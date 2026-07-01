@@ -1,12 +1,12 @@
 # AGENTS.md
 
-## Project Intent
+## 项目目标
 
-Wyse Agent OS is a Rust-first agent runtime and workflow orchestration system. Keep the implementation modular, strongly typed, observable, and safe by default.
+Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现时优先保持模块化、强类型、可观测，并默认安全。
 
-## Rust Development Rules
+## Rust 开发规范
 
-Follow the local `rust-skills` guidance in `.agents/skills/rust-skills/SKILL.md` when writing, reviewing, or refactoring Rust code. Prioritize the rules in this order:
+编写、审查或重构 Rust 代码时，遵循本地 `rust-skills` 规范：`.agents/skills/rust-skills/SKILL.md`。规则优先级如下：
 
 1. Ownership and borrowing
 2. Error handling
@@ -19,111 +19,123 @@ Follow the local `rust-skills` guidance in `.agents/skills/rust-skills/SKILL.md`
 9. Testing
 10. Observability
 
-## Workspace Structure
+## Workspace 结构
 
-- Use a Cargo workspace with small crates organized by capability.
-- Keep crate responsibilities narrow and explicit.
-- Prefer module organization by feature, not by generic type buckets.
-- Keep `main.rs` thin; put reusable logic in `lib.rs`.
-- Use workspace dependency inheritance for shared dependency versions.
-- Cargo features must be additive.
+- 使用 Cargo workspace，并按能力拆分小而清晰的 crates。
+- 每个 crate 的职责要窄且明确。
+- 模块按功能组织，不按泛泛的类型类别组织。
+- 保持 `main.rs` 足够薄，可复用逻辑放到 `lib.rs`。
+- 共享依赖版本通过 workspace dependency inheritance 管理。
+- Cargo features 必须是 additive，不要让 feature 之间互相排斥或改变已有行为。
 
-## API Design
+## API 设计
 
-- Use newtypes for domain IDs such as `RunId`, `AgentId`, `ToolId`, and `ModelId`.
-- Avoid stringly typed APIs when enums or validated newtypes communicate intent better.
-- Public types should implement the common useful traits where appropriate: `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Serialize`, and `Deserialize`.
-- Prefer `From<T>` over `Into<T>` implementations.
-- Use `TryFrom` and `FromStr` for fallible parsing and conversions.
-- Mark public enums and structs `#[non_exhaustive]` when future variants or fields are likely.
-- Use builders for complex construction and mark builder methods `#[must_use]`.
+- 领域 ID 使用 newtype，例如 `RunId`、`AgentId`、`ToolId`、`ModelId`。
+- 避免 stringly typed API；能用 enum 或已校验 newtype 表达的，不要只用裸字符串。
+- 公共类型在合适时实现常用 trait：`Debug`、`Clone`、`PartialEq`、`Eq`、`Hash`、`Serialize`、`Deserialize`。
+- 实现转换时优先实现 `From<T>`，不要手写 `Into<T>`。
+- 可失败的解析和转换使用 `TryFrom`、`FromStr`。
+- 未来可能增加字段或变体的公共 struct/enum 使用 `#[non_exhaustive]`。
+- 复杂对象构造使用 builder，并给 builder 方法加 `#[must_use]`。
 
-## Error Handling
+## 克制设计
 
-- Library crates should use typed errors with `thiserror`.
-- Application binaries may use `anyhow` for top-level error handling.
-- Return `Result<T, E>` for recoverable failures.
-- Do not use `unwrap()` in production code.
-- Use `expect()` only for invariants that indicate programmer bugs.
-- Preserve error sources with `#[source]` or `From` conversions.
-- Error messages should be lowercase and omit trailing punctuation.
-- Document fallible public functions with a `# Errors` section.
+- 默认选择能工作的最小设计，先解决当前明确需求。
+- 禁止为了“以后可能需要”提前增加 wrapper 层、adapter 层、facade 层、manager 层或 snapshot 机制。
+- 禁止在没有明确收益和讨论结论的情况下引入设计模式，例如 factory、strategy、observer、repository、service locator 等。
+- 一个 trait 至少要有真实的多实现需求；只有一个实现时，优先使用具体类型。
+- 一个配置项至少要有真实使用场景；不会被用户或调用方改变的值不要配置化。
+- 一个 abstraction 必须减少真实重复、隔离真实外部边界，或编码重要不变量；否则不要添加。
+- 优先复用 Rust 标准库、已有 crate 内部函数和已经引入的依赖，不为几行代码新增依赖。
+- 需要明显扩展点时，先在 TODO 或注释里记录边界，等需求出现后再实现。
+- 如果认为必须引入额外层次或设计模式，先在回复中说明原因、替代方案和成本，经过讨论后再落代码。
 
-## Ownership And Memory
+## 错误处理
 
-- Prefer borrowing over cloning.
-- Accept `&str` over `&String` and `&[T]` over `&Vec<T>`.
-- Use `Arc<T>` for shared ownership across threads.
-- Avoid holding large enum variants inline when boxing materially reduces enum size.
-- Preallocate with `with_capacity` when size is known.
-- Reuse collections in hot paths instead of repeatedly allocating.
-- Avoid `format!` in hot paths when direct writes or literals work.
+- library crates 使用 `thiserror` 定义类型化错误。
+- application binaries 可以在顶层使用 `anyhow`。
+- 可恢复失败返回 `Result<T, E>`。
+- 生产代码不要使用 `unwrap()`。
+- `expect()` 只用于表示程序员错误的不变量。
+- 用 `#[source]` 或 `From` 转换保留错误来源链。
+- 错误消息使用小写开头，不加句号。
+- 可失败的公共函数需要在文档里写 `# Errors`。
 
-## Async And Concurrency
+## Ownership 和内存
 
-- Use Tokio for async runtime code.
-- Do not hold `Mutex` or `RwLock` guards across `.await`.
-- Use bounded channels for queues and backpressure.
-- Use `CancellationToken` for shutdown and run cancellation.
-- Use `JoinSet` for managing dynamic spawned tasks.
-- Use `spawn_blocking` for CPU-heavy or blocking work.
-- Ensure `tokio::select!` branches are cancellation-safe.
-- Prefer native `async fn` in traits where it fits the public API.
+- 优先借用，避免不必要的 clone。
+- 参数优先接收 `&str` 而不是 `&String`，接收 `&[T]` 而不是 `&Vec<T>`。
+- 跨线程共享所有权使用 `Arc<T>`。
+- 如果 enum 的大变体会明显增大整体尺寸，考虑 boxing。
+- 已知容量时使用 `with_capacity` 预分配。
+- 热路径中尽量复用 collection，避免重复分配。
+- 热路径中避免不必要的 `format!`，能直接写入或使用字面量就直接使用。
 
-## Unsafe Code
+## Async 和并发
 
-- Avoid `unsafe` unless there is a clear, measured need.
-- Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant.
-- Every `unsafe fn` must document a `# Safety` section.
-- Keep `unsafe` scopes as small as possible.
-- Do not use `mem::uninitialized()` or invalid `mem::zeroed()` patterns.
+- async runtime 使用 Tokio。
+- 不要在 `.await` 期间持有 `Mutex` 或 `RwLock` guard。
+- 队列和背压使用 bounded channels。
+- 运行取消和优雅关闭使用 `CancellationToken`。
+- 动态任务集合使用 `JoinSet` 管理。
+- CPU-heavy 或 blocking 工作使用 `spawn_blocking`。
+- `tokio::select!` 分支要满足 cancellation-safe。
+- trait API 合适时优先使用原生 `async fn`。
 
-## Serialization
+## Unsafe 代码
 
-- Use serde naming conventions that match external payloads, typically `#[serde(rename_all = "snake_case")]` or the protocol-required casing.
-- Use `#[serde(default)]` for backward-compatible optional fields.
-- Use `skip_serializing_if` for empty optional fields.
-- Validate boundary data while deserializing when practical.
-- Reject unknown fields for strict config formats where silent typos are dangerous.
+- 除非有清晰且可衡量的必要性，否则不要使用 `unsafe`。
+- 每个 `unsafe` block 前必须有 `// SAFETY:` 注释说明不变量。
+- 每个 `unsafe fn` 必须有 `# Safety` 文档。
+- `unsafe` 作用域越小越好。
+- 不要使用 `mem::uninitialized()`，也不要对有有效性约束的类型使用无效的 `mem::zeroed()`。
 
-## Observability
+## 序列化
 
-- Use `tracing` for structured logs and spans.
-- Libraries must emit through tracing/log facades and must not install global subscribers.
-- Do not log secrets, tokens, raw credentials, or sensitive user data.
-- Attach structured fields to spans instead of interpolating context into strings.
-- Log an error once at the boundary where it is handled.
+- serde 命名规则要匹配外部 payload，通常使用 `#[serde(rename_all = "snake_case")]` 或协议要求的 casing。
+- 向后兼容的可选字段使用 `#[serde(default)]`。
+- 空 optional 字段使用 `skip_serializing_if`。
+- 边界数据尽量在反序列化时完成校验。
+- 对严格配置格式，使用拒绝未知字段的策略，避免配置拼写错误被静默忽略。
 
-## Testing
+## 可观测性
 
-- Put unit tests in `#[cfg(test)] mod tests`.
-- Put cross-crate integration tests in `tests/`.
-- Use descriptive test names.
-- Structure tests as arrange, act, assert.
-- Use `#[tokio::test]` for async tests.
-- Use mock providers and trait-based dependencies for agent, LLM, tool, and MCP tests.
-- Prefer property tests for parsers, validators, graph scheduling, and schema conversion.
+- 使用 `tracing` 做结构化日志和 spans。
+- library 只通过 tracing/log facade 发出事件，不安装全局 subscriber。
+- 不要记录 secret、token、原始凭据或敏感用户数据。
+- 上下文信息放到 structured fields，不要拼进字符串里。
+- 错误只在真正处理它的边界记录一次。
 
-## Linting And Formatting
+## 测试
 
-- Run `cargo fmt` before committing Rust changes.
-- Run `cargo clippy --workspace --all-targets` for meaningful Rust changes.
-- Configure workspace lints once the workspace skeleton exists.
-- Start with correctness, suspicious, style, complexity, and perf lints.
-- Do not silence lints without a short reason.
+- 单元测试放在 `#[cfg(test)] mod tests` 中。
+- 跨 crate 集成测试放在 `tests/` 目录。
+- 测试命名要描述被验证的行为。
+- 测试结构保持 arrange、act、assert 清晰。
+- async 测试使用 `#[tokio::test]`。
+- agent、LLM、tool、MCP 相关测试使用 mock provider 和基于 trait 的依赖。
+- parser、validator、graph scheduling、schema conversion 优先考虑 property tests。
 
-## Documentation
+## Lint 和格式化
 
-- Document public APIs with `///`.
-- Use module-level `//!` docs for crate and module intent.
-- Include runnable examples for important public APIs when practical.
-- Link related types with intra-doc links.
-- Keep examples free of `unwrap()`; use `?` where possible.
+- 提交 Rust 变更前运行 `cargo fmt`。
+- 有意义的 Rust 变更运行 `cargo clippy --workspace --all-targets`。
+- workspace skeleton 创建后，在 workspace 层统一配置 lints。
+- 先启用 correctness、suspicious、style、complexity、perf 相关 lints。
+- 不要无理由 silence lint；确实需要时写简短原因。
 
-## Implementation Style
+## 文档
 
-- Prefer clear, boring Rust over clever abstractions.
-- Add abstractions only when they remove real duplication or encode important invariants.
-- Keep dependencies explicit and minimal.
-- Keep public APIs stable-looking even while internals are evolving.
-- Preserve user changes in the working tree; do not revert unrelated files.
+- 公共 API 使用 `///` 文档。
+- crate 和 module 的意图使用 `//!` 模块级文档说明。
+- 重要公共 API 尽量提供可运行示例。
+- 相关类型之间使用 intra-doc links。
+- 示例中避免 `unwrap()`，优先使用 `?`。
+
+## 实现风格
+
+- 优先写清晰、朴素、可维护的 Rust。
+- 只有当抽象能消除真实重复或编码重要不变量时才引入抽象。
+- 依赖保持明确且尽量少。
+- 即使内部还在演进，公共 API 也要看起来稳定、克制。
+- 保留用户在工作区中的改动，不要回滚无关文件。
