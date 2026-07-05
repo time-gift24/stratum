@@ -37,13 +37,6 @@ impl OpenAICompatibleProvider {
         }
     }
 
-    /// Replaces the HTTP client used by the provider.
-    #[must_use]
-    pub fn with_client(mut self, client: reqwest::Client) -> Self {
-        self.client = client;
-        self
-    }
-
     fn chat_completions_url(&self) -> Result<Url, LlmError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         Url::parse(&url).map_err(|source| LlmError::RequestBuild(Box::new(source)))

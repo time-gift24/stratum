@@ -7,7 +7,6 @@ pub mod mock;
 pub mod protocol;
 pub mod structured_output;
 pub mod tool_call;
-pub mod usage;
 
 pub use definition::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmProvider,
@@ -18,4 +17,3 @@ pub use mock::MockLlmProvider;
 pub use protocol::openai_compatible::OpenAICompatibleProvider;
 pub use structured_output::StructuredOutput;
 pub use tool_call::{ToolCall, ToolCallDelta, ToolChoice, ToolSpec};
-pub use usage::{CostEstimate, TokenPrices};

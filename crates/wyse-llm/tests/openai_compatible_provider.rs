@@ -27,12 +27,7 @@ async fn chat_posts_chat_completion_and_maps_response() {
             "total_tokens": 5
         }
     })));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    )
-    .with_client(reqwest::Client::new());
+    let provider = test_provider(server.base_url("v1"));
 
     let response = provider
         .chat(
@@ -61,11 +56,7 @@ async fn chat_posts_chat_completion_and_maps_response() {
 
 #[tokio::test]
 async fn chat_rejects_request_model_that_differs_from_provider_model() {
-    let provider = OpenAICompatibleProvider::new(
-        "http://127.0.0.1:9/v1",
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider("http://127.0.0.1:9/v1");
 
     let error = provider
         .chat(ChatRequest::new(ModelId::from("other-model")))
@@ -90,11 +81,7 @@ async fn chat_maps_provider_status_error_payload() {
             }
         }),
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let error = provider
         .chat(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -115,11 +102,7 @@ async fn chat_stream_posts_streaming_chat_completion_request() {
     let server = TestServer::spawn(TestResponse::stream(
         "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(
@@ -162,11 +145,7 @@ async fn chat_stream_maps_text_delta_and_finished_event() {
          data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
          data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -208,11 +187,7 @@ async fn chat_stream_maps_tool_call_delta() {
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\"}}]}}]}\n\n\
          data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":\\\"Paris\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -260,11 +235,7 @@ async fn chat_stream_recovers_sse_events_split_across_tcp_chunks() {
         "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\r",
         "\n\r\n",
     ]));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -293,11 +264,7 @@ async fn chat_stream_recovers_sse_events_split_across_tcp_chunks() {
 #[tokio::test]
 async fn chat_stream_done_emits_unknown_finish_when_no_finish_reason_arrived() {
     let server = TestServer::spawn(TestResponse::stream("data: [DONE]\n\n"));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -324,11 +291,7 @@ async fn chat_stream_joins_multiple_data_lines_in_one_sse_event() {
          data: {\"delta\":{\"content\":\"hello\"}}]}\n\n\
          data: [DONE]\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -346,11 +309,7 @@ async fn chat_stream_joins_multiple_data_lines_in_one_sse_event() {
 #[tokio::test]
 async fn chat_stream_maps_invalid_json_event_to_stream_error() {
     let server = TestServer::spawn(TestResponse::stream("data: {not-json}\n\n"));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -372,11 +331,7 @@ async fn chat_stream_keeps_events_before_later_stream_error() {
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
          data: {not-json}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -403,11 +358,7 @@ async fn chat_stream_errors_when_eof_arrives_before_finish_event() {
     let server = TestServer::spawn(TestResponse::stream(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -434,11 +385,7 @@ async fn chat_stream_errors_when_eof_leaves_partial_sse_event() {
     let server = TestServer::spawn(TestResponse::stream(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -461,11 +408,7 @@ async fn chat_stream_ignores_events_after_terminal_event() {
          data: [DONE]\n\n\
          data: {not-json}\n\n",
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -498,11 +441,7 @@ async fn chat_stream_maps_provider_status_error_payload() {
             }
         }),
     ));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let result = provider
         .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -522,11 +461,7 @@ async fn chat_stream_maps_provider_status_error_payload() {
 
 #[tokio::test]
 async fn chat_stream_rejects_request_model_that_differs_from_provider_model() {
-    let provider = OpenAICompatibleProvider::new(
-        "http://127.0.0.1:9/v1",
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider("http://127.0.0.1:9/v1");
 
     let result = provider
         .chat_stream(ChatRequest::new(ModelId::from("other-model")))
@@ -544,11 +479,7 @@ async fn chat_stream_rejects_request_model_that_differs_from_provider_model() {
 #[tokio::test]
 async fn chat_maps_success_body_decode_errors_to_response_decode() {
     let server = TestServer::spawn(TestResponse::raw(200, "{not-json"));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let error = provider
         .chat(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -561,11 +492,7 @@ async fn chat_maps_success_body_decode_errors_to_response_decode() {
 #[tokio::test]
 async fn chat_maps_status_body_decode_errors_to_provider_payload_decode() {
     let server = TestServer::spawn(TestResponse::raw(500, "{not-json"));
-    let provider = OpenAICompatibleProvider::new(
-        server.base_url("v1"),
-        ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
-    );
+    let provider = test_provider(server.base_url("v1"));
 
     let error = provider
         .chat(ChatRequest::new(ModelId::from("gpt-configured")))
@@ -578,6 +505,14 @@ async fn chat_maps_status_body_decode_errors_to_provider_payload_decode() {
 struct TestServer {
     base_url: String,
     request_rx: mpsc::Receiver<RecordedRequest>,
+}
+
+fn test_provider(base_url: impl Into<String>) -> OpenAICompatibleProvider {
+    OpenAICompatibleProvider::new(
+        base_url,
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    )
 }
 
 impl TestServer {

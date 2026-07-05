@@ -221,24 +221,6 @@ pub enum LlmEvent {
     },
 }
 
-impl LlmEvent {
-    /// Returns the serialized LLM event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::Finished { .. } => "finished",
-            Self::Failed { .. } => "failed",
-            Self::TextDelta { .. } => "text_delta",
-            Self::ReasoningDelta { .. } => "reasoning_delta",
-            Self::ToolCallStarted { .. } => "tool_call_started",
-            Self::ToolCallDelta { .. } => "tool_call_delta",
-            Self::ToolCallFinished { .. } => "tool_call_finished",
-            Self::ToolCallFailed { .. } => "tool_call_failed",
-        }
-    }
-}
-
 /// Runtime event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -375,10 +357,8 @@ mod tests {
         };
 
         assert_eq!(event.event_type(), "llm");
-        let RuntimeEvent::Llm { event, .. } = event else {
-            panic!("expected llm event");
-        };
-        assert_eq!(event.event_type(), "started");
+        let value = serde_json::to_value(event).expect("event should serialize");
+        assert_eq!(value["data"]["event"]["type"], "started");
     }
 
     #[test]
@@ -387,8 +367,10 @@ mod tests {
             role: LlmCallRole::User,
             delta: "hello".to_owned(),
         };
+        let value = serde_json::to_value(event).expect("event should serialize");
 
-        assert_eq!(event.event_type(), "text_delta");
+        assert_eq!(value["type"], "text_delta");
+        assert_eq!(value["data"]["role"], "user");
     }
 
     #[test]
@@ -410,8 +392,10 @@ mod tests {
             role: LlmCallRole::Assistant,
             delta: "hello".to_owned(),
         };
+        let value = serde_json::to_value(event).expect("event should serialize");
 
-        assert_eq!(event.event_type(), "text_delta");
+        assert_eq!(value["type"], "text_delta");
+        assert_eq!(value["data"]["role"], "assistant");
     }
 
     #[test]
@@ -423,10 +407,8 @@ mod tests {
             },
         };
 
-        let RuntimeEvent::Llm { event, .. } = event else {
-            panic!("expected llm event");
-        };
-        assert_eq!(event.event_type(), "reasoning_delta");
+        let value = serde_json::to_value(event).expect("event should serialize");
+        assert_eq!(value["data"]["event"]["type"], "reasoning_delta");
     }
 
     #[test]
@@ -434,8 +416,9 @@ mod tests {
         let event = LlmEvent::ReasoningDelta {
             delta: "thinking".to_owned(),
         };
+        let value = serde_json::to_value(event).expect("event should serialize");
 
-        assert_eq!(event.event_type(), "reasoning_delta");
+        assert_eq!(value["type"], "reasoning_delta");
     }
 
     #[test]
@@ -446,7 +429,9 @@ mod tests {
             name: Some("get_weather".to_owned()),
             arguments_delta: "{\"city".to_owned(),
         };
+        let value = serde_json::to_value(event).expect("event should serialize");
 
-        assert_eq!(event.event_type(), "tool_call_delta");
+        assert_eq!(value["type"], "tool_call_delta");
+        assert_eq!(value["data"]["call_id"], "call-1");
     }
 }
