@@ -154,6 +154,91 @@ pub enum LlmCallRole {
     Tool,
 }
 
+/// Event emitted inside one LLM call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LlmEvent {
+    /// LLM call started.
+    Started,
+    /// LLM call finished.
+    Finished {
+        /// Why the LLM call finished.
+        finish_reason: String,
+        /// Token usage reported by the provider.
+        usage: Option<TokenUsage>,
+    },
+    /// LLM call failed.
+    Failed {
+        /// Error text safe to expose to callers.
+        error_text: String,
+    },
+    /// LLM call emitted normal text.
+    TextDelta {
+        /// Role of this text fragment.
+        role: LlmCallRole,
+        /// Visible text delta.
+        delta: String,
+    },
+    /// LLM call emitted reasoning text.
+    ReasoningDelta {
+        /// Reasoning text delta.
+        delta: String,
+    },
+    /// Tool call started.
+    ToolCallStarted {
+        /// Tool call identity.
+        call_id: CallId,
+        /// Tool identity.
+        tool_id: Option<ToolId>,
+        /// Provider-visible tool name.
+        name: Option<String>,
+    },
+    /// Tool call arguments changed.
+    ToolCallDelta {
+        /// Tool call identity.
+        call_id: CallId,
+        /// Tool identity when known.
+        tool_id: Option<ToolId>,
+        /// Provider-visible tool name when known.
+        name: Option<String>,
+        /// Tool argument text fragment.
+        arguments_delta: String,
+    },
+    /// Tool call finished.
+    ToolCallFinished {
+        /// Tool call identity.
+        call_id: CallId,
+        /// Tool result.
+        result: Value,
+    },
+    /// Tool call failed.
+    ToolCallFailed {
+        /// Tool call identity.
+        call_id: CallId,
+        /// Error text safe to expose to callers.
+        error_text: String,
+    },
+}
+
+impl LlmEvent {
+    /// Returns the serialized LLM event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Finished { .. } => "finished",
+            Self::Failed { .. } => "failed",
+            Self::TextDelta { .. } => "text_delta",
+            Self::ReasoningDelta { .. } => "reasoning_delta",
+            Self::ToolCallStarted { .. } => "tool_call_started",
+            Self::ToolCallDelta { .. } => "tool_call_delta",
+            Self::ToolCallFinished { .. } => "tool_call_finished",
+            Self::ToolCallFailed { .. } => "tool_call_failed",
+        }
+    }
+}
+
 /// Runtime event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -189,84 +274,12 @@ pub enum RuntimeEvent {
         /// Error text safe to expose to callers.
         error_text: String,
     },
-    /// LLM call started.
-    LlmCallStarted {
+    /// Event emitted by one LLM call.
+    Llm {
         /// LLM call identity.
         llm_call_id: LlmCallId,
-    },
-    /// LLM call finished.
-    LlmCallFinished {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Why the LLM call finished.
-        finish_reason: String,
-        /// Token usage reported by the provider.
-        usage: Option<TokenUsage>,
-    },
-    /// LLM call failed.
-    LlmCallFailed {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Error text safe to expose to callers.
-        error_text: String,
-    },
-    /// LLM call emitted normal text.
-    TextDelta {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Role of this text fragment.
-        role: LlmCallRole,
-        /// Visible text delta.
-        delta: String,
-    },
-    /// LLM call emitted reasoning text.
-    ReasoningDelta {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Reasoning text delta.
-        delta: String,
-    },
-    /// Tool call started.
-    ToolCallStarted {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Tool identity.
-        tool_id: Option<ToolId>,
-        /// Provider-visible tool name.
-        name: Option<String>,
-    },
-    /// Tool call arguments changed.
-    ToolCallDelta {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Tool identity when known.
-        tool_id: Option<ToolId>,
-        /// Provider-visible tool name when known.
-        name: Option<String>,
-        /// Tool argument text fragment.
-        arguments_delta: String,
-    },
-    /// Tool call finished.
-    ToolCallFinished {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Tool result.
-        result: Value,
-    },
-    /// Tool call failed.
-    ToolCallFailed {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Error text safe to expose to callers.
-        error_text: String,
+        /// LLM event payload.
+        event: LlmEvent,
     },
     /// Agent-visible plan changed.
     PlanUpdated {
@@ -290,15 +303,7 @@ impl RuntimeEvent {
             Self::NodeOutput { .. } => "node_output",
             Self::NodeFinished => "node_finished",
             Self::NodeFailed { .. } => "node_failed",
-            Self::LlmCallStarted { .. } => "llm_call_started",
-            Self::LlmCallFinished { .. } => "llm_call_finished",
-            Self::LlmCallFailed { .. } => "llm_call_failed",
-            Self::TextDelta { .. } => "text_delta",
-            Self::ReasoningDelta { .. } => "reasoning_delta",
-            Self::ToolCallStarted { .. } => "tool_call_started",
-            Self::ToolCallDelta { .. } => "tool_call_delta",
-            Self::ToolCallFinished { .. } => "tool_call_finished",
-            Self::ToolCallFailed { .. } => "tool_call_failed",
+            Self::Llm { .. } => "llm",
             Self::PlanUpdated { .. } => "plan_updated",
         }
     }
@@ -351,28 +356,34 @@ mod tests {
 
     #[test]
     fn event_type_matches_protocol_name() {
-        let event = RuntimeEvent::TextDelta {
+        let event = RuntimeEvent::Llm {
             llm_call_id: LlmCallId::from("llm-call-1"),
-            role: LlmCallRole::Assistant,
-            delta: "hello".to_owned(),
+            event: LlmEvent::TextDelta {
+                role: LlmCallRole::Assistant,
+                delta: "hello".to_owned(),
+            },
         };
 
-        assert_eq!(event.event_type(), "text_delta");
+        assert_eq!(event.event_type(), "llm");
     }
 
     #[test]
-    fn llm_call_started_has_event_type() {
-        let event = RuntimeEvent::LlmCallStarted {
+    fn llm_started_has_nested_event_type() {
+        let event = RuntimeEvent::Llm {
             llm_call_id: LlmCallId::from("llm-call-1"),
+            event: LlmEvent::Started,
         };
 
-        assert_eq!(event.event_type(), "llm_call_started");
+        assert_eq!(event.event_type(), "llm");
+        let RuntimeEvent::Llm { event, .. } = event else {
+            panic!("expected llm event");
+        };
+        assert_eq!(event.event_type(), "started");
     }
 
     #[test]
     fn user_input_uses_text_delta_role() {
-        let event = RuntimeEvent::TextDelta {
-            llm_call_id: LlmCallId::from("llm-call-1"),
+        let event = LlmEvent::TextDelta {
             role: LlmCallRole::User,
             delta: "hello".to_owned(),
         };
@@ -381,9 +392,21 @@ mod tests {
     }
 
     #[test]
-    fn assistant_output_uses_text_delta_role() {
-        let event = RuntimeEvent::TextDelta {
+    fn llm_runtime_event_wraps_text_delta() {
+        let event = RuntimeEvent::Llm {
             llm_call_id: LlmCallId::from("llm-call-1"),
+            event: LlmEvent::TextDelta {
+                role: LlmCallRole::User,
+                delta: "hello".to_owned(),
+            },
+        };
+
+        assert_eq!(event.event_type(), "llm");
+    }
+
+    #[test]
+    fn assistant_output_uses_text_delta_role() {
+        let event = LlmEvent::TextDelta {
             role: LlmCallRole::Assistant,
             delta: "hello".to_owned(),
         };
@@ -393,8 +416,22 @@ mod tests {
 
     #[test]
     fn reasoning_delta_uses_llm_call_id() {
-        let event = RuntimeEvent::ReasoningDelta {
+        let event = RuntimeEvent::Llm {
             llm_call_id: LlmCallId::from("llm-call-1"),
+            event: LlmEvent::ReasoningDelta {
+                delta: "thinking".to_owned(),
+            },
+        };
+
+        let RuntimeEvent::Llm { event, .. } = event else {
+            panic!("expected llm event");
+        };
+        assert_eq!(event.event_type(), "reasoning_delta");
+    }
+
+    #[test]
+    fn reasoning_delta_is_not_a_text_role() {
+        let event = LlmEvent::ReasoningDelta {
             delta: "thinking".to_owned(),
         };
 
@@ -403,8 +440,7 @@ mod tests {
 
     #[test]
     fn tool_call_delta_supports_partial_arguments() {
-        let event = RuntimeEvent::ToolCallDelta {
-            llm_call_id: LlmCallId::from("llm-call-1"),
+        let event = LlmEvent::ToolCallDelta {
             call_id: CallId::from("call-1"),
             tool_id: Some(ToolId::from("weather")),
             name: Some("get_weather".to_owned()),
