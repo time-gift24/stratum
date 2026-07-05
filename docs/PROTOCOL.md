@@ -99,7 +99,7 @@
 | `event` 表达发生了什么 | 不用 `metadata`、`source` 或字符串状态重复表达事件类型。 |
 | 一次 LLM 请求只用 `llm_call_id` 关联 | 外层使用 `RuntimeEvent::Llm { llm_call_id, event }`；不记录 `model_id`，不引入 `message_id`，文本顺序由 `seq` 决定。 |
 | user、assistant、tool 普通文本共用 `LlmEvent::TextDelta` | `role` 表达文本归属；reasoning 使用独立 `LlmEvent::ReasoningDelta`。 |
-| LLM 相关 tool call 放在 `LlmEvent` 中 | `call_id` 继续只表示 tool call；`tool_id` 和 `name` 只在已知时填写。 |
+| LLM 相关 tool call 放在 `LlmEvent` 中 | `call_id` 继续只表示 provider tool call；外层用 provider-visible `name` 匹配真实 tool。 |
 | agent 是特殊 node | 生命周期仍用 `node_started` / `node_finished` / `node_failed`；内部输出用 `agent` source。 |
 | 普通 node 输出用 `node_output` | 不新增 `task` 事件；需要用户可见计划时才用 `plan_updated`。 |
 
@@ -109,7 +109,7 @@
 | --- | --- |
 | 禁止放业务 payload | 业务数据必须进入类型化 event data。 |
 | 禁止放事件状态 | 状态必须由 event type 或类型化字段表达。 |
-| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`llm_call_id`、`tool_id`、`call_id` 必须放在明确字段中。 |
+| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`llm_call_id`、`call_id` 必须放在明确字段中。 |
 | 禁止放 secret | 不记录 token、凭据、密钥或原始敏感数据。 |
 | 禁止让前端依赖 metadata 渲染核心 UI | 前端核心渲染只能依赖 envelope、source 和 event data。 |
 

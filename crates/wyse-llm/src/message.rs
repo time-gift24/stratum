@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wyse_core::{CallId, ToolId};
+use wyse_core::CallId;
 
 use crate::ToolCall;
 
@@ -45,9 +45,6 @@ pub struct ChatMessage {
     /// Tool call this tool message answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<CallId>,
-    /// Tool that produced this message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_id: Option<ToolId>,
 }
 
 impl ChatMessage {
@@ -77,7 +74,6 @@ impl ChatMessage {
             content: ChatContent::Text(content.into()),
             tool_calls: Vec::new(),
             tool_call_id: None,
-            tool_id: None,
         }
     }
 }

@@ -101,7 +101,6 @@ macro_rules! string_id {
 
 string_id!(NodeId, "Identity of a workflow node.");
 string_id!(AgentId, "Identity of an agent.");
-string_id!(ToolId, "Identity of a tool.");
 string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(LlmCallId, "Identity of one LLM call.");
@@ -189,8 +188,6 @@ pub enum LlmEvent {
     ToolCallStarted {
         /// Tool call identity.
         call_id: CallId,
-        /// Tool identity.
-        tool_id: Option<ToolId>,
         /// Provider-visible tool name.
         name: Option<String>,
     },
@@ -198,8 +195,6 @@ pub enum LlmEvent {
     ToolCallDelta {
         /// Tool call identity.
         call_id: CallId,
-        /// Tool identity when known.
-        tool_id: Option<ToolId>,
         /// Provider-visible tool name when known.
         name: Option<String>,
         /// Tool argument text fragment.
@@ -425,7 +420,6 @@ mod tests {
     fn tool_call_delta_supports_partial_arguments() {
         let event = LlmEvent::ToolCallDelta {
             call_id: CallId::from("call-1"),
-            tool_id: Some(ToolId::from("weather")),
             name: Some("get_weather".to_owned()),
             arguments_delta: "{\"city".to_owned(),
         };

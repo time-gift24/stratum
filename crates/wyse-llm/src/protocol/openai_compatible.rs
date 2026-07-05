@@ -8,12 +8,12 @@ use reqwest::{
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 use serde_json::{Value, json};
-use wyse_core::{CallId, ModelId, TokenUsage, ToolId};
+use wyse_core::{CallId, ModelId, TokenUsage};
 
 use crate::{
     ApiKey, ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream,
     ChatStreamEvent, FinishReason, LlmError, LlmProvider, ProviderStatusError, StructuredOutput,
-    ToolCall, ToolCallDelta, ToolChoice, ToolSpec,
+    ToolCall, ToolCallDelta,
 };
 
 /// OpenAI-compatible chat completions provider.
@@ -85,7 +85,7 @@ impl LlmProvider for OpenAICompatibleProvider {
         }
 
         let value = serde_json::from_slice(&body).map_err(LlmError::ResponseDecode)?;
-        chat_response_from_value(value, &request.tools)
+        chat_response_from_value(value)
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
@@ -363,7 +363,7 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
     let messages = request
         .messages
         .iter()
-        .map(|message| message_to_value(message, &request.tools))
+        .map(message_to_value)
         .collect::<Result<Vec<_>, _>>()?;
     let mut payload = json!({
         "model": request.model.as_str(),
@@ -390,10 +390,6 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
         );
     }
 
-    if let Some(choice) = &request.tool_choice {
-        payload["tool_choice"] = tool_choice_to_value(choice, &request.tools)?;
-    }
-
     if let Some(output) = &request.structured_output {
         payload["response_format"] = structured_output_to_value(output);
     }
@@ -401,10 +397,7 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
     Ok(payload)
 }
 
-pub(crate) fn chat_response_from_value(
-    value: Value,
-    tools: &[ToolSpec],
-) -> Result<ChatResponse, LlmError> {
+pub(crate) fn chat_response_from_value(value: Value) -> Result<ChatResponse, LlmError> {
     let choice = value["choices"]
         .as_array()
         .and_then(|choices| choices.first())
@@ -414,7 +407,7 @@ pub(crate) fn chat_response_from_value(
     let finish_reason = finish_reason(choice["finish_reason"].as_str());
     let usage = usage_from_value(value.get("usage"));
     let mut chat_message = ChatMessage::assistant(content);
-    chat_message.tool_calls = tool_calls_from_message(message, tools)?;
+    chat_message.tool_calls = tool_calls_from_message(message)?;
 
     Ok(ChatResponse {
         message: chat_message,
@@ -465,7 +458,7 @@ fn redact_secret(value: &str, api_key: &ApiKey) -> String {
     value.replace(api_key.as_str(), "[redacted]")
 }
 
-fn message_to_value(message: &ChatMessage, tools: &[ToolSpec]) -> Result<Value, LlmError> {
+fn message_to_value(message: &ChatMessage) -> Result<Value, LlmError> {
     let role = match message.role {
         ChatRole::System => "system",
         ChatRole::User => "user",
@@ -489,16 +482,10 @@ fn message_to_value(message: &ChatMessage, tools: &[ToolSpec]) -> Result<Value, 
         );
     }
 
-    if message.role == ChatRole::Tool {
-        if let Some(call_id) = &message.tool_call_id {
-            value["tool_call_id"] = Value::String(call_id.as_str().to_owned());
-        }
-
-        if let Some(tool_id) = &message.tool_id
-            && let Some(name) = provider_tool_name(tool_id, tools)
-        {
-            value["name"] = Value::String(name.to_owned());
-        }
+    if message.role == ChatRole::Tool
+        && let Some(call_id) = &message.tool_call_id
+    {
+        value["tool_call_id"] = Value::String(call_id.as_str().to_owned());
     }
 
     Ok(value)
@@ -516,36 +503,6 @@ fn tool_call_to_value(tool_call: &ToolCall) -> Result<Value, LlmError> {
             "arguments": arguments
         }
     }))
-}
-
-fn tool_choice_to_value(choice: &ToolChoice, tools: &[ToolSpec]) -> Result<Value, LlmError> {
-    match choice {
-        ToolChoice::Auto => Ok(Value::String("auto".to_owned())),
-        ToolChoice::None => Ok(Value::String("none".to_owned())),
-        ToolChoice::Required => Ok(Value::String("required".to_owned())),
-        ToolChoice::Tool(tool_id) => {
-            let name = provider_tool_name(tool_id, tools)
-                .ok_or(LlmError::InvalidProviderPayload("unknown tool choice"))?;
-            Ok(json!({
-                "type": "function",
-                "function": {"name": name}
-            }))
-        }
-    }
-}
-
-fn provider_tool_name<'a>(tool_id: &ToolId, tools: &'a [ToolSpec]) -> Option<&'a str> {
-    tools
-        .iter()
-        .find(|tool| &tool.tool_id == tool_id)
-        .map(|tool| tool.name.as_str())
-}
-
-fn tool_id_for_provider_name(name: &str, tools: &[ToolSpec]) -> Option<ToolId> {
-    tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .map(|tool| tool.tool_id.clone())
 }
 
 fn structured_output_to_value(output: &StructuredOutput) -> Value {
@@ -585,7 +542,7 @@ fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn tool_calls_from_message(message: &Value, tools: &[ToolSpec]) -> Result<Vec<ToolCall>, LlmError> {
+fn tool_calls_from_message(message: &Value) -> Result<Vec<ToolCall>, LlmError> {
     let Some(value) = message.get("tool_calls") else {
         return Ok(Vec::new());
     };
@@ -600,12 +557,9 @@ fn tool_calls_from_message(message: &Value, tools: &[ToolSpec]) -> Result<Vec<To
             let call_id = required_str(&call["id"], "missing tool call id")?;
             let name = required_str(&call["function"]["name"], "missing tool name")?;
             let arguments = required_str(&call["function"]["arguments"], "missing tool arguments")?;
-            let tool_id = tool_id_for_provider_name(name, tools)
-                .ok_or(LlmError::InvalidProviderPayload("unknown tool call"))?;
 
             Ok(ToolCall {
                 call_id: CallId::from(call_id),
-                tool_id,
                 name: name.to_owned(),
                 arguments: serde_json::from_str(arguments).map_err(LlmError::ResponseDecode)?,
             })
@@ -623,12 +577,12 @@ fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wyse_core::{CallId, ModelId, ToolId};
+    use wyse_core::{CallId, ModelId};
 
     use super::*;
     use crate::{
         ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, StructuredOutput, ToolCall,
-        ToolChoice, ToolSpec,
+        ToolSpec,
     };
 
     #[test]
@@ -638,12 +592,10 @@ mod tests {
             .with_message(ChatMessage::user("answer"));
         let request = ChatRequest {
             tools: vec![ToolSpec {
-                tool_id: ToolId::from("weather"),
                 name: "weather".to_owned(),
                 description: "get weather".to_owned(),
                 input_schema: json!({"type": "object"}),
             }],
-            tool_choice: Some(ToolChoice::Required),
             structured_output: Some(StructuredOutput::JsonSchema {
                 name: "answer".to_owned(),
                 schema: json!({"type": "object"}),
@@ -657,7 +609,6 @@ mod tests {
         assert_eq!(payload["model"], "gpt-4.1-mini");
         assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(payload["tools"][0]["function"]["name"], "weather");
-        assert_eq!(payload["tool_choice"], "required");
         assert_eq!(payload["response_format"]["type"], "json_schema");
     }
 
@@ -675,7 +626,7 @@ mod tests {
             }
         });
 
-        let response = chat_response_from_value(payload, &[]).expect("response maps");
+        let response = chat_response_from_value(payload).expect("response maps");
 
         assert_eq!(response.message, ChatMessage::assistant("hello"));
         assert_eq!(response.finish_reason, FinishReason::Stop);
@@ -702,7 +653,7 @@ mod tests {
             }]
         });
 
-        let response = chat_response_from_value(payload, &[weather_tool()]).expect("response maps");
+        let response = chat_response_from_value(payload).expect("response maps");
 
         assert_eq!(response.finish_reason, FinishReason::ToolCalls);
         assert_eq!(response.message.tool_calls.len(), 1);
@@ -710,44 +661,11 @@ mod tests {
             response.message.tool_calls[0].call_id,
             CallId::from("call-1")
         );
-        assert_eq!(
-            response.message.tool_calls[0].tool_id,
-            ToolId::from("internal-weather")
-        );
         assert_eq!(response.message.tool_calls[0].name, "get_weather");
         assert_eq!(
             response.message.tool_calls[0].arguments,
             json!({"city": "Shanghai"})
         );
-    }
-
-    #[test]
-    fn unknown_response_tool_name_returns_mapping_error() {
-        let payload = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {
-                            "name": "unknown_tool",
-                            "arguments": "{}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        });
-
-        let error =
-            chat_response_from_value(payload, &[weather_tool()]).expect_err("tool should fail");
-
-        assert!(matches!(
-            error,
-            LlmError::InvalidProviderPayload("unknown tool call")
-        ));
     }
 
     #[test]
@@ -770,8 +688,7 @@ mod tests {
             }]
         });
 
-        let error =
-            chat_response_from_value(payload, &[weather_tool()]).expect_err("tool should fail");
+        let error = chat_response_from_value(payload).expect_err("tool should fail");
 
         assert!(matches!(error, LlmError::ResponseDecode(_)));
     }
@@ -811,10 +728,10 @@ mod tests {
             }]
         });
 
-        let missing_id_error = chat_response_from_value(missing_id, &[weather_tool()])
-            .expect_err("missing id should fail");
-        let missing_name_error = chat_response_from_value(missing_name, &[weather_tool()])
-            .expect_err("missing name should fail");
+        let missing_id_error =
+            chat_response_from_value(missing_id).expect_err("missing id should fail");
+        let missing_name_error =
+            chat_response_from_value(missing_name).expect_err("missing name should fail");
 
         assert!(matches!(
             missing_id_error,
@@ -840,8 +757,7 @@ mod tests {
                 }]
             });
 
-            let error = chat_response_from_value(payload, &[weather_tool()])
-                .expect_err("tool calls should fail");
+            let error = chat_response_from_value(payload).expect_err("tool calls should fail");
 
             assert!(matches!(
                 error,
@@ -855,7 +771,6 @@ mod tests {
         let mut message = ChatMessage::assistant("checking");
         message.tool_calls = vec![ToolCall {
             call_id: CallId::from("call-1"),
-            tool_id: ToolId::from("internal-weather"),
             name: "get_weather".to_owned(),
             arguments: json!({"city": "Paris"}),
         }];
@@ -877,14 +792,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_message_maps_call_id_and_provider_name() {
+    fn tool_message_maps_call_id() {
         let mut message = ChatMessage::text(ChatRole::Tool, "sunny");
         message.tool_call_id = Some(CallId::from("call-1"));
-        message.tool_id = Some(ToolId::from("internal-weather"));
-        let request = ChatRequest {
-            tools: vec![weather_tool()],
-            ..ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message)
-        };
+        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message);
 
         let payload = to_chat_payload(&request, false).expect("payload maps");
         let message = &payload["messages"][0];
@@ -892,43 +803,5 @@ mod tests {
         assert_eq!(message["role"], "tool");
         assert_eq!(message["content"], "sunny");
         assert_eq!(message["tool_call_id"], "call-1");
-        assert_eq!(message["name"], "get_weather");
-    }
-
-    #[test]
-    fn tool_choice_tool_uses_provider_tool_name() {
-        let request = ChatRequest {
-            tools: vec![weather_tool()],
-            tool_choice: Some(ToolChoice::Tool(ToolId::from("internal-weather"))),
-            ..ChatRequest::new(ModelId::from("gpt-4.1-mini"))
-        };
-
-        let payload = to_chat_payload(&request, false).expect("payload maps");
-
-        assert_eq!(payload["tool_choice"]["function"]["name"], "get_weather");
-    }
-
-    #[test]
-    fn unknown_tool_choice_returns_mapping_error() {
-        let request = ChatRequest {
-            tool_choice: Some(ToolChoice::Tool(ToolId::from("missing-tool"))),
-            ..ChatRequest::new(ModelId::from("gpt-4.1-mini"))
-        };
-
-        let error = to_chat_payload(&request, false).expect_err("tool choice should fail");
-
-        assert!(matches!(
-            error,
-            LlmError::InvalidProviderPayload("unknown tool choice")
-        ));
-    }
-
-    fn weather_tool() -> ToolSpec {
-        ToolSpec {
-            tool_id: ToolId::from("internal-weather"),
-            name: "get_weather".to_owned(),
-            description: "get weather".to_owned(),
-            input_schema: json!({"type": "object"}),
-        }
     }
 }

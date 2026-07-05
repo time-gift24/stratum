@@ -6,7 +6,7 @@ use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use wyse_core::{ModelId, TokenUsage};
 
-use crate::{ChatMessage, LlmError, StructuredOutput, ToolCallDelta, ToolChoice, ToolSpec};
+use crate::{ChatMessage, LlmError, StructuredOutput, ToolCallDelta, ToolSpec};
 
 /// Stream of chat events produced by a provider.
 pub type ChatStream =
@@ -37,9 +37,6 @@ pub struct ChatRequest {
     /// Tools available to the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
-    /// Provider tool selection hint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<ToolChoice>,
     /// Structured output constraint for the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<StructuredOutput>,
@@ -53,7 +50,6 @@ impl ChatRequest {
             model,
             messages: Vec::new(),
             tools: Vec::new(),
-            tool_choice: None,
             structured_output: None,
         }
     }

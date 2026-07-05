@@ -33,7 +33,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 
 ## API 设计
 
-- 领域 ID 使用 newtype，例如 `RunId`、`AgentId`、`ToolId`、`ModelId`。
+- 领域 ID 使用 newtype，例如 `RunId`、`AgentId`、`CallId`、`ModelId`。
 - 避免 stringly typed API；能用 enum 或已校验 newtype 表达的，不要只用裸字符串。
 - 公共类型在合适时实现常用 trait：`Debug`、`Clone`、`PartialEq`、`Eq`、`Hash`、`Serialize`、`Deserialize`。
 - 实现转换时优先实现 `From<T>`，不要手写 `Into<T>`。

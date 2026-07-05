@@ -16,4 +16,4 @@ pub use message::{ChatContent, ChatMessage, ChatRole};
 pub use mock::MockLlmProvider;
 pub use protocol::openai_compatible::OpenAICompatibleProvider;
 pub use structured_output::StructuredOutput;
-pub use tool_call::{ToolCall, ToolCallDelta, ToolChoice, ToolSpec};
+pub use tool_call::{ToolCall, ToolCallDelta, ToolSpec};
