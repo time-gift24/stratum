@@ -1,4 +1,4 @@
-//! Error types for infrastructure primitives.
+//! Error types for event stream bus operations.
 
 use std::error::Error;
 

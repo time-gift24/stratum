@@ -1,51 +1,21 @@
-//! NATS JetStream implementation of the event stream bus.
+//! NATS JetStream event stream bus implementation.
 
 use async_nats::{HeaderMap, jetstream};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use wyse_core::{RunId, StreamEnvelope};
 
-use crate::{EventStream, EventStreamBus, EventStreamBusError};
+use super::{EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig};
 
-/// Configuration for [`NatsEventStreamBus`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NatsEventStreamBusConfig {
-    /// NATS server URL.
-    pub url: String,
-    /// JetStream stream name.
-    pub stream_name: String,
-    /// Subject prefix before `<run_id>.<event_type>`.
-    pub subject_prefix: String,
-    /// Number of stream replicas.
-    pub replicas: usize,
-}
-
-impl Default for NatsEventStreamBusConfig {
-    fn default() -> Self {
-        Self {
-            url: "nats://localhost:4222".to_owned(),
-            stream_name: "WYSE_EVENTS".to_owned(),
-            subject_prefix: "wyse.events".to_owned(),
-            replicas: 1,
-        }
-    }
-}
-
-/// NATS JetStream implementation of [`EventStreamBus`].
 #[derive(Clone)]
-pub struct NatsEventStreamBus {
+pub(crate) struct NatsEventStreamBus {
     client: async_nats::Client,
     jetstream: jetstream::Context,
     config: NatsEventStreamBusConfig,
 }
 
 impl NatsEventStreamBus {
-    /// Connects to NATS and ensures the JetStream stream exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if NATS connection or stream creation fails.
-    pub async fn new(config: NatsEventStreamBusConfig) -> Result<Self, EventStreamBusError> {
+    pub(crate) async fn new(config: NatsEventStreamBusConfig) -> Result<Self, EventStreamBusError> {
         let client = async_nats::connect(&config.url)
             .await
             .map_err(EventStreamBusError::nats)?;
@@ -69,15 +39,11 @@ impl NatsEventStreamBus {
         })
     }
 
-    /// Returns the NATS subject for a published envelope.
-    #[must_use]
-    pub fn subject_for(&self, envelope: &StreamEnvelope) -> String {
+    fn subject_for(&self, envelope: &StreamEnvelope) -> String {
         subject_for(&self.config.subject_prefix, envelope)
     }
 
-    /// Returns the NATS subject used to subscribe to a run.
-    #[must_use]
-    pub fn subscribe_subject(&self, run_id: RunId) -> String {
+    fn subscribe_subject(&self, run_id: RunId) -> String {
         subscribe_subject(&self.config.subject_prefix, run_id)
     }
 }
