@@ -363,6 +363,7 @@ async fn chat_stream_maps_invalid_json_event_to_stream_error() {
         .expect_err("invalid json should fail");
 
     assert!(matches!(error, LlmError::Stream(_)));
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -425,6 +426,7 @@ async fn chat_stream_errors_when_eof_arrives_before_finish_event() {
         .expect("eof error")
         .expect_err("missing finish should fail");
     assert!(matches!(error, LlmError::Stream(_)));
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -449,6 +451,39 @@ async fn chat_stream_errors_when_eof_leaves_partial_sse_event() {
         .expect_err("partial sse event should fail");
 
     assert!(matches!(error, LlmError::Stream(_)));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn chat_stream_ignores_events_after_terminal_event() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n\
+         data: {not-json}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream
+            .next()
+            .await
+            .expect("finish event")
+            .expect("finish maps"),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None
+        }
+    );
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
