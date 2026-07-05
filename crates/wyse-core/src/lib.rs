@@ -102,6 +102,7 @@ macro_rules! string_id {
 string_id!(NodeId, "Identity of a workflow node.");
 string_id!(AgentId, "Identity of an agent.");
 string_id!(ToolId, "Identity of a tool.");
+string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(MessageId, "Identity of one streamed message.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
@@ -271,6 +272,14 @@ mod tests {
         let version = RunId::new().as_uuid().get_version_num();
 
         assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn model_id_round_trips_string() {
+        let model_id = ModelId::from("gpt-4.1-mini");
+
+        assert_eq!(model_id.as_str(), "gpt-4.1-mini");
+        assert_eq!(model_id.to_string(), "gpt-4.1-mini");
     }
 
     #[test]
