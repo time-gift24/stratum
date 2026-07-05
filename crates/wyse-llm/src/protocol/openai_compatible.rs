@@ -192,30 +192,34 @@ fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
 }
 
 fn tool_calls_from_message(message: &Value, tools: &[ToolSpec]) -> Result<Vec<ToolCall>, LlmError> {
-    message["tool_calls"]
-        .as_array()
-        .map(|calls| {
-            calls
-                .iter()
-                .map(|call| {
-                    let call_id = required_str(&call["id"], "missing tool call id")?;
-                    let name = required_str(&call["function"]["name"], "missing tool name")?;
-                    let arguments =
-                        required_str(&call["function"]["arguments"], "missing tool arguments")?;
-                    let tool_id = tool_id_for_provider_name(name, tools)
-                        .ok_or(LlmError::InvalidProviderPayload("unknown tool call"))?;
+    let Some(value) = message.get("tool_calls") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
 
-                    Ok(ToolCall {
-                        call_id: CallId::from(call_id),
-                        tool_id,
-                        name: name.to_owned(),
-                        arguments: serde_json::from_str(arguments)
-                            .map_err(LlmError::ResponseDecode)?,
-                    })
-                })
-                .collect()
+    let calls = value
+        .as_array()
+        .ok_or(LlmError::InvalidProviderPayload("invalid tool calls"))?;
+
+    calls
+        .iter()
+        .map(|call| {
+            let call_id = required_str(&call["id"], "missing tool call id")?;
+            let name = required_str(&call["function"]["name"], "missing tool name")?;
+            let arguments = required_str(&call["function"]["arguments"], "missing tool arguments")?;
+            let tool_id = tool_id_for_provider_name(name, tools)
+                .ok_or(LlmError::InvalidProviderPayload("unknown tool call"))?;
+
+            Ok(ToolCall {
+                call_id: CallId::from(call_id),
+                tool_id,
+                name: name.to_owned(),
+                arguments: serde_json::from_str(arguments).map_err(LlmError::ResponseDecode)?,
+            })
         })
-        .unwrap_or_else(|| Ok(Vec::new()))
+        .collect()
 }
 
 fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, LlmError> {
@@ -428,6 +432,28 @@ mod tests {
         assert!(matches!(
             missing_name_error,
             LlmError::InvalidProviderPayload("missing tool name")
+        ));
+    }
+
+    #[test]
+    fn response_tool_calls_must_be_an_array() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": {}
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let error = chat_response_from_value(payload, &[weather_tool()])
+            .expect_err("tool calls should fail");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidProviderPayload("invalid tool calls")
         ));
     }
 
