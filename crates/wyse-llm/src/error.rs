@@ -62,10 +62,6 @@ pub enum LlmError {
 }
 
 impl LlmError {
-    #[expect(
-        dead_code,
-        reason = "provider backends use this constructor when transport calls are added"
-    )]
     pub(crate) fn transport(source: impl Error + Send + Sync + 'static) -> Self {
         Self::Transport(Box::new(source))
     }

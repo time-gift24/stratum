@@ -1,11 +1,96 @@
 //! OpenAI-compatible protocol implementation.
+use reqwest::{
+    Url,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use serde_json::{Value, json};
-use wyse_core::{CallId, TokenUsage, ToolId};
+use wyse_core::{CallId, ModelId, TokenUsage, ToolId};
 
 use crate::{
-    ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, FinishReason, LlmError,
-    StructuredOutput, ToolCall, ToolChoice, ToolSpec,
+    ApiKey, ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream,
+    FinishReason, LlmError, LlmProvider, ProviderStatusError, StructuredOutput, ToolCall,
+    ToolChoice, ToolSpec,
 };
+
+/// OpenAI-compatible chat completions provider.
+#[derive(Debug, Clone)]
+pub struct OpenAICompatibleProvider {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: ApiKey,
+    model: ModelId,
+}
+
+impl OpenAICompatibleProvider {
+    /// Creates a provider using a default reqwest client.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, api_key: ApiKey, model: ModelId) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url: base_url.into(),
+            api_key,
+            model,
+        }
+    }
+
+    /// Replaces the HTTP client used by the provider.
+    #[must_use]
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    fn chat_completions_url(&self) -> Result<Url, LlmError> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        Url::parse(&url).map_err(|source| LlmError::RequestBuild(Box::new(source)))
+    }
+
+    fn headers(&self) -> Result<HeaderMap, LlmError> {
+        let mut headers = HeaderMap::new();
+        let value = format!("Bearer {}", self.api_key.as_str());
+        let mut auth = HeaderValue::from_str(&value)
+            .map_err(|source| LlmError::RequestBuild(Box::new(source)))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
+        Ok(headers)
+    }
+}
+
+impl LlmProvider for OpenAICompatibleProvider {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let mut request = request;
+        request.model = self.model.clone();
+        let payload = to_chat_payload(&request, false)?;
+        let response = self
+            .client
+            .post(self.chat_completions_url()?)
+            .headers(self.headers()?)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(LlmError::transport)?;
+        let status = response.status();
+        let request_id = request_id(response.headers());
+        let body = response.bytes().await.map_err(LlmError::transport)?;
+
+        if !status.is_success() {
+            let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
+            return Err(LlmError::ProviderStatus(provider_status_error(
+                status.as_u16(),
+                value,
+                request_id,
+                &self.api_key,
+            )));
+        }
+
+        let value = serde_json::from_slice(&body).map_err(LlmError::ResponseDecode)?;
+        chat_response_from_value(value, &request.tools)
+    }
+
+    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        Err(LlmError::UnsupportedCapability("streaming"))
+    }
+}
 
 pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Value, LlmError> {
     let messages = request
@@ -69,6 +154,48 @@ pub(crate) fn chat_response_from_value(
         finish_reason,
         usage,
     })
+}
+
+fn request_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-request-id")
+        .or_else(|| headers.get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn provider_status_error(
+    status: u16,
+    value: Value,
+    request_id: Option<String>,
+    api_key: &ApiKey,
+) -> ProviderStatusError {
+    let error = value.get("error").unwrap_or(&value);
+    let code = error
+        .get("code")
+        .and_then(error_field)
+        .or_else(|| error.get("type").and_then(error_field))
+        .map(|value| redact_secret(&value, api_key));
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .unwrap_or("provider request failed");
+
+    ProviderStatusError::new(status, code, redact_secret(message, api_key), request_id)
+}
+
+fn error_field(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) if value.is_empty() => None,
+        Value::String(value) => Some(value.clone()),
+        value => Some(value.to_string()),
+    }
+}
+
+fn redact_secret(value: &str, api_key: &ApiKey) -> String {
+    value.replace(api_key.as_str(), "[redacted]")
 }
 
 fn message_to_value(message: &ChatMessage, tools: &[ToolSpec]) -> Result<Value, LlmError> {
