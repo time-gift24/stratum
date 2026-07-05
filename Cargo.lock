@@ -1962,12 +1962,10 @@ name = "wyse-llm"
 version = "0.1.0"
 dependencies = [
  "futures-core",
- "futures-util",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
  "wyse-core",
 ]
 
