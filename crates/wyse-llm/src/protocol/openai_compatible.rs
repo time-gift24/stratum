@@ -437,7 +437,7 @@ fn structured_output_to_value(output: &StructuredOutput) -> Value {
     }
 }
 
-fn finish_reason(value: Option<&str>) -> FinishReason {
+pub(crate) fn finish_reason(value: Option<&str>) -> FinishReason {
     match value {
         Some("stop") => FinishReason::Stop,
         Some("length") => FinishReason::Length,
@@ -447,7 +447,7 @@ fn finish_reason(value: Option<&str>) -> FinishReason {
     }
 }
 
-fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
+pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
     let value = value?;
     Some(TokenUsage {
         input_tokens: value["prompt_tokens"].as_u64().unwrap_or_default(),
@@ -456,7 +456,7 @@ fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn tool_calls_from_message(message: &Value) -> Result<Vec<ToolCall>, LlmError> {
+pub(crate) fn tool_calls_from_message(message: &Value) -> Result<Vec<ToolCall>, LlmError> {
     let Some(value) = message.get("tool_calls") else {
         return Ok(Vec::new());
     };

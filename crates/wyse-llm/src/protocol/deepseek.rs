@@ -8,9 +8,11 @@ use serde_json::{Value, json};
 use wyse_core::ModelId;
 
 use crate::{
-    ApiKey, ChatRequest, ChatResponse, ChatRole, ChatStream, LlmError, LlmProvider,
+    ApiKey, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream, LlmError, LlmProvider,
+    StructuredOutput,
     protocol::openai_compatible::{
-        chat_response_from_value, provider_status_error, request_id, to_chat_payload,
+        finish_reason, provider_status_error, request_id, to_chat_payload, tool_calls_from_message,
+        usage_from_value,
     },
 };
 
@@ -90,7 +92,7 @@ impl LlmProvider for DeepSeekProvider {
         }
 
         let value = serde_json::from_slice(&body).map_err(LlmError::ResponseDecode)?;
-        chat_response_from_value(value)
+        deepseek_chat_response_from_value(value)
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
@@ -106,6 +108,7 @@ impl LlmProvider for DeepSeekProvider {
 
 /// DeepSeek chat model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DeepSeekModel {
     /// DeepSeek V4 Flash.
     V4Flash,
@@ -132,6 +135,7 @@ impl DeepSeekModel {
 
 /// DeepSeek thinking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DeepSeekThinking {
     /// Enable thinking, optionally with reasoning effort.
     Enabled {
@@ -144,6 +148,7 @@ pub enum DeepSeekThinking {
 
 /// DeepSeek reasoning effort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DeepSeekReasoningEffort {
     /// High reasoning effort.
     High,
@@ -155,6 +160,15 @@ fn to_deepseek_chat_payload(
     request: &ChatRequest,
     thinking: DeepSeekThinking,
 ) -> Result<Value, LlmError> {
+    if matches!(
+        &request.structured_output,
+        Some(StructuredOutput::JsonSchema { .. })
+    ) {
+        return Err(LlmError::UnsupportedCapability(
+            "deepseek json schema structured output",
+        ));
+    }
+
     let mut payload = to_chat_payload(request, false)?;
     add_reasoning_content(&mut payload, request);
 
@@ -171,6 +185,30 @@ fn to_deepseek_chat_payload(
     }
 
     Ok(payload)
+}
+
+fn deepseek_chat_response_from_value(value: Value) -> Result<ChatResponse, LlmError> {
+    let choice = value["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+        .ok_or(LlmError::InvalidProviderPayload("missing choice"))?;
+    let message = &choice["message"];
+    let content = message["content"].as_str().unwrap_or_default();
+    let mut chat_message = ChatMessage::assistant(content);
+
+    if let Some(reasoning_content) = message["reasoning_content"].as_str()
+        && !reasoning_content.is_empty()
+    {
+        chat_message = chat_message.with_reasoning_content(reasoning_content);
+    }
+
+    chat_message.tool_calls = tool_calls_from_message(message)?;
+
+    Ok(ChatResponse {
+        message: chat_message,
+        finish_reason: finish_reason(choice["finish_reason"].as_str()),
+        usage: usage_from_value(value.get("usage")),
+    })
 }
 
 fn add_reasoning_content(payload: &mut Value, request: &ChatRequest) {
