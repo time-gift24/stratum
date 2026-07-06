@@ -57,13 +57,22 @@
 | `node_output` | `node` | 普通 node 产生输出。 |
 | `node_finished` | `node` | node 执行完成。 |
 | `node_failed` | `node` | node 执行失败。 |
-| `message_started` | `agent` | agent message 开始。 |
-| `text_delta` | `agent` | agent 产生可见文本增量。 |
-| `reasoning_delta` | `agent` | agent 产生 reasoning 增量。 |
-| `tool_call_started` | `node` / `agent` | tool call 开始。 |
-| `tool_call_finished` | `node` / `agent` | tool call 完成。 |
-| `tool_call_failed` | `node` / `agent` | tool call 失败。 |
+| `llm` | `agent` | 一次 LLM 请求内事件；由 `llm_call_id` 和嵌套 `LlmEvent` 表达细分阶段。 |
 | `plan_updated` | `agent` | agent 可见计划发生变化。 |
+
+## LLM Events
+
+| Event | 说明 |
+| --- | --- |
+| `started` | LLM call 开始。 |
+| `finished` | LLM call 完成，包含 `finish_reason` 和可选 `usage`。 |
+| `failed` | LLM call 失败。 |
+| `text_delta` | 普通文本增量；`role` 表达 `system`、`user`、`assistant` 或 `tool`。 |
+| `reasoning_delta` | reasoning 增量，不进入普通文本 role。 |
+| `tool_call_started` | tool call 开始。 |
+| `tool_call_delta` | tool call 参数增量。 |
+| `tool_call_finished` | tool call 完成，包含结构化 `result`。 |
+| `tool_call_failed` | tool call 失败。 |
 
 ## Checkpoint
 
@@ -88,7 +97,9 @@
 | --- | --- |
 | `source` 只表达归属 | 用来定位事件属于 run、node 还是 agent。 |
 | `event` 表达发生了什么 | 不用 `metadata`、`source` 或字符串状态重复表达事件类型。 |
-| tool 没有独立 source | `tool_call_*` 使用 `node` 或 `agent` source；`call_id`、`tool_id` 放在事件 data 中。 |
+| 一次 LLM 请求只用 `llm_call_id` 关联 | 外层使用 `RuntimeEvent::Llm { llm_call_id, event }`；不记录 `model_id`，不引入 `message_id`，文本顺序由 `seq` 决定。 |
+| user、assistant、tool 普通文本共用 `LlmEvent::TextDelta` | `role` 表达文本归属；reasoning 使用独立 `LlmEvent::ReasoningDelta`。 |
+| LLM 相关 tool call 放在 `LlmEvent` 中 | `call_id` 继续只表示 provider tool call；外层用 provider-visible `name` 匹配真实 tool。 |
 | agent 是特殊 node | 生命周期仍用 `node_started` / `node_finished` / `node_failed`；内部输出用 `agent` source。 |
 | 普通 node 输出用 `node_output` | 不新增 `task` 事件；需要用户可见计划时才用 `plan_updated`。 |
 
@@ -98,7 +109,7 @@
 | --- | --- |
 | 禁止放业务 payload | 业务数据必须进入类型化 event data。 |
 | 禁止放事件状态 | 状态必须由 event type 或类型化字段表达。 |
-| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`tool_id`、`call_id` 必须放在明确字段中。 |
+| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`llm_call_id`、`call_id` 必须放在明确字段中。 |
 | 禁止放 secret | 不记录 token、凭据、密钥或原始敏感数据。 |
 | 禁止让前端依赖 metadata 渲染核心 UI | 前端核心渲染只能依赖 envelope、source 和 event data。 |
 

@@ -33,7 +33,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 
 ## API 设计
 
-- 领域 ID 使用 newtype，例如 `RunId`、`AgentId`、`ToolId`、`ModelId`。
+- 领域 ID 使用 newtype，例如 `RunId`、`AgentId`、`CallId`、`ModelId`。
 - 避免 stringly typed API；能用 enum 或已校验 newtype 表达的，不要只用裸字符串。
 - 公共类型在合适时实现常用 trait：`Debug`、`Clone`、`PartialEq`、`Eq`、`Hash`、`Serialize`、`Deserialize`。
 - 实现转换时优先实现 `From<T>`，不要手写 `Into<T>`。
@@ -116,6 +116,8 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 跨 crate 集成测试放在 `tests/` 目录。
 - 测试命名要描述被验证的行为。
 - 测试结构保持 arrange、act、assert 清晰。
+- 测试模块和测试函数不得放在文件头部；应放在被测生产代码之后，通常放在文件末尾。
+- 禁止为了测试方便在生产 API 中添加函数；测试辅助逻辑应放在测试模块、`tests/` helper 或 fixture 中。
 - async 测试使用 `#[tokio::test]`。
 - agent、LLM、tool、MCP 相关测试使用 mock provider 和基于 trait 的依赖。
 - parser、validator、graph scheduling、schema conversion 优先考虑 property tests。
