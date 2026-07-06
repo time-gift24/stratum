@@ -12,7 +12,6 @@
 - 共享 SSE framing/parser，供 DeepSeek 和 OpenAI-compatible provider 复用
 - assistant message 级别的 `reasoning_content`
 - streaming `ReasoningDelta`
-- DeepSeek V4 Flash / Pro 的模型元数据
 - 本地 mock HTTP 测试和 ignored smoke test
 
 本轮不做 provider registry、factory、manager、Anthropic API、FIM、前缀续写、上下文硬盘缓存控制、自动重试、限流器或内置默认 base URL。
@@ -36,7 +35,7 @@ DeepSeek 官方文档当前列出的 OpenAI 格式 base URL 是 `https://api.dee
 - Flash 价格：缓存命中输入 `0.02` 元 / 百万 tokens，缓存未命中输入 `1` 元 / 百万 tokens，输出 `2` 元 / 百万 tokens
 - Pro 价格：缓存命中输入 `0.025` 元 / 百万 tokens，缓存未命中输入 `3` 元 / 百万 tokens，输出 `6` 元 / 百万 tokens
 
-旧模型名 `deepseek-chat` 和 `deepseek-reasoner` 将于北京时间 `2026-07-24 23:59` 弃用。DeepSeek provider 不把它们作为推荐或枚举模型；如果调用方显式传旧模型名，返回 `LlmError::InvalidRequest`。
+旧模型名 `deepseek-chat` 和 `deepseek-reasoner` 将于北京时间 `2026-07-24 23:59` 弃用。DeepSeek provider 不把它们作为推荐或枚举模型。本轮不额外实现旧模型名拒绝逻辑。
 
 参考来源：
 
@@ -57,7 +56,7 @@ DeepSeek 官方文档当前列出的 OpenAI 格式 base URL 是 `https://api.dee
 - 处理 TCP chunk 切分
 - 对 partial EOF 返回 stream error
 
-`protocol::sse` 不理解 OpenAI 或 DeepSeek JSON shape。它只产出 `SseEvent` 或 data string stream。
+`protocol::sse` 不理解 OpenAI 或 DeepSeek JSON shape。它只暴露共享 `SseParser` 和 `SseEvent`，OpenAI-compatible 与 DeepSeek 各自保留现有 `unfold` stream 映射逻辑。
 
 `protocol::openai_compatible` 移除私有 SSE parser，改为复用 `protocol::sse`。OpenAI-compatible 的 JSON chunk 到 `ChatStreamEvent` 的映射继续留在该模块内。
 
@@ -117,17 +116,12 @@ impl DeepSeekProvider {
 }
 ```
 
-`DeepSeekModel` 提供 `ModelId` 转换和元数据方法：
+`DeepSeekModel` 只提供模型名转换：
 
 - `model_id() -> ModelId`
 - `as_str() -> &'static str`
-- `context_window_tokens() -> u64`
-- `default_max_output_tokens() -> u64`
-- `max_output_tokens() -> u64`
-- `concurrency_limit() -> u64`
-- `pricing_cny_per_million_tokens() -> DeepSeekPricing`
 
-`DeepSeekPricing` 是简单值类型，包含缓存命中输入、缓存未命中输入和输出价格。价格只作为元数据暴露，不接入 cost 自动计算。
+官网价格、并发、上下文和输出长度只保留在设计文档中，不进入本轮代码。需要 cost 或限流时再加真实调用点需要的类型。
 
 ## 请求映射
 
@@ -148,7 +142,7 @@ DeepSeek provider 构造 payload：
 - `Enabled { effort: Some(High) }` 映射 `reasoning_effort: "high"`
 - `Enabled { effort: Some(Max) }` 映射 `reasoning_effort: "max"`
 
-本轮不向 `ChatRequest` 增加 `max_tokens`、temperature、top_p 或 provider option。DeepSeek 的 max output 数值只作为模型元数据提供。
+本轮不向 `ChatRequest` 增加 `max_tokens`、temperature、top_p 或 provider option。DeepSeek 的 max output 数值只保留在设计文档中。
 
 消息映射沿用 OpenAI Chat Completions 形态。assistant message 如果带 `reasoning_content`，DeepSeek provider 在请求中输出同名字段，支持思考模式工具调用后的多轮上下文拼接。
 
@@ -177,7 +171,7 @@ DeepSeek 的 `prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`、`completio
 
 DeepSeek provider 复用 `LlmError`，不新增 provider 专属错误 enum。
 
-- 模型不匹配、旧模型名和请求侧不支持能力返回 `LlmError::InvalidRequest`
+- 模型不匹配和请求侧不支持能力返回 `LlmError::InvalidRequest`
 - 请求 URL/header/body 构造失败返回 `RequestBuild`
 - reqwest 失败返回 `Transport`
 - 非 2xx status 返回 `ProviderStatus`
@@ -225,9 +219,7 @@ library 只允许通过 `tracing` 发安全字段，不安装 subscriber。
 - DeepSeek request body 能回传 assistant `reasoning_content`
 - DeepSeek 非流式响应把 `reasoning_content` 放进 assistant message
 - DeepSeek stream 映射 `ReasoningDelta`、`TextDelta`、`ToolCallDelta` 和 `Finished`
-- DeepSeek model metadata 数值与官方文档一致
 - API key debug/error redaction
-- 旧模型名被拒绝
 
 真实网络测试使用 `#[ignore]`，需要环境变量：
 
@@ -263,7 +255,7 @@ library 只允许通过 `tracing` 发安全字段，不安装 subscriber。
 - `wyse-llm` 暴露 `DeepSeekProvider`
 - `DeepSeekProvider` 构造时必须显式传 `base_url`
 - `DeepSeekProvider` 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`
-- 旧 DeepSeek 模型名不会成为推荐 API
+- 旧 DeepSeek 模型名不会成为推荐 API，也没有专门的旧名拒绝分支
 - `ChatMessage` 可以承载 assistant `reasoning_content`
 - DeepSeek 非流式响应能保留 reasoning 内容
 - DeepSeek 流式响应能发出 `ReasoningDelta`
