@@ -90,6 +90,11 @@ pub enum ChatStreamEvent {
         /// Text fragment.
         delta: String,
     },
+    /// Reasoning text emitted by the model.
+    ReasoningDelta {
+        /// Reasoning text fragment.
+        delta: String,
+    },
     /// Tool-call fragment emitted by the model.
     ToolCallDelta(ToolCallDelta),
     /// Terminal stream event.
@@ -138,5 +143,20 @@ mod tests {
         assert_eq!(request.model.as_str(), "gpt-4.1-mini");
         assert_eq!(request.messages.len(), 1);
         assert!(request.structured_output.is_some());
+    }
+
+    #[test]
+    fn stream_event_can_represent_reasoning_delta() {
+        let event = crate::ChatStreamEvent::ReasoningDelta {
+            delta: "thinking".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).expect("event should serialize"),
+            serde_json::json!({
+                "type": "reasoning_delta",
+                "data": { "delta": "thinking" }
+            })
+        );
     }
 }
