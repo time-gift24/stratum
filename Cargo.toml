@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wyse-core",
+    "crates/wyse-filesystem",
     "crates/wyse-infra",
     "crates/wyse-llm",
     "crates/wyse-tools",
