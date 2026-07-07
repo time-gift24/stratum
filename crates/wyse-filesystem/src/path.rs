@@ -45,16 +45,9 @@ impl fmt::Display for VirtualPath {
 }
 
 /// Error returned when parsing an invalid [`VirtualPath`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid virtual path")]
 pub struct VirtualPathError;
-
-impl fmt::Display for VirtualPathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("invalid virtual path")
-    }
-}
-
-impl std::error::Error for VirtualPathError {}
 
 fn validate(value: &str) -> Result<(), VirtualPathError> {
     if value.is_empty()
