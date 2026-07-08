@@ -56,6 +56,10 @@ impl LocalFilesystem {
         &self,
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
+        if path.as_str() == "/" {
+            return Ok(self.root.clone());
+        }
+
         let host = self.host_path(path);
         let parent = host.parent().unwrap_or(&self.root);
         let canonical_parent = fs::canonicalize(parent).await.map_err(|source| {
@@ -72,6 +76,11 @@ impl LocalFilesystem {
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
         let host = self.host_path(path);
+        if let Ok(metadata) = fs::symlink_metadata(&host).await {
+            if metadata.file_type().is_symlink() {
+                return Err(FilesystemError::PathEscapesSandbox { path: path.clone() });
+            }
+        }
         if fs::try_exists(&host)
             .await
             .map_err(|source| FilesystemError::local_io("try_exists", path.clone(), source))?
@@ -343,6 +352,34 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
 
+    #[tokio::test]
+    async fn metadata_and_create_dir_handle_root_path() {
+        let temp = std::env::temp_dir().join(format!("wyse-fs-root-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let root = VirtualPath::try_from("/").expect("root path is valid");
+
+        let metadata = fs.metadata(&root).await.expect("root metadata");
+        assert_eq!(metadata.file_type, FileType::Directory);
+        assert_eq!(metadata.len, None);
+
+        let error = fs.create_dir(&root).await.expect_err("root already exists");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::AlreadyExists { .. }
+        ));
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn reports_symlink_metadata_without_following_target() {
@@ -427,6 +464,45 @@ mod tests {
                 .await
                 .expect("read outside target"),
             b"secret"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_dangling_final_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("wyse-fs-dangling-{}", std::process::id()));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        tokio::fs::create_dir_all(&root).await.expect("create root");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("create outside");
+        symlink(outside.join("missing.txt"), root.join("link.txt")).expect("create symlink");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: root.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let link = VirtualPath::try_from("/link.txt").expect("path is valid");
+
+        let error = fs
+            .write_file(&link, Bytes::from_static(b"owned"))
+            .await
+            .expect_err("dangling symlink escape is rejected");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::PathEscapesSandbox { .. }
+        ));
+        assert!(
+            !tokio::fs::try_exists(outside.join("missing.txt"))
+                .await
+                .expect("check outside target")
         );
 
         let _ = tokio::fs::remove_dir_all(&base).await;

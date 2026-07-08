@@ -83,3 +83,10 @@ test result: ok. 3 passed; 0 failed
 - Replaced the `child_virtual_path()` panic with a typed `FilesystemError::InvalidVirtualPath`.
 - Added focused tests for symlink reporting, symlink escape rejection, and invalid child entry names.
 - Verified with `cargo test -p wyse-filesystem local::tests` and `cargo fmt`.
+
+## Task 3 follow-up fix
+
+- Special-cased the sandbox root in parent validation so `metadata("/")` resolves against the root directory itself instead of the host parent directory.
+- Kept `create_dir("/")` on the normal filesystem path, which now returns an existing-path error from the OS instead of `PathEscapesSandbox`.
+- Hardened `write_file` against dangling final-component symlinks by checking `symlink_metadata()` on the destination path before falling back to parent validation.
+- Added focused regression tests for root metadata, root `create_dir`, and a Unix dangling-symlink write escape that must reject the write and leave the outside target untouched.
