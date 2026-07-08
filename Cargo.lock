@@ -2063,6 +2063,7 @@ dependencies = [
 name = "wyse-llm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bon",
  "bytes",
  "futures-core",

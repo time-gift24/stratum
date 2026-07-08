@@ -2,6 +2,7 @@
 
 use std::{collections::VecDeque, sync::Mutex};
 
+use async_trait::async_trait;
 use futures_util::stream;
 
 use crate::{ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, LlmError, LlmProvider};
@@ -41,7 +42,12 @@ impl MockLlmProvider {
     }
 }
 
+#[async_trait]
 impl LlmProvider for MockLlmProvider {
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
         self.chat_responses
             .lock()
@@ -71,6 +77,13 @@ mod tests {
         ChatMessage, ChatRequest, ChatResponse, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
     };
+
+    #[test]
+    fn mock_provider_reports_provider_name() {
+        let provider = MockLlmProvider::new();
+
+        assert_eq!(provider.provider_name(), "mock");
+    }
 
     #[tokio::test]
     async fn mock_returns_queued_chat_response() {

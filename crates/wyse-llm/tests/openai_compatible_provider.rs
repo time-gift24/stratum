@@ -102,6 +102,13 @@ async fn chat_rejects_request_model_that_differs_from_provider_model() {
     ));
 }
 
+#[test]
+fn openai_compatible_provider_reports_provider_name() {
+    let provider = test_provider("http://127.0.0.1:9/v1");
+
+    assert_eq!(provider.provider_name(), "openai_compatible");
+}
+
 #[tokio::test]
 async fn chat_maps_provider_status_error_payload() {
     let server = TestServer::spawn(TestResponse::status(

@@ -1,6 +1,7 @@
 //! OpenAI-compatible protocol implementation.
 use std::{collections::VecDeque, pin::Pin};
 
+use async_trait::async_trait;
 use bon::Builder;
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
@@ -57,7 +58,12 @@ impl OpenAICompatibleProvider {
     }
 }
 
+#[async_trait]
 impl LlmProvider for OpenAICompatibleProvider {
+    fn provider_name(&self) -> &str {
+        "openai_compatible"
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -381,10 +387,12 @@ fn message_to_value(message: &ChatMessage) -> Result<Value, LlmError> {
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Tool => "tool",
+        _ => unreachable!("unsupported chat role"),
     };
     let content = match &message.content {
         ChatContent::Text(text) => Value::String(text.clone()),
         ChatContent::Json(value) => value.clone(),
+        _ => unreachable!("unsupported chat content"),
     };
 
     let mut value = json!({"role": role, "content": content});
