@@ -9,10 +9,7 @@ pub mod error;
 pub mod local;
 pub mod path;
 
-pub use apply_patch::{
-    ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, ApplyPatchOutput,
-    ApplyPatchStatus, apply_patch,
-};
+pub use apply_patch::{ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, apply_patch};
 pub use definition::{DirEntry, FileMetadata, FileType, Filesystem};
 pub use error::FilesystemError;
 pub use local::{LocalFilesystem, LocalFilesystemConfig};

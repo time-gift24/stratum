@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 use wyse_core::ToolSpec;
 use wyse_filesystem::{
-    ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, ApplyPatchStatus, Filesystem,
-    FilesystemError, VirtualPath, apply_patch,
+    ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, Filesystem, FilesystemError,
+    VirtualPath, apply_patch,
 };
 
 use crate::{Tool, ToolError, ToolInput, ToolOutput};
@@ -64,20 +64,14 @@ impl Tool for ApplyPatchTool {
             .map_err(|source| ToolError::InvalidInput { source })?;
         let operation = operation_from_raw(raw.operation)?;
         let display_path = display_path(&operation.path);
-        let result = match apply_patch(self.filesystem.as_ref(), &operation).await {
-            Ok(output) => ApplyPatchOutputForTool {
-                status: output.status,
-                output: success_output(operation.kind, &display_path),
-            },
-            Err(error) => ApplyPatchOutputForTool {
-                status: ApplyPatchStatus::Failed,
-                output: failed_output(error, &display_path),
-            },
+        let (status, output) = match apply_patch(self.filesystem.as_ref(), &operation).await {
+            Ok(()) => ("completed", success_output(operation.kind, &display_path)),
+            Err(error) => ("failed", failed_output(&error, &display_path)),
         };
 
         Ok(ToolOutput::new(json!({
-            "status": status_text(result.status),
-            "output": result.output,
+            "status": status,
+            "output": output,
         })))
     }
 }
@@ -93,11 +87,6 @@ struct RawOperation {
     kind: String,
     path: String,
     diff: Option<String>,
-}
-
-struct ApplyPatchOutputForTool {
-    status: ApplyPatchStatus,
-    output: String,
 }
 
 fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolError> {
@@ -138,14 +127,6 @@ fn display_path(path: &VirtualPath) -> String {
     path.as_str().trim_start_matches('/').to_owned()
 }
 
-fn status_text(status: ApplyPatchStatus) -> &'static str {
-    match status {
-        ApplyPatchStatus::Completed => "completed",
-        ApplyPatchStatus::Failed => "failed",
-        _ => "failed",
-    }
-}
-
 fn success_output(kind: ApplyPatchOperationKind, path: &str) -> String {
     match kind {
         ApplyPatchOperationKind::CreateFile => format!("created {path}"),
@@ -155,7 +136,7 @@ fn success_output(kind: ApplyPatchOperationKind, path: &str) -> String {
     }
 }
 
-fn failed_output(error: ApplyPatchError, path: &str) -> String {
+fn failed_output(error: &ApplyPatchError, path: &str) -> String {
     match error {
         ApplyPatchError::MissingDiff { operation } => {
             format!("patch diff is required for {operation}")
@@ -164,22 +145,14 @@ fn failed_output(error: ApplyPatchError, path: &str) -> String {
             format!("patch context did not match {path}")
         }
         ApplyPatchError::Filesystem { source } => filesystem_error_output(source, path),
-        _ => format!("patch failed {path}"),
+        _ => error.to_string(),
     }
 }
 
-fn filesystem_error_output(error: FilesystemError, path: &str) -> String {
+fn filesystem_error_output(error: &FilesystemError, path: &str) -> String {
     match error {
         FilesystemError::NotFound { .. } => format!("file not found at path '{path}'"),
         FilesystemError::AlreadyExists { .. } => format!("file already exists at path '{path}'"),
-        FilesystemError::NotAFile { .. } => format!("path is not a file '{path}'"),
-        FilesystemError::NotADirectory { .. } => format!("path is not a directory '{path}'"),
-        FilesystemError::DirectoryNotEmpty { .. } => format!("directory is not empty '{path}'"),
-        FilesystemError::PermissionDenied { .. } => format!("permission denied '{path}'"),
-        FilesystemError::ContentTooLarge { .. } => format!("content too large '{path}'"),
-        FilesystemError::PathEscapesSandbox { .. } => format!("path escapes sandbox '{path}'"),
-        FilesystemError::InvalidVirtualPath { .. } => format!("invalid path '{path}'"),
-        FilesystemError::LocalIo { .. } => format!("local filesystem operation failed '{path}'"),
-        _ => format!("filesystem operation failed '{path}'"),
+        _ => error.to_string(),
     }
 }

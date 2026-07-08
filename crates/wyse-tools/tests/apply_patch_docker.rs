@@ -5,7 +5,7 @@ use wyse_core::CallId;
 use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig, VirtualPath};
 use wyse_tools::{ApplyPatchTool, Tool, ToolInput};
 
-#[ignore = "requires wyse-tools-test compose stack"]
+#[ignore = "crate integration test"]
 #[tokio::test]
 async fn apply_patch_tool_edits_local_sandbox_with_test_stack_running() {
     let root = std::env::temp_dir().join(format!(

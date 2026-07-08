@@ -36,26 +36,6 @@ impl ApplyPatchOperation {
     }
 }
 
-/// Result status for an apply-patch operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ApplyPatchStatus {
-    /// Operation completed.
-    Completed,
-    /// Operation failed in a recoverable way.
-    Failed,
-}
-
-/// Output for an apply-patch operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct ApplyPatchOutput {
-    /// Operation status.
-    pub status: ApplyPatchStatus,
-    /// Short human-readable output.
-    pub output: String,
-}
-
 /// Error returned while applying a patch.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -90,8 +70,8 @@ pub enum ApplyPatchError {
 pub async fn apply_patch(
     filesystem: &dyn Filesystem,
     operation: &ApplyPatchOperation,
-) -> Result<ApplyPatchOutput, ApplyPatchError> {
-    let output = match operation.kind {
+) -> Result<(), ApplyPatchError> {
+    match operation.kind {
         ApplyPatchOperationKind::CreateFile => {
             let diff = required_diff(operation)?;
             ensure_missing(filesystem, &operation.path).await?;
@@ -100,7 +80,6 @@ pub async fn apply_patch(
                 .write_file(&operation.path, contents.into_bytes())
                 .await
                 .map_err(|source| ApplyPatchError::Filesystem { source })?;
-            format!("created {}", operation.path)
         }
         ApplyPatchOperationKind::UpdateFile => {
             let diff = required_diff(operation)?;
@@ -114,21 +93,15 @@ pub async fn apply_patch(
                 .write_file(&operation.path, updated.into_bytes())
                 .await
                 .map_err(|source| ApplyPatchError::Filesystem { source })?;
-            format!("updated {}", operation.path)
         }
         ApplyPatchOperationKind::DeleteFile => {
             filesystem
                 .remove_file(&operation.path)
                 .await
                 .map_err(|source| ApplyPatchError::Filesystem { source })?;
-            format!("deleted {}", operation.path)
         }
-    };
-
-    Ok(ApplyPatchOutput {
-        status: ApplyPatchStatus::Completed,
-        output,
-    })
+    }
+    Ok(())
 }
 
 fn required_diff(operation: &ApplyPatchOperation) -> Result<&str, ApplyPatchError> {
@@ -258,11 +231,10 @@ mod tests {
             diff: Some("@@\n+hello\n+world\n".to_owned()),
         };
 
-        let output = apply_patch(&filesystem, &operation)
+        apply_patch(&filesystem, &operation)
             .await
             .expect("patch should apply");
 
-        assert_eq!(output.status, ApplyPatchStatus::Completed);
         assert_eq!(
             filesystem.read_file(&path).await.expect("read file"),
             b"hello\nworld\n"
@@ -285,11 +257,10 @@ mod tests {
             diff: Some("@@\n one\n-two\n+deux\n three\n".to_owned()),
         };
 
-        let output = apply_patch(&filesystem, &operation)
+        apply_patch(&filesystem, &operation)
             .await
             .expect("patch should apply");
 
-        assert_eq!(output.status, ApplyPatchStatus::Completed);
         assert_eq!(
             filesystem.read_file(&path).await.expect("read file"),
             b"one\ndeux\nthree\n"
@@ -312,11 +283,10 @@ mod tests {
             diff: None,
         };
 
-        let output = apply_patch(&filesystem, &operation)
+        apply_patch(&filesystem, &operation)
             .await
             .expect("delete should apply");
 
-        assert_eq!(output.status, ApplyPatchStatus::Completed);
         assert!(matches!(
             filesystem
                 .read_file(&path)
