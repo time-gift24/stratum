@@ -64,7 +64,7 @@ fn validate(value: &str) -> Result<(), VirtualPathError> {
     }
 
     for segment in value.trim_start_matches('/').split('/') {
-        if segment.is_empty() || segment == ".." {
+        if segment.is_empty() || segment == "." || segment == ".." {
             return Err(VirtualPathError);
         }
     }
@@ -101,6 +101,8 @@ mod tests {
             "",
             "src/lib.rs",
             "../secret",
+            "/.",
+            "/src/.",
             "/../secret",
             "/src/../secret",
             "/src//lib.rs",

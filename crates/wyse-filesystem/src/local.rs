@@ -1,11 +1,13 @@
 //! Local sandbox filesystem backend.
 
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 use bytes::Bytes;
 use tokio::fs;
 
-use crate::{DirEntry, FileMetadata, FileType, Filesystem, FilesystemError, VirtualPath};
+use crate::{
+    DirEntry, FileMetadata, FileType, Filesystem, FilesystemError, VirtualPath, VirtualPathError,
+};
 
 /// Configuration for [`LocalFilesystem`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +39,11 @@ impl LocalFilesystem {
                 source,
             )
         })?;
+        if !root.is_dir() {
+            return Err(FilesystemError::NotADirectory {
+                path: VirtualPath::try_from("/").expect("root virtual path is valid"),
+            });
+        }
 
         Ok(Self {
             root,
@@ -163,7 +170,7 @@ impl Filesystem for LocalFilesystem {
             .await
             .map_err(|source| FilesystemError::local_io("read_dir_entry", path.clone(), source))?
         {
-            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let file_name = file_name_to_string(entry.file_name())?;
             let child_path = child_virtual_path(path, &file_name)?;
             let entry_file_type = entry.file_type().await.map_err(|source| {
                 FilesystemError::local_io("entry_file_type", child_path.clone(), source)
@@ -211,6 +218,12 @@ impl Filesystem for LocalFilesystem {
 
     async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let host = self.ensure_existing_inside_root(path).await?;
+        let metadata = fs::metadata(&host)
+            .await
+            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
+        if !metadata.is_file() {
+            return Err(FilesystemError::NotAFile { path: path.clone() });
+        }
         fs::remove_file(&host)
             .await
             .map_err(|source| FilesystemError::local_io("remove_file", path.clone(), source))
@@ -221,6 +234,12 @@ impl Filesystem for LocalFilesystem {
             return Err(FilesystemError::DirectoryNotEmpty { path: path.clone() });
         }
         let host = self.ensure_existing_inside_root(path).await?;
+        let metadata = fs::metadata(&host)
+            .await
+            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
+        if !metadata.is_dir() {
+            return Err(FilesystemError::NotADirectory { path: path.clone() });
+        }
         fs::remove_dir(&host)
             .await
             .map_err(|source| FilesystemError::local_io("remove_dir", path.clone(), source))
@@ -238,6 +257,12 @@ fn child_virtual_path(
     };
     VirtualPath::try_from(path.as_str())
         .map_err(|source| FilesystemError::invalid_virtual_path(path, source))
+}
+
+fn file_name_to_string(file_name: OsString) -> Result<String, FilesystemError> {
+    file_name.into_string().map_err(|name| {
+        FilesystemError::invalid_virtual_path(name.to_string_lossy(), VirtualPathError)
+    })
 }
 
 fn file_type_from_file_type(file_type: &std::fs::FileType) -> FileType {
@@ -329,6 +354,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_operations_return_typed_file_kind_errors() {
+        let temp = std::env::temp_dir().join(format!("wyse-fs-remove-kind-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(temp.join("dir"))
+            .await
+            .expect("create dir");
+        tokio::fs::write(temp.join("file.txt"), b"x")
+            .await
+            .expect("write file");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let dir = VirtualPath::try_from("/dir").expect("path is valid");
+        let file = VirtualPath::try_from("/file.txt").expect("path is valid");
+
+        let file_error = fs.remove_file(&dir).await.expect_err("dir is not a file");
+        assert!(matches!(
+            file_error,
+            crate::FilesystemError::NotAFile { .. }
+        ));
+        let dir_error = fs.remove_dir(&file).await.expect_err("file is not a dir");
+        assert!(matches!(
+            dir_error,
+            crate::FilesystemError::NotADirectory { .. }
+        ));
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
     async fn rejects_reads_larger_than_limit() {
         let temp = std::env::temp_dir().join(format!("wyse-fs-limit-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&temp).await;
@@ -381,6 +439,27 @@ mod tests {
         ));
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_file_as_sandbox_root() {
+        let temp = std::env::temp_dir().join(format!("wyse-fs-file-root-{}", std::process::id()));
+        let _ = tokio::fs::remove_file(&temp).await;
+        tokio::fs::write(&temp, b"not a dir")
+            .await
+            .expect("write root file");
+
+        let error = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect_err("file root is rejected");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::NotADirectory { .. }
+        ));
+
+        let _ = tokio::fs::remove_file(&temp).await;
     }
 
     #[tokio::test]
@@ -568,6 +647,19 @@ mod tests {
         ));
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_name_to_string_rejects_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error =
+            file_name_to_string(OsString::from_vec(vec![0xff])).expect_err("non-utf8 entry path");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::InvalidVirtualPath { .. }
+        ));
     }
 
     #[cfg(unix)]

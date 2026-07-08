@@ -88,7 +88,6 @@ impl FilesystemError {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn local_io(operation: &'static str, path: VirtualPath, source: io::Error) -> Self {
         match source.kind() {
             io::ErrorKind::NotFound => Self::NotFound { path },
