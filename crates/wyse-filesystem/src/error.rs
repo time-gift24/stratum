@@ -88,10 +88,6 @@ impl FilesystemError {
         }
     }
 
-    pub(crate) fn not_found(path: VirtualPath) -> Self {
-        Self::NotFound { path }
-    }
-
     #[allow(dead_code)]
     pub(crate) fn local_io(operation: &'static str, path: VirtualPath, source: io::Error) -> Self {
         match source.kind() {
@@ -126,7 +122,7 @@ mod tests {
     #[test]
     fn not_found_mentions_only_virtual_path() {
         let path = VirtualPath::try_from("/missing.txt").expect("path is valid");
-        let error = FilesystemError::not_found(path);
+        let error = FilesystemError::NotFound { path };
 
         assert_eq!(error.to_string(), "path not found /missing.txt");
     }

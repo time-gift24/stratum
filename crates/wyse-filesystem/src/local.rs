@@ -76,10 +76,10 @@ impl LocalFilesystem {
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
         let host = self.host_path(path);
-        if let Ok(metadata) = fs::symlink_metadata(&host).await {
-            if metadata.file_type().is_symlink() {
-                return Err(FilesystemError::PathEscapesSandbox { path: path.clone() });
-            }
+        if let Ok(metadata) = fs::symlink_metadata(&host).await
+            && metadata.file_type().is_symlink()
+        {
+            return Err(FilesystemError::PathEscapesSandbox { path: path.clone() });
         }
         if fs::try_exists(&host)
             .await
