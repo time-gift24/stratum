@@ -2036,6 +2036,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyse-filesystem"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "wyse-infra"
 version = "0.1.0"
 dependencies = [
