@@ -417,7 +417,8 @@ mod tests {
     async fn reports_symlink_metadata_without_following_target() {
         use std::os::unix::fs::symlink;
 
-        let temp = std::env::temp_dir().join(format!("wyse-fs-symlink-{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("wyse-fs-symlink-metadata-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&temp).await;
         tokio::fs::create_dir_all(&temp)
             .await
@@ -567,5 +568,43 @@ mod tests {
         ));
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = std::env::temp_dir().join(format!("wyse-fs-symlink-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("wyse-fs-outside-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        let _ = tokio::fs::remove_dir_all(&outside).await;
+        tokio::fs::create_dir_all(&temp).await.expect("create root");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("create outside");
+        tokio::fs::write(outside.join("secret.txt"), b"secret")
+            .await
+            .expect("write outside file");
+        symlink(outside.join("secret.txt"), temp.join("link.txt")).expect("create symlink");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let link = VirtualPath::try_from("/link.txt").expect("path is valid");
+
+        let error = fs
+            .read_file(&link)
+            .await
+            .expect_err("symlink escape is rejected");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::PathEscapesSandbox { .. }
+        ));
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        let _ = tokio::fs::remove_dir_all(&outside).await;
     }
 }
