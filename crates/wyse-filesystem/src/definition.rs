@@ -2,9 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::{
-    FilesystemError, Patch, PatchApplyReport, VirtualPath, patch::apply_patch_using_filesystem,
-};
+use crate::{FilesystemError, VirtualPath};
 
 /// Agent-visible filesystem operations.
 /// Native async trait methods are intentional for this crate's IO boundary.
@@ -58,15 +56,6 @@ pub trait Filesystem: Send + Sync {
     ///
     /// Returns an error when the path is missing, not a directory, not empty, or cannot be removed.
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
-
-    /// Applies a Codex-style patch using this filesystem's primitive operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the patch conflicts, references invalid state, or IO fails.
-    async fn apply_patch(&self, patch: &Patch) -> Result<PatchApplyReport, FilesystemError> {
-        apply_patch_using_filesystem(self, patch).await
-    }
 }
 
 /// Metadata for one filesystem path.

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `wyse-filesystem`, an async virtual filesystem crate with `VirtualPath`, whole-file IO, a local sandbox backend, and Codex-style patch application.
+**Goal:** Build `wyse-filesystem`, an async virtual filesystem crate with `VirtualPath`, whole-file IO, and a local sandbox backend.
 
-**Architecture:** The crate exposes one `Filesystem` trait over safe virtual paths. Backends implement minimal file primitives; `apply_patch` is a default method implemented once using those primitives. `LocalFilesystem` maps `/...` paths into one sandbox root and rejects escapes.
+**Architecture:** The crate exposes one `Filesystem` trait over safe virtual paths. Backends implement minimal file primitives only. `LocalFilesystem` maps `/...` paths into one sandbox root and rejects escapes.
 
 **Tech Stack:** Rust 2024, Tokio `fs`, `bytes::Bytes`, `thiserror`, workspace dependency inheritance, native async trait methods.
 
@@ -16,8 +16,8 @@
 - No stream read/write in this implementation.
 - No mount router, registry, factory, manager, read-only policy, glob/search, watch, snapshot, remote backend, or object storage backend.
 - `remove_dir` removes empty directories only.
-- `apply_patch` is a `Filesystem` default method using minimal file primitives.
-- Errors must not expose host paths, sandbox root, file contents, or patch contents.
+- `apply_patch` is not part of `wyse-filesystem`; it belongs in a later agent/tool layer.
+- Errors must not expose host paths, sandbox root, or file contents.
 - Run `cargo fmt`, `cargo test --workspace --all-targets`, and `cargo clippy --workspace --all-targets` before completion.
 - After implementation, remind the user to archive final filesystem conventions in crate `AGENTS.md` before PR merge.
 
@@ -26,13 +26,12 @@
 ## File Structure
 
 - Create `crates/wyse-filesystem/Cargo.toml`: crate manifest using workspace package fields and dependencies.
-- Create `crates/wyse-filesystem/AGENTS.md`: crate-specific rules for virtual paths, sandbox safety, and patch scope.
+- Create `crates/wyse-filesystem/AGENTS.md`: crate-specific rules for virtual paths and sandbox safety.
 - Create `crates/wyse-filesystem/src/lib.rs`: crate docs and public re-exports.
 - Create `crates/wyse-filesystem/src/path.rs`: `VirtualPath` newtype and validation.
 - Create `crates/wyse-filesystem/src/error.rs`: `FilesystemError`.
-- Create `crates/wyse-filesystem/src/definition.rs`: `Filesystem`, metadata types, default `apply_patch`.
+- Create `crates/wyse-filesystem/src/definition.rs`: `Filesystem` and metadata types.
 - Create `crates/wyse-filesystem/src/local.rs`: `LocalFilesystem` and sandbox mapping.
-- Create `crates/wyse-filesystem/src/patch.rs`: Codex-style patch parser and default applier.
 - Modify `Cargo.toml`: add `crates/wyse-filesystem` to workspace members. Do not add a `wyse-filesystem` workspace dependency because no existing crate consumes it in this plan.
 
 ---
@@ -456,21 +455,6 @@ pub enum FilesystemError {
         /// Virtual path.
         path: VirtualPath,
     },
-    /// Patch content is not supported as text.
-    #[error("unsupported binary content for patch {path}")]
-    UnsupportedBinaryContent {
-        /// Virtual path.
-        path: VirtualPath,
-    },
-    /// Patch text failed to parse.
-    #[error("patch parse error")]
-    PatchParse,
-    /// Patch context did not match file content.
-    #[error("patch conflict {path}")]
-    PatchConflict {
-        /// Virtual path.
-        path: VirtualPath,
-    },
     /// Local filesystem operation failed.
     #[error("local filesystem operation failed {operation} {path}")]
     LocalIo {
@@ -545,7 +529,7 @@ Replace `crates/wyse-filesystem/src/definition.rs` with:
 
 use bytes::Bytes;
 
-use crate::{patch::apply_patch_using_filesystem, FilesystemError, Patch, PatchApplyReport, VirtualPath};
+use crate::{FilesystemError, VirtualPath};
 
 /// Agent-visible filesystem operations.
 // Native async trait methods are intentional for this crate's IO boundary.
@@ -599,15 +583,6 @@ pub trait Filesystem: Send + Sync {
     ///
     /// Returns an error when the path is missing, not a directory, not empty, or cannot be removed.
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
-
-    /// Applies a Codex-style patch using this filesystem's primitive operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the patch conflicts, references invalid state, or IO fails.
-    async fn apply_patch(&self, patch: &Patch) -> Result<PatchApplyReport, FilesystemError> {
-        apply_patch_using_filesystem(self, patch).await
-    }
 }
 
 /// Metadata for one filesystem path.
@@ -675,46 +650,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 5: Add patch types and exports**
-
-Create `crates/wyse-filesystem/src/patch.rs`:
-
-```rust
-//! Codex-style patch parsing and application.
-
-use crate::{Filesystem, FilesystemError};
-
-/// Parsed Codex-style patch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Patch {
-    operations: Vec<PatchOperation>,
-}
-
-/// Summary of paths changed by a patch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct PatchApplyReport {
-    /// Added files.
-    pub added: Vec<crate::VirtualPath>,
-    /// Updated files.
-    pub updated: Vec<crate::VirtualPath>,
-    /// Deleted files.
-    pub deleted: Vec<crate::VirtualPath>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PatchOperation {}
-
-pub(crate) async fn apply_patch_using_filesystem<F>(
-    _filesystem: &F,
-    _patch: &Patch,
-) -> Result<PatchApplyReport, FilesystemError>
-where
-    F: Filesystem + ?Sized,
-{
-    Ok(PatchApplyReport::default())
-}
-```
+- [ ] **Step 5: Add exports**
 
 Modify `crates/wyse-filesystem/src/lib.rs`:
 
@@ -723,12 +659,10 @@ Modify `crates/wyse-filesystem/src/lib.rs`:
 
 pub mod definition;
 pub mod error;
-pub mod patch;
 pub mod path;
 
 pub use definition::{DirEntry, FileMetadata, FileType, Filesystem};
 pub use error::FilesystemError;
-pub use patch::{Patch, PatchApplyReport};
 pub use path::{VirtualPath, VirtualPathError};
 ```
 
@@ -1168,13 +1102,11 @@ Modify `crates/wyse-filesystem/src/lib.rs`:
 pub mod definition;
 pub mod error;
 pub mod local;
-pub mod patch;
 pub mod path;
 
 pub use definition::{DirEntry, FileMetadata, FileType, Filesystem};
 pub use error::FilesystemError;
 pub use local::{LocalFilesystem, LocalFilesystemConfig};
-pub use patch::{Patch, PatchApplyReport};
 pub use path::{VirtualPath, VirtualPathError};
 ```
 
@@ -1198,491 +1130,7 @@ git commit -m "feat: add local filesystem backend"
 
 ---
 
-### Task 4: Patch Parser And Default Apply
-
-**Files:**
-- Modify: `crates/wyse-filesystem/src/patch.rs`
-- Modify: `crates/wyse-filesystem/src/error.rs`
-
-**Interfaces:**
-- Consumes: `Filesystem::read_file`, `Filesystem::write_file`, `Filesystem::remove_file`
-- Produces: `impl Patch { pub fn parse(input: &str) -> Result<Self, FilesystemError>; }`
-- Produces: `pub(crate) async fn apply_patch_using_filesystem<F: Filesystem + ?Sized>(filesystem: &F, patch: &Patch) -> Result<PatchApplyReport, FilesystemError>`
-
-- [ ] **Step 1: Write failing patch tests**
-
-Replace the test module in `crates/wyse-filesystem/src/patch.rs` with:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use std::{collections::BTreeMap, sync::Mutex};
-
-    use bytes::Bytes;
-
-    use super::*;
-    use crate::{DirEntry, FileMetadata, FileType, Filesystem, VirtualPath};
-
-    #[test]
-    fn parses_add_update_and_delete_paths() {
-        let patch = Patch::parse(
-            "*** Begin Patch\n\
-             *** Add File: /new.txt\n\
-             +hello\n\
-             *** Update File: /old.txt\n\
-              old\n\
-             -old\n\
-             +new\n\
-             *** Delete File: /gone.txt\n\
-             *** End Patch\n",
-        )
-        .expect("patch parses");
-
-        assert_eq!(patch.operations.len(), 3);
-    }
-
-    #[test]
-    fn rejects_relative_patch_paths() {
-        let error = Patch::parse(
-            "*** Begin Patch\n\
-             *** Add File: new.txt\n\
-             +hello\n\
-             *** End Patch\n",
-        )
-        .expect_err("relative path is rejected");
-
-        assert!(matches!(error, crate::FilesystemError::PatchParse));
-    }
-
-    #[tokio::test]
-    async fn applies_add_update_and_delete_with_default_method() {
-        let fs = MemoryFilesystem::new([
-            ("/old.txt", "old\n"),
-            ("/gone.txt", "bye\n"),
-        ]);
-        let patch = Patch::parse(
-            "*** Begin Patch\n\
-             *** Add File: /new.txt\n\
-             +hello\n\
-             *** Update File: /old.txt\n\
-             -old\n\
-             +new\n\
-             *** Delete File: /gone.txt\n\
-             *** End Patch\n",
-        )
-        .expect("patch parses");
-
-        let report = fs.apply_patch(&patch).await.expect("patch applies");
-
-        assert_eq!(report.added, [VirtualPath::try_from("/new.txt").expect("valid")]);
-        assert_eq!(report.updated, [VirtualPath::try_from("/old.txt").expect("valid")]);
-        assert_eq!(report.deleted, [VirtualPath::try_from("/gone.txt").expect("valid")]);
-        assert_eq!(fs.read_text("/new.txt"), Some("hello\n".to_owned()));
-        assert_eq!(fs.read_text("/old.txt"), Some("new\n".to_owned()));
-        assert_eq!(fs.read_text("/gone.txt"), None);
-    }
-
-    #[tokio::test]
-    async fn conflict_does_not_write_any_file() {
-        let fs = MemoryFilesystem::new([
-            ("/a.txt", "aaa\n"),
-            ("/b.txt", "bbb\n"),
-        ]);
-        let patch = Patch::parse(
-            "*** Begin Patch\n\
-             *** Update File: /a.txt\n\
-             -missing\n\
-             +changed\n\
-             *** Update File: /b.txt\n\
-             -bbb\n\
-             +changed\n\
-             *** End Patch\n",
-        )
-        .expect("patch parses");
-
-        let error = fs.apply_patch(&patch).await.expect_err("patch conflicts");
-
-        assert!(matches!(error, crate::FilesystemError::PatchConflict { .. }));
-        assert_eq!(fs.read_text("/a.txt"), Some("aaa\n".to_owned()));
-        assert_eq!(fs.read_text("/b.txt"), Some("bbb\n".to_owned()));
-    }
-
-    #[derive(Debug, Default)]
-    struct MemoryFilesystem {
-        files: Mutex<BTreeMap<VirtualPath, Bytes>>,
-    }
-
-    impl MemoryFilesystem {
-        fn new<const N: usize>(files: [(&str, &str); N]) -> Self {
-            let mut map = BTreeMap::new();
-            for (path, content) in files {
-                map.insert(
-                    VirtualPath::try_from(path).expect("path is valid"),
-                    Bytes::from(content.to_owned()),
-                );
-            }
-            Self {
-                files: Mutex::new(map),
-            }
-        }
-
-        fn read_text(&self, path: &str) -> Option<String> {
-            let path = VirtualPath::try_from(path).expect("path is valid");
-            let files = self.files.lock().expect("lock is not poisoned");
-            files.get(&path).map(|content| String::from_utf8_lossy(content).into_owned())
-        }
-    }
-
-    impl Filesystem for MemoryFilesystem {
-        async fn read_file(&self, path: &VirtualPath) -> Result<Bytes, crate::FilesystemError> {
-            let files = self.files.lock().expect("lock is not poisoned");
-            files
-                .get(path)
-                .cloned()
-                .ok_or_else(|| crate::FilesystemError::NotFound { path: path.clone() })
-        }
-
-        async fn write_file(
-            &self,
-            path: &VirtualPath,
-            contents: Bytes,
-        ) -> Result<(), crate::FilesystemError> {
-            let mut files = self.files.lock().expect("lock is not poisoned");
-            files.insert(path.clone(), contents);
-            Ok(())
-        }
-
-        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, crate::FilesystemError> {
-            Ok(Vec::new())
-        }
-
-        async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, crate::FilesystemError> {
-            let files = self.files.lock().expect("lock is not poisoned");
-            if files.contains_key(path) {
-                Ok(FileMetadata {
-                    file_type: FileType::File,
-                    len: None,
-                })
-            } else {
-                Err(crate::FilesystemError::NotFound { path: path.clone() })
-            }
-        }
-
-        async fn create_dir(&self, _path: &VirtualPath) -> Result<(), crate::FilesystemError> {
-            Ok(())
-        }
-
-        async fn remove_file(&self, path: &VirtualPath) -> Result<(), crate::FilesystemError> {
-            let mut files = self.files.lock().expect("lock is not poisoned");
-            files.remove(path);
-            Ok(())
-        }
-
-        async fn remove_dir(&self, _path: &VirtualPath) -> Result<(), crate::FilesystemError> {
-            Ok(())
-        }
-    }
-}
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run:
-
-```bash
-cargo test -p wyse-filesystem patch::tests
-```
-
-Expected: FAIL because parser and apply logic return the default empty report.
-
-- [ ] **Step 3: Implement parser and default applier**
-
-Replace `crates/wyse-filesystem/src/patch.rs` with:
-
-```rust
-//! Codex-style patch parsing and application.
-
-use bytes::Bytes;
-
-use crate::{Filesystem, FilesystemError, VirtualPath};
-
-/// Parsed Codex-style patch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Patch {
-    pub(crate) operations: Vec<PatchOperation>,
-}
-
-impl Patch {
-    /// Parses a Codex-style patch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the patch syntax or any path is invalid.
-    pub fn parse(input: &str) -> Result<Self, FilesystemError> {
-        let mut lines = input.lines();
-        if lines.next() != Some("*** Begin Patch") {
-            return Err(FilesystemError::PatchParse);
-        }
-
-        let mut operations = Vec::new();
-        let mut current: Option<RawOperation> = None;
-
-        for line in lines {
-            if line == "*** End Patch" {
-                if let Some(operation) = current.take() {
-                    operations.push(operation.into_operation()?);
-                }
-                return Ok(Self { operations });
-            }
-
-            if let Some(path) = line.strip_prefix("*** Add File: ") {
-                if let Some(operation) = current.take() {
-                    operations.push(operation.into_operation()?);
-                }
-                current = Some(RawOperation::add(path)?);
-                continue;
-            }
-
-            if let Some(path) = line.strip_prefix("*** Update File: ") {
-                if let Some(operation) = current.take() {
-                    operations.push(operation.into_operation()?);
-                }
-                current = Some(RawOperation::update(path)?);
-                continue;
-            }
-
-            if let Some(path) = line.strip_prefix("*** Delete File: ") {
-                if let Some(operation) = current.take() {
-                    operations.push(operation.into_operation()?);
-                }
-                operations.push(PatchOperation::Delete {
-                    path: parse_patch_path(path)?,
-                });
-                current = None;
-                continue;
-            }
-
-            let Some(operation) = current.as_mut() else {
-                return Err(FilesystemError::PatchParse);
-            };
-            operation.push_line(line)?;
-        }
-
-        Err(FilesystemError::PatchParse)
-    }
-}
-
-/// Summary of paths changed by a patch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct PatchApplyReport {
-    /// Added files.
-    pub added: Vec<VirtualPath>,
-    /// Updated files.
-    pub updated: Vec<VirtualPath>,
-    /// Deleted files.
-    pub deleted: Vec<VirtualPath>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PatchOperation {
-    Add { path: VirtualPath, content: String },
-    Update { path: VirtualPath, replacements: Vec<Replacement> },
-    Delete { path: VirtualPath },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Replacement {
-    old: String,
-    new: String,
-}
-
-pub(crate) async fn apply_patch_using_filesystem<F>(
-    filesystem: &F,
-    patch: &Patch,
-) -> Result<PatchApplyReport, FilesystemError>
-where
-    F: Filesystem + ?Sized,
-{
-    let mut writes = Vec::new();
-    let mut deletes = Vec::new();
-
-    for operation in &patch.operations {
-        match operation {
-            PatchOperation::Add { path, content } => {
-                if filesystem.metadata(path).await.is_ok() {
-                    return Err(FilesystemError::AlreadyExists { path: path.clone() });
-                }
-                writes.push((path.clone(), Bytes::from(content.clone()), ChangeKind::Add));
-            }
-            PatchOperation::Update { path, replacements } => {
-                let old = filesystem.read_file(path).await?;
-                let old_text = String::from_utf8(old.to_vec())
-                    .map_err(|_| FilesystemError::UnsupportedBinaryContent { path: path.clone() })?;
-                let new_text = apply_replacements(path, &old_text, replacements)?;
-                writes.push((path.clone(), Bytes::from(new_text), ChangeKind::Update));
-            }
-            PatchOperation::Delete { path } => {
-                filesystem.metadata(path).await?;
-                deletes.push(path.clone());
-            }
-        }
-    }
-
-    let mut report = PatchApplyReport::default();
-    for (path, content, kind) in writes {
-        filesystem.write_file(&path, content).await?;
-        match kind {
-            ChangeKind::Add => report.added.push(path),
-            ChangeKind::Update => report.updated.push(path),
-        }
-    }
-    for path in deletes {
-        filesystem.remove_file(&path).await?;
-        report.deleted.push(path);
-    }
-    Ok(report)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChangeKind {
-    Add,
-    Update,
-}
-
-#[derive(Debug)]
-enum RawOperation {
-    Add { path: VirtualPath, lines: Vec<String> },
-    Update { path: VirtualPath, lines: Vec<String> },
-}
-
-impl RawOperation {
-    fn add(path: &str) -> Result<Self, FilesystemError> {
-        Ok(Self::Add {
-            path: parse_patch_path(path)?,
-            lines: Vec::new(),
-        })
-    }
-
-    fn update(path: &str) -> Result<Self, FilesystemError> {
-        Ok(Self::Update {
-            path: parse_patch_path(path)?,
-            lines: Vec::new(),
-        })
-    }
-
-    fn push_line(&mut self, line: &str) -> Result<(), FilesystemError> {
-        match line.as_bytes().first() {
-            Some(b'+') | Some(b'-') | Some(b' ') => {
-                let target = match self {
-                    Self::Add { lines, .. } | Self::Update { lines, .. } => lines,
-                };
-                target.push(line.to_owned());
-                Ok(())
-            }
-            _ => Err(FilesystemError::PatchParse),
-        }
-    }
-
-    fn into_operation(self) -> Result<PatchOperation, FilesystemError> {
-        match self {
-            Self::Add { path, lines } => {
-                let mut content = String::new();
-                for line in lines {
-                    let Some(text) = line.strip_prefix('+') else {
-                        return Err(FilesystemError::PatchParse);
-                    };
-                    content.push_str(text);
-                    content.push('\n');
-                }
-                Ok(PatchOperation::Add { path, content })
-            }
-            Self::Update { path, lines } => Ok(PatchOperation::Update {
-                path,
-                replacements: parse_replacements(lines)?,
-            }),
-        }
-    }
-}
-
-fn parse_replacements(lines: Vec<String>) -> Result<Vec<Replacement>, FilesystemError> {
-    let mut replacements = Vec::new();
-    let mut old = String::new();
-    let mut new = String::new();
-
-    for line in lines {
-        if let Some(text) = line.strip_prefix('-') {
-            old.push_str(text);
-            old.push('\n');
-        } else if let Some(text) = line.strip_prefix('+') {
-            new.push_str(text);
-            new.push('\n');
-        } else if line.starts_with(' ') {
-            if !old.is_empty() || !new.is_empty() {
-                replacements.push(Replacement {
-                    old: std::mem::take(&mut old),
-                    new: std::mem::take(&mut new),
-                });
-            }
-        } else {
-            return Err(FilesystemError::PatchParse);
-        }
-    }
-
-    if !old.is_empty() || !new.is_empty() {
-        replacements.push(Replacement { old, new });
-    }
-
-    if replacements.is_empty() {
-        return Err(FilesystemError::PatchParse);
-    }
-
-    Ok(replacements)
-}
-
-fn apply_replacements(
-    path: &VirtualPath,
-    original: &str,
-    replacements: &[Replacement],
-) -> Result<String, FilesystemError> {
-    let mut output = original.to_owned();
-    for replacement in replacements {
-        if !output.contains(&replacement.old) {
-            return Err(FilesystemError::PatchConflict { path: path.clone() });
-        }
-        output = output.replacen(&replacement.old, &replacement.new, 1);
-    }
-    Ok(output)
-}
-
-fn parse_patch_path(path: &str) -> Result<VirtualPath, FilesystemError> {
-    VirtualPath::try_from(path).map_err(|_| FilesystemError::PatchParse)
-}
-```
-
-Keep the complete test module from Step 1 at the bottom of `crates/wyse-filesystem/src/patch.rs` after the implementation.
-
-- [ ] **Step 4: Verify Task 4**
-
-Run:
-
-```bash
-cargo test -p wyse-filesystem patch::tests
-cargo fmt
-```
-
-Expected: patch tests pass and formatting succeeds.
-
-- [ ] **Step 5: Commit Task 4**
-
-```bash
-git add crates/wyse-filesystem
-git commit -m "feat: add filesystem patch support"
-```
-
----
-
-### Task 5: Final Safety Tests, Docs, And Workspace Verification
+### Task 4: Final Safety Tests, Docs, And Workspace Verification
 
 **Files:**
 - Create: `crates/wyse-filesystem/AGENTS.md`
@@ -1729,46 +1177,7 @@ async fn rejects_symlink_escape() {
 }
 ```
 
-- [ ] **Step 2: Add default apply_patch integration test with LocalFilesystem**
-
-Add this test to `crates/wyse-filesystem/src/local.rs` tests:
-
-```rust
-#[tokio::test]
-async fn local_filesystem_uses_default_apply_patch() {
-    let temp = std::env::temp_dir().join(format!("wyse-fs-patch-{}", std::process::id()));
-    let _ = tokio::fs::remove_dir_all(&temp).await;
-    tokio::fs::create_dir_all(&temp).await.expect("create temp root");
-    tokio::fs::write(temp.join("old.txt"), b"old\n").await.expect("write old file");
-
-    let fs = LocalFilesystem::new(LocalFilesystemConfig {
-        root: temp.clone(),
-        max_file_bytes: Some(1024),
-    })
-    .expect("filesystem is valid");
-    let patch = crate::Patch::parse(
-        "*** Begin Patch\n\
-         *** Update File: /old.txt\n\
-         -old\n\
-         +new\n\
-         *** End Patch\n",
-    )
-    .expect("patch parses");
-
-    let report = fs.apply_patch(&patch).await.expect("patch applies");
-
-    assert_eq!(report.updated, [VirtualPath::try_from("/old.txt").expect("valid")]);
-    let content = fs
-        .read_file(&VirtualPath::try_from("/old.txt").expect("valid"))
-        .await
-        .expect("read updated file");
-    assert_eq!(content, Bytes::from_static(b"new\n"));
-
-    let _ = tokio::fs::remove_dir_all(&temp).await;
-}
-```
-
-- [ ] **Step 3: Write crate AGENTS.md**
+- [ ] **Step 2: Write crate AGENTS.md**
 
 Create `crates/wyse-filesystem/AGENTS.md`:
 
@@ -1777,20 +1186,20 @@ Create `crates/wyse-filesystem/AGENTS.md`:
 
 ## Scope
 
-`wyse-filesystem` owns the agent-visible virtual filesystem trait, virtual path validation, Codex-style patch application, and the local sandbox backend.
+`wyse-filesystem` owns the agent-visible virtual filesystem trait, virtual path validation, and the local sandbox backend.
 
 ## Design Rules
 
 - Public file APIs accept `VirtualPath`, not raw strings or host paths.
 - Keep paths virtual and absolute, for example `/README.md`.
-- Do not expose host paths, sandbox roots, file contents, or patch contents in errors or tracing.
-- Backend implementations should implement minimal file primitives; keep `apply_patch` as the default trait method until a backend has a real need to override it.
+- Do not expose host paths, sandbox roots, or file contents in errors or tracing.
+- Backend implementations should implement minimal file primitives only.
 - `remove_dir` removes empty directories only.
-- Do not add mount routers, registries, factories, managers, read-only policy, stream IO, glob/search, watch, snapshot, remote backends, or object storage until a concrete caller needs them.
+- Do not add `apply_patch`, mount routers, registries, factories, managers, read-only policy, stream IO, glob/search, watch, snapshot, remote backends, or object storage until a concrete caller needs them.
 - Local sandbox operations must reject symlink escapes by default.
 ```
 
-- [ ] **Step 4: Ensure crate root docs are complete**
+- [ ] **Step 3: Ensure crate root docs are complete**
 
 Replace `crates/wyse-filesystem/src/lib.rs` with:
 
@@ -1803,17 +1212,15 @@ Replace `crates/wyse-filesystem/src/lib.rs` with:
 pub mod definition;
 pub mod error;
 pub mod local;
-pub mod patch;
 pub mod path;
 
 pub use definition::{DirEntry, FileMetadata, FileType, Filesystem};
 pub use error::FilesystemError;
 pub use local::{LocalFilesystem, LocalFilesystemConfig};
-pub use patch::{Patch, PatchApplyReport};
 pub use path::{VirtualPath, VirtualPathError};
 ```
 
-- [ ] **Step 5: Run focused tests**
+- [ ] **Step 4: Run focused tests**
 
 Run:
 
@@ -1823,7 +1230,7 @@ cargo test -p wyse-filesystem
 
 Expected: all `wyse-filesystem` tests pass.
 
-- [ ] **Step 6: Run workspace verification**
+- [ ] **Step 5: Run workspace verification**
 
 Run:
 
@@ -1835,7 +1242,7 @@ cargo clippy --workspace --all-targets
 
 Expected: all commands pass.
 
-- [ ] **Step 7: Commit Task 5**
+- [ ] **Step 6: Commit Task 4**
 
 ```bash
 git add Cargo.toml crates/wyse-filesystem
@@ -1846,7 +1253,7 @@ git commit -m "test: verify filesystem safety"
 
 ## Self-Review
 
-- Spec coverage: The plan covers async trait, `VirtualPath`, whole-file `Bytes` IO, local sandbox backend, empty-dir-only removal, default `apply_patch`, error redaction constraints, and tests for path validation, patch behavior, local IO, size limits, and symlink escape rejection.
+- Spec coverage: The plan covers async trait, `VirtualPath`, whole-file `Bytes` IO, local sandbox backend, empty-dir-only removal, error redaction constraints, and tests for path validation, local IO, size limits, and symlink escape rejection.
 - Placeholder scan: The plan contains no `TBD`, `TODO`, "implement later", or unspecified edge-case instructions.
-- Type consistency: `VirtualPath`, `FilesystemError`, `Filesystem`, `Patch`, `PatchApplyReport`, `LocalFilesystem`, and `LocalFilesystemConfig` are introduced before later tasks consume them.
+- Type consistency: `VirtualPath`, `FilesystemError`, `Filesystem`, `LocalFilesystem`, and `LocalFilesystemConfig` are introduced before later tasks consume them.
 - Ponytail check: No mount router, registry, factory, policy layer, streaming API, recursive delete, remote backend, or new dependency beyond already-present workspace crates.

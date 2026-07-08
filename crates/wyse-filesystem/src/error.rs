@@ -67,21 +67,6 @@ pub enum FilesystemError {
         /// Virtual path.
         path: VirtualPath,
     },
-    /// Patch content is not supported as text.
-    #[error("unsupported binary content for patch {path}")]
-    UnsupportedBinaryContent {
-        /// Virtual path.
-        path: VirtualPath,
-    },
-    /// Patch text failed to parse.
-    #[error("patch parse error")]
-    PatchParse,
-    /// Patch context did not match file content.
-    #[error("patch conflict {path}")]
-    PatchConflict {
-        /// Virtual path.
-        path: VirtualPath,
-    },
     /// Local filesystem operation failed.
     #[error("local filesystem operation failed {operation} {path}")]
     LocalIo {
@@ -107,6 +92,7 @@ impl FilesystemError {
         Self::NotFound { path }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn local_io(operation: &'static str, path: VirtualPath, source: io::Error) -> Self {
         match source.kind() {
             io::ErrorKind::NotFound => Self::NotFound { path },
