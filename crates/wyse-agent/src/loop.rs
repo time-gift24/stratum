@@ -1,0 +1,1 @@
+//! Internal streaming loop implementation.

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/wyse-agent",
     "crates/wyse-core",
     "crates/wyse-filesystem",
     "crates/wyse-infra",
@@ -26,8 +27,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7.18"
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
+wyse-infra = { path = "crates/wyse-infra" }
+wyse-llm = { path = "crates/wyse-llm" }
+wyse-tools = { path = "crates/wyse-tools" }
 
 [workspace.lints.clippy]
 correctness = "deny"
