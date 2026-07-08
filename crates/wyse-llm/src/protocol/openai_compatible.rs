@@ -297,7 +297,7 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
                     json!({
                         "type": "function",
                         "function": {
-                            "name": tool.name,
+                            "name": tool.name.as_str(),
                             "description": tool.description,
                             "parameters": tool.input_schema,
                         }
@@ -494,7 +494,7 @@ fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wyse_core::{CallId, ModelId};
+    use wyse_core::{CallId, ModelId, ToolName};
 
     use super::*;
     use crate::{
@@ -508,11 +508,11 @@ mod tests {
             .with_message(ChatMessage::system("be brief"))
             .with_message(ChatMessage::user("answer"));
         let request = ChatRequest {
-            tools: vec![ToolSpec {
-                name: "weather".to_owned(),
-                description: "get weather".to_owned(),
-                input_schema: json!({"type": "object"}),
-            }],
+            tools: vec![ToolSpec::new(
+                ToolName::from("weather"),
+                "get weather",
+                json!({"type": "object"}),
+            )],
             structured_output: Some(StructuredOutput::JsonSchema {
                 name: "answer".to_owned(),
                 schema: json!({"type": "object"}),

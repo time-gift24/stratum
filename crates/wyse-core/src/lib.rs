@@ -103,6 +103,7 @@ string_id!(NodeId, "Identity of a workflow node.");
 string_id!(AgentId, "Identity of an agent.");
 string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
+string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
 
@@ -136,6 +137,30 @@ pub struct TokenUsage {
     pub output_tokens: u64,
     /// Total tokens reported by the provider.
     pub total_tokens: u64,
+}
+
+/// Tool definition exposed to an LLM provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolSpec {
+    /// Provider-visible tool name.
+    pub name: ToolName,
+    /// Provider-visible tool description.
+    pub description: String,
+    /// JSON schema for tool input.
+    pub input_schema: Value,
+}
+
+impl ToolSpec {
+    /// Creates a provider-visible tool specification.
+    #[must_use]
+    pub fn new(name: ToolName, description: impl Into<String>, input_schema: Value) -> Self {
+        Self {
+            name,
+            description: description.into(),
+            input_schema,
+        }
+    }
 }
 
 /// Role of one normal text delta in an LLM call.
@@ -321,6 +346,32 @@ mod tests {
 
         assert_eq!(model_id.as_str(), "gpt-4.1-mini");
         assert_eq!(model_id.to_string(), "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn tool_name_round_trips_string() {
+        let tool_name = ToolName::from("echo");
+
+        assert_eq!(tool_name.as_str(), "echo");
+        assert_eq!(tool_name.to_string(), "echo");
+    }
+
+    #[test]
+    fn tool_spec_serializes_provider_visible_shape() {
+        let spec = ToolSpec {
+            name: ToolName::from("echo"),
+            description: "returns input arguments".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+
+        assert_eq!(
+            serde_json::to_value(spec).expect("tool spec should serialize"),
+            serde_json::json!({
+                "name": "echo",
+                "description": "returns input arguments",
+                "input_schema": {"type": "object"}
+            })
+        );
     }
 
     #[test]
