@@ -135,7 +135,7 @@ pub(crate) async fn run_agent_loop(
             &input,
             &mut seq,
             AgentEvent::Finished {
-                finish_reason: format!("{finish_reason:?}").to_ascii_lowercase(),
+                finish_reason: finish_reason_name(finish_reason).to_owned(),
                 usage,
             },
             None,
@@ -336,7 +336,7 @@ async fn consume_assistant_stream(
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::Finished {
-                                finish_reason: format!("{finish_reason:?}").to_ascii_lowercase(),
+                                finish_reason: finish_reason_name(finish_reason).to_owned(),
                                 usage: event_usage,
                             },
                             None,
@@ -533,4 +533,32 @@ fn add_usage(total: &mut TokenUsage, usage: TokenUsage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
     total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+}
+
+const fn finish_reason_name(finish_reason: FinishReason) -> &'static str {
+    match finish_reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::Unknown => "unknown",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finish_reason_names_match_protocol_values() {
+        assert_eq!(finish_reason_name(FinishReason::Stop), "stop");
+        assert_eq!(finish_reason_name(FinishReason::Length), "length");
+        assert_eq!(finish_reason_name(FinishReason::ToolCalls), "tool_calls");
+        assert_eq!(
+            finish_reason_name(FinishReason::ContentFilter),
+            "content_filter"
+        );
+        assert_eq!(finish_reason_name(FinishReason::Unknown), "unknown");
+    }
 }
