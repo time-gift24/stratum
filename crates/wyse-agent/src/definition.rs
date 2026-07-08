@@ -39,6 +39,23 @@ pub struct AgentStream {
     pub events: EventStream,
     /// Cancellation handle for this run.
     pub cancel: CancellationToken,
+    _active_guard: ActiveRunGuard,
+}
+
+struct ActiveRunGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl ActiveRunGuard {
+    fn new(active: Arc<AtomicBool>) -> Self {
+        Self { active }
+    }
+}
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Stateful agent that owns conversation history.
@@ -78,14 +95,21 @@ impl Agent {
         }
 
         let run_id = RunId::new();
-        let events = self.event_bus.subscribe_run(run_id).await?;
+        let events = match self.event_bus.subscribe_run(run_id).await {
+            Ok(events) => events,
+            Err(source) => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(AgentError::from(source));
+            }
+        };
         let cancel = CancellationToken::new();
-        self.active.store(false, Ordering::SeqCst);
+        let active_guard = ActiveRunGuard::new(self.active.clone());
 
         Ok(AgentStream {
             run_id,
             events,
             cancel,
+            _active_guard: active_guard,
         })
     }
 }
@@ -195,12 +219,17 @@ impl AgentBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, atomic::Ordering};
 
-    use wyse_core::{ChatMessage, ModelId};
-    use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
+    use wyse_core::{ChatMessage, ModelId, RunId};
+    use wyse_infra::event_stream_bus::{
+        EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
+    };
     use wyse_llm::MockLlmProvider;
     use wyse_tools::BuiltinToolRegistry;
+
+    use async_trait::async_trait;
+    use serde_json;
 
     use super::*;
 
@@ -226,5 +255,59 @@ mod tests {
         };
 
         assert!(matches!(error, AgentError::InvalidInputMessageRole { .. }));
+    }
+
+    struct FailingEventBus;
+
+    #[async_trait]
+    impl EventStreamBus for FailingEventBus {
+        async fn publish(
+            &self,
+            _envelope: wyse_core::StreamEnvelope,
+        ) -> Result<(), EventStreamBusError> {
+            Ok(())
+        }
+
+        async fn subscribe_run(&self, _run_id: RunId) -> Result<EventStream, EventStreamBusError> {
+            Err(EventStreamBusError::Deserialize(
+                serde_json::from_str::<serde_json::Value>("}")
+                    .expect_err("invalid json should fail"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_resets_active_on_subscribe_failure() {
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(Arc::new(MockLlmProvider::new()))
+            .model(ModelId::from("mock-model"))
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(Arc::new(FailingEventBus))
+            .build()
+            .expect("agent should build");
+
+        let error = match agent.stream(ChatMessage::user("fail me")).await {
+            Ok(_) => panic!("subscription failure should return error"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, AgentError::EventBus { .. }));
+        assert!(!agent.active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn stream_keeps_active_until_drop() {
+        let agent = test_agent();
+        let stream = agent
+            .stream(ChatMessage::user("hello"))
+            .await
+            .expect("stream should start");
+
+        assert!(agent.active.load(Ordering::SeqCst));
+
+        drop(stream);
+        assert!(!agent.active.load(Ordering::SeqCst));
     }
 }
