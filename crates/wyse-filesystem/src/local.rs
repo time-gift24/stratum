@@ -217,11 +217,11 @@ impl Filesystem for LocalFilesystem {
     }
 
     async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let host = self.ensure_existing_inside_root(path).await?;
-        let metadata = fs::metadata(&host)
+        let host = self.ensure_parent_inside_root(path).await?;
+        let metadata = fs::symlink_metadata(&host)
             .await
             .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
-        if !metadata.is_file() {
+        if !metadata.is_file() && !metadata.file_type().is_symlink() {
             return Err(FilesystemError::NotAFile { path: path.clone() });
         }
         fs::remove_file(&host)
@@ -233,8 +233,8 @@ impl Filesystem for LocalFilesystem {
         if path.as_str() == "/" {
             return Err(FilesystemError::DirectoryNotEmpty { path: path.clone() });
         }
-        let host = self.ensure_existing_inside_root(path).await?;
-        let metadata = fs::metadata(&host)
+        let host = self.ensure_parent_inside_root(path).await?;
+        let metadata = fs::symlink_metadata(&host)
             .await
             .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
         if !metadata.is_dir() {
@@ -382,6 +382,88 @@ mod tests {
             dir_error,
             crate::FilesystemError::NotADirectory { .. }
         ));
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_file_removes_symlink_without_removing_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp =
+            std::env::temp_dir().join(format!("wyse-fs-remove-symlink-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+        tokio::fs::write(temp.join("target.txt"), b"target")
+            .await
+            .expect("write target");
+        symlink(temp.join("target.txt"), temp.join("link.txt")).expect("create symlink");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let link = VirtualPath::try_from("/link.txt").expect("path is valid");
+
+        fs.remove_file(&link).await.expect("remove symlink");
+
+        assert!(
+            !tokio::fs::try_exists(temp.join("link.txt"))
+                .await
+                .expect("check link")
+        );
+        assert_eq!(
+            tokio::fs::read(temp.join("target.txt"))
+                .await
+                .expect("read target"),
+            b"target"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_dir_rejects_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp =
+            std::env::temp_dir().join(format!("wyse-fs-remove-dir-symlink-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(temp.join("target"))
+            .await
+            .expect("create target dir");
+        symlink(temp.join("target"), temp.join("link")).expect("create symlink");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let link = VirtualPath::try_from("/link").expect("path is valid");
+
+        let error = fs
+            .remove_dir(&link)
+            .await
+            .expect_err("symlink is not a dir");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::NotADirectory { .. }
+        ));
+        assert!(
+            tokio::fs::try_exists(temp.join("target"))
+                .await
+                .expect("check target dir")
+        );
+        assert!(
+            tokio::fs::try_exists(temp.join("link"))
+                .await
+                .expect("check link")
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
