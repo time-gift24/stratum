@@ -30,19 +30,22 @@ them directly.
 Use `async_trait::async_trait` for object-safe async traits. This adds one small
 dependency, but keeps future agent injection simple with `Arc<dyn ToolRegistry>`.
 
-`Tool`:
+`Tool: Send + Sync`:
 
 - `fn spec(&self) -> &ToolSpec`
 - `async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError>`
 
-`ToolRegistry`:
+`ToolRegistry: Send + Sync`:
 
 - `fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError>`
 - `fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>>`
+- `fn specs(&self) -> Vec<ToolSpec>`
 - `async fn call(&self, name: &ToolName, input: ToolInput) -> Result<ToolOutput, ToolError>`
 
 The registry owns registered tools by `Arc` so agent code can cheaply hold and
-share a registry behind `Arc<dyn ToolRegistry>`.
+share a registry behind `Arc<dyn ToolRegistry>`. The `specs` method gives agent
+code the provider-visible tool list for `ChatRequest.tools` without exposing the
+registry internals.
 
 ## Builtin First Version
 
