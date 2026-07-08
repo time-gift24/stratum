@@ -307,6 +307,13 @@ impl ChatMessage {
         self.reasoning_content = Some(content.into());
         self
     }
+
+    /// Sets tool calls for this message.
+    #[must_use]
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = tool_calls;
+        self
+    }
 }
 
 /// Tool definition exposed to an LLM provider.
@@ -569,6 +576,25 @@ mod tests {
         assert_eq!(message.content, ChatContent::Text("hello".to_owned()));
         assert!(message.tool_calls.is_empty());
         assert!(message.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn chat_message_with_tool_calls_sets_tool_calls() {
+        let calls = vec![
+            ToolCall {
+                call_id: CallId::from("call-1"),
+                name: "get_weather".to_owned(),
+                arguments: serde_json::json!({"city": "Tokyo"}),
+            },
+            ToolCall {
+                call_id: CallId::from("call-2"),
+                name: "get_time".to_owned(),
+                arguments: serde_json::json!({"tz": "UTC"}),
+            },
+        ];
+        let message = ChatMessage::assistant("hi").with_tool_calls(calls.clone());
+
+        assert_eq!(message.tool_calls, calls);
     }
 
     #[test]
