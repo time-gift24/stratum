@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    future::pending,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,26 +11,32 @@ use serde_json::json;
 use tokio::time::timeout;
 use wyse_agent::{Agent, AgentConfig};
 use wyse_core::{
-    AgentEvent, CallId, ChatMessage, ChatRole, LlmCallRole, LlmEvent, ModelId, RuntimeEvent,
-    ToolCallDelta,
+    AgentEvent, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent, ModelId,
+    RuntimeEvent, ToolCallDelta, ToolName, ToolSpec,
 };
 use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolRegistry};
+use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+
+#[derive(Debug)]
+enum ProviderResponse {
+    Events(Vec<ChatStreamEvent>),
+    PendingStart { entered: Arc<tokio::sync::Notify> },
+}
 
 #[derive(Debug)]
 struct RecordingProvider {
     requests: Mutex<Vec<ChatRequest>>,
-    streams: Mutex<VecDeque<Vec<ChatStreamEvent>>>,
+    responses: Mutex<VecDeque<ProviderResponse>>,
 }
 
 impl RecordingProvider {
-    fn new(streams: Vec<Vec<ChatStreamEvent>>) -> Self {
+    fn new(responses: Vec<ProviderResponse>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
-            streams: Mutex::new(VecDeque::from(streams)),
+            responses: Mutex::new(VecDeque::from(responses)),
         }
     }
 
@@ -56,21 +63,70 @@ impl LlmProvider for RecordingProvider {
             .lock()
             .expect("requests mutex should not be poisoned")
             .push(request);
-        let events = self
-            .streams
+        let response = self
+            .responses
             .lock()
-            .expect("streams mutex should not be poisoned")
+            .expect("responses mutex should not be poisoned")
             .pop_front()
             .ok_or(LlmError::MockExhausted)?;
 
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        match response {
+            ProviderResponse::Events(events) => {
+                Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+            }
+            ProviderResponse::PendingStart { entered } => {
+                entered.notify_waiters();
+                pending::<Result<ChatStream, LlmError>>().await
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlockingToolRegistry {
+    entered: Arc<tokio::sync::Notify>,
+    spec: ToolSpec,
+}
+
+impl BlockingToolRegistry {
+    fn new(entered: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            entered,
+            spec: ToolSpec::builder()
+                .name("hang")
+                .description("never returns")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolRegistry for BlockingToolRegistry {
+    fn register(&mut self, tool: Arc<dyn wyse_tools::Tool>) -> Result<(), ToolError> {
+        Err(ToolError::DuplicateTool {
+            name: tool.spec().name.clone(),
+        })
+    }
+
+    fn get(&self, _name: &ToolName) -> Option<Arc<dyn wyse_tools::Tool>> {
+        None
+    }
+
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![self.spec.clone()]
+    }
+
+    async fn call(&self, _name: &ToolName, _input: ToolInput) -> Result<ToolOutput, ToolError> {
+        self.entered.notify_waiters();
+        pending::<Result<ToolOutput, ToolError>>().await
     }
 }
 
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
-        vec![
+        ProviderResponse::Events(vec![
             ChatStreamEvent::ToolCallDelta(ToolCallDelta {
                 index: 0,
                 call_id: Some(CallId::from("call-1")),
@@ -81,8 +137,8 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
                 finish_reason: FinishReason::ToolCalls,
                 usage: None,
             },
-        ],
-        vec![
+        ]),
+        ProviderResponse::Events(vec![
             ChatStreamEvent::TextDelta {
                 delta: "done".to_owned(),
             },
@@ -90,7 +146,7 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
                 finish_reason: FinishReason::Stop,
                 usage: None,
             },
-        ],
+        ]),
     ]));
     let mut registry = BuiltinToolRegistry::default();
     registry
@@ -155,12 +211,12 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
 
 #[tokio::test]
 async fn stream_publishes_failure_when_turn_limit_is_reached() {
-    let provider = Arc::new(RecordingProvider::new(vec![vec![
-        ChatStreamEvent::Finished {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![ChatStreamEvent::Finished {
             finish_reason: FinishReason::ToolCalls,
             usage: None,
-        },
-    ]]));
+        }],
+    )]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = Agent::builder()
         .name("test-agent")
@@ -198,4 +254,197 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
     })
     .await
     .expect("timed out waiting for failed event");
+}
+
+#[tokio::test]
+async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::PendingStart {
+            entered: Arc::clone(&entered),
+        },
+    ]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .model(ModelId::from("mock-model"))
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(bus)
+        .build()
+        .expect("agent should build");
+
+    let mut agent_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+    entered.notified().await;
+    agent_stream.cancel.cancel();
+
+    let mut saw_cancelled = false;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = agent_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            let RuntimeEvent::Agent { event, .. } = envelope.event else {
+                continue;
+            };
+
+            match event {
+                AgentEvent::Cancelled => {
+                    saw_cancelled = true;
+                    break;
+                }
+                AgentEvent::Failed { error_text } => {
+                    panic!("unexpected failure event: {error_text}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for cancelled event");
+
+    assert!(saw_cancelled);
+}
+
+#[tokio::test]
+async fn stream_publishes_cancelled_when_tool_call_hangs() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("hang".to_owned()),
+                arguments_delta: "{}".to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ],
+    )]));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .model(ModelId::from("mock-model"))
+        .tool_registry(Arc::new(BlockingToolRegistry::new(Arc::clone(&entered))))
+        .event_bus(bus)
+        .build()
+        .expect("agent should build");
+
+    let mut agent_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+    entered.notified().await;
+    agent_stream.cancel.cancel();
+
+    let mut saw_cancelled = false;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = agent_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            let RuntimeEvent::Agent { event, .. } = envelope.event else {
+                continue;
+            };
+
+            match event {
+                AgentEvent::Cancelled => {
+                    saw_cancelled = true;
+                    break;
+                }
+                AgentEvent::Failed { error_text } => {
+                    panic!("unexpected failure event: {error_text}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for cancelled event");
+
+    assert!(saw_cancelled);
+}
+
+#[tokio::test]
+async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("missing".to_owned()),
+                arguments_delta: "{}".to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ]),
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+    ]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .model(ModelId::from("mock-model"))
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(bus)
+        .build()
+        .expect("agent should build");
+
+    let mut agent_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+    let mut failure_text = None;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = agent_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            let RuntimeEvent::Agent { event, .. } = envelope.event else {
+                continue;
+            };
+
+            match event {
+                AgentEvent::Llm {
+                    event:
+                        LlmEvent::ToolCallFailed {
+                            call_id,
+                            error_text,
+                        },
+                    ..
+                } if call_id == CallId::from("call-1") => {
+                    failure_text = Some(error_text);
+                }
+                AgentEvent::Finished { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for streamed agent events");
+
+    let failure_text = failure_text.expect("expected tool failure event");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::Tool
+            && message.tool_call_id == Some(CallId::from("call-1"))
+            && matches!(&message.content, ChatContent::Text(text) if text == &failure_text)
+    }));
 }

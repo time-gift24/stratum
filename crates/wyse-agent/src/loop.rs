@@ -40,7 +40,7 @@ pub(crate) async fn run_agent_loop(
 
     for turn_index in 0..input.config.max_turns {
         if input.cancel.is_cancelled() {
-            publish_agent_event(&input, &mut seq, AgentEvent::Cancelled, None).await?;
+            publish_cancelled(&input, &mut seq).await?;
             return Err(AgentError::Cancelled);
         }
 
@@ -62,7 +62,13 @@ pub(crate) async fn run_agent_loop(
             tools: input.tool_registry.specs(),
             structured_output: None,
         };
-        let stream = match input.llm_provider.chat_stream(request).await {
+        let stream = match tokio::select! {
+            () = input.cancel.cancelled() => {
+                publish_cancelled(&input, &mut seq).await?;
+                return Err(AgentError::Cancelled);
+            }
+            result = input.llm_provider.chat_stream(request) => result,
+        } {
             Ok(stream) => stream,
             Err(source) => {
                 publish_llm_event(
@@ -115,7 +121,7 @@ pub(crate) async fn run_agent_loop(
 
             for tool_call in tool_calls {
                 if input.cancel.is_cancelled() {
-                    publish_agent_event(&input, &mut seq, AgentEvent::Cancelled, None).await?;
+                    publish_cancelled(&input, &mut seq).await?;
                     return Err(AgentError::Cancelled);
                 }
                 let tool_message =
@@ -166,6 +172,10 @@ async fn publish_failed(
         None,
     )
     .await
+}
+
+async fn publish_cancelled(input: &AgentLoopInput, seq: &mut u64) -> Result<(), AgentError> {
+    publish_agent_event(input, seq, AgentEvent::Cancelled, None).await
 }
 
 async fn publish_agent_event(
@@ -243,7 +253,7 @@ async fn consume_assistant_stream(
     loop {
         tokio::select! {
             () = input.cancel.cancelled() => {
-                publish_agent_event(input, seq, AgentEvent::Cancelled, None).await?;
+                publish_cancelled(input, seq).await?;
                 return Err(AgentError::Cancelled);
             }
             event = stream.next() => {
@@ -469,14 +479,18 @@ async fn execute_tool_call(
     .await?;
 
     let name = ToolName::from(tool_call.name.as_str());
-    match input
-        .tool_registry
-        .call(
+    let tool_result = tokio::select! {
+        () = input.cancel.cancelled() => {
+            publish_cancelled(input, seq).await?;
+            return Err(AgentError::Cancelled);
+        }
+        result = input.tool_registry.call(
             &name,
             ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-        )
-        .await
-    {
+        ) => result,
+    };
+
+    match tool_result {
         Ok(output) => {
             publish_llm_event(
                 input,
