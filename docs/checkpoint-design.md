@@ -26,42 +26,67 @@ state payload.
 
 ## Common Record
 
-The shared checkpoint record should be small and generic:
+The shared checkpoint record should be small and turn-scoped. `run_id` groups
+turn checkpoints under one run; `turn_id` is the upsert key for the resumable
+unit of work.
 
 ```text
 CheckpointRecord
 - run_id
+- turn_id
 - checkpoint_id
-- parent_checkpoint_id
-- owner: agent | workflow
+- kind: agent
 - status: running | waiting_retry | finished | cancelled
-- phase: serde_json::Value
-- state: serde_json::Value
+- state_version
+- state: Vec<u8>
 - last_seq
-- retry_count
-- last_error_text
-- created_at
+- updated_at
 ```
 
 The first store trait should stay narrow:
 
 ```text
 CheckpointStore
-- put(record) -> Result<()>
-- latest(run_id, owner) -> Result<Option<CheckpointRecord>>
+- put_latest(record) -> Result<()>
+- latest_turn(run_id, turn_id, kind) -> Result<Option<CheckpointRecord>>
 ```
 
-Skip checkpoint history browsing, time travel, branching APIs, Postgres, pending
-writes, and event logs until a caller needs them.
+Each `(run_id, turn_id, kind)` keeps one latest checkpoint row. Writes use
+SQLite upsert and overwrite the full state BLOB for that turn and checkpoint
+kind.
+
+The first SQLite table can be:
+
+```sql
+CREATE TABLE checkpoints (
+  run_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  state_version INTEGER NOT NULL,
+  state BLOB NOT NULL,
+  last_seq INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, turn_id, kind)
+);
+```
+
+Skip checkpoint history browsing, time travel, branching APIs, Postgres, state
+compression, transcript storage, pending writes, and event logs until a caller
+needs them.
 
 ## Agent State
 
-`wyse-agent` should keep a typed state before serializing it into
-`CheckpointRecord.state`:
+`wyse-agent` should keep a typed state before serializing it into the
+`CheckpointRecord.state` BLOB:
 
 ```text
 AgentCheckpointState
 - agent_id
+- phase
+- retry_count
+- last_error_text
 - history: Vec<ChatMessage>
 - usage
 - turn_index
@@ -171,7 +196,7 @@ Checkpoint save failure:
 
 Runtime crash:
 
-- resume from latest checkpoint
+- resume from the latest checkpoint for the current turn
 - in-flight token deltas are lost unless still available in NATS retention
 
 ## First Version
@@ -179,11 +204,16 @@ Runtime crash:
 Build the minimal version:
 
 - `wyse-checkpoint` with common records, narrow trait, and SQLite store
+- turn-level latest checkpoint upsert keyed by `(run_id, turn_id, kind)`
 - `wyse-agent` save points for history, phase, tool progress, usage, and retry
 - explicit resume from `waiting_retry`
 - best-effort NATS/live stream with warning-only failure handling
 
 Do not build event log persistence in the first version.
+
+If a single turn checkpoint becomes too large or full-state rewrites become
+measurably expensive, split durable transcript/history storage out of the
+checkpoint row or add state compression.
 
 ## References
 
