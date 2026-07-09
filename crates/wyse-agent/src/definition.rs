@@ -47,6 +47,7 @@ pub struct Agent {
     next_seq: Arc<Mutex<u64>>,
     usage: Arc<Mutex<TokenUsage>>,
     active: Arc<AtomicBool>,
+    resumable: Arc<AtomicBool>,
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     cancel: Arc<Mutex<Option<CancellationToken>>>,
@@ -169,6 +170,11 @@ impl Agent {
     pub async fn resume_turn(&self) -> Result<RunId, AgentError> {
         if self.active.swap(true, Ordering::SeqCst) {
             return Err(AgentError::RunAlreadyActive);
+        }
+
+        if !self.resumable.swap(false, Ordering::SeqCst) {
+            self.active.store(false, Ordering::SeqCst);
+            return Err(AgentError::CheckpointNotRetryable);
         }
 
         let Some(run_id) = self.current_run() else {
@@ -367,6 +373,7 @@ impl AgentBuilder {
             next_seq: Arc::new(Mutex::new(1)),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
+            resumable: Arc::new(AtomicBool::new(true)),
             current_run_id: Arc::new(Mutex::new(Some(run_id))),
             current_turn_id: Arc::new(Mutex::new(Some(turn_id))),
             cancel: Arc::new(Mutex::new(None)),
@@ -405,6 +412,7 @@ impl AgentBuilder {
             next_seq: Arc::new(Mutex::new(1)),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
+            resumable: Arc::new(AtomicBool::new(false)),
             current_run_id: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
@@ -627,28 +635,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_turn_keeps_agent_inactive_when_checkpoint_is_not_retryable() {
+    async fn resume_turn_rejects_completed_agent_without_leaving_it_active() {
         let provider = Arc::new(BlockingStartProvider::new());
+        let bus = Arc::new(InMemoryEventStreamBus::default());
         let agent = Agent::builder()
             .name("test-agent")
             .system_prompt("be helpful")
             .llm_provider(provider)
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-            .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .event_bus(bus)
             .build()
             .expect("agent should build");
-
-        let error = agent
-            .resume_turn()
-            .await
-            .expect_err("resume should reject non-resumed agent");
-        assert!(matches!(error, AgentError::CheckpointNotRetryable));
 
         let run_id = agent
             .run_turn(ChatMessage::user("hello"))
             .await
+            .expect("run_turn should start");
+        agent.stop();
+        timeout(Duration::from_secs(1), async {
+            let mut events = agent
+                .event_bus()
+                .subscribe_run(run_id)
+                .await
+                .expect("event subscription should succeed");
+            while let Some(envelope) = events.next().await {
+                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
+                if matches!(
+                    event,
+                    wyse_core::RuntimeEvent::Agent {
+                        event: wyse_core::AgentEvent::Cancelled { .. },
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("run should cancel");
+        timeout(Duration::from_secs(1), async {
+            while agent.active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active flag should clear after cancellation");
+
+        let error = agent
+            .resume_turn()
+            .await
+            .expect_err("resume should reject agent that was not restored");
+        assert!(matches!(error, AgentError::CheckpointNotRetryable));
+        assert!(!agent.active.load(Ordering::SeqCst));
+
+        let next_run_id = agent
+            .run_turn(ChatMessage::user("hello"))
+            .await
             .expect("run_turn should still start");
-        assert_eq!(agent.current_run(), Some(run_id));
+        assert_eq!(agent.current_run(), Some(next_run_id));
 
         agent.stop();
         timeout(Duration::from_secs(1), async {
