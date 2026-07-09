@@ -75,6 +75,10 @@ impl LlmProvider for DeepSeekProvider {
         "deepseek"
     }
 
+    fn model_id(&self) -> ModelId {
+        self.model.model_id()
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model.model_id() {
             return Err(LlmError::InvalidRequest(

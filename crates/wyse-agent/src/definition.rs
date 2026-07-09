@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use tokio_util::sync::CancellationToken;
-use wyse_core::{AgentId, ChatMessage, ChatRole, ModelId, RunId};
+use wyse_core::{AgentId, ChatMessage, ChatRole, RunId};
 use wyse_infra::event_stream_bus::{EventStream, EventStreamBus};
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
@@ -47,7 +47,6 @@ pub struct Agent {
     name: String,
     system_prompt: String,
     llm_provider: Arc<dyn LlmProvider>,
-    model: ModelId,
     tool_registry: Arc<dyn ToolRegistry>,
     event_bus: Arc<dyn EventStreamBus>,
     config: AgentConfig,
@@ -100,7 +99,6 @@ impl Agent {
             system_prompt: self.system_prompt.clone(),
             history,
             llm_provider: Arc::clone(&self.llm_provider),
-            model: self.model.clone(),
             tool_registry: Arc::clone(&self.tool_registry),
             event_bus: Arc::clone(&self.event_bus),
             config: self.config.clone(),
@@ -133,7 +131,6 @@ pub struct AgentBuilder {
     name: Option<String>,
     system_prompt: Option<String>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
-    model: Option<ModelId>,
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     event_bus: Option<Arc<dyn EventStreamBus>>,
     config: Option<AgentConfig>,
@@ -165,13 +162,6 @@ impl AgentBuilder {
     #[must_use]
     pub fn llm_provider(mut self, llm_provider: Arc<dyn LlmProvider>) -> Self {
         self.llm_provider = Some(llm_provider);
-        self
-    }
-
-    /// Sets the model id.
-    #[must_use]
-    pub fn model(mut self, model: ModelId) -> Self {
-        self.model = Some(model);
         self
     }
 
@@ -213,9 +203,6 @@ impl AgentBuilder {
             llm_provider: self.llm_provider.ok_or(AgentError::MissingBuilderField {
                 field: "llm_provider",
             })?,
-            model: self
-                .model
-                .ok_or(AgentError::MissingBuilderField { field: "model" })?,
             tool_registry: self.tool_registry.ok_or(AgentError::MissingBuilderField {
                 field: "tool_registry",
             })?,
@@ -258,11 +245,23 @@ mod tests {
             .name("test-agent")
             .system_prompt("be helpful")
             .llm_provider(Arc::new(MockLlmProvider::new()))
-            .model(ModelId::from("mock-model"))
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
             .build()
             .expect("agent should build")
+    }
+
+    #[test]
+    fn builder_uses_provider_model() {
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(Arc::new(MockLlmProvider::new()))
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .build();
+
+        assert!(agent.is_ok());
     }
 
     #[tokio::test]
@@ -302,7 +301,6 @@ mod tests {
             .name("test-agent")
             .system_prompt("be helpful")
             .llm_provider(Arc::new(MockLlmProvider::new()))
-            .model(ModelId::from("mock-model"))
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(FailingEventBus))
             .build()
@@ -325,6 +323,10 @@ mod tests {
     impl LlmProvider for BlockingStreamProvider {
         fn provider_name(&self) -> &str {
             "blocking"
+        }
+
+        fn model_id(&self) -> ModelId {
+            ModelId::from("mock-model")
         }
 
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -364,7 +366,6 @@ mod tests {
             .llm_provider(Arc::new(BlockingStreamProvider {
                 release: release_rx,
             }))
-            .model(ModelId::from("mock-model"))
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
             .build()

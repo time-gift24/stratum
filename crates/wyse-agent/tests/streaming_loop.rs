@@ -54,6 +54,10 @@ impl LlmProvider for RecordingProvider {
         "recording"
     }
 
+    fn model_id(&self) -> ModelId {
+        ModelId::from("mock-model")
+    }
+
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
         Err(LlmError::UnsupportedCapability("chat"))
     }
@@ -157,7 +161,6 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
-        .model(ModelId::from("mock-model"))
         .tool_registry(Arc::new(registry))
         .event_bus(bus)
         .build()
@@ -204,6 +207,8 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
     assert!(saw_tool_finished);
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].model, ModelId::from("mock-model"));
+    assert_eq!(requests[1].model, ModelId::from("mock-model"));
     assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
     }));
@@ -222,7 +227,6 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
-        .model(ModelId::from("mock-model"))
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
         .config(AgentConfig {
@@ -269,7 +273,6 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
-        .model(ModelId::from("mock-model"))
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
         .build()
@@ -331,7 +334,6 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
-        .model(ModelId::from("mock-model"))
         .tool_registry(Arc::new(BlockingToolRegistry::new(Arc::clone(&entered))))
         .event_bus(bus)
         .build()
@@ -401,7 +403,6 @@ async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
-        .model(ModelId::from("mock-model"))
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
         .build()

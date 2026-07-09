@@ -23,7 +23,6 @@ pub(crate) struct AgentLoopInput {
     pub(crate) system_prompt: String,
     pub(crate) history: Vec<ChatMessage>,
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
-    pub(crate) model: wyse_core::ModelId,
     pub(crate) tool_registry: Arc<dyn ToolRegistry>,
     pub(crate) event_bus: Arc<dyn EventStreamBus>,
     pub(crate) config: AgentConfig,
@@ -57,7 +56,7 @@ pub(crate) async fn run_agent_loop(
         .await?;
 
         let request = ChatRequest {
-            model: input.model.clone(),
+            model: input.llm_provider.model_id(),
             messages: request_messages(&input.system_prompt, &input.history),
             tools: input.tool_registry.specs(),
             structured_output: None,
@@ -193,17 +192,11 @@ async fn publish_agent_event(
         "llm_provider".to_owned(),
         Value::String(input.llm_provider.provider_name().to_owned()),
     );
-    metadata.insert(
-        "model".to_owned(),
-        Value::String(input.model.as_str().to_owned()),
-    );
+    let model = input.llm_provider.model_id();
+    metadata.insert("model".to_owned(), Value::String(model.as_str().to_owned()));
     metadata.insert(
         "llm".to_owned(),
-        Value::String(format!(
-            "{}:{}",
-            input.llm_provider.provider_name(),
-            input.model
-        )),
+        Value::String(format!("{}:{}", input.llm_provider.provider_name(), model)),
     );
     if let Some(extra_metadata) = extra_metadata {
         metadata.extend(extra_metadata);

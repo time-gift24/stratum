@@ -19,6 +19,9 @@ pub trait LlmProvider: Send + Sync {
     /// Returns the stable provider name used in runtime metadata.
     fn provider_name(&self) -> &str;
 
+    /// Returns the model bound to this provider.
+    fn model_id(&self) -> ModelId;
+
     /// Sends a non-streaming chat request.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
 

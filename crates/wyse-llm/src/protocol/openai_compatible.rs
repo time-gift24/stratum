@@ -64,6 +64,10 @@ impl LlmProvider for OpenAICompatibleProvider {
         "openai_compatible"
     }
 
+    fn model_id(&self) -> ModelId {
+        self.model.clone()
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
