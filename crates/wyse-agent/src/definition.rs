@@ -111,6 +111,7 @@ impl Agent {
             checkpoint_store: self.checkpoint_store.clone(),
             config: self.config.clone(),
             cancel: cancel.clone(),
+            start_seq: 1,
         };
         let history = Arc::clone(&self.history);
         let active = Arc::clone(&self.active);
@@ -195,6 +196,7 @@ impl Agent {
             checkpoint_store: self.checkpoint_store.clone(),
             config: self.config.clone(),
             cancel: cancel.clone(),
+            start_seq: record.last_seq.saturating_add(1),
         };
         let history = Arc::clone(&self.history);
         let active = Arc::clone(&self.active);

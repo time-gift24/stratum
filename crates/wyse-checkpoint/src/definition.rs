@@ -105,6 +105,8 @@ pub enum CheckpointStatus {
     WaitingRetry,
     /// Runtime work finished successfully.
     Finished,
+    /// Runtime work failed and cannot be retried automatically.
+    Failed,
     /// Runtime work was cancelled.
     Cancelled,
 }
@@ -117,6 +119,7 @@ impl CheckpointStatus {
             Self::Running => "running",
             Self::WaitingRetry => "waiting_retry",
             Self::Finished => "finished",
+            Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
     }
@@ -131,6 +134,7 @@ impl CheckpointStatus {
             "running" => Ok(Self::Running),
             "waiting_retry" => Ok(Self::WaitingRetry),
             "finished" => Ok(Self::Finished),
+            "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(CheckpointError::UnknownStatus {
                 value: value.to_owned(),

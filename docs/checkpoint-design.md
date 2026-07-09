@@ -36,7 +36,7 @@ CheckpointRecord
 - turn_id
 - checkpoint_id
 - kind: agent
-- status: running | waiting_retry | finished | cancelled
+- status: running | waiting_retry | finished | failed | cancelled
 - state_version
 - state: Vec<u8>
 - last_seq
@@ -107,7 +107,7 @@ Agent runtime saves checkpoints at durable execution boundaries:
 - after an LLM call finishes, with the complete assistant message in `history`
 - after each tool call finishes, with the tool message and advanced tool index
 - after a retryable runtime failure, with `waiting_retry`
-- after successful finish or user cancellation
+- after successful finish, non-retryable failure, or user cancellation
 
 LLM token deltas, reasoning deltas, and tool-call argument deltas are not
 checkpointed.
@@ -143,6 +143,11 @@ Runtime order at durable boundaries:
 save checkpoint
 publish live event
 ```
+
+Terminal boundaries may upsert the same checkpoint once more after a successful
+live publish so `last_seq` reflects the terminal event. If live publish fails,
+the earlier checkpoint remains the source of truth and `last_seq` is not
+advanced for that missed event.
 
 Checkpoint save failure stops the runtime. Continuing would create work with no
 reliable resume point.

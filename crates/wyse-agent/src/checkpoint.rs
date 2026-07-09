@@ -26,6 +26,9 @@ pub(crate) enum AgentCheckpointPhase {
     Finished {
         finish_reason: String,
     },
+    Failed {
+        error_text: String,
+    },
     Cancelled,
 }
 

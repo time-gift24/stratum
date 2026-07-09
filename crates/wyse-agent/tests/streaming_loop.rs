@@ -8,16 +8,18 @@ use std::{
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
-use tokio::time::timeout;
-use wyse_agent::{Agent, AgentConfig};
+use tokio::time::{sleep, timeout};
+use wyse_agent::{Agent, AgentConfig, AgentError};
 use wyse_checkpoint::{
     CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
 };
 use wyse_core::{
     AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
-    ModelId, RuntimeEvent, ToolCallDelta, ToolName, ToolSpec, TurnId,
+    ModelId, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, ToolName, ToolSpec, TurnId,
 };
-use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
+use wyse_infra::event_stream_bus::{
+    EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
+};
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
@@ -171,6 +173,57 @@ impl CheckpointStore for RecordingCheckpointStore {
     }
 }
 
+#[derive(Debug, Default)]
+struct FailingPublishEventBus;
+
+#[async_trait]
+impl EventStreamBus for FailingPublishEventBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        Err(EventStreamBusError::Deserialize(
+            serde_json::from_str::<serde_json::Value>("}").expect_err("invalid json should fail"),
+        ))
+    }
+
+    async fn subscribe_run(&self, _run_id: RunId) -> Result<EventStream, EventStreamBusError> {
+        Ok(Box::pin(stream::empty()))
+    }
+}
+
+async fn wait_for_latest_checkpoint(
+    checkpoints: &RecordingCheckpointStore,
+    status: CheckpointStatus,
+) -> CheckpointRecord {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(record) = checkpoints
+                .records()
+                .into_iter()
+                .rev()
+                .find(|record| record.status == status)
+            {
+                return record;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for checkpoint")
+}
+
+async fn wait_for_request_count(provider: &RecordingProvider, count: usize) -> Vec<ChatRequest> {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let requests = provider.requests();
+            if requests.len() >= count {
+                return requests;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for provider requests")
+}
+
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -311,7 +364,7 @@ async fn stream_saves_finished_checkpoint_with_stable_history() {
     assert_eq!(latest.turn_id, agent_stream.turn_id);
     assert_eq!(latest.kind, CheckpointKind::Agent);
     assert_eq!(latest.status, CheckpointStatus::Finished);
-    assert_eq!(latest.last_seq, 4);
+    assert_eq!(latest.last_seq, 5);
     assert!(
         latest
             .state
@@ -385,6 +438,61 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
 }
 
 #[tokio::test]
+async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+        ProviderResponse::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(FailingPublishEventBus))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let first_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+    wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
+
+    let second_stream = timeout(Duration::from_secs(1), async {
+        loop {
+            match agent.stream(ChatMessage::user("again")).await {
+                Ok(stream) => return stream,
+                Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected stream error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for second stream");
+
+    let requests = wait_for_request_count(&provider, 2).await;
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::Assistant
+            && message.content == ChatContent::Text("done".to_owned())
+    }));
+    first_stream.cancel.cancel();
+    second_stream.cancel.cancel();
+}
+
+#[tokio::test]
 async fn resume_retries_llm_from_stable_checkpoint_history() {
     let agent_id = AgentId::new();
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -421,9 +529,11 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
         .await
         .expect("stream should start");
 
+    let mut last_failed_seq = 0;
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = failed_stream.events.next().await {
             let envelope = envelope.expect("event should be delivered");
+            last_failed_seq = envelope.seq;
             if matches!(
                 envelope.event,
                 RuntimeEvent::Agent {
@@ -446,6 +556,10 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = resumed.events.next().await {
             let envelope = envelope.expect("event should be delivered");
+            assert!(
+                envelope.seq > last_failed_seq,
+                "resumed stream seq should continue after failed attempt"
+            );
             if matches!(
                 envelope.event,
                 RuntimeEvent::Agent {
@@ -553,12 +667,14 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         }],
     )]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .config(AgentConfig {
             max_turns: 0,
             max_tool_calls_per_turn: 16,
@@ -588,6 +704,9 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
     })
     .await
     .expect("timed out waiting for failed event");
+
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Failed).await;
+    assert_eq!(latest.status, CheckpointStatus::Failed);
 }
 
 #[tokio::test]
@@ -599,12 +718,14 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
         },
     ]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
 
@@ -640,6 +761,8 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Cancelled).await;
+    assert_eq!(latest.status, CheckpointStatus::Cancelled);
 }
 
 #[tokio::test]

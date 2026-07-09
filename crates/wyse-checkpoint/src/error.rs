@@ -21,15 +21,6 @@ pub enum CheckpointError {
         /// Stored status value.
         value: String,
     },
-    /// ID field in storage was invalid.
-    #[error("invalid checkpoint id field: {field}")]
-    InvalidId {
-        /// Invalid field name.
-        field: &'static str,
-        /// Underlying UUID parser error.
-        #[source]
-        source: uuid::Error,
-    },
     /// Sequence number cannot be stored in SQLite integer form.
     #[error("checkpoint sequence is too large: {value}")]
     InvalidSequence {

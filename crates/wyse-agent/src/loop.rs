@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use wyse_checkpoint::{CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore};
 use wyse_core::{
     AgentEvent, AgentId, CallId, ChatMessage, EventSource, LlmCallId, LlmEvent, RuntimeEvent,
@@ -33,12 +34,13 @@ pub(crate) struct AgentLoopInput {
     pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     pub(crate) config: AgentConfig,
     pub(crate) cancel: CancellationToken,
+    pub(crate) start_seq: u64,
 }
 
 pub(crate) async fn run_agent_loop(
     mut input: AgentLoopInput,
 ) -> Result<Vec<ChatMessage>, AgentError> {
-    let mut seq = 1;
+    let mut seq = input.start_seq;
     let mut usage = TokenUsage::default();
 
     save_checkpoint(
@@ -61,7 +63,7 @@ pub(crate) async fn run_agent_loop(
 
     for turn_index in 0..input.config.max_turns {
         if input.cancel.is_cancelled() {
-            publish_cancelled(&input, &mut seq).await?;
+            publish_cancelled(&input, &mut seq, usage).await?;
             return Err(AgentError::Cancelled);
         }
 
@@ -101,7 +103,7 @@ pub(crate) async fn run_agent_loop(
         };
         let stream = match tokio::select! {
             () = input.cancel.cancelled() => {
-                publish_cancelled(&input, &mut seq).await?;
+                publish_cancelled(&input, &mut seq, usage).await?;
                 return Err(AgentError::Cancelled);
             }
             result = input.llm_provider.chat_stream(request) => result,
@@ -137,6 +139,21 @@ pub(crate) async fn run_agent_loop(
                 .await?;
                 let error = AgentError::from(source);
                 publish_failed(&input, &mut seq, &error).await?;
+                save_checkpoint(
+                    &input,
+                    seq,
+                    CheckpointStatus::WaitingRetry,
+                    checkpoint_state(
+                        &input,
+                        AgentCheckpointPhase::RunningLlm { turn_index },
+                        1,
+                        Some(error.to_string()),
+                        usage,
+                        Vec::new(),
+                        0,
+                    ),
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -154,23 +171,28 @@ pub(crate) async fn run_agent_loop(
             Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
             Err(error) => {
                 if matches!(error, AgentError::Llm { .. }) {
+                    let checkpoint = checkpoint_state(
+                        &input,
+                        AgentCheckpointPhase::RunningLlm { turn_index },
+                        1,
+                        Some(error.to_string()),
+                        usage,
+                        Vec::new(),
+                        0,
+                    );
                     save_checkpoint(
                         &input,
                         seq,
                         CheckpointStatus::WaitingRetry,
-                        checkpoint_state(
-                            &input,
-                            AgentCheckpointPhase::RunningLlm { turn_index },
-                            1,
-                            Some(error.to_string()),
-                            usage,
-                            Vec::new(),
-                            0,
-                        ),
+                        checkpoint.clone(),
                     )
                     .await?;
+                    publish_failed(&input, &mut seq, &error).await?;
+                    save_checkpoint(&input, seq, CheckpointStatus::WaitingRetry, checkpoint)
+                        .await?;
+                } else {
+                    save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
                 }
-                publish_failed(&input, &mut seq, &error).await?;
                 return Err(error);
             }
         };
@@ -204,13 +226,13 @@ pub(crate) async fn run_agent_loop(
                 let error = AgentError::ToolCallLimitExceeded {
                     limit: input.config.max_tool_calls_per_turn,
                 };
-                publish_failed(&input, &mut seq, &error).await?;
+                save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
                 return Err(error);
             }
 
             for (next_tool_call_index, tool_call) in tool_calls.iter().enumerate() {
                 if input.cancel.is_cancelled() {
-                    publish_cancelled(&input, &mut seq).await?;
+                    publish_cancelled(&input, &mut seq, usage).await?;
                     return Err(AgentError::Cancelled);
                 }
                 let tool_message =
@@ -239,23 +261,18 @@ pub(crate) async fn run_agent_loop(
             continue;
         }
 
-        save_checkpoint(
+        let checkpoint = checkpoint_state(
             &input,
-            seq,
-            CheckpointStatus::Finished,
-            checkpoint_state(
-                &input,
-                AgentCheckpointPhase::Finished {
-                    finish_reason: finish_reason_name(finish_reason).to_owned(),
-                },
-                0,
-                None,
-                usage,
-                Vec::new(),
-                0,
-            ),
-        )
-        .await?;
+            AgentCheckpointPhase::Finished {
+                finish_reason: finish_reason_name(finish_reason).to_owned(),
+            },
+            0,
+            None,
+            usage,
+            Vec::new(),
+            0,
+        );
+        save_checkpoint(&input, seq, CheckpointStatus::Finished, checkpoint.clone()).await?;
 
         publish_agent_event(
             &input,
@@ -267,13 +284,14 @@ pub(crate) async fn run_agent_loop(
             None,
         )
         .await?;
+        save_checkpoint(&input, seq, CheckpointStatus::Finished, checkpoint).await?;
         return Ok(input.history);
     }
 
     let error = AgentError::TurnLimitExceeded {
         limit: input.config.max_turns,
     };
-    publish_failed(&input, &mut seq, &error).await?;
+    save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
     Err(error)
 }
 
@@ -300,8 +318,45 @@ async fn publish_failed(
     .await
 }
 
-async fn publish_cancelled(input: &AgentLoopInput, seq: &mut u64) -> Result<(), AgentError> {
-    publish_agent_event(input, seq, AgentEvent::Cancelled, None).await
+async fn publish_cancelled(
+    input: &AgentLoopInput,
+    seq: &mut u64,
+    usage: TokenUsage,
+) -> Result<(), AgentError> {
+    let checkpoint = checkpoint_state(
+        input,
+        AgentCheckpointPhase::Cancelled,
+        0,
+        None,
+        usage,
+        Vec::new(),
+        0,
+    );
+    save_checkpoint(input, *seq, CheckpointStatus::Cancelled, checkpoint.clone()).await?;
+    publish_agent_event(input, seq, AgentEvent::Cancelled, None).await?;
+    save_checkpoint(input, *seq, CheckpointStatus::Cancelled, checkpoint).await
+}
+
+async fn save_failed_checkpoint(
+    input: &AgentLoopInput,
+    seq: &mut u64,
+    usage: TokenUsage,
+    error: &AgentError,
+) -> Result<(), AgentError> {
+    let checkpoint = checkpoint_state(
+        input,
+        AgentCheckpointPhase::Failed {
+            error_text: error.to_string(),
+        },
+        0,
+        Some(error.to_string()),
+        usage,
+        Vec::new(),
+        0,
+    );
+    save_checkpoint(input, *seq, CheckpointStatus::Failed, checkpoint.clone()).await?;
+    publish_failed(input, seq, error).await?;
+    save_checkpoint(input, *seq, CheckpointStatus::Failed, checkpoint).await
 }
 
 async fn save_checkpoint(
@@ -384,8 +439,19 @@ async fn publish_agent_event(
         },
         metadata,
     };
-    *seq = seq.saturating_add(1);
-    input.event_bus.publish(envelope).await?;
+    match input.event_bus.publish(envelope).await {
+        Ok(()) => {
+            *seq = seq.saturating_add(1);
+        }
+        Err(error) => {
+            warn!(
+                run_id = %input.run_id,
+                current_seq = *seq,
+                source = %error,
+                "failed to publish live agent event"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -417,7 +483,7 @@ async fn consume_assistant_stream(
     loop {
         tokio::select! {
             () = input.cancel.cancelled() => {
-                publish_cancelled(input, seq).await?;
+                publish_cancelled(input, seq, *usage).await?;
                 return Err(AgentError::Cancelled);
             }
             event = stream.next() => {
@@ -645,7 +711,7 @@ async fn execute_tool_call(
     let name = ToolName::from(tool_call.name.as_str());
     let tool_result = tokio::select! {
         () = input.cancel.cancelled() => {
-            publish_cancelled(input, seq).await?;
+            publish_cancelled(input, seq, TokenUsage::default()).await?;
             return Err(AgentError::Cancelled);
         }
         result = input.tool_registry.call(
