@@ -12,7 +12,7 @@ use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::{AgentError, checkpoint::AgentCheckpointState};
+use crate::{AgentError, checkpoint::decode_checkpoint_payload};
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +284,7 @@ impl AgentBuilder {
             Some(record) if record.status == CheckpointStatus::WaitingRetry => record,
             Some(_) | None => return Err(AgentError::CheckpointNotRetryable),
         };
-        let checkpoint = AgentCheckpointState::decode(&record.state, record.state_version)?;
+        let checkpoint = decode_checkpoint_payload(&record.state, record.state_version)?;
         if let Some(expected) = self.id
             && checkpoint.agent_id != expected
         {

@@ -17,7 +17,7 @@ use wyse_tools::ToolInput;
 
 use crate::{
     Agent, AgentError,
-    checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, AgentCheckpointState},
+    checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, encode_checkpoint_payload},
 };
 
 impl Agent {
@@ -229,18 +229,15 @@ impl Agent {
             return Ok(());
         };
 
-        let checkpoint = AgentCheckpointState {
-            agent_id: self.id,
-            usage: self.current_usage(),
-            history: self.history_snapshot(),
-        };
+        let history = self.history_snapshot();
+        let state = encode_checkpoint_payload(self.id, self.current_usage(), &history)?;
         let record = CheckpointRecord::new(
             self.current_run().expect("run id should be set"),
             self.current_turn().expect("turn id should be set"),
             CheckpointKind::Agent,
             status,
             AGENT_CHECKPOINT_STATE_VERSION,
-            checkpoint.encode()?,
+            state,
             self.seq.load(Ordering::SeqCst).saturating_sub(1),
         );
         store.put_latest(record).await?;
