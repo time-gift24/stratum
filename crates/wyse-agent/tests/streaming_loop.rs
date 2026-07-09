@@ -26,6 +26,7 @@ use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput
 #[derive(Debug)]
 enum ProviderResponse {
     Events(Vec<ChatStreamEvent>),
+    StreamResults(Vec<Result<ChatStreamEvent, LlmError>>),
     PendingStart { entered: Arc<tokio::sync::Notify> },
 }
 
@@ -81,6 +82,7 @@ impl LlmProvider for RecordingProvider {
             ProviderResponse::Events(events) => {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
             }
+            ProviderResponse::StreamResults(results) => Ok(Box::pin(stream::iter(results))),
             ProviderResponse::PendingStart { entered } => {
                 entered.notify_waiters();
                 pending::<Result<ChatStream, LlmError>>().await
@@ -315,6 +317,67 @@ async fn stream_saves_finished_checkpoint_with_stable_history() {
             .state
             .windows(b"done".len())
             .any(|window| window == b"done")
+    );
+}
+
+#[tokio::test]
+async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let mut agent_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = agent_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let records = checkpoints.records();
+    let latest = records.last().expect("waiting retry checkpoint exists");
+
+    assert_eq!(latest.status, CheckpointStatus::WaitingRetry);
+    assert!(
+        latest
+            .state
+            .windows(b"hello".len())
+            .any(|window| window == b"hello")
+    );
+    assert!(
+        !latest
+            .state
+            .windows(b"partial".len())
+            .any(|window| window == b"partial")
     );
 }
 
