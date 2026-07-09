@@ -7,7 +7,12 @@ TEST_SANDBOX := $(CURDIR)/target/docker-sandbox
 test-integration:
 	mkdir -p $(TEST_SANDBOX)
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d
-	WYSE_TOOLS_DOCKER_SANDBOX=$(TEST_SANDBOX) cargo test -p wyse-tools --test apply_patch_docker -- --ignored --nocapture; \
+	WYSE_TOOLS_DOCKER_SANDBOX=$(TEST_SANDBOX) \
+	WYSE_TOOLS_COMPOSE="$(COMPOSE)" \
+	WYSE_TOOLS_COMPOSE_FILE=$(TEST_COMPOSE_FILE) \
+	WYSE_TOOLS_COMPOSE_DIR=$(CURDIR) \
+	WYSE_TOOLS_COMPOSE_SERVICE=filesystem-sandbox \
+	cargo test -p wyse-tools --test apply_patch_docker -- --ignored --nocapture; \
 	code=$$?; \
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v; \
 	exit $$code

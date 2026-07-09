@@ -339,6 +339,94 @@ async fn search_text_tool_returns_matches_under_directory_through_registry() {
 }
 
 #[tokio::test]
+async fn search_text_tool_respects_max_results() {
+    let (filesystem, root) = apply_patch_test_filesystem("search-text-limit").await;
+    let src = VirtualPath::try_from("/src").expect("path is valid");
+    let first = VirtualPath::try_from("/src/first.rs").expect("path is valid");
+    let second = VirtualPath::try_from("/src/second.rs").expect("path is valid");
+    filesystem.create_dir(&src).await.expect("create src dir");
+    filesystem
+        .write_file(&first, b"alpha one\n".to_vec())
+        .await
+        .expect("seed first file");
+    filesystem
+        .write_file(&second, b"alpha two\n".to_vec())
+        .await
+        .expect("seed second file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(SearchTextTool::new(filesystem)))
+        .expect("search text tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("search_text"),
+            ToolInput::new(
+                CallId::from("call-search-text-limit"),
+                json!({
+                    "path": "src",
+                    "query": "alpha",
+                    "max_results": 1
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "src",
+            "query": "alpha",
+            "matches": [
+                {
+                    "path": "src/first.rs",
+                    "line_number": 1,
+                    "line_text": "alpha one",
+                    "match_start": 0,
+                    "match_end": 5
+                }
+            ]
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn search_text_tool_rejects_empty_query() {
+    let (filesystem, root) = apply_patch_test_filesystem("search-text-empty-query").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(SearchTextTool::new(filesystem)))
+        .expect("search text tool should register");
+
+    let error = registry
+        .call(
+            &ToolName::from("search_text"),
+            ToolInput::new(
+                CallId::from("call-search-text-empty-query"),
+                json!({
+                    "path": ".",
+                    "query": ""
+                }),
+            ),
+        )
+        .await
+        .expect_err("empty query should fail");
+
+    assert!(matches!(
+        error,
+        ToolError::InvalidArgument {
+            name: "query",
+            reason: "must not be empty"
+        }
+    ));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn registered_echo_tool_can_be_called_through_registry() {
     let mut registry = BuiltinToolRegistry::default();
     registry

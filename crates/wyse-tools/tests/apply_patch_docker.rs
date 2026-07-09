@@ -69,6 +69,7 @@ async fn apply_patch_tool_updates_and_deletes_large_file_in_docker_sandbox() {
         .expect("read updated file");
     let updated = String::from_utf8(updated).expect("updated file is utf-8");
     assert_large_file_patched(&updated);
+    assert_container_stdout("sed -n '401p' /workspace/large.txt", "line 0401: patched\n");
 
     let delete = tool
         .call(ToolInput::new(
@@ -93,6 +94,7 @@ async fn apply_patch_tool_updates_and_deletes_large_file_in_docker_sandbox() {
         matches!(&missing, FilesystemError::NotFound { .. }),
         "expected not found error, got {missing}"
     );
+    assert_container_success("test ! -e /workspace/large.txt");
 }
 
 #[ignore = "crate integration test"]
@@ -130,6 +132,7 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
         .write_file(&nested_file, b"pub fn alpha_nested() {}\n".to_vec())
         .await
         .expect("seed nested file");
+    assert_container_stdout("cat /workspace/src/lib.rs", "fn alpha() {}\nfn beta() {}\n");
 
     let read_lines = ReadFileLinesTool::new(filesystem.clone())
         .call(ToolInput::new(
@@ -207,9 +210,71 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
         .await
         .expect("search text tool should run");
     assert_eq!(
-        search.result["matches"].as_array().expect("matches").len(),
-        2
+        search.result,
+        json!({
+            "path": "src",
+            "query": "alpha",
+            "matches": [
+                {
+                    "path": "src/lib.rs",
+                    "line_number": 1,
+                    "line_text": "fn alpha() {}",
+                    "match_start": 3,
+                    "match_end": 8
+                },
+                {
+                    "path": "src/nested/mod.rs",
+                    "line_number": 1,
+                    "line_text": "pub fn alpha_nested() {}",
+                    "match_start": 7,
+                    "match_end": 12
+                }
+            ]
+        })
     );
+}
+
+fn assert_container_stdout(script: &str, expected: &str) {
+    let output = compose_exec(script);
+    assert!(
+        output.status.success(),
+        "container command failed: {script}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+}
+
+fn assert_container_success(script: &str) {
+    let output = compose_exec(script);
+    assert!(
+        output.status.success(),
+        "container command failed: {script}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn compose_exec(script: &str) -> std::process::Output {
+    let compose = std::env::var("WYSE_TOOLS_COMPOSE").unwrap_or_else(|_| "podman compose".into());
+    let compose_file = std::env::var("WYSE_TOOLS_COMPOSE_FILE")
+        .unwrap_or_else(|_| "docker-compose.test.yml".into());
+    let compose_dir = std::env::var("WYSE_TOOLS_COMPOSE_DIR")
+        .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").into());
+    let service =
+        std::env::var("WYSE_TOOLS_COMPOSE_SERVICE").unwrap_or_else(|_| "filesystem-sandbox".into());
+
+    std::process::Command::new("sh")
+        .current_dir(compose_dir)
+        .env("COMPOSE", compose)
+        .env("COMPOSE_FILE", compose_file)
+        .env("SERVICE", service)
+        .arg("-c")
+        .arg(r#"$COMPOSE -f "$COMPOSE_FILE" exec -T "$SERVICE" sh -c "$1""#)
+        .arg("compose-exec")
+        .arg(script)
+        .output()
+        .expect("run compose exec")
 }
 
 fn original_file() -> String {
