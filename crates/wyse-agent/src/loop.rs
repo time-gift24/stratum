@@ -236,7 +236,7 @@ pub(crate) async fn run_agent_loop(
                     return Err(AgentError::Cancelled);
                 }
                 let tool_message =
-                    execute_tool_call(&input, &mut seq, turn_index, tool_call).await?;
+                    execute_tool_call(&input, &mut seq, turn_index, usage, tool_call).await?;
                 input.history.push(tool_message);
                 save_checkpoint(
                     &input,
@@ -691,6 +691,7 @@ async fn execute_tool_call(
     input: &AgentLoopInput,
     seq: &mut u64,
     turn_index: usize,
+    usage: TokenUsage,
     tool_call: &ToolCall,
 ) -> Result<ChatMessage, AgentError> {
     let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
@@ -711,7 +712,7 @@ async fn execute_tool_call(
     let name = ToolName::from(tool_call.name.as_str());
     let tool_result = tokio::select! {
         () = input.cancel.cancelled() => {
-            publish_cancelled(input, seq, TokenUsage::default()).await?;
+            publish_cancelled(input, seq, usage).await?;
             return Err(AgentError::Cancelled);
         }
         result = input.tool_registry.call(

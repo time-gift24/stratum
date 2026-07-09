@@ -15,7 +15,8 @@ use wyse_checkpoint::{
 };
 use wyse_core::{
     AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
-    ModelId, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, ToolName, ToolSpec, TurnId,
+    ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolName, ToolSpec,
+    TurnId,
 };
 use wyse_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -777,18 +778,24 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
             }),
             ChatStreamEvent::Finished {
                 finish_reason: FinishReason::ToolCalls,
-                usage: None,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    total_tokens: 8,
+                }),
             },
         ],
     )]));
     let entered = Arc::new(tokio::sync::Notify::new());
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BlockingToolRegistry::new(Arc::clone(&entered))))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
 
@@ -824,6 +831,12 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Cancelled).await;
+    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
+        .expect("cancelled checkpoint state should deserialize");
+    assert_eq!(checkpoint_state["usage"]["input_tokens"].as_u64(), Some(3));
+    assert_eq!(checkpoint_state["usage"]["output_tokens"].as_u64(), Some(5));
+    assert_eq!(checkpoint_state["usage"]["total_tokens"].as_u64(), Some(8));
 }
 
 #[tokio::test]
