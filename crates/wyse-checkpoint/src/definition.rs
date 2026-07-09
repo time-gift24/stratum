@@ -78,6 +78,16 @@ impl CheckpointKind {
             Self::Agent => "agent",
         }
     }
+
+    /// Parses the database representation.
+    pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
+        match value {
+            "agent" => Ok(Self::Agent),
+            _ => Err(CheckpointError::UnknownKind {
+                value: value.to_owned(),
+            }),
+        }
+    }
 }
 
 /// Latest checkpoint status.
@@ -104,6 +114,19 @@ impl CheckpointStatus {
             Self::WaitingRetry => "waiting_retry",
             Self::Finished => "finished",
             Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses the database representation.
+    pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
+        match value {
+            "running" => Ok(Self::Running),
+            "waiting_retry" => Ok(Self::WaitingRetry),
+            "finished" => Ok(Self::Finished),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(CheckpointError::UnknownStatus {
+                value: value.to_owned(),
+            }),
         }
     }
 }

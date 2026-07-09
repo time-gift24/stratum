@@ -14,5 +14,8 @@ thiserror.workspace = true
 uuid.workspace = true
 wyse-core.workspace = true
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true

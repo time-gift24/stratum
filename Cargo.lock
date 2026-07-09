@@ -2147,6 +2147,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "thiserror",
+ "tokio",
  "uuid",
  "wyse-core",
 ]
