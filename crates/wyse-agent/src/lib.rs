@@ -1,5 +1,6 @@
 //! Agent runtime loop for Wyse.
 
+pub(crate) mod checkpoint;
 pub mod definition;
 pub mod error;
 

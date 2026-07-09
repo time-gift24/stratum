@@ -6,7 +6,8 @@ use std::sync::{
 };
 
 use tokio_util::sync::CancellationToken;
-use wyse_core::{AgentId, ChatMessage, ChatRole, RunId};
+use wyse_checkpoint::CheckpointStore;
+use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TurnId};
 use wyse_infra::event_stream_bus::{EventStream, EventStreamBus};
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
@@ -35,6 +36,8 @@ impl Default for AgentConfig {
 pub struct AgentStream {
     /// Run identity for this stream.
     pub run_id: RunId,
+    /// Turn identity for this stream.
+    pub turn_id: TurnId,
     /// Live event stream for the run.
     pub events: EventStream,
     /// Cancellation handle for this run.
@@ -49,6 +52,7 @@ pub struct Agent {
     llm_provider: Arc<dyn LlmProvider>,
     tool_registry: Arc<dyn ToolRegistry>,
     event_bus: Arc<dyn EventStreamBus>,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     config: AgentConfig,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     active: Arc<AtomicBool>,
@@ -77,6 +81,7 @@ impl Agent {
         }
 
         let run_id = RunId::new();
+        let turn_id = TurnId::new();
         let events = match self.event_bus.subscribe_run(run_id).await {
             Ok(events) => events,
             Err(source) => {
@@ -97,10 +102,12 @@ impl Agent {
             agent_id: self.id,
             agent_name: self.name.clone(),
             system_prompt: self.system_prompt.clone(),
+            turn_id,
             history,
             llm_provider: Arc::clone(&self.llm_provider),
             tool_registry: Arc::clone(&self.tool_registry),
             event_bus: Arc::clone(&self.event_bus),
+            checkpoint_store: self.checkpoint_store.clone(),
             config: self.config.clone(),
             cancel: cancel.clone(),
         };
@@ -118,6 +125,7 @@ impl Agent {
 
         Ok(AgentStream {
             run_id,
+            turn_id,
             events,
             cancel,
         })
@@ -133,6 +141,7 @@ pub struct AgentBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     event_bus: Option<Arc<dyn EventStreamBus>>,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     config: Option<AgentConfig>,
 }
 
@@ -179,6 +188,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets the checkpoint store.
+    #[must_use]
+    pub fn checkpoint_store(mut self, checkpoint_store: Arc<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
     /// Sets runtime config.
     #[must_use]
     pub fn config(mut self, config: AgentConfig) -> Self {
@@ -209,6 +225,7 @@ impl AgentBuilder {
             event_bus: self
                 .event_bus
                 .ok_or(AgentError::MissingBuilderField { field: "event_bus" })?,
+            checkpoint_store: self.checkpoint_store,
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(AtomicBool::new(false)),
@@ -262,6 +279,19 @@ mod tests {
             .build();
 
         assert!(agent.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stream_returns_turn_id() {
+        let agent = test_agent();
+
+        let agent_stream = agent
+            .stream(ChatMessage::user("hello"))
+            .await
+            .expect("stream should start");
+
+        assert_eq!(agent_stream.turn_id.as_uuid().get_version_num(), 7);
+        agent_stream.cancel.cancel();
     }
 
     #[tokio::test]

@@ -6,9 +6,10 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use wyse_checkpoint::CheckpointStore;
 use wyse_core::{
     AgentEvent, AgentId, CallId, ChatMessage, EventSource, LlmCallId, LlmEvent, RuntimeEvent,
-    StreamEnvelope, TokenUsage, ToolCall, ToolName,
+    StreamEnvelope, TokenUsage, ToolCall, ToolName, TurnId,
 };
 use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::{ChatRequest, ChatStream, ChatStreamEvent, FinishReason, LlmProvider};
@@ -21,10 +22,12 @@ pub(crate) struct AgentLoopInput {
     pub(crate) agent_id: AgentId,
     pub(crate) agent_name: String,
     pub(crate) system_prompt: String,
+    pub(crate) turn_id: TurnId,
     pub(crate) history: Vec<ChatMessage>,
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
     pub(crate) tool_registry: Arc<dyn ToolRegistry>,
     pub(crate) event_bus: Arc<dyn EventStreamBus>,
+    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     pub(crate) config: AgentConfig,
     pub(crate) cancel: CancellationToken,
 }
@@ -34,6 +37,8 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<Vec<ChatMessage>, AgentError> {
     let mut seq = 1;
     let mut usage = TokenUsage::default();
+    let _ = input.turn_id;
+    let _ = &input.checkpoint_store;
 
     publish_agent_event(&input, &mut seq, AgentEvent::Started, None).await?;
 
