@@ -385,6 +385,91 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
 }
 
 #[tokio::test]
+async fn resume_retries_llm_from_stable_checkpoint_history() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints)
+        .build()
+        .expect("agent should build");
+
+    let mut failed_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = failed_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let mut resumed = agent
+        .resume(failed_stream.run_id, failed_stream.turn_id)
+        .await
+        .expect("resume should start");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = resumed.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for resumed finish");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User && message.content == ChatContent::Text("hello".to_owned())
+    }));
+    assert!(!requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::Assistant
+            && message.content == ChatContent::Text("partial".to_owned())
+    }));
+}
+
+#[tokio::test]
 async fn stream_publishes_failure_when_turn_limit_is_reached() {
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![ChatStreamEvent::Finished {

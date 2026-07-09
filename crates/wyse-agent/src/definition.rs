@@ -6,13 +6,13 @@ use std::sync::{
 };
 
 use tokio_util::sync::CancellationToken;
-use wyse_checkpoint::CheckpointStore;
+use wyse_checkpoint::{CheckpointKind, CheckpointStatus, CheckpointStore};
 use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TurnId};
 use wyse_infra::event_stream_bus::{EventStream, EventStreamBus};
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::AgentError;
+use crate::{AgentError, checkpoint::AgentCheckpointState};
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +105,83 @@ impl Agent {
             system_prompt: self.system_prompt.clone(),
             turn_id,
             history,
+            llm_provider: Arc::clone(&self.llm_provider),
+            tool_registry: Arc::clone(&self.tool_registry),
+            event_bus: Arc::clone(&self.event_bus),
+            checkpoint_store: self.checkpoint_store.clone(),
+            config: self.config.clone(),
+            cancel: cancel.clone(),
+        };
+        let history = Arc::clone(&self.history);
+        let active = Arc::clone(&self.active);
+
+        tokio::spawn(async move {
+            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
+                *history
+                    .lock()
+                    .expect("agent history mutex should not be poisoned") = new_history;
+            }
+            active.store(false, Ordering::SeqCst);
+        });
+
+        Ok(AgentStream {
+            run_id,
+            turn_id,
+            events,
+            cancel,
+        })
+    }
+
+    /// Resumes a retryable run from its latest agent checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another run is active, the agent has no checkpoint
+    /// store, the latest checkpoint is missing or not retryable, the checkpoint
+    /// state cannot be decoded, or subscribing to the event bus fails.
+    pub async fn resume(&self, run_id: RunId, turn_id: TurnId) -> Result<AgentStream, AgentError> {
+        if self.active.swap(true, Ordering::SeqCst) {
+            return Err(AgentError::RunAlreadyActive);
+        }
+
+        let Some(checkpoint_store) = &self.checkpoint_store else {
+            self.active.store(false, Ordering::SeqCst);
+            return Err(AgentError::MissingBuilderField {
+                field: "checkpoint_store",
+            });
+        };
+        let record = match checkpoint_store
+            .latest_turn(run_id, turn_id, CheckpointKind::Agent)
+            .await?
+        {
+            Some(record) if record.status == CheckpointStatus::WaitingRetry => record,
+            Some(_) | None => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(AgentError::CheckpointNotRetryable);
+            }
+        };
+        let checkpoint = match AgentCheckpointState::decode(&record.state, record.state_version) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
+        let events = match self.event_bus.subscribe_run(run_id).await {
+            Ok(events) => events,
+            Err(source) => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(AgentError::from(source));
+            }
+        };
+        let cancel = CancellationToken::new();
+        let loop_input = crate::r#loop::AgentLoopInput {
+            run_id,
+            turn_id,
+            agent_id: self.id,
+            agent_name: self.name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            history: checkpoint.history,
             llm_provider: Arc::clone(&self.llm_provider),
             tool_registry: Arc::clone(&self.tool_registry),
             event_bus: Arc::clone(&self.event_bus),
