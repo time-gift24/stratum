@@ -187,6 +187,13 @@ async fn chat_rejects_json_schema_structured_output() {
     ));
 }
 
+#[test]
+fn deepseek_provider_reports_provider_name() {
+    let provider = test_provider("http://127.0.0.1:9/v1");
+
+    assert_eq!(provider.provider_name(), "deepseek");
+}
+
 fn test_provider(base_url: impl Into<String>) -> DeepSeekProvider {
     DeepSeekProvider::new(
         base_url,

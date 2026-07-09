@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use wyse_core::{ModelId, TokenUsage};
@@ -13,9 +14,14 @@ pub type ChatStream =
     Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, LlmError>> + Send + 'static>>;
 
 /// Provider capable of chat completion requests.
-// Native async trait methods are intentional for this crate's provider API.
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Returns the stable provider name used in runtime metadata.
+    fn provider_name(&self) -> &str;
+
+    /// Returns the model bound to this provider.
+    fn model_id(&self) -> ModelId;
+
     /// Sends a non-streaming chat request.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
 

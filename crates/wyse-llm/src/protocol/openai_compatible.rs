@@ -1,6 +1,7 @@
 //! OpenAI-compatible protocol implementation.
 use std::{collections::VecDeque, pin::Pin};
 
+use async_trait::async_trait;
 use bon::Builder;
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
@@ -57,7 +58,16 @@ impl OpenAICompatibleProvider {
     }
 }
 
+#[async_trait]
 impl LlmProvider for OpenAICompatibleProvider {
+    fn provider_name(&self) -> &str {
+        "openai_compatible"
+    }
+
+    fn model_id(&self) -> ModelId {
+        self.model.clone()
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -381,10 +391,23 @@ fn message_to_value(message: &ChatMessage) -> Result<Value, LlmError> {
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Tool => "tool",
+        _ => {
+            return Err(LlmError::UnsupportedCapability(
+                "unsupported chat role for openai-compatible provider",
+            ));
+        }
     };
     let content = match &message.content {
         ChatContent::Text(text) => Value::String(text.clone()),
+        ChatContent::Json(value) if message.role == ChatRole::Tool => {
+            Value::String(value.to_string())
+        }
         ChatContent::Json(value) => value.clone(),
+        _ => {
+            return Err(LlmError::UnsupportedCapability(
+                "unsupported chat content for openai-compatible provider",
+            ));
+        }
     };
 
     let mut value = json!({"role": role, "content": content});
@@ -721,6 +744,19 @@ mod tests {
 
         assert_eq!(message["role"], "tool");
         assert_eq!(message["content"], "sunny");
+        assert_eq!(message["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn tool_json_message_maps_call_id_and_string_content() {
+        let message = ChatMessage::tool(CallId::from("call-1"), json!({"ok": true}));
+        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message);
+
+        let payload = to_chat_payload(&request, false).expect("payload maps");
+        let message = &payload["messages"][0];
+
+        assert_eq!(message["role"], "tool");
+        assert_eq!(message["content"], "{\"ok\":true}");
         assert_eq!(message["tool_call_id"], "call-1");
     }
 }

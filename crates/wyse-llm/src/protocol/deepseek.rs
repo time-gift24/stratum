@@ -2,6 +2,7 @@
 
 use std::{collections::VecDeque, pin::Pin};
 
+use async_trait::async_trait;
 use bon::Builder;
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
@@ -68,7 +69,16 @@ impl DeepSeekProvider {
     }
 }
 
+#[async_trait]
 impl LlmProvider for DeepSeekProvider {
+    fn provider_name(&self) -> &str {
+        "deepseek"
+    }
+
+    fn model_id(&self) -> ModelId {
+        self.model.model_id()
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model.model_id() {
             return Err(LlmError::InvalidRequest(

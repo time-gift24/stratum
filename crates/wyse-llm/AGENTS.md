@@ -9,6 +9,7 @@
 - Keep one public provider trait until another real trait split has multiple implementations.
 - Treat `protocol::openai_compatible` as a low-level protocol adapter, not the long-term provider model.
 - Use `wyse_core::ModelId` for public model identity.
+- `LlmProvider` exposes its bound `ModelId`; agent/runtime callers should not carry a duplicate model setting.
 - `OpenAICompatibleProvider` is bound to one model; reject requests whose `ChatRequest.model` differs from the provider model.
 - Tool names are the LLM boundary identity; do not add internal tool-id mapping or provider-level tool selection hints until a real caller needs them.
 - Map future OpenAI and Anthropic runtime output to `RuntimeEvent::Llm { llm_call_id, event: LlmEvent }`; do not add `model_id`, `message_id`, or message lifecycle events to runtime events.

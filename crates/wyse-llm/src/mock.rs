@@ -2,15 +2,28 @@
 
 use std::{collections::VecDeque, sync::Mutex};
 
+use async_trait::async_trait;
 use futures_util::stream;
+use wyse_core::ModelId;
 
 use crate::{ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, LlmError, LlmProvider};
 
 /// Queue-backed mock provider for deterministic tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockLlmProvider {
+    model: ModelId,
     chat_responses: Mutex<VecDeque<ChatResponse>>,
     stream_responses: Mutex<VecDeque<Vec<ChatStreamEvent>>>,
+}
+
+impl Default for MockLlmProvider {
+    fn default() -> Self {
+        Self {
+            model: ModelId::from("mock"),
+            chat_responses: Mutex::default(),
+            stream_responses: Mutex::default(),
+        }
+    }
 }
 
 impl MockLlmProvider {
@@ -41,7 +54,16 @@ impl MockLlmProvider {
     }
 }
 
+#[async_trait]
 impl LlmProvider for MockLlmProvider {
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+
+    fn model_id(&self) -> ModelId {
+        self.model.clone()
+    }
+
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
         self.chat_responses
             .lock()
@@ -71,6 +93,13 @@ mod tests {
         ChatMessage, ChatRequest, ChatResponse, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
     };
+
+    #[test]
+    fn mock_provider_reports_provider_name() {
+        let provider = MockLlmProvider::new();
+
+        assert_eq!(provider.provider_name(), "mock");
+    }
 
     #[tokio::test]
     async fn mock_returns_queued_chat_response() {

@@ -2025,6 +2025,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "wyse-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "wyse-core",
+ "wyse-infra",
+ "wyse-llm",
+ "wyse-tools",
+]
+
+[[package]]
 name = "wyse-core"
 version = "0.1.0"
 dependencies = [
@@ -2049,6 +2067,7 @@ name = "wyse-infra"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "async-trait",
  "bytes",
  "chrono",
  "futures-core",
@@ -2063,6 +2082,7 @@ dependencies = [
 name = "wyse-llm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bon",
  "bytes",
  "futures-core",
