@@ -433,9 +433,6 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
             .windows(b"partial".len())
             .any(|window| window == b"partial")
     );
-    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
-        .expect("waiting retry checkpoint state should deserialize");
-    assert_eq!(checkpoint_state["retry_count"].as_u64(), Some(1));
 }
 
 #[tokio::test]
@@ -471,6 +468,13 @@ async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit(
         .await
         .expect("stream should start");
     wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
+    let finished_records: Vec<_> = checkpoints
+        .records()
+        .into_iter()
+        .filter(|record| record.status == CheckpointStatus::Finished)
+        .collect();
+    assert_eq!(finished_records.len(), 1);
+    assert_eq!(finished_records[0].last_seq, 5);
 
     let second_stream = timeout(Duration::from_secs(1), async {
         loop {

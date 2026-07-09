@@ -18,7 +18,7 @@ use wyse_tools::{ToolInput, ToolRegistry};
 
 use crate::{
     AgentConfig, AgentError,
-    checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, AgentCheckpointPhase, AgentCheckpointState},
+    checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, AgentCheckpointState},
 };
 
 pub(crate) struct AgentLoopInput {
@@ -37,56 +37,47 @@ pub(crate) struct AgentLoopInput {
     pub(crate) start_seq: u64,
 }
 
+struct AgentLoopState {
+    seq: u64,
+    usage: TokenUsage,
+}
+
+impl AgentLoopState {
+    fn new(seq: u64) -> Self {
+        Self {
+            seq,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn reserve_event_seq(&mut self) -> u64 {
+        let seq = self.seq;
+        self.seq = self.seq.saturating_add(1);
+        seq
+    }
+}
+
 pub(crate) async fn run_agent_loop(
     mut input: AgentLoopInput,
 ) -> Result<Vec<ChatMessage>, AgentError> {
-    let mut seq = input.start_seq;
-    let mut usage = TokenUsage::default();
+    let mut state = AgentLoopState::new(input.start_seq);
 
-    save_checkpoint(
-        &input,
-        seq,
-        CheckpointStatus::Running,
-        checkpoint_state(
-            &input,
-            AgentCheckpointPhase::ReadyForLlm { turn_index: 0 },
-            0,
-            None,
-            usage,
-            Vec::new(),
-            0,
-        ),
-    )
-    .await?;
+    save_checkpoint(&input, &state, CheckpointStatus::Running).await?;
 
-    publish_agent_event(&input, &mut seq, AgentEvent::Started, None).await?;
+    publish_agent_event(&input, &mut state, AgentEvent::Started, None).await?;
 
     for turn_index in 0..input.config.max_turns {
         if input.cancel.is_cancelled() {
-            publish_cancelled(&input, &mut seq, usage).await?;
+            publish_cancelled(&input, &mut state).await?;
             return Err(AgentError::Cancelled);
         }
 
-        save_checkpoint(
-            &input,
-            seq,
-            CheckpointStatus::Running,
-            checkpoint_state(
-                &input,
-                AgentCheckpointPhase::RunningLlm { turn_index },
-                0,
-                None,
-                usage,
-                Vec::new(),
-                0,
-            ),
-        )
-        .await?;
+        save_checkpoint(&input, &state, CheckpointStatus::Running).await?;
 
         let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
         publish_llm_event(
             &input,
-            &mut seq,
+            &mut state,
             turn_index,
             llm_call_id.clone(),
             LlmEvent::Started,
@@ -103,31 +94,17 @@ pub(crate) async fn run_agent_loop(
         };
         let stream = match tokio::select! {
             () = input.cancel.cancelled() => {
-                publish_cancelled(&input, &mut seq, usage).await?;
+                publish_cancelled(&input, &mut state).await?;
                 return Err(AgentError::Cancelled);
             }
             result = input.llm_provider.chat_stream(request) => result,
         } {
             Ok(stream) => stream,
             Err(source) => {
-                save_checkpoint(
-                    &input,
-                    seq,
-                    CheckpointStatus::WaitingRetry,
-                    checkpoint_state(
-                        &input,
-                        AgentCheckpointPhase::RunningLlm { turn_index },
-                        1,
-                        Some(source.to_string()),
-                        usage,
-                        Vec::new(),
-                        0,
-                    ),
-                )
-                .await?;
+                save_checkpoint(&input, &state, CheckpointStatus::WaitingRetry).await?;
                 publish_llm_event(
                     &input,
-                    &mut seq,
+                    &mut state,
                     turn_index,
                     llm_call_id,
                     LlmEvent::Failed {
@@ -138,160 +115,88 @@ pub(crate) async fn run_agent_loop(
                 )
                 .await?;
                 let error = AgentError::from(source);
-                publish_failed(&input, &mut seq, &error).await?;
-                save_checkpoint(
+                publish_checkpointed_agent_event(
                     &input,
-                    seq,
+                    &mut state,
                     CheckpointStatus::WaitingRetry,
-                    checkpoint_state(
-                        &input,
-                        AgentCheckpointPhase::RunningLlm { turn_index },
-                        1,
-                        Some(error.to_string()),
-                        usage,
-                        Vec::new(),
-                        0,
-                    ),
+                    AgentEvent::Failed {
+                        error_text: error.to_string(),
+                    },
                 )
                 .await?;
                 return Err(error);
             }
         };
-        let assistant = match consume_assistant_stream(
-            &input,
-            &mut seq,
-            turn_index,
-            llm_call_id,
-            stream,
-            &mut usage,
-        )
-        .await
-        {
-            Ok(assistant) => assistant,
-            Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
-            Err(error) => {
-                if matches!(error, AgentError::Llm { .. }) {
-                    let checkpoint = checkpoint_state(
-                        &input,
-                        AgentCheckpointPhase::RunningLlm { turn_index },
-                        1,
-                        Some(error.to_string()),
-                        usage,
-                        Vec::new(),
-                        0,
-                    );
-                    save_checkpoint(
-                        &input,
-                        seq,
-                        CheckpointStatus::WaitingRetry,
-                        checkpoint.clone(),
-                    )
-                    .await?;
-                    publish_failed(&input, &mut seq, &error).await?;
-                    save_checkpoint(&input, seq, CheckpointStatus::WaitingRetry, checkpoint)
+        let assistant =
+            match consume_assistant_stream(&input, &mut state, turn_index, llm_call_id, stream)
+                .await
+            {
+                Ok(assistant) => assistant,
+                Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                Err(error) => {
+                    if matches!(error, AgentError::Llm { .. }) {
+                        publish_checkpointed_agent_event(
+                            &input,
+                            &mut state,
+                            CheckpointStatus::WaitingRetry,
+                            AgentEvent::Failed {
+                                error_text: error.to_string(),
+                            },
+                        )
                         .await?;
-                } else {
-                    save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
+                    } else {
+                        save_failed_checkpoint(&input, &mut state, &error).await?;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         let finish_reason = assistant.finish_reason;
         let message = assistant.message;
         let tool_calls = message.tool_calls.clone();
         input.history.push(message);
 
         if finish_reason == FinishReason::ToolCalls && !tool_calls.is_empty() {
-            save_checkpoint(
-                &input,
-                seq,
-                CheckpointStatus::Running,
-                checkpoint_state(
-                    &input,
-                    AgentCheckpointPhase::RunningTools {
-                        turn_index,
-                        tool_calls: tool_calls.clone(),
-                        next_tool_call_index: 0,
-                    },
-                    0,
-                    None,
-                    usage,
-                    tool_calls.clone(),
-                    0,
-                ),
-            )
-            .await?;
+            save_checkpoint(&input, &state, CheckpointStatus::Running).await?;
 
             if tool_calls.len() > input.config.max_tool_calls_per_turn {
                 let error = AgentError::ToolCallLimitExceeded {
                     limit: input.config.max_tool_calls_per_turn,
                 };
-                save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
+                save_failed_checkpoint(&input, &mut state, &error).await?;
                 return Err(error);
             }
 
-            for (next_tool_call_index, tool_call) in tool_calls.iter().enumerate() {
+            for tool_call in &tool_calls {
                 if input.cancel.is_cancelled() {
-                    publish_cancelled(&input, &mut seq, usage).await?;
+                    publish_cancelled(&input, &mut state).await?;
                     return Err(AgentError::Cancelled);
                 }
                 let tool_message =
-                    execute_tool_call(&input, &mut seq, turn_index, usage, tool_call).await?;
+                    execute_tool_call(&input, &mut state, turn_index, tool_call).await?;
                 input.history.push(tool_message);
-                save_checkpoint(
-                    &input,
-                    seq,
-                    CheckpointStatus::Running,
-                    checkpoint_state(
-                        &input,
-                        AgentCheckpointPhase::RunningTools {
-                            turn_index,
-                            tool_calls: tool_calls.clone(),
-                            next_tool_call_index: next_tool_call_index.saturating_add(1),
-                        },
-                        0,
-                        None,
-                        usage,
-                        tool_calls.clone(),
-                        next_tool_call_index.saturating_add(1),
-                    ),
-                )
-                .await?;
+                save_checkpoint(&input, &state, CheckpointStatus::Running).await?;
             }
             continue;
         }
 
-        let checkpoint = checkpoint_state(
+        let usage = state.usage;
+        publish_checkpointed_agent_event(
             &input,
-            AgentCheckpointPhase::Finished {
-                finish_reason: finish_reason_name(finish_reason).to_owned(),
-            },
-            0,
-            None,
-            usage,
-            Vec::new(),
-            0,
-        );
-        save_checkpoint(&input, seq, CheckpointStatus::Finished, checkpoint.clone()).await?;
-
-        publish_agent_event(
-            &input,
-            &mut seq,
+            &mut state,
+            CheckpointStatus::Finished,
             AgentEvent::Finished {
                 finish_reason: finish_reason_name(finish_reason).to_owned(),
                 usage,
             },
-            None,
         )
         .await?;
-        save_checkpoint(&input, seq, CheckpointStatus::Finished, checkpoint).await?;
         return Ok(input.history);
     }
 
     let error = AgentError::TurnLimitExceeded {
         limit: input.config.max_turns,
     };
-    save_failed_checkpoint(&input, &mut seq, usage, &error).await?;
+    save_failed_checkpoint(&input, &mut state, &error).await?;
     Err(error)
 }
 
@@ -302,110 +207,86 @@ fn request_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<ChatMes
     messages
 }
 
-async fn publish_failed(
+async fn publish_checkpointed_agent_event(
     input: &AgentLoopInput,
-    seq: &mut u64,
-    error: &AgentError,
+    state: &mut AgentLoopState,
+    status: CheckpointStatus,
+    event: AgentEvent,
 ) -> Result<(), AgentError> {
-    publish_agent_event(
-        input,
-        seq,
-        AgentEvent::Failed {
-            error_text: error.to_string(),
-        },
-        None,
-    )
-    .await
+    let seq = state.reserve_event_seq();
+    save_checkpoint(input, state, status).await?;
+    publish_agent_event_at(input, seq, event, None).await
 }
 
 async fn publish_cancelled(
     input: &AgentLoopInput,
-    seq: &mut u64,
-    usage: TokenUsage,
+    state: &mut AgentLoopState,
 ) -> Result<(), AgentError> {
-    let checkpoint = checkpoint_state(
+    publish_checkpointed_agent_event(
         input,
-        AgentCheckpointPhase::Cancelled,
-        0,
-        None,
-        usage,
-        Vec::new(),
-        0,
-    );
-    save_checkpoint(input, *seq, CheckpointStatus::Cancelled, checkpoint.clone()).await?;
-    publish_agent_event(input, seq, AgentEvent::Cancelled, None).await?;
-    save_checkpoint(input, *seq, CheckpointStatus::Cancelled, checkpoint).await
+        state,
+        CheckpointStatus::Cancelled,
+        AgentEvent::Cancelled,
+    )
+    .await
 }
 
 async fn save_failed_checkpoint(
     input: &AgentLoopInput,
-    seq: &mut u64,
-    usage: TokenUsage,
+    state: &mut AgentLoopState,
     error: &AgentError,
 ) -> Result<(), AgentError> {
-    let checkpoint = checkpoint_state(
+    publish_checkpointed_agent_event(
         input,
-        AgentCheckpointPhase::Failed {
+        state,
+        CheckpointStatus::Failed,
+        AgentEvent::Failed {
             error_text: error.to_string(),
         },
-        0,
-        Some(error.to_string()),
-        usage,
-        Vec::new(),
-        0,
-    );
-    save_checkpoint(input, *seq, CheckpointStatus::Failed, checkpoint.clone()).await?;
-    publish_failed(input, seq, error).await?;
-    save_checkpoint(input, *seq, CheckpointStatus::Failed, checkpoint).await
+    )
+    .await
 }
 
 async fn save_checkpoint(
     input: &AgentLoopInput,
-    seq: u64,
+    state: &AgentLoopState,
     status: CheckpointStatus,
-    state: AgentCheckpointState,
 ) -> Result<(), AgentError> {
     let Some(store) = &input.checkpoint_store else {
         return Ok(());
     };
 
+    let checkpoint = AgentCheckpointState {
+        agent_id: input.agent_id,
+        usage: state.usage,
+        history: input.history.clone(),
+    };
     let record = CheckpointRecord::new(
         input.run_id,
         input.turn_id,
         CheckpointKind::Agent,
         status,
         AGENT_CHECKPOINT_STATE_VERSION,
-        state.encode()?,
-        seq.saturating_sub(1),
+        checkpoint.encode()?,
+        state.seq.saturating_sub(1),
     );
     store.put_latest(record).await?;
     Ok(())
 }
 
-fn checkpoint_state(
-    input: &AgentLoopInput,
-    phase: AgentCheckpointPhase,
-    retry_count: u32,
-    last_error_text: Option<String>,
-    usage: TokenUsage,
-    pending_tool_calls: Vec<ToolCall>,
-    next_tool_call_index: usize,
-) -> AgentCheckpointState {
-    AgentCheckpointState {
-        agent_id: input.agent_id,
-        phase,
-        retry_count,
-        last_error_text,
-        usage,
-        history: input.history.clone(),
-        pending_tool_calls,
-        next_tool_call_index,
-    }
-}
-
 async fn publish_agent_event(
     input: &AgentLoopInput,
-    seq: &mut u64,
+    state: &mut AgentLoopState,
+    event: AgentEvent,
+    extra_metadata: Option<BTreeMap<String, Value>>,
+) -> Result<(), AgentError> {
+    let seq = state.reserve_event_seq();
+    publish_agent_event_at(input, seq, event, extra_metadata).await
+}
+
+async fn publish_agent_event_at(
+    input: &AgentLoopInput,
+    seq: u64,
     event: AgentEvent,
     extra_metadata: Option<BTreeMap<String, Value>>,
 ) -> Result<(), AgentError> {
@@ -430,7 +311,7 @@ async fn publish_agent_event(
 
     let envelope = StreamEnvelope {
         run_id: input.run_id,
-        seq: *seq,
+        seq,
         timestamp: Utc::now(),
         source: EventSource::Run,
         event: RuntimeEvent::Agent {
@@ -439,18 +320,13 @@ async fn publish_agent_event(
         },
         metadata,
     };
-    match input.event_bus.publish(envelope).await {
-        Ok(()) => {
-            *seq = seq.saturating_add(1);
-        }
-        Err(error) => {
-            warn!(
-                run_id = %input.run_id,
-                current_seq = *seq,
-                source = %error,
-                "failed to publish live agent event"
-            );
-        }
+    if let Err(error) = input.event_bus.publish(envelope).await {
+        warn!(
+            run_id = %input.run_id,
+            current_seq = seq,
+            source = %error,
+            "failed to publish live agent event"
+        );
     }
     Ok(())
 }
@@ -469,11 +345,10 @@ struct PendingToolCall {
 
 async fn consume_assistant_stream(
     input: &AgentLoopInput,
-    seq: &mut u64,
+    state: &mut AgentLoopState,
     turn_index: usize,
     llm_call_id: LlmCallId,
     mut stream: ChatStream,
-    usage: &mut TokenUsage,
 ) -> Result<AssistantStreamResult, AgentError> {
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -483,7 +358,7 @@ async fn consume_assistant_stream(
     loop {
         tokio::select! {
             () = input.cancel.cancelled() => {
-                publish_cancelled(input, seq, *usage).await?;
+                publish_cancelled(input, state).await?;
                 return Err(AgentError::Cancelled);
             }
             event = stream.next() => {
@@ -495,7 +370,7 @@ async fn consume_assistant_stream(
                         text.push_str(&delta);
                         publish_llm_event(
                             input,
-                            seq,
+                            state,
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::TextDelta {
@@ -511,7 +386,7 @@ async fn consume_assistant_stream(
                         reasoning.push_str(&delta);
                         publish_llm_event(
                             input,
-                            seq,
+                            state,
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::ReasoningDelta { delta },
@@ -539,7 +414,7 @@ async fn consume_assistant_stream(
                             .unwrap_or_else(|| CallId::from(format!("tool-call-{}", delta.index)));
                         publish_llm_event(
                             input,
-                            seq,
+                            state,
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::ToolCallDelta {
@@ -558,11 +433,11 @@ async fn consume_assistant_stream(
                     }) => {
                         finish_reason = reason;
                         if let Some(event_usage) = event_usage {
-                            add_usage(usage, event_usage);
+                            add_usage(&mut state.usage, event_usage);
                         }
                         publish_llm_event(
                             input,
-                            seq,
+                            state,
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::Finished {
@@ -578,7 +453,7 @@ async fn consume_assistant_stream(
                     Err(source) => {
                         publish_llm_event(
                             input,
-                            seq,
+                            state,
                             turn_index,
                             llm_call_id.clone(),
                             LlmEvent::Failed {
@@ -605,7 +480,7 @@ async fn consume_assistant_stream(
         Err(error) => {
             publish_llm_event(
                 input,
-                seq,
+                state,
                 turn_index,
                 llm_call_id,
                 LlmEvent::Failed {
@@ -630,7 +505,7 @@ async fn consume_assistant_stream(
 
 async fn publish_llm_event(
     input: &AgentLoopInput,
-    seq: &mut u64,
+    state: &mut AgentLoopState,
     turn_index: usize,
     llm_call_id: LlmCallId,
     event: LlmEvent,
@@ -651,7 +526,7 @@ async fn publish_llm_event(
 
     publish_agent_event(
         input,
-        seq,
+        state,
         AgentEvent::Llm { llm_call_id, event },
         Some(metadata),
     )
@@ -689,15 +564,14 @@ fn finalize_tool_calls(
 
 async fn execute_tool_call(
     input: &AgentLoopInput,
-    seq: &mut u64,
+    state: &mut AgentLoopState,
     turn_index: usize,
-    usage: TokenUsage,
     tool_call: &ToolCall,
 ) -> Result<ChatMessage, AgentError> {
     let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
     publish_llm_event(
         input,
-        seq,
+        state,
         turn_index,
         llm_call_id.clone(),
         LlmEvent::ToolCallStarted {
@@ -712,7 +586,7 @@ async fn execute_tool_call(
     let name = ToolName::from(tool_call.name.as_str());
     let tool_result = tokio::select! {
         () = input.cancel.cancelled() => {
-            publish_cancelled(input, seq, usage).await?;
+            publish_cancelled(input, state).await?;
             return Err(AgentError::Cancelled);
         }
         result = input.tool_registry.call(
@@ -725,7 +599,7 @@ async fn execute_tool_call(
         Ok(output) => {
             publish_llm_event(
                 input,
-                seq,
+                state,
                 turn_index,
                 llm_call_id,
                 LlmEvent::ToolCallFinished {
@@ -742,7 +616,7 @@ async fn execute_tool_call(
             let error_text = error.to_string();
             publish_llm_event(
                 input,
-                seq,
+                state,
                 turn_index,
                 llm_call_id,
                 LlmEvent::ToolCallFailed {
