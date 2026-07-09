@@ -607,7 +607,7 @@ mod tests {
                 if matches!(
                     event,
                     wyse_core::RuntimeEvent::Agent {
-                        event: wyse_core::AgentEvent::Cancelled { .. },
+                        event: wyse_core::AgentEvent::Cancelled,
                         ..
                     }
                 ) {
@@ -678,7 +678,7 @@ mod tests {
                 if matches!(
                     event,
                     wyse_core::RuntimeEvent::Agent {
-                        event: wyse_core::AgentEvent::Cancelled { .. },
+                        event: wyse_core::AgentEvent::Cancelled,
                         ..
                     }
                 ) {
