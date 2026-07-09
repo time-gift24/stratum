@@ -167,6 +167,13 @@ impl Agent {
                 return Err(error);
             }
         };
+        if checkpoint.agent_id != self.id {
+            self.active.store(false, Ordering::SeqCst);
+            return Err(AgentError::CheckpointAgentMismatch {
+                expected: self.id,
+                actual: checkpoint.agent_id,
+            });
+        }
         let events = match self.event_bus.subscribe_run(run_id).await {
             Ok(events) => events,
             Err(source) => {

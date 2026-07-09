@@ -55,6 +55,14 @@ pub enum AgentError {
     /// The requested checkpoint cannot be resumed.
     #[error("agent checkpoint is not waiting for retry")]
     CheckpointNotRetryable,
+    /// The checkpoint belongs to a different agent.
+    #[error("checkpoint agent mismatch: expected {expected}, actual {actual}")]
+    CheckpointAgentMismatch {
+        /// Expected agent id.
+        expected: wyse_core::AgentId,
+        /// Actual agent id stored in the checkpoint.
+        actual: wyse_core::AgentId,
+    },
     /// A required builder field was not provided.
     #[error("missing builder field: {field}")]
     MissingBuilderField {

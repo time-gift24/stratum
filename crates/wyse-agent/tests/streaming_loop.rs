@@ -14,8 +14,8 @@ use wyse_checkpoint::{
     CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
 };
 use wyse_core::{
-    AgentEvent, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent, ModelId,
-    RuntimeEvent, ToolCallDelta, ToolName, ToolSpec, TurnId,
+    AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
+    ModelId, RuntimeEvent, ToolCallDelta, ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
 use wyse_llm::{
@@ -386,6 +386,7 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
 
 #[tokio::test]
 async fn resume_retries_llm_from_stable_checkpoint_history() {
+    let agent_id = AgentId::new();
     let provider = Arc::new(RecordingProvider::new(vec![
         ProviderResponse::StreamResults(vec![
             Ok(ChatStreamEvent::TextDelta {
@@ -405,6 +406,7 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
     ]));
     let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
+        .id(agent_id)
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
@@ -467,6 +469,79 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
         message.role == ChatRole::Assistant
             && message.content == ChatContent::Text("partial".to_owned())
     }));
+}
+
+#[tokio::test]
+async fn resume_rejects_checkpoint_from_different_agent() {
+    let checkpoint_owner = AgentId::new();
+    let resuming_agent = AgentId::new();
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let first_agent = Agent::builder()
+        .id(checkpoint_owner)
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+    let second_agent = Agent::builder()
+        .id(resuming_agent)
+        .name("other-agent")
+        .system_prompt("be helpful")
+        .llm_provider(Arc::new(RecordingProvider::new(Vec::new())))
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints)
+        .build()
+        .expect("agent should build");
+
+    let mut failed_stream = first_agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = failed_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let error = match second_agent
+        .resume(failed_stream.run_id, failed_stream.turn_id)
+        .await
+    {
+        Ok(_) => panic!("resume should reject checkpoint from different agent"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        wyse_agent::AgentError::CheckpointAgentMismatch {
+            expected: e,
+            actual: a
+        } if e == resuming_agent && a == checkpoint_owner
+    ));
 }
 
 #[tokio::test]
