@@ -140,11 +140,21 @@ export function WorkspacePager({
 
   return (
     <WorkspacePagerContext.Provider value={contextValue}>
-      <div data-workspace-pager="viewport" onWheel={handleWheel} ref={rootRef}>
-        <div data-workspace-pager="track" ref={trackRef}>
+      <div
+        className="workspace-pager-viewport"
+        data-workspace-pager="viewport"
+        onWheel={handleWheel}
+        ref={rootRef}
+      >
+        <div
+          className="workspace-pager-track"
+          data-workspace-pager="track"
+          ref={trackRef}
+        >
           {slides.map((slide, index) => (
             <div
               aria-hidden={index !== activeSlideIndex}
+              className="workspace-pager-slide"
               data-workspace-pager="slide"
               key={index}
             >
