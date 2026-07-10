@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -18,8 +18,8 @@ pub(super) struct MemoryCasFilesystem {
     records: Mutex<BTreeMap<VirtualPath, VersionedEntry>>,
     directories: Mutex<BTreeSet<VirtualPath>>,
     read_counts: Mutex<BTreeMap<VirtualPath, u64>>,
-    list_count: AtomicU64,
-    next_version: AtomicU64,
+    list_count: AtomicUsize,
+    next_version: AtomicUsize,
     fail_next_version_write: AtomicBool,
     pause_next_version_write: AtomicBool,
     version_write_paused: Notify,
@@ -103,11 +103,12 @@ impl MemoryCasFilesystem {
     }
 
     pub(super) fn list_count(&self) -> u64 {
-        self.list_count.load(Ordering::SeqCst)
+        u64::try_from(self.list_count.load(Ordering::SeqCst)).expect("list count fits u64")
     }
 
     fn next_record_version(&self) -> RecordVersion {
-        RecordVersion::from_backend(self.next_version.fetch_add(1, Ordering::SeqCst))
+        let version = self.next_version.fetch_add(1, Ordering::SeqCst);
+        RecordVersion::from_backend(u64::try_from(version).expect("record version fits u64"))
     }
 }
 
@@ -149,19 +150,18 @@ impl Filesystem for MemoryCasFilesystem {
 
         match cas {
             CasExpectation::Absent if records.contains_key(path) => {
-                Err(FilesystemError::VersionMismatch { path: path.clone() })
+                return Err(FilesystemError::VersionMismatch { path: path.clone() });
             }
             CasExpectation::Version(expected)
                 if records.get(path).map(|record| record.version) != Some(expected) =>
             {
-                Err(FilesystemError::VersionMismatch { path: path.clone() })
+                return Err(FilesystemError::VersionMismatch { path: path.clone() });
             }
-            CasExpectation::Absent | CasExpectation::Version(_) | CasExpectation::Any => {
-                let version = self.next_record_version();
-                records.insert(path.clone(), VersionedEntry { entry, version });
-                Ok(version)
-            }
+            _ => {}
         }
+        let version = self.next_record_version();
+        records.insert(path.clone(), VersionedEntry { entry, version });
+        Ok(version)
     }
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
@@ -176,9 +176,15 @@ impl Filesystem for MemoryCasFilesystem {
         path: &VirtualPath,
         contents: Vec<u8>,
     ) -> Result<(), FilesystemError> {
-        self.put(path, Entry::new(contents), CasExpectation::Any)
-            .await
-            .map(|_| ())
+        let version = self.next_record_version();
+        self.records.lock().expect("records mutex").insert(
+            path.clone(),
+            VersionedEntry {
+                entry: Entry::new(contents),
+                version,
+            },
+        );
+        Ok(())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {

@@ -6,7 +6,7 @@ TEST_COMPOSE_FILE := docker-compose.test.yml
 test-integration:
 	@set -eu; \
 	trap '$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v' EXIT; \
-	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d; \
+	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d --wait; \
 	cargo test -p wyse-infra --test event_stream_bus_nats nats_rejects_incompatible_existing_stream -- --ignored --exact; \
 	cargo test -p wyse-infra --test event_stream_bus_nats nats_agent_replay_modes_and_isolation -- --ignored --exact; \
 	cargo test -p wyse-infra --test event_stream_bus_nats nats_reports_expired_cursor -- --ignored --exact; \

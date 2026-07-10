@@ -133,7 +133,7 @@ fn jittered_backoff(attempt: usize) -> Duration {
 mod tests {
     use std::{
         convert::Infallible,
-        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
@@ -144,14 +144,14 @@ mod tests {
     };
 
     struct ScriptedFilesystem {
-        version: AtomicU64,
+        version: AtomicUsize,
         puts: AtomicUsize,
     }
 
     impl ScriptedFilesystem {
         fn with_one_conflict() -> Self {
             Self {
-                version: AtomicU64::new(1),
+                version: AtomicUsize::new(1),
                 puts: AtomicUsize::new(0),
             }
         }
@@ -197,7 +197,10 @@ mod tests {
         ) -> Result<Option<VersionedEntry>, FilesystemError> {
             Ok(Some(VersionedEntry {
                 entry: Entry::new(vec![1]),
-                version: RecordVersion::from_backend(self.version.load(Ordering::SeqCst)),
+                version: RecordVersion::from_backend(
+                    u64::try_from(self.version.load(Ordering::SeqCst))
+                        .expect("test version fits u64"),
+                ),
             }))
         }
 
@@ -208,7 +211,7 @@ mod tests {
             cas: CasExpectation,
         ) -> Result<RecordVersion, FilesystemError> {
             let expected = CasExpectation::Version(RecordVersion::from_backend(
-                self.version.load(Ordering::SeqCst),
+                u64::try_from(self.version.load(Ordering::SeqCst)).expect("test version fits u64"),
             ));
             assert_eq!(cas, expected);
 

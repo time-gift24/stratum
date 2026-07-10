@@ -5,7 +5,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -124,7 +124,7 @@ impl FilesystemAgentCheckpoint {
         seq: u64,
     ) -> Result<CommitSequenceOutcome, CheckpointError> {
         let updated_at = Utc::now();
-        let attempts = AtomicU64::new(0);
+        let attempts = AtomicUsize::new(0);
         let result = cas_update(
             self.filesystem.as_ref(),
             &self.agent_path()?,
@@ -276,7 +276,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         usage: TokenUsage,
     ) -> Result<AgentState, CheckpointError> {
         let updated_at = Utc::now();
-        let attempts = AtomicU64::new(0);
+        let attempts = AtomicUsize::new(0);
         let result = cas_update(
             self.filesystem.as_ref(),
             &self.agent_path()?,
@@ -646,7 +646,7 @@ fn strict_json_error() -> serde_json::Error {
 
 fn trace_cas_outcome(
     result: &Result<AgentState, CasUpdateError<CheckpointError>>,
-    attempt_count: u64,
+    attempt_count: usize,
     seq: Option<u64>,
 ) {
     let state = result.as_ref().ok();

@@ -944,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn event_cursor_is_not_ordered_with_business_sequence() {
+    fn event_cursor_round_trips_transport_sequence() {
         let cursor = EventCursor::from_transport_sequence(12);
         assert_eq!(cursor.transport_sequence(), 12);
     }

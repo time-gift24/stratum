@@ -2062,6 +2062,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "serde",
  "serde_json",
  "thiserror",
@@ -2069,6 +2070,7 @@ dependencies = [
  "tracing",
  "wyse-core",
  "wyse-filesystem",
+ "wyse-infra",
 ]
 
 [[package]]

@@ -28,7 +28,8 @@ pub trait EventStreamBus: Send + Sync {
     /// # Errors
     ///
     /// Returns [`EventStreamBusError::CursorExpired`] if the requested cursor is no longer
-    /// retained, or a backend error if the subscription cannot be created.
+    /// retained, [`EventStreamBusError::CursorOverflow`] if the transport cannot advance past
+    /// the cursor, or a backend error if the subscription cannot be created.
     async fn subscribe_agent(
         &self,
         agent_id: AgentId,
