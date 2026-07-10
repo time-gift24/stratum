@@ -112,6 +112,19 @@ pub struct DirEntry {
     pub file_type: FileType,
 }
 
+impl DirEntry {
+    /// Creates a directory entry from backend-returned values.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_backend(path: VirtualPath, file_name: String, file_type: FileType) -> Self {
+        Self {
+            path,
+            file_name,
+            file_type,
+        }
+    }
+}
+
 /// Type of one filesystem path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -124,4 +137,20 @@ pub enum FileType {
     Symlink,
     /// Other platform-specific file type.
     Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_can_construct_a_directory_entry() {
+        let path = VirtualPath::try_from("/messages/1.json").expect("valid path");
+
+        let entry = DirEntry::from_backend(path.clone(), "1.json".to_owned(), FileType::File);
+
+        assert_eq!(entry.path, path);
+        assert_eq!(entry.file_name, "1.json");
+        assert_eq!(entry.file_type, FileType::File);
+    }
 }

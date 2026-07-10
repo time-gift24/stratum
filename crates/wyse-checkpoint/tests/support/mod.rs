@@ -8,14 +8,16 @@ use std::{
 
 use async_trait::async_trait;
 use wyse_filesystem::{
-    CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, RecordVersion,
-    VersionedEntry, VirtualPath,
+    CasExpectation, DirEntry, Entry, FileMetadata, FileType, Filesystem, FilesystemError,
+    RecordVersion, VersionedEntry, VirtualPath,
 };
 
 #[derive(Default)]
 pub(super) struct MemoryCasFilesystem {
     records: Mutex<BTreeMap<VirtualPath, VersionedEntry>>,
     directories: Mutex<BTreeSet<VirtualPath>>,
+    read_counts: Mutex<BTreeMap<VirtualPath, u64>>,
+    list_count: AtomicU64,
     next_version: AtomicU64,
     fail_next_version_write: AtomicBool,
 }
@@ -60,6 +62,25 @@ impl MemoryCasFilesystem {
         self.fail_next_version_write.load(Ordering::SeqCst)
     }
 
+    pub(super) fn reset_read_counts(&self) {
+        self.read_counts.lock().expect("read counts mutex").clear();
+        self.list_count.store(0, Ordering::SeqCst);
+    }
+
+    pub(super) fn read_count(&self, path: &str) -> u64 {
+        let path = VirtualPath::try_from(path).expect("valid fixture path");
+        self.read_counts
+            .lock()
+            .expect("read counts mutex")
+            .get(&path)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn list_count(&self) -> u64 {
+        self.list_count.load(Ordering::SeqCst)
+    }
+
     fn next_record_version(&self) -> RecordVersion {
         RecordVersion::from_backend(self.next_version.fetch_add(1, Ordering::SeqCst))
     }
@@ -68,6 +89,12 @@ impl MemoryCasFilesystem {
 #[async_trait]
 impl Filesystem for MemoryCasFilesystem {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        *self
+            .read_counts
+            .lock()
+            .expect("read counts mutex")
+            .entry(path.clone())
+            .or_default() += 1;
         Ok(self
             .records
             .lock()
@@ -124,16 +151,34 @@ impl Filesystem for MemoryCasFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        if self
+        self.list_count.fetch_add(1, Ordering::SeqCst);
+        if !self
             .directories
             .lock()
             .expect("directories mutex")
             .contains(path)
         {
-            Ok(Vec::new())
-        } else {
-            Err(FilesystemError::NotFound { path: path.clone() })
+            return Err(FilesystemError::NotFound { path: path.clone() });
         }
+        let prefix = if path.as_str() == "/" {
+            "/".to_owned()
+        } else {
+            format!("{}/", path.as_str())
+        };
+        let records = self.records.lock().expect("records mutex");
+        Ok(records
+            .keys()
+            .filter_map(|record_path| {
+                let file_name = record_path.as_str().strip_prefix(&prefix)?;
+                (!file_name.contains('/')).then(|| {
+                    DirEntry::from_backend(
+                        record_path.clone(),
+                        file_name.to_owned(),
+                        FileType::File,
+                    )
+                })
+            })
+            .collect())
     }
 
     async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {

@@ -1,7 +1,8 @@
 //! Filesystem-backed agent checkpoint storage.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound::{Excluded, Unbounded},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -16,7 +17,8 @@ use wyse_core::{
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{
-    CasExpectation, CasUpdateError, Entry, Filesystem, FilesystemError, VirtualPath, cas_update,
+    CasExpectation, CasUpdateError, Entry, FileType, Filesystem, FilesystemError, VirtualPath,
+    cas_update,
 };
 
 use crate::{
@@ -143,16 +145,34 @@ impl FilesystemAgentCheckpoint {
         result.map_err(CheckpointError::from)
     }
 
-    async fn reconcile_frontier(&self, state: AgentState) -> Result<AgentState, CheckpointError> {
+    async fn reconcile_frontier(
+        &self,
+        state: AgentState,
+        message_sequences: &BTreeSet<u64>,
+    ) -> Result<AgentState, CheckpointError> {
         self.validate_committed_messages(&state).await?;
 
         let frontier = state
             .last_seq
             .checked_add(1)
             .ok_or(CheckpointError::SequenceOverflow)?;
-        let Some(frontier_message) = self.read_message(&state, frontier).await? else {
+        if let Some(seq) = message_sequences
+            .range((Excluded(frontier), Unbounded))
+            .next()
+        {
+            trace_checkpoint_corruption(&state, *seq);
+            return Err(CheckpointError::MessageBeyondFrontier {
+                seq: *seq,
+                frontier,
+            });
+        }
+        if !message_sequences.contains(&frontier) {
             return Ok(state);
-        };
+        }
+        let frontier_message = self
+            .read_message(&state, frontier)
+            .await?
+            .ok_or(CheckpointError::MissingCommittedMessage { seq: frontier })?;
         validate_message(
             &frontier_message,
             state.agent_id,
@@ -161,17 +181,6 @@ impl FilesystemAgentCheckpoint {
             state.turn_id,
         )
         .inspect_err(|_| trace_checkpoint_corruption(&state, frontier))?;
-
-        let beyond = frontier
-            .checked_add(1)
-            .ok_or(CheckpointError::SequenceOverflow)?;
-        if self.read_message(&state, beyond).await?.is_some() {
-            trace_checkpoint_corruption(&state, beyond);
-            return Err(CheckpointError::MessageBeyondFrontier {
-                seq: beyond,
-                frontier,
-            });
-        }
 
         tracing::info!(
             agent_id = %state.agent_id,
@@ -182,6 +191,21 @@ impl FilesystemAgentCheckpoint {
             "checkpoint frontier reconciliation"
         );
         self.commit_sequence(state.last_seq, frontier).await
+    }
+
+    async fn list_message_sequences(&self) -> Result<BTreeSet<u64>, CheckpointError> {
+        let entries = self.filesystem.list_dir(&self.messages_path()?).await?;
+        let mut sequences = BTreeSet::new();
+        for entry in entries {
+            let seq = parse_message_filename(&entry.file_name)?;
+            if entry.file_type != FileType::File || entry.path != self.message_path(seq)? {
+                return Err(CheckpointError::InvalidMessageFilename {
+                    file_name: entry.file_name,
+                });
+            }
+            sequences.insert(seq);
+        }
+        Ok(sequences)
     }
 
     async fn validate_committed_messages(&self, state: &AgentState) -> Result<(), CheckpointError> {
@@ -198,8 +222,15 @@ impl FilesystemAgentCheckpoint {
 #[async_trait]
 impl AgentCheckpoint for FilesystemAgentCheckpoint {
     async fn load_agent(&self) -> Result<AgentState, CheckpointError> {
-        let state = self.read_state().await?;
-        self.reconcile_frontier(state).await
+        loop {
+            let state = self.read_state().await?;
+            let message_sequences = self.list_message_sequences().await?;
+            let refreshed = self.read_state().await?;
+            if refreshed.last_seq != state.last_seq {
+                continue;
+            }
+            return self.reconcile_frontier(refreshed, &message_sequences).await;
+        }
     }
 
     async fn update_state(
@@ -323,7 +354,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 maximum: MAX_HISTORY_PAGE_SIZE,
             });
         }
-        let state = self.load_agent().await?;
+        let state = self.read_state().await?;
         let through_seq = query.through_seq.unwrap_or(state.last_seq);
         if through_seq > state.last_seq {
             return Err(CheckpointError::HistoryBarrierBeyondLast {
@@ -405,6 +436,22 @@ fn validate_state(state: &AgentState) -> Result<(), CheckpointError> {
         });
     }
     Ok(())
+}
+
+fn parse_message_filename(file_name: &str) -> Result<u64, CheckpointError> {
+    let Some(number) = file_name.strip_suffix(".json") else {
+        return Err(CheckpointError::InvalidMessageFilename {
+            file_name: file_name.to_owned(),
+        });
+    };
+    let seq = number
+        .parse::<u64>()
+        .ok()
+        .filter(|seq| *seq != 0 && number == seq.to_string())
+        .ok_or_else(|| CheckpointError::InvalidMessageFilename {
+            file_name: file_name.to_owned(),
+        })?;
+    Ok(seq)
 }
 
 fn validate_message(

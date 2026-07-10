@@ -115,6 +115,86 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
 }
 
 #[tokio::test]
+async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let second = message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
+
+    let error = checkpoint
+        .load_agent()
+        .await
+        .expect_err("discontiguous extra message");
+
+    assert!(matches!(
+        error,
+        CheckpointError::MessageBeyondFrontier {
+            seq: 2,
+            frontier: 1
+        }
+    ));
+}
+
+#[tokio::test]
+async fn load_rejects_a_third_message_beyond_the_single_frontier() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let third = message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
+    filesystem.insert_entry("/agents/a/messages/3.json", json_entry(&third));
+
+    let error = checkpoint
+        .load_agent()
+        .await
+        .expect_err("message beyond single frontier");
+
+    assert!(matches!(
+        error,
+        CheckpointError::MessageBeyondFrontier {
+            seq: 3,
+            frontier: 1
+        }
+    ));
+}
+
+#[tokio::test]
+async fn load_rejects_noncanonical_message_filenames() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    filesystem.insert_entry("/agents/a/messages/01.json", json_entry(&first));
+
+    let error = checkpoint
+        .load_agent()
+        .await
+        .expect_err("noncanonical filename");
+
+    assert!(matches!(
+        error,
+        CheckpointError::InvalidMessageFilename { file_name } if file_name == "01.json"
+    ));
+}
+
+#[tokio::test]
 async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplication() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -543,4 +623,37 @@ async fn pagination_reads_nine_and_ten_in_numeric_order() {
         .expect("numeric page");
 
     assert_eq!(event_sequences(&page.events), [9, 10]);
+}
+
+#[tokio::test]
+async fn pagination_reads_only_the_requested_message_paths() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    checkpoint
+        .initialize(AgentId::new(), "a".to_owned())
+        .await
+        .expect("initialize");
+    append_messages(&checkpoint, 5).await;
+    filesystem.reset_read_counts();
+
+    let page = checkpoint
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: Some(5),
+            limit: 1,
+        })
+        .await
+        .expect("single-message page");
+
+    assert_eq!(event_sequences(&page.events), [1]);
+    assert_eq!(filesystem.read_count("/agents/a/agent.json"), 1);
+    assert_eq!(filesystem.read_count("/agents/a/messages/1.json"), 1);
+    for seq in 2..=5 {
+        assert_eq!(
+            filesystem.read_count(&format!("/agents/a/messages/{seq}.json")),
+            0
+        );
+    }
+    assert_eq!(filesystem.list_count(), 0);
 }
