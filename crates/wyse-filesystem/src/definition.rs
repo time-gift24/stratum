@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::{FilesystemError, VirtualPath};
+use crate::{CasExpectation, Entry, FilesystemError, RecordVersion, VersionedEntry, VirtualPath};
 
 /// Agent-visible filesystem operations.
 ///
@@ -10,6 +10,32 @@ use crate::{FilesystemError, VirtualPath};
 /// dependencies without knowing the backend type.
 #[async_trait]
 pub trait Filesystem: Send + Sync {
+    /// Reads one versioned record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilesystemError::UnsupportedCas`] when the backend does not support
+    /// compare-and-swap operations, or another backend error when the read fails.
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        Err(FilesystemError::UnsupportedCas)
+    }
+
+    /// Writes one record when its compare-and-swap expectation holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilesystemError::UnsupportedCas`] when the backend does not support
+    /// compare-and-swap operations, [`FilesystemError::VersionMismatch`] when the
+    /// expectation fails, or another backend error when the write fails.
+    async fn put(
+        &self,
+        _path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        Err(FilesystemError::UnsupportedCas)
+    }
+
     /// Reads a complete file into memory.
     ///
     /// # Errors

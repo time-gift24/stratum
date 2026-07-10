@@ -312,6 +312,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_filesystem_fails_closed_for_cas() {
+        let temp = std::env::temp_dir().join(format!("wyse-fs-cas-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let path = VirtualPath::try_from("/agent.json").expect("valid path");
+
+        let error = filesystem.get(&path).await.expect_err("CAS is unsupported");
+
+        assert!(matches!(error, FilesystemError::UnsupportedCas));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
     async fn remove_dir_rejects_non_empty_directory() {
         let temp = std::env::temp_dir().join(format!("wyse-fs-non-empty-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&temp).await;
