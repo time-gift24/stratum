@@ -5,7 +5,7 @@
   "scripts": {
     "build": "react-router build",
     "dev": "react-router dev",
-    "test": "node --test app/components/stratum-mark.test.mjs",
+    "test": "tsx --test app/components/stratum-mark.test.mjs app/lib/*.test.ts",
     "start": "react-router-serve ./build/server/index.js",
     "typecheck": "react-router typegen && tsc",
     "format": "prettier --write \"**/*.{ts,tsx}\""
@@ -38,6 +38,7 @@
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
     "tailwindcss": "^4",
+    "tsx": "^4.23.0",
     "typescript": "^6",
     "vite": "^8"
   }
