@@ -1,5 +1,7 @@
 //! Core protocol types shared across Wyse crates.
 
+pub mod error;
+
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use bon::Builder;
@@ -7,6 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+pub use error::ModelRefParseError;
 
 /// Identity of one workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -208,6 +212,66 @@ string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
+
+/// Canonical identity of a provider-local model.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ModelRef {
+    provider: String,
+    model: ModelId,
+}
+
+impl ModelRef {
+    /// Returns the canonical provider name.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the provider-local model identifier.
+    #[must_use]
+    pub fn model(&self) -> &ModelId {
+        &self.model
+    }
+}
+
+impl fmt::Display for ModelRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.provider, self.model)
+    }
+}
+
+impl FromStr for ModelRef {
+    type Err = ModelRefParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some((provider, model)) = value.split_once(':') else {
+            return Err(ModelRefParseError::InvalidFormat);
+        };
+        if provider.is_empty() || model.is_empty() || model.contains(':') || value.trim() != value {
+            return Err(ModelRefParseError::InvalidFormat);
+        }
+
+        Ok(Self {
+            provider: provider.to_owned(),
+            model: ModelId::from(model),
+        })
+    }
+}
+
+impl TryFrom<String> for ModelRef {
+    type Error = ModelRefParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<ModelRef> for String {
+    fn from(value: ModelRef) -> Self {
+        value.to_string()
+    }
+}
 
 /// Source that owns a runtime stream event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -624,6 +688,32 @@ mod tests {
 
         assert_eq!(model_id.as_str(), "gpt-4.1-mini");
         assert_eq!(model_id.to_string(), "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn model_ref_round_trips_provider_and_model() {
+        let model_ref: ModelRef = "openai:gpt-4.1-mini".parse().expect("model ref parses");
+
+        assert_eq!(model_ref.provider(), "openai");
+        assert_eq!(model_ref.model().as_str(), "gpt-4.1-mini");
+        assert_eq!(model_ref.to_string(), "openai:gpt-4.1-mini");
+        assert_eq!(
+            serde_json::to_string(&model_ref).expect("model ref serializes"),
+            "\"openai:gpt-4.1-mini\"",
+        );
+    }
+
+    #[test]
+    fn model_ref_rejects_noncanonical_values() {
+        for value in [
+            "openai",
+            ":gpt",
+            "openai:",
+            "openai:gpt:mini",
+            " openai:gpt",
+        ] {
+            assert!(value.parse::<ModelRef>().is_err(), "{value} should fail");
+        }
     }
 
     #[test]
