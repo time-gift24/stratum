@@ -2,7 +2,7 @@ use std::{io::Write, sync::Arc};
 
 use futures_util::StreamExt;
 use wyse_agent::AgentError;
-use wyse_agent_builtin::{DefaultAgentError, build_default_agent};
+use wyse_agent_builtin::build_default_agent;
 use wyse_core::{AgentEvent, ChatMessage, ModelId, ModelIdParseError, RuntimeEvent};
 use wyse_infra::{
     EventStreamBus,
@@ -42,10 +42,8 @@ enum SimpleAgentError {
     ProviderManager(#[from] LlmError),
     #[error("unsupported deepseek model: {model}")]
     UnsupportedDeepSeekModel { model: ModelId },
-    #[error("default agent setup failed")]
-    DefaultAgent(#[from] DefaultAgentError),
-    #[error("agent start failed")]
-    AgentStart(#[from] AgentError),
+    #[error("agent operation failed")]
+    Agent(#[from] AgentError),
     #[error("event stream failed")]
     EventStream(#[from] EventStreamBusError),
     #[error("failed to encode event")]
