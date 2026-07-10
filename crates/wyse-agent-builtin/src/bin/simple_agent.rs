@@ -8,20 +8,40 @@ use wyse_infra::{
     EventStreamBus,
     event_stream_bus::{EventStreamBusError, InMemoryEventStreamBus},
 };
-use wyse_llm::ApiKey;
+use wyse_llm::{
+    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError, LlmProvider,
+    LlmProviderManager, OpenAICompatibleProvider,
+};
+
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+
+#[derive(serde::Deserialize)]
+struct Config {
+    openai: Option<ProviderConfig>,
+    deepseek: Option<ProviderConfig>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderConfig {
+    api_key: String,
+    models: Vec<String>,
+}
 
 #[derive(Debug, thiserror::Error)]
 enum SimpleAgentError {
-    #[error("missing environment variable: {name}")]
-    MissingEnvironment { name: &'static str },
-    #[error("environment variable is not valid unicode")]
-    InvalidEnvironment(#[source] std::env::VarError),
-    #[error("missing prompt argument")]
-    MissingPrompt,
-    #[error("expected exactly one prompt argument")]
-    TooManyArguments,
+    #[error("failed to read config.toml")]
+    ConfigRead(#[source] std::io::Error),
+    #[error("failed to parse config.toml")]
+    ConfigParse(#[source] toml::de::Error),
+    #[error("usage: simple_agent --model provider:model <prompt>")]
+    InvalidArguments,
     #[error("invalid model id")]
     ModelId(#[from] ModelIdParseError),
+    #[error("provider manager operation failed")]
+    ProviderManager(#[from] LlmError),
+    #[error("unsupported deepseek model: {model}")]
+    UnsupportedDeepSeekModel { model: ModelId },
     #[error("default agent setup failed")]
     DefaultAgent(#[from] DefaultAgentError),
     #[error("agent start failed")]
@@ -40,30 +60,80 @@ enum SimpleAgentError {
     StreamClosed,
 }
 
-fn required_environment(name: &'static str) -> Result<String, SimpleAgentError> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => Err(SimpleAgentError::MissingEnvironment { name }),
-        Err(error) => Err(SimpleAgentError::InvalidEnvironment(error)),
-    }
+fn parse_config(input: &str) -> Result<Config, SimpleAgentError> {
+    toml::from_str(input).map_err(SimpleAgentError::ConfigParse)
 }
 
-fn prompt_from_args(mut args: impl Iterator<Item = String>) -> Result<String, SimpleAgentError> {
-    let prompt = args.next().ok_or(SimpleAgentError::MissingPrompt)?;
-    if args.next().is_some() {
-        return Err(SimpleAgentError::TooManyArguments);
+fn parse_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(ModelId, String), SimpleAgentError> {
+    if args.next().as_deref() != Some("--model") {
+        return Err(SimpleAgentError::InvalidArguments);
     }
-    Ok(prompt)
+
+    let model = args
+        .next()
+        .ok_or(SimpleAgentError::InvalidArguments)?
+        .parse()?;
+    let prompt = args.next().ok_or(SimpleAgentError::InvalidArguments)?;
+    if args.next().is_some() {
+        return Err(SimpleAgentError::InvalidArguments);
+    }
+
+    Ok((model, prompt))
+}
+
+fn configured_providers(config: &Config) -> Result<LlmProviderManager, SimpleAgentError> {
+    let mut providers = LlmProviderManager::new();
+
+    if let Some(openai) = &config.openai {
+        for model in &openai.models {
+            let model = ModelId::new("openai", model)?;
+            let provider: Arc<dyn LlmProvider> = Arc::new(OpenAICompatibleProvider::new(
+                OPENAI_BASE_URL,
+                ApiKey::new(&openai.api_key),
+                model,
+            ));
+            providers.register(provider)?;
+        }
+    }
+
+    if let Some(deepseek) = &config.deepseek {
+        for model in &deepseek.models {
+            let model = ModelId::new("deepseek", model)?;
+            let provider: Arc<dyn LlmProvider> = Arc::new(DeepSeekProvider::new(
+                DEEPSEEK_BASE_URL,
+                ApiKey::new(&deepseek.api_key),
+                deepseek_model(&model)?,
+                DeepSeekThinking::Disabled,
+            ));
+            providers.register(provider)?;
+        }
+    }
+
+    Ok(providers)
+}
+
+fn deepseek_model(model: &ModelId) -> Result<DeepSeekModel, SimpleAgentError> {
+    match model.model_name() {
+        "deepseek-v4-flash" => Ok(DeepSeekModel::V4Flash),
+        "deepseek-v4-pro" => Ok(DeepSeekModel::V4Pro),
+        _ => Err(SimpleAgentError::UnsupportedDeepSeekModel {
+            model: model.clone(),
+        }),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), SimpleAgentError> {
-    let api_key = ApiKey::new(required_environment("API_KEY")?);
-    let model: ModelId = required_environment("MODEL")?.parse()?;
-    let prompt = prompt_from_args(std::env::args().skip(1))?;
+    let (model, prompt) = parse_args(std::env::args().skip(1))?;
+    let config = parse_config(
+        &std::fs::read_to_string("config.toml").map_err(SimpleAgentError::ConfigRead)?,
+    )?;
+    let llm_provider = configured_providers(&config)?.get(&model)?;
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let event_bus: Arc<dyn EventStreamBus> = bus.clone();
-    let agent = build_default_agent(event_bus, api_key, &model)?;
+    let agent = build_default_agent(event_bus, llm_provider)?;
     let run_id = agent.run_turn(ChatMessage::user(prompt)).await?;
     let mut stream = bus.subscribe_run(run_id).await?;
     let stdout = std::io::stdout();
@@ -100,14 +170,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_from_args_requires_exactly_one_argument() {
+    fn config_parses_provider_keys_and_model_lists() {
+        let config = parse_config("[openai]\napi_key = \"test\"\nmodels = [\"gpt-4.1-mini\"]")
+            .expect("config parses");
+
+        assert_eq!(
+            config.openai.expect("openai config").models,
+            ["gpt-4.1-mini"]
+        );
+    }
+
+    #[test]
+    fn arguments_require_model_flag_and_one_prompt() {
+        let (model, prompt) = parse_args(
+            ["--model", "openai:gpt-4.1-mini", "hello"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("arguments parse");
+
+        assert_eq!(model.as_str(), "openai:gpt-4.1-mini");
+        assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn arguments_reject_any_form_other_than_model_and_one_prompt() {
+        for arguments in [
+            vec![],
+            vec!["hello"],
+            vec!["--model", "openai:gpt-4.1-mini"],
+            vec!["--model", "openai:gpt-4.1-mini", "hello", "again"],
+        ] {
+            assert!(matches!(
+                parse_args(arguments.into_iter().map(str::to_owned)),
+                Err(SimpleAgentError::InvalidArguments)
+            ));
+        }
+    }
+
+    #[test]
+    fn configured_providers_register_every_configured_model() {
+        let config = parse_config(
+            "[openai]\napi_key = \"test\"\nmodels = [\"gpt-4.1-mini\"]\n\
+             [deepseek]\napi_key = \"test\"\nmodels = [\"deepseek-v4-flash\"]",
+        )
+        .expect("config parses");
+
+        let providers = configured_providers(&config).expect("providers configure");
+
+        assert_eq!(
+            providers
+                .get(&ModelId::new("openai", "gpt-4.1-mini").expect("model id parses"))
+                .expect("openai provider registers")
+                .model_id()
+                .as_str(),
+            "openai:gpt-4.1-mini"
+        );
+        assert_eq!(
+            providers
+                .get(&ModelId::new("deepseek", "deepseek-v4-flash").expect("model id parses"),)
+                .expect("deepseek provider registers")
+                .model_id()
+                .as_str(),
+            "deepseek:deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn configured_providers_reject_unknown_deepseek_model() {
+        let config = parse_config("[deepseek]\napi_key = \"test\"\nmodels = [\"not-a-model\"]")
+            .expect("config parses");
+
+        let error = match configured_providers(&config) {
+            Ok(_) => panic!("unknown DeepSeek model should reject"),
+            Err(error) => error,
+        };
+
         assert!(matches!(
-            prompt_from_args(Vec::<String>::new().into_iter()),
-            Err(SimpleAgentError::MissingPrompt)
-        ));
-        assert!(matches!(
-            prompt_from_args(["one".to_owned(), "two".to_owned()].into_iter()),
-            Err(SimpleAgentError::TooManyArguments)
+            error,
+            SimpleAgentError::UnsupportedDeepSeekModel { .. }
         ));
     }
 }

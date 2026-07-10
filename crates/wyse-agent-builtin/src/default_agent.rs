@@ -1,32 +1,23 @@
 use std::sync::Arc;
 
 use wyse_agent::Agent;
-use wyse_core::ModelId;
 use wyse_infra::EventStreamBus;
-use wyse_llm::{
-    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProvider,
-    OpenAICompatibleProvider,
-};
+use wyse_llm::LlmProvider;
 use wyse_tools::BuiltinToolRegistry;
 
 use crate::DefaultAgentError;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
-const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
-/// Builds the no-tool default agent for one supported model id.
+/// Builds the no-tool default agent with an injected provider.
 ///
 /// # Errors
 ///
-/// Returns an error when the provider/model is unsupported or agent wiring is incomplete.
+/// Returns an error when the supplied agent wiring is incomplete.
 pub fn build_default_agent(
     event_bus: Arc<dyn EventStreamBus>,
-    api_key: ApiKey,
-    model: &ModelId,
+    llm_provider: Arc<dyn LlmProvider>,
 ) -> Result<Agent, DefaultAgentError> {
-    let llm_provider = build_llm_provider(api_key, model)?;
-
     Ok(Agent::builder()
         .name("default-agent")
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
@@ -34,83 +25,4 @@ pub fn build_default_agent(
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(event_bus)
         .build()?)
-}
-
-fn build_llm_provider(
-    api_key: ApiKey,
-    model: &ModelId,
-) -> Result<Arc<dyn LlmProvider>, DefaultAgentError> {
-    match model.provider_name() {
-        "openai" => Ok(Arc::new(OpenAICompatibleProvider::new(
-            OPENAI_BASE_URL,
-            api_key,
-            model.clone(),
-        ))),
-        "deepseek" => Ok(Arc::new(DeepSeekProvider::new(
-            DEEPSEEK_BASE_URL,
-            api_key,
-            deepseek_model(model)?,
-            DeepSeekThinking::Disabled,
-        ))),
-        provider => Err(DefaultAgentError::UnsupportedProvider {
-            provider: provider.to_owned(),
-        }),
-    }
-}
-
-fn deepseek_model(model: &ModelId) -> Result<DeepSeekModel, DefaultAgentError> {
-    match model.model_name() {
-        "deepseek-v4-flash" => Ok(DeepSeekModel::V4Flash),
-        "deepseek-v4-pro" => Ok(DeepSeekModel::V4Pro),
-        _ => Err(DefaultAgentError::UnsupportedDeepSeekModel {
-            model: model.clone(),
-        }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use wyse_llm::ApiKey;
-
-    use super::{DefaultAgentError, build_llm_provider};
-
-    #[test]
-    fn openai_wiring_reports_canonical_provider_and_model() {
-        let provider = build_llm_provider(
-            ApiKey::new("test-key"),
-            &"openai:gpt-4.1-mini".parse().expect("model id parses"),
-        )
-        .expect("openai is supported");
-
-        assert_eq!(provider.model_id().as_str(), "openai:gpt-4.1-mini");
-    }
-
-    #[test]
-    fn deepseek_wiring_reports_canonical_provider_and_model() {
-        let provider = build_llm_provider(
-            ApiKey::new("test-key"),
-            &"deepseek:deepseek-v4-flash"
-                .parse()
-                .expect("model id parses"),
-        )
-        .expect("deepseek model is supported");
-
-        assert_eq!(provider.model_id().as_str(), "deepseek:deepseek-v4-flash");
-    }
-
-    #[test]
-    fn deepseek_wiring_rejects_unknown_model() {
-        let error = match build_llm_provider(
-            ApiKey::new("test-key"),
-            &"deepseek:not-a-model".parse().expect("model id parses"),
-        ) {
-            Ok(_) => panic!("unknown DeepSeek model should fail"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            DefaultAgentError::UnsupportedDeepSeekModel { .. }
-        ));
-    }
 }

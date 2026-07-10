@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tokio.workspace = true
 wyse-agent.workspace = true
 wyse-core.workspace = true
