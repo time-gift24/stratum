@@ -28,8 +28,8 @@ async fn nats_event_stream_bus_publishes_and_subscribes_run_events() -> Result<(
     eprintln!("publishing {} envelopes concurrently", envelopes.len());
     try_join_all(envelopes.iter().cloned().map(|envelope| {
         eprintln!(
-            "publish seq={} event_type={} metadata={:?}",
-            envelope.seq,
+            "publish pub_index={:?} event_type={} metadata={:?}",
+            envelope.metadata.get("pub_index"),
             envelope.event.event_type(),
             envelope.metadata
         );
@@ -116,8 +116,8 @@ async fn receive_envelopes(
             .ok_or_else(|| format!("{subscriber} ended before receiving all envelopes"))?;
 
         eprintln!(
-            "{subscriber} received seq={} event_type={} metadata={:?}",
-            envelope.seq,
+            "{subscriber} received pub_index={:?} event_type={} metadata={:?}",
+            envelope.metadata.get("pub_index"),
             envelope.event.event_type(),
             envelope.metadata
         );
@@ -136,7 +136,6 @@ fn envelopes(run_id: RunId) -> Vec<StreamEnvelope> {
 
             StreamEnvelope {
                 run_id,
-                seq,
                 timestamp: Utc::now(),
                 source: EventSource::Run,
                 event: RuntimeEvent::NodeOutput {

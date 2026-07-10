@@ -121,13 +121,14 @@ mod tests {
     use super::*;
     use crate::event_stream_bus::EventStreamBus;
 
-    fn envelope(run_id: RunId, seq: u64) -> StreamEnvelope {
+    fn envelope(run_id: RunId, value: u64) -> StreamEnvelope {
         StreamEnvelope {
             run_id,
-            seq,
             timestamp: Utc::now(),
             source: EventSource::Run,
-            event: RuntimeEvent::RunStarted,
+            event: RuntimeEvent::NodeOutput {
+                output: serde_json::json!(value),
+            },
             metadata: BTreeMap::new(),
         }
     }
@@ -147,7 +148,10 @@ mod tests {
             .expect("event should deserialize");
 
         assert_eq!(received.run_id, run_id);
-        assert_eq!(received.seq, 1);
+        assert_eq!(
+            received.event,
+            RuntimeEvent::NodeOutput { output: 1.into() }
+        );
     }
 
     #[tokio::test]
@@ -165,7 +169,10 @@ mod tests {
             .expect("event should deserialize");
 
         assert_eq!(received.run_id, run_id);
-        assert_eq!(received.seq, 1);
+        assert_eq!(
+            received.event,
+            RuntimeEvent::NodeOutput { output: 1.into() }
+        );
     }
 
     #[tokio::test]
@@ -188,8 +195,8 @@ mod tests {
             .expect("second event")
             .expect("event should deserialize");
 
-        assert_eq!(first.seq, 1);
-        assert_eq!(second.seq, 2);
+        assert_eq!(first.event, RuntimeEvent::NodeOutput { output: 1.into() });
+        assert_eq!(second.event, RuntimeEvent::NodeOutput { output: 2.into() });
     }
 
     #[tokio::test]
@@ -202,13 +209,18 @@ mod tests {
         bus.publish(envelope(run_id, 2)).await.expect("publish 2");
         bus.publish(envelope(run_id, 3)).await.expect("publish 3");
 
-        for expected_seq in 1..=3 {
+        for expected_value in 1..=3 {
             let received = stream
                 .next()
                 .await
                 .expect("event")
                 .expect("event should deserialize");
-            assert_eq!(received.seq, expected_seq);
+            assert_eq!(
+                received.event,
+                RuntimeEvent::NodeOutput {
+                    output: expected_value.into()
+                }
+            );
         }
     }
 
@@ -233,6 +245,9 @@ mod tests {
             .expect("event should deserialize");
 
         assert_eq!(received.run_id, run_id);
-        assert_eq!(received.seq, 2);
+        assert_eq!(
+            received.event,
+            RuntimeEvent::NodeOutput { output: 2.into() }
+        );
     }
 }

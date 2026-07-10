@@ -1068,11 +1068,11 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
         .await
         .expect("subscribe should succeed");
 
-    let mut last_failed_seq = 0;
+    let mut failed_event_count = 0;
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = failed_events.next().await {
             let envelope = envelope.expect("event should be delivered");
-            last_failed_seq = envelope.seq;
+            failed_event_count += 1;
             if matches!(
                 envelope.event,
                 RuntimeEvent::Agent {
@@ -1115,17 +1115,15 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
         .expect("subscribe should succeed");
 
     let mut saw_resumed_event = false;
+    let mut resumed_event_count = 0;
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = resumed_events.next().await {
             let envelope = envelope.expect("event should be delivered");
-            if envelope.seq <= last_failed_seq {
+            resumed_event_count += 1;
+            if resumed_event_count <= failed_event_count {
                 continue;
             }
             saw_resumed_event = true;
-            assert!(
-                envelope.seq > last_failed_seq,
-                "resumed stream seq should continue after failed attempt"
-            );
             if matches!(
                 envelope.event,
                 RuntimeEvent::Agent {

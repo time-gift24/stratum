@@ -637,6 +637,15 @@ pub enum LlmEvent {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEvent {
+    /// One complete message committed to agent history.
+    Message {
+        /// Monotonic business sequence for complete messages.
+        seq: u64,
+        /// Turn that produced the message.
+        turn_id: TurnId,
+        /// Complete message payload.
+        message: ChatMessage,
+    },
     /// Agent run started.
     Started,
     /// Agent run finished.
@@ -684,6 +693,34 @@ pub enum AgentEvent {
         /// LLM event payload.
         event: LlmEvent,
     },
+}
+
+impl AgentEvent {
+    /// Returns the complete-message business sequence, when present.
+    #[must_use]
+    pub const fn business_seq(&self) -> Option<u64> {
+        match self {
+            Self::Message { seq, .. } => Some(*seq),
+            Self::Started
+            | Self::Finished { .. }
+            | Self::Failed { .. }
+            | Self::Cancelled
+            | Self::Llm { .. } => None,
+        }
+    }
+
+    /// Returns the serialized event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Message { .. } => "message",
+            Self::Started => "started",
+            Self::Finished { .. } => "finished",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Llm { .. } => "llm",
+        }
+    }
 }
 
 /// Runtime event payload.
@@ -745,6 +782,24 @@ pub enum RuntimeEvent {
 }
 
 impl RuntimeEvent {
+    /// Returns the complete-message business sequence, when present.
+    #[must_use]
+    pub const fn business_seq(&self) -> Option<u64> {
+        match self {
+            Self::Agent { event, .. } => event.business_seq(),
+            Self::RunStarted
+            | Self::RunFinished { .. }
+            | Self::RunFailed { .. }
+            | Self::RunCancelled
+            | Self::NodeStarted
+            | Self::NodeOutput { .. }
+            | Self::NodeFinished
+            | Self::NodeFailed { .. }
+            | Self::Llm { .. }
+            | Self::PlanUpdated { .. } => None,
+        }
+    }
+
     /// Returns the serialized event type name.
     #[must_use]
     pub const fn event_type(&self) -> &'static str {
@@ -764,13 +819,42 @@ impl RuntimeEvent {
     }
 }
 
+/// Opaque position in a transport event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventCursor(u64);
+
+impl EventCursor {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_transport_sequence(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn transport_sequence(self) -> u64 {
+        self.0
+    }
+}
+
+/// Starting position for a replayable event subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayStart {
+    /// Replay all retained events.
+    All,
+    /// Replay events after the supplied transport cursor.
+    After(EventCursor),
+    /// Deliver only newly published events.
+    New,
+}
+
 /// One event in a workflow run stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEnvelope {
     /// Workflow run identity.
     pub run_id: RunId,
-    /// Monotonic event sequence in one run.
-    pub seq: u64,
     /// Event creation time.
     pub timestamp: DateTime<Utc>,
     /// Event ownership.
@@ -782,9 +866,88 @@ pub struct StreamEnvelope {
     pub metadata: BTreeMap<String, Value>,
 }
 
+/// One transport event and its replay cursor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRecord {
+    /// Transport position of the event.
+    pub cursor: EventCursor,
+    /// Event payload.
+    pub envelope: StreamEnvelope,
+}
+
+/// Fixed-range query over complete agent messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryQuery {
+    /// Excludes messages at or before this business sequence.
+    pub after_seq: u64,
+    /// Optional inclusive upper business-sequence bound.
+    pub through_seq: Option<u64>,
+    /// Maximum number of messages to return.
+    pub limit: usize,
+}
+
+/// One page of complete agent-message history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryPage {
+    /// Inclusive upper business-sequence bound used for this page.
+    pub through_seq: u64,
+    /// Complete message events in the page.
+    pub events: Vec<StreamEnvelope>,
+    /// Business sequence from which the next front page should continue.
+    pub next_front_seq: u64,
+    /// Whether additional events remain in the fixed range.
+    pub has_more: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent_envelope(event: AgentEvent) -> StreamEnvelope {
+        StreamEnvelope {
+            run_id: RunId::new(),
+            timestamp: Utc::now(),
+            source: EventSource::Run,
+            event: RuntimeEvent::Agent {
+                agent_id: AgentId::new(),
+                event,
+            },
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn only_complete_agent_message_has_business_sequence() {
+        let message = AgentEvent::Message {
+            seq: 7,
+            turn_id: TurnId::new(),
+            message: ChatMessage::user("hello"),
+        };
+        let delta = AgentEvent::Llm {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+            event: LlmEvent::TextDelta {
+                role: LlmCallRole::Assistant,
+                delta: "hel".to_owned(),
+            },
+        };
+
+        assert_eq!(message.business_seq(), Some(7));
+        assert_eq!(delta.business_seq(), None);
+    }
+
+    #[test]
+    fn stream_envelope_has_no_top_level_sequence() {
+        let value =
+            serde_json::to_value(agent_envelope(AgentEvent::Started)).expect("serialize envelope");
+
+        assert!(value.get("seq").is_none());
+    }
+
+    #[test]
+    fn event_cursor_is_not_ordered_with_business_sequence() {
+        let cursor = EventCursor::from_transport_sequence(12);
+        assert_eq!(cursor.transport_sequence(), 12);
+    }
 
     #[test]
     fn run_id_uses_uuid_v7() {

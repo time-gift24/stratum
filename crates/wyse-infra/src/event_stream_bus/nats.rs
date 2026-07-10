@@ -1,11 +1,8 @@
 //! NATS JetStream event stream bus implementation.
 
-use async_nats::{
-    HeaderMap,
-    jetstream::{
-        self,
-        consumer::{DeliverPolicy, push::OrderedConfig},
-    },
+use async_nats::jetstream::{
+    self,
+    consumer::{DeliverPolicy, push::OrderedConfig},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -54,13 +51,10 @@ impl NatsEventStreamBus {
 impl EventStreamBus for NatsEventStreamBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
         let subject = self.subject_for(&envelope);
-        let message_id = message_id(&envelope);
         let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
-        let mut headers = HeaderMap::new();
-        headers.append("Nats-Msg-Id", message_id);
 
         self.jetstream
-            .publish_with_headers(subject, headers, Bytes::from(payload))
+            .publish(subject, Bytes::from(payload))
             .await
             .map_err(EventStreamBusError::nats)?
             .await
@@ -111,10 +105,6 @@ fn subscribe_subject(prefix: &str, run_id: RunId) -> String {
     format!("{prefix}.{run_id}.>")
 }
 
-fn message_id(envelope: &StreamEnvelope) -> String {
-    format!("{}:{}", envelope.run_id, envelope.seq)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -127,7 +117,6 @@ mod tests {
     fn envelope() -> StreamEnvelope {
         StreamEnvelope {
             run_id: RunId::new(),
-            seq: 42,
             timestamp: Utc::now(),
             source: EventSource::Run,
             event: RuntimeEvent::RunStarted,
@@ -152,12 +141,5 @@ mod tests {
         let subject = subscribe_subject("wyse.events", run_id);
 
         assert_eq!(subject, format!("wyse.events.{run_id}.>"));
-    }
-
-    #[test]
-    fn message_id_uses_run_id_and_seq() {
-        let envelope = envelope();
-
-        assert_eq!(message_id(&envelope), format!("{}:42", envelope.run_id));
     }
 }

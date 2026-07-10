@@ -339,7 +339,6 @@ impl Agent {
 
         let envelope = StreamEnvelope {
             run_id: self.current_run().expect("run id should be set"),
-            seq,
             timestamp: Utc::now(),
             source: EventSource::Run,
             event: RuntimeEvent::Agent {
