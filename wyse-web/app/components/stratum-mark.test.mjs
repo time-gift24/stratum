@@ -115,6 +115,19 @@ test("the dashboard remains a static run-first sample", async () => {
   assert.doesNotMatch(sample, /fetch\(|axios|\b\d+(?:\.\d+)?(?:%|ms)\b/)
 })
 
+test("the navbar groups localized dashboard navigation", async () => {
+  const navbar = await readFile(navbarUrl, "utf8")
+
+  assert.match(navbar, /NavigationMenuContent/)
+  assert.match(navbar, /NavigationMenuTrigger/)
+  assert.match(navbar, /t\("nav\.product"\)/)
+  assert.match(navbar, /href="#dashboard"/)
+  assert.match(navbar, /href="#agents"/)
+  assert.match(navbar, /href="#workflows"/)
+  assert.match(navbar, /href="#runs"/)
+  assert.match(navbar, /<LocaleToggle\s*\/>/)
+})
+
 test("dashboard component rules keep visual declarations in Tailwind apply utilities", async () => {
   const appCss = await readFile(appCssUrl, "utf8")
   const dashboardRules = [

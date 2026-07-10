@@ -6,15 +6,18 @@ import gsap from "gsap"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
 
 import GlassSurface from "~/components/GlassSurface"
+import { useLocale } from "~/components/locale-provider"
+import { LocaleToggle } from "~/components/locale-toggle"
 import { StratumMark } from "~/components/stratum-mark"
 import { ThemeToggle } from "~/components/theme-toggle"
 import { Button } from "~/components/ui/button"
 import {
   NavigationMenu,
+  NavigationMenuContent,
   NavigationMenuItem,
   NavigationMenuLink,
   NavigationMenuList,
-  navigationMenuTriggerStyle,
+  NavigationMenuTrigger,
 } from "~/components/ui/navigation-menu"
 import { Separator } from "~/components/ui/separator"
 
@@ -23,6 +26,7 @@ gsap.registerPlugin(useGSAP, ScrollTrigger)
 export function SiteNavbar() {
   const navRef = useRef<HTMLElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
+  const { t } = useLocale()
 
   useGSAP(
     () => {
@@ -127,28 +131,44 @@ export function SiteNavbar() {
         <NavigationMenu className="relative z-10 hidden flex-none md:flex">
           <NavigationMenuList>
             <NavigationMenuItem>
-              <NavigationMenuLink
-                render={<a href="#runtime" />}
-                className={navigationMenuTriggerStyle()}
-              >
-                Features
-              </NavigationMenuLink>
-            </NavigationMenuItem>
-            <NavigationMenuItem>
-              <NavigationMenuLink
-                render={<a href="#workflows" />}
-                className={navigationMenuTriggerStyle()}
-              >
-                About
-              </NavigationMenuLink>
+              <NavigationMenuTrigger>{t("nav.product")}</NavigationMenuTrigger>
+              <NavigationMenuContent>
+                <NavigationMenuLink render={<a href="#dashboard" />}>
+                  <dl>
+                    <dt>{t("nav.workspace")}</dt>
+                    <dd>{t("nav.workspace.description")}</dd>
+                  </dl>
+                </NavigationMenuLink>
+                <NavigationMenuLink render={<a href="#agents" />}>
+                  <dl>
+                    <dt>{t("nav.agents")}</dt>
+                    <dd>{t("nav.agents.description")}</dd>
+                  </dl>
+                </NavigationMenuLink>
+                <NavigationMenuLink render={<a href="#workflows" />}>
+                  <dl>
+                    <dt>{t("nav.workflows")}</dt>
+                    <dd>{t("nav.workflows.description")}</dd>
+                  </dl>
+                </NavigationMenuLink>
+                <NavigationMenuLink render={<a href="#runs" />}>
+                  <dl>
+                    <dt>{t("nav.runs")}</dt>
+                    <dd>{t("nav.runs.description")}</dd>
+                  </dl>
+                </NavigationMenuLink>
+              </NavigationMenuContent>
             </NavigationMenuItem>
           </NavigationMenuList>
         </NavigationMenu>
 
         <div className="relative z-10 flex items-center gap-3">
           <Separator orientation="vertical" className="hidden md:block" />
+          <LocaleToggle />
           <ThemeToggle />
-          <Button size="lg">Sign up</Button>
+          <Button render={<a href="#dashboard" />} size="lg">
+            {t("hero.enter")}
+          </Button>
         </div>
       </div>
     </header>
