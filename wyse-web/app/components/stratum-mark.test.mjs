@@ -129,7 +129,7 @@ test("the navbar groups localized dashboard navigation", async () => {
   assert.match(navbar, /<LocaleToggle\s*\/>/)
 })
 
-test("the home composes localized hero and dashboard content", async () => {
+test("the home composes localized hero and dashboard content without auto-scroll", async () => {
   const [home, content] = await Promise.all([
     readFile(homeUrl, "utf8"),
     readFile(homeContentUrl, "utf8"),
@@ -137,7 +137,7 @@ test("the home composes localized hero and dashboard content", async () => {
 
   assert.match(home, /<LocaleProvider>/)
   assert.match(home, /<HomeContent\s*\/>/)
-  assert.match(content, /<HeroDashboardScroll\s*\/>/)
+  assert.doesNotMatch(content, /HeroDashboardScroll/)
   assert.match(content, /<SiteNavbar\s*\/>/)
   assert.match(content, /<StratumMark/)
   assert.match(content, /<Dashboard/)

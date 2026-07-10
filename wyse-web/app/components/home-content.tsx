@@ -3,7 +3,6 @@
 import { ArrowRightIcon } from "lucide-react"
 
 import { Dashboard } from "~/components/dashboard"
-import { HeroDashboardScroll } from "~/components/hero-dashboard-scroll"
 import { useLocale } from "~/components/locale-provider"
 import { SiteNavbar } from "~/components/site-navbar"
 import { StratumMark } from "~/components/stratum-mark"
@@ -14,7 +13,6 @@ export function HomeContent() {
 
   return (
     <>
-      <HeroDashboardScroll />
       <SiteNavbar />
       <main className="wyse-home">
         <section className="wyse-home-hero">
