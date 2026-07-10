@@ -18,6 +18,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarTrigger,
 } from "~/components/ui/sidebar"
 
 export function ChatWorkspace() {
@@ -28,7 +29,7 @@ export function ChatWorkspace() {
       <SiteNavbar />
       <div className="wyse-workspace-body">
         <SidebarProvider className="wyse-workspace-shell">
-          <Sidebar collapsible="none" className="wyse-workspace-sidebar">
+          <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
             <SidebarHeader className="wyse-workspace-sidebar-header">
               <span className="wyse-workspace-sidebar-title">
                 {t("chat.sessions")}
@@ -52,6 +53,7 @@ export function ChatWorkspace() {
             </SidebarFooter>
           </Sidebar>
           <SidebarInset className="wyse-workspace-inset">
+            <SidebarTrigger className="absolute top-3 left-3 md:hidden" />
             <section className="wyse-chat-main">
               <div className="wyse-chat-copy">
                 <p className="wyse-chat-eyebrow">{t("nav.chat")}</p>

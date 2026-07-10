@@ -7,6 +7,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -66,10 +67,31 @@ export function WorkspacePager({
   const trackRef = useRef<HTMLDivElement>(null)
   const tweenRef = useRef<gsap.core.Tween | null>(null)
   const transitionLockedRef = useRef(false)
+  const focusSlideIndexRef = useRef<number | null>(null)
+  const clearTransitionAfterFocusRef = useRef(false)
+  const slideRefs = useRef<Array<HTMLDivElement | null>>([])
   const [activeSlideIndex, setActiveSlideIndex] = useState(() =>
     resolveSlideIndex(0, initialSlideIndex, slideCount, false)
   )
   const [isTransitioning, setIsTransitioning] = useState(false)
+  const [transitioningFromSlideIndex, setTransitioningFromSlideIndex] =
+    useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    const focusSlideIndex = focusSlideIndexRef.current
+
+    if (focusSlideIndex !== activeSlideIndex) {
+      return
+    }
+
+    slideRefs.current[focusSlideIndex]?.focus()
+    focusSlideIndexRef.current = null
+
+    if (clearTransitionAfterFocusRef.current) {
+      clearTransitionAfterFocusRef.current = false
+      setTransitioningFromSlideIndex(null)
+    }
+  }, [activeSlideIndex])
 
   const { contextSafe } = useGSAP(
     () => {
@@ -98,9 +120,12 @@ export function WorkspacePager({
       }
 
       const motionPolicy = getCurrentMotionPolicy()
+      focusSlideIndexRef.current = nextSlideIndex
+      setTransitioningFromSlideIndex(activeSlideIndex)
       setActiveSlideIndex(nextSlideIndex)
 
       if (motionPolicy === "instant") {
+        clearTransitionAfterFocusRef.current = true
         gsap.set(trackRef.current, { xPercent: -nextSlideIndex * 100 })
         return
       }
@@ -113,6 +138,7 @@ export function WorkspacePager({
         xPercent: -nextSlideIndex * 100,
         onComplete: () => {
           transitionLockedRef.current = false
+          setTransitioningFromSlideIndex(null)
           setIsTransitioning(false)
           tweenRef.current = null
         },
@@ -153,11 +179,19 @@ export function WorkspacePager({
         >
           {slides.map((slide, index) => (
             <div
-              aria-hidden={index !== activeSlideIndex}
+              aria-hidden={
+                index !== activeSlideIndex && index !== transitioningFromSlideIndex
+              }
               className="workspace-pager-slide"
               data-workspace-pager="slide"
-              inert={index !== activeSlideIndex}
+              inert={
+                index !== activeSlideIndex && index !== transitioningFromSlideIndex
+              }
               key={index}
+              ref={(element) => {
+                slideRefs.current[index] = element
+              }}
+              tabIndex={-1}
             >
               {slide}
             </div>

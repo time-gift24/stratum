@@ -25,17 +25,31 @@ test("uses two right-aligned pager navigation entries", async () => {
   assert.match(navbar, /selectSlide\(item\.slideIndex\)/)
 })
 
-test("builds both workspace panes on the shadcn Sidebar foundation", async () => {
-  const [chat, orchestration] = await Promise.all([
+test("uses shadcn's responsive Sidebar Sheet with a mobile trigger in both workspace panes", async () => {
+  const [chat, orchestration, css] = await Promise.all([
     component("chat-workspace.tsx"),
     component("orchestration-workspace.tsx"),
+    readFile(new URL("../app.css", import.meta.url), "utf8"),
   ])
 
   for (const source of [chat, orchestration]) {
     assert.match(source, /SidebarProvider/)
-    assert.match(source, /<Sidebar\s+collapsible="none"/)
+    assert.match(source, /SidebarTrigger/)
+    assert.match(source, /<Sidebar\s+collapsible="offcanvas"/)
+    assert.match(source, /<SidebarTrigger\s+className="[^"]*md:hidden"\s*\/>/)
     assert.match(source, /<SidebarInset/)
+
+    const providerStart = source.indexOf("<SidebarProvider")
+    const trigger = source.indexOf("<SidebarTrigger")
+    const providerEnd = source.indexOf("</SidebarProvider>")
+
+    assert.ok(providerStart < trigger && trigger < providerEnd)
   }
+
+  assert.match(
+    css,
+    /\.wyse-workspace-inset\s*\{\s*@apply min-h-0 w-full bg-background;/
+  )
 })
 
 test("caps rendered Sidebar menu corners at six pixels", async () => {
@@ -51,8 +65,25 @@ test("caps rendered Sidebar menu corners at six pixels", async () => {
 test("removes inactive pager slides from interaction and tab order", async () => {
   const pager = await component("workspace-pager.tsx")
 
-  assert.match(pager, /aria-hidden=\{index !== activeSlideIndex\}/)
-  assert.match(pager, /inert=\{index !== activeSlideIndex\}/)
+  assert.match(
+    pager,
+    /aria-hidden=\{\s*index !== activeSlideIndex && index !== transitioningFromSlideIndex\s*\}/
+  )
+  assert.match(
+    pager,
+    /inert=\{\s*index !== activeSlideIndex && index !== transitioningFromSlideIndex\s*\}/
+  )
+})
+
+test("hands focus to the incoming slide before making the outgoing slide inert", async () => {
+  const pager = await component("workspace-pager.tsx")
+
+  assert.match(pager, /const focusSlideIndexRef = useRef<number \| null>\(null\)/)
+  assert.match(pager, /useLayoutEffect\(/)
+  assert.match(
+    pager,
+    /slideRefs\.current\[focusSlideIndex\]\?\.focus\(\)/
+  )
 })
 
 test("keeps SidebarInset workspace content out of nested main landmarks", async () => {

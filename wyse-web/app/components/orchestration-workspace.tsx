@@ -18,6 +18,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarTrigger,
 } from "~/components/ui/sidebar"
 
 const orchestrationItems = [
@@ -37,7 +38,7 @@ export function OrchestrationWorkspace() {
       <SiteNavbar />
       <div className="wyse-workspace-body">
         <SidebarProvider className="wyse-workspace-shell">
-          <Sidebar collapsible="none" className="wyse-workspace-sidebar">
+          <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
             <SidebarHeader className="wyse-workspace-sidebar-header">
               <span className="wyse-workspace-sidebar-title">
                 {t("orchestration.library")}
@@ -72,6 +73,7 @@ export function OrchestrationWorkspace() {
             </SidebarFooter>
           </Sidebar>
           <SidebarInset className="wyse-workspace-inset">
+            <SidebarTrigger className="absolute top-3 left-3 md:hidden" />
             <section className="wyse-orchestration-main">
               <header className="wyse-orchestration-header">
                 <p className="wyse-chat-eyebrow">{t("nav.orchestration")}</p>
