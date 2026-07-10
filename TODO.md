@@ -22,6 +22,14 @@
   - permission context 和 policy hooks
   - config/env loading helpers
 
+- [ ] `wyse-checkpoint`
+  - checkpoint store trait
+  - SQLite checkpoint store
+  - 第一版按 turn + kind 粒度保留 latest checkpoint，写入时 upsert 覆盖该 turn 的 state BLOB
+  - checkpoint `kind` 第一版使用 `agent`，后续 workflow 接入时再增加 `workflow`
+  - `run_id` 作为 run 归属维度，不作为唯一 checkpoint 粒度
+  - 后续当单个 turn state 变大或重写成本明显时，再拆 transcript store 或增加 state 压缩
+
 - [ ] `wyse-llm`
   - 统一 chat、completion、streaming、embedding、rerank 抽象
   - `LlmProvider::provider_name()`，供 agent event metadata 组合 `provider:model`
@@ -113,11 +121,12 @@
 6. [ ] 实现 `wyse-mcp` client，包含 stdio tool adapter
 7. [ ] 实现 `wyse-agent` streaming function-calling loop
 8. [ ] 实现 `wyse-workflow` in-memory DAG runtime
-9. [ ] 实现 `wyse-store` SQLite persistence
-10. [ ] 实现 `wyse-api` REST + SSE
-11. [ ] 实现 `wyse-cli` commands
-12. [ ] 实现 `wyse-knowledge`
-13. [ ] 添加 MCP server mode
+9. [ ] 实现 `wyse-checkpoint` SQLite checkpoint persistence
+10. [ ] 实现 `wyse-store` SQLite persistence
+11. [ ] 实现 `wyse-api` REST + SSE
+12. [ ] 实现 `wyse-cli` commands
+13. [ ] 实现 `wyse-knowledge`
+14. [ ] 添加 MCP server mode
 
 ## 第一个可运行里程碑
 

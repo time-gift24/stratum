@@ -8,13 +8,19 @@ use std::{
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
-use tokio::time::timeout;
-use wyse_agent::{Agent, AgentConfig};
-use wyse_core::{
-    AgentEvent, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent, ModelId,
-    RuntimeEvent, ToolCallDelta, ToolName, ToolSpec,
+use tokio::time::{sleep, timeout};
+use wyse_agent::{Agent, AgentConfig, AgentError};
+use wyse_checkpoint::{
+    CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
 };
-use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
+use wyse_core::{
+    AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
+    ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolName, ToolSpec,
+    TurnId,
+};
+use wyse_infra::event_stream_bus::{
+    EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
+};
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
@@ -23,6 +29,8 @@ use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput
 #[derive(Debug)]
 enum ProviderResponse {
     Events(Vec<ChatStreamEvent>),
+    StreamResults(Vec<Result<ChatStreamEvent, LlmError>>),
+    StartError(LlmError),
     PendingStart { entered: Arc<tokio::sync::Notify> },
 }
 
@@ -78,6 +86,8 @@ impl LlmProvider for RecordingProvider {
             ProviderResponse::Events(events) => {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
             }
+            ProviderResponse::StreamResults(results) => Ok(Box::pin(stream::iter(results))),
+            ProviderResponse::StartError(error) => Err(error),
             ProviderResponse::PendingStart { entered } => {
                 entered.notify_waiters();
                 pending::<Result<ChatStream, LlmError>>().await
@@ -127,6 +137,106 @@ impl ToolRegistry for BlockingToolRegistry {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingCheckpointStore {
+    records: Mutex<Vec<CheckpointRecord>>,
+}
+
+impl RecordingCheckpointStore {
+    fn records(&self) -> Vec<CheckpointRecord> {
+        self.records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for RecordingCheckpointStore {
+    async fn put_latest(&self, record: CheckpointRecord) -> Result<(), CheckpointError> {
+        self.records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .push(record);
+        Ok(())
+    }
+
+    async fn latest_turn(
+        &self,
+        _run_id: wyse_core::RunId,
+        _turn_id: TurnId,
+        _kind: CheckpointKind,
+    ) -> Result<Option<CheckpointRecord>, CheckpointError> {
+        Ok(self
+            .records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .last()
+            .cloned())
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailingPublishEventBus;
+
+#[async_trait]
+impl EventStreamBus for FailingPublishEventBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        Err(EventStreamBusError::Deserialize(
+            serde_json::from_str::<serde_json::Value>("}").expect_err("invalid json should fail"),
+        ))
+    }
+
+    async fn subscribe_run(&self, _run_id: RunId) -> Result<EventStream, EventStreamBusError> {
+        Ok(Box::pin(stream::empty()))
+    }
+}
+
+async fn wait_for_latest_checkpoint(
+    checkpoints: &RecordingCheckpointStore,
+    status: CheckpointStatus,
+) -> CheckpointRecord {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(record) = checkpoints
+                .records()
+                .into_iter()
+                .rev()
+                .find(|record| record.status == status)
+            {
+                return record;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for checkpoint")
+}
+
+async fn wait_for_request_count(provider: &RecordingProvider, count: usize) -> Vec<ChatRequest> {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let requests = provider.requests();
+            if requests.len() >= count {
+                return requests;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for provider requests")
+}
+
+async fn run_turn_and_subscribe(agent: &Agent, message: ChatMessage) -> (RunId, EventStream) {
+    let run_id = agent.run_turn(message).await.expect("run should start");
+    let events = agent
+        .event_bus()
+        .subscribe_run(run_id)
+        .await
+        .expect("subscribe should succeed");
+    (run_id, events)
+}
+
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -166,15 +276,12 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut saw_text_delta = false;
     let mut saw_tool_finished = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -215,6 +322,524 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
 }
 
 #[tokio::test]
+async fn stream_saves_finished_checkpoint_with_stable_history() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ],
+    )]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let (run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for finished event");
+
+    let records = checkpoints.records();
+    let latest = records.last().expect("finished checkpoint exists");
+
+    assert_eq!(latest.run_id, run_id);
+    assert_eq!(
+        latest.turn_id,
+        agent.current_turn().expect("turn id should be set")
+    );
+    assert_eq!(latest.kind, CheckpointKind::Agent);
+    assert_eq!(latest.status, CheckpointStatus::Finished);
+    assert_eq!(latest.last_seq, 5);
+    assert!(
+        latest
+            .state
+            .windows(b"done".len())
+            .any(|window| window == b"done")
+    );
+}
+
+#[tokio::test]
+async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let records = checkpoints.records();
+    let latest = records.last().expect("waiting retry checkpoint exists");
+
+    assert_eq!(latest.status, CheckpointStatus::WaitingRetry);
+    assert!(
+        latest
+            .state
+            .windows(b"hello".len())
+            .any(|window| window == b"hello")
+    );
+    assert!(
+        !latest
+            .state
+            .windows(b"partial".len())
+            .any(|window| window == b"partial")
+    );
+}
+
+#[tokio::test]
+async fn stream_creation_failure_saves_one_retry_checkpoint() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::StartError(
+        LlmError::UnsupportedCapability("stream creation failed"),
+    )]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    assert_eq!(
+        checkpoints
+            .records()
+            .iter()
+            .filter(|record| record.status == CheckpointStatus::WaitingRetry)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_turn_does_not_commit_history_for_next_run() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+        ProviderResponse::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let (_run_id, _events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("failed input")).await;
+    wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::WaitingRetry).await;
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match agent.run_turn(ChatMessage::user("fresh input")).await {
+                Ok(run_id) => return run_id,
+                Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected run error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for second run");
+
+    let requests = wait_for_request_count(&provider, 2).await;
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("failed input".to_owned())
+    }));
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("fresh input".to_owned())
+    }));
+    assert!(!requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("failed input".to_owned())
+    }));
+}
+
+#[tokio::test]
+async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+        ProviderResponse::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(FailingPublishEventBus))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let _first_run_id = agent
+        .run_turn(ChatMessage::user("hello"))
+        .await
+        .expect("run should start");
+    wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
+    let finished_records: Vec<_> = checkpoints
+        .records()
+        .into_iter()
+        .filter(|record| record.status == CheckpointStatus::Finished)
+        .collect();
+    assert_eq!(finished_records.len(), 1);
+    assert_eq!(finished_records[0].last_seq, 5);
+
+    let _second_run_id = timeout(Duration::from_secs(1), async {
+        loop {
+            match agent.run_turn(ChatMessage::user("again")).await {
+                Ok(run_id) => return run_id,
+                Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected run error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for second run");
+
+    let requests = wait_for_request_count(&provider, 2).await;
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::Assistant
+            && message.content == ChatContent::Text("done".to_owned())
+    }));
+    agent.stop();
+}
+
+#[tokio::test]
+async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
+    let agent_id = AgentId::new();
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("echo".to_owned()),
+                arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    total_tokens: 8,
+                }),
+            },
+        ]),
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: Some(TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                }),
+            },
+        ]),
+    ]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(EchoTool::new()))
+        .expect("echo should register");
+    let agent = Agent::builder()
+        .id(agent_id)
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(registry))
+        .event_bus(bus.clone())
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let failed_run_id = agent
+        .run_turn(ChatMessage::user("hello"))
+        .await
+        .expect("run should start");
+    let failed_turn_id = agent.current_turn().expect("turn id should be set");
+    let mut failed_events = bus
+        .subscribe_run(failed_run_id)
+        .await
+        .expect("subscribe should succeed");
+
+    let mut last_failed_seq = 0;
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = failed_events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            last_failed_seq = envelope.seq;
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let resumed_agent = Agent::builder()
+        .id(agent_id)
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry({
+            let mut registry = BuiltinToolRegistry::default();
+            registry
+                .register(Arc::new(EchoTool::new()))
+                .expect("echo should register");
+            Arc::new(registry)
+        })
+        .event_bus(bus.clone())
+        .checkpoint_store(checkpoints.clone())
+        .resume(failed_run_id, failed_turn_id)
+        .await
+        .expect("agent should resume");
+    let resumed_run_id = resumed_agent
+        .resume_turn()
+        .await
+        .expect("resume turn should start");
+    assert_eq!(resumed_run_id, failed_run_id);
+    let mut resumed_events = bus
+        .subscribe_run(resumed_run_id)
+        .await
+        .expect("subscribe should succeed");
+
+    let mut saw_resumed_event = false;
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = resumed_events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if envelope.seq <= last_failed_seq {
+                continue;
+            }
+            saw_resumed_event = true;
+            assert!(
+                envelope.seq > last_failed_seq,
+                "resumed stream seq should continue after failed attempt"
+            );
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for resumed finish");
+    assert!(
+        saw_resumed_event,
+        "resumed stream should publish new events"
+    );
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].messages.iter().any(|message| {
+        message.role == ChatRole::User && message.content == ChatContent::Text("hello".to_owned())
+    }));
+    assert!(requests[2].messages.iter().any(|message| {
+        message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
+    }));
+    assert!(!requests[2].messages.iter().any(|message| {
+        message.role == ChatRole::User && message.content == ChatContent::Text("retry".to_owned())
+    }));
+    assert!(!requests[2].messages.iter().any(|message| {
+        message.role == ChatRole::Assistant
+            && message.content == ChatContent::Text("partial".to_owned())
+    }));
+
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
+    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
+        .expect("finished checkpoint state should deserialize");
+    assert_eq!(checkpoint_state["usage"]["input_tokens"].as_u64(), Some(5));
+    assert_eq!(checkpoint_state["usage"]["output_tokens"].as_u64(), Some(6));
+    assert_eq!(checkpoint_state["usage"]["total_tokens"].as_u64(), Some(11));
+}
+
+#[tokio::test]
+async fn resume_rejects_checkpoint_from_different_agent() {
+    let checkpoint_owner = AgentId::new();
+    let resuming_agent = AgentId::new();
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let first_agent = Agent::builder()
+        .id(checkpoint_owner)
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+    let (failed_run_id, mut failed_events) =
+        run_turn_and_subscribe(&first_agent, ChatMessage::user("hello")).await;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = failed_events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    let error = match Agent::builder()
+        .id(resuming_agent)
+        .name("other-agent")
+        .system_prompt("be helpful")
+        .llm_provider(Arc::new(RecordingProvider::new(Vec::new())))
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints)
+        .resume(
+            failed_run_id,
+            first_agent.current_turn().expect("turn id should be set"),
+        )
+        .await
+    {
+        Ok(_) => panic!("resume should reject checkpoint from different agent"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        wyse_agent::AgentError::CheckpointAgentMismatch {
+            expected: e,
+            actual: a
+        } if e == resuming_agent && a == checkpoint_owner
+    ));
+}
+
+#[tokio::test]
 async fn stream_publishes_failure_when_turn_limit_is_reached() {
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![ChatStreamEvent::Finished {
@@ -223,12 +848,14 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         }],
     )]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .config(AgentConfig {
             max_turns: 0,
             max_tool_calls_per_turn: 16,
@@ -236,13 +863,10 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             if let RuntimeEvent::Agent {
                 event: AgentEvent::Failed { error_text },
@@ -258,6 +882,9 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
     })
     .await
     .expect("timed out waiting for failed event");
+
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Failed).await;
+    assert_eq!(latest.status, CheckpointStatus::Failed);
 }
 
 #[tokio::test]
@@ -269,26 +896,25 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
         },
     ]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     entered.notified().await;
-    agent_stream.cancel.cancel();
+    agent.stop();
 
     let mut saw_cancelled = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -310,6 +936,8 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Cancelled).await;
+    assert_eq!(latest.status, CheckpointStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -324,32 +952,35 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
             }),
             ChatStreamEvent::Finished {
                 finish_reason: FinishReason::ToolCalls,
-                usage: None,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    total_tokens: 8,
+                }),
             },
         ],
     )]));
     let entered = Arc::new(tokio::sync::Notify::new());
     let bus = Arc::new(InMemoryEventStreamBus::default());
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider)
         .tool_registry(Arc::new(BlockingToolRegistry::new(Arc::clone(&entered))))
         .event_bus(bus)
+        .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     entered.notified().await;
-    agent_stream.cancel.cancel();
+    agent.stop();
 
     let mut saw_cancelled = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -371,6 +1002,12 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Cancelled).await;
+    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
+        .expect("cancelled checkpoint state should deserialize");
+    assert_eq!(checkpoint_state["usage"]["input_tokens"].as_u64(), Some(3));
+    assert_eq!(checkpoint_state["usage"]["output_tokens"].as_u64(), Some(5));
+    assert_eq!(checkpoint_state["usage"]["total_tokens"].as_u64(), Some(8));
 }
 
 #[tokio::test]
@@ -408,14 +1045,11 @@ async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut failure_text = None;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;

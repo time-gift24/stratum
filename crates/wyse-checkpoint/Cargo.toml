@@ -1,28 +1,19 @@
 [package]
-name = "wyse-agent"
+name = "wyse-checkpoint"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
-futures-util.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
-tracing.workspace = true
 uuid.workspace = true
-wyse-checkpoint.workspace = true
 wyse-core.workspace = true
-wyse-infra.workspace = true
-wyse-llm.workspace = true
-wyse-tools.workspace = true
-
-[dev-dependencies]
-async-trait.workspace = true
 
 [lints]
 workspace = true

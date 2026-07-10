@@ -1,6 +1,7 @@
 //! Error types for agent runtime operations.
 
 use thiserror::Error;
+use wyse_checkpoint::CheckpointError;
 use wyse_core::{CallId, ChatRole};
 use wyse_infra::event_stream_bus::EventStreamBusError;
 use wyse_llm::LlmError;
@@ -9,7 +10,7 @@ use wyse_llm::LlmError;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AgentError {
-    /// Input message role is not accepted by `Agent::stream`.
+    /// Input message role is not accepted by `Agent::run_turn`.
     #[error("invalid input message role: {role:?}")]
     InvalidInputMessageRole {
         /// Rejected role.
@@ -31,6 +32,36 @@ pub enum AgentError {
         /// Underlying event bus error.
         #[source]
         source: EventStreamBusError,
+    },
+    /// Checkpoint persistence failed.
+    #[error("checkpoint operation failed")]
+    Checkpoint {
+        /// Underlying checkpoint error.
+        #[source]
+        source: CheckpointError,
+    },
+    /// Agent checkpoint state serialization failed.
+    #[error("failed to encode agent checkpoint state")]
+    CheckpointEncode(#[source] serde_json::Error),
+    /// Agent checkpoint state deserialization failed.
+    #[error("failed to decode agent checkpoint state")]
+    CheckpointDecode(#[source] serde_json::Error),
+    /// Agent checkpoint state version is not supported.
+    #[error("unsupported agent checkpoint state version: {version}")]
+    UnsupportedCheckpointVersion {
+        /// Stored state version.
+        version: u32,
+    },
+    /// The requested checkpoint cannot be resumed.
+    #[error("agent checkpoint is not waiting for retry")]
+    CheckpointNotRetryable,
+    /// The checkpoint belongs to a different agent.
+    #[error("checkpoint agent mismatch: expected {expected}, actual {actual}")]
+    CheckpointAgentMismatch {
+        /// Expected agent id.
+        expected: wyse_core::AgentId,
+        /// Actual agent id stored in the checkpoint.
+        actual: wyse_core::AgentId,
     },
     /// A required builder field was not provided.
     #[error("missing builder field: {field}")]
@@ -70,5 +101,11 @@ impl From<LlmError> for AgentError {
 impl From<EventStreamBusError> for AgentError {
     fn from(source: EventStreamBusError) -> Self {
         Self::EventBus { source }
+    }
+}
+
+impl From<CheckpointError> for AgentError {
+    fn from(source: CheckpointError) -> Self {
+        Self::Checkpoint { source }
     }
 }
