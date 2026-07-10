@@ -212,3 +212,21 @@ test("the mobile navbar CTA has an instance-level responsive hide utility", asyn
 
   assert.match(navbar, /<Button\s+className="site-navbar-cta max-sm:hidden"/)
 })
+
+test("Buttons rendering dashboard anchors opt out of native button semantics", async () => {
+  const [navbar, homeContent] = await Promise.all([
+    readFile(navbarUrl, "utf8"),
+    readFile(homeContentUrl, "utf8"),
+  ])
+
+  for (const component of [navbar, homeContent]) {
+    const anchorButtons = [
+      ...component.matchAll(
+        /<Button\b(?:(?!<\/Button>)[\s\S])*?render=\{<a href="#dashboard" \/>\}[\s\S]*?<\/Button>/g
+      ),
+    ]
+
+    assert.equal(anchorButtons.length, 1)
+    assert.match(anchorButtons[0][0], /\bnativeButton=\{false\}/)
+  }
+})

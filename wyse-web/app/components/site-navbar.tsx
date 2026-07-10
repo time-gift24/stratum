@@ -168,6 +168,7 @@ export function SiteNavbar() {
           <ThemeToggle />
           <Button
             className="site-navbar-cta max-sm:hidden"
+            nativeButton={false}
             render={<a href="#dashboard" />}
             size="lg"
           >

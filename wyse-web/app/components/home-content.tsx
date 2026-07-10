@@ -24,7 +24,11 @@ export function HomeContent() {
               <h1 className="wyse-home-hero__title">{t("hero.title")}</h1>
               <p className="wyse-home-hero__body">{t("hero.body")}</p>
             </div>
-            <Button size="lg" render={<a href="#dashboard" />}>
+            <Button
+              size="lg"
+              nativeButton={false}
+              render={<a href="#dashboard" />}
+            >
               {t("hero.enter")}
               <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
             </Button>
