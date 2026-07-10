@@ -4,7 +4,10 @@ import { useEffect, useRef } from "react"
 import gsap from "gsap"
 import { ScrollToPlugin } from "gsap/ScrollToPlugin"
 
-import { shouldAutoScroll } from "../lib/hero-dashboard-scroll"
+import {
+  hasInitialUserIntent,
+  shouldAutoScroll,
+} from "../lib/hero-dashboard-scroll"
 
 gsap.registerPlugin(ScrollToPlugin)
 
@@ -13,7 +16,10 @@ export function HeroDashboardScroll() {
 
   useEffect(() => {
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
-    let hasUserIntent = false
+    let hasUserIntent = hasInitialUserIntent(
+      window.location.hash,
+      window.scrollY
+    )
 
     const cancelAutoScroll = () => {
       hasUserIntent = true
@@ -39,7 +45,12 @@ export function HeroDashboardScroll() {
       })
     }, 1800)
 
-    const userIntentEvents = ["pointerdown", "wheel", "touchstart", "keydown"] as const
+    const userIntentEvents = [
+      "pointerdown",
+      "wheel",
+      "touchstart",
+      "keydown",
+    ] as const
     userIntentEvents.forEach((eventName) => {
       window.addEventListener(eventName, cancelAutoScroll, { once: true })
     })

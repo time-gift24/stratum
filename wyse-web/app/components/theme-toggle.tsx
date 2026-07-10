@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { MoonIcon, SunIcon } from "lucide-react"
 
+import { useLocale } from "~/components/locale-provider"
 import { Switch } from "~/components/ui/switch"
 
 const STORAGE_KEY = "wyse-theme"
@@ -23,6 +24,7 @@ function applyTheme(theme: Theme) {
 
 export function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>("light")
+  const { t } = useLocale()
 
   useEffect(() => {
     setTheme(getInitialTheme())
@@ -39,7 +41,7 @@ export function ThemeToggle() {
       )}
       <Switch
         checked={isDark}
-        aria-label="Toggle dark theme"
+        aria-label={t("theme.toggle")}
         onCheckedChange={(checked) => {
           const nextTheme = checked ? "dark" : "light"
           applyTheme(nextTheme)

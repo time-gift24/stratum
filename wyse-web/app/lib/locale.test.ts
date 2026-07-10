@@ -29,3 +29,22 @@ test("gets locale option labels from translation keys", async () => {
   assert.match(toggle, /\{t\("locale\.option\.zh"\)\}/)
   assert.match(toggle, /\{t\("locale\.option\.en"\)\}/)
 })
+
+test("localizes the theme switch label through the typed locale dictionary", async () => {
+  const [themeToggle, locale] = await Promise.all([
+    readFile(
+      new URL("../components/theme-toggle.tsx", import.meta.url),
+      "utf8"
+    ),
+    readFile(new URL("./locale.ts", import.meta.url), "utf8"),
+  ])
+
+  assert.match(
+    themeToggle,
+    /import \{ useLocale \} from "~\/components\/locale-provider"/
+  )
+  assert.match(themeToggle, /const \{ t \} = useLocale\(\)/)
+  assert.match(themeToggle, /aria-label=\{t\("theme\.toggle"\)\}/)
+  assert.match(locale, /"theme\.toggle": "切换深色模式"/)
+  assert.match(locale, /"theme\.toggle": "Toggle dark theme"/)
+})

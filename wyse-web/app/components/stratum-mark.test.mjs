@@ -163,3 +163,46 @@ test("dashboard quick-open links have reachable semantic targets", async () => {
   assert.equal((dashboard.match(/id="agents"/g) ?? []).length, 1)
   assert.equal((dashboard.match(/id="workflows"/g) ?? []).length, 1)
 })
+
+test("fixed-navbar fragment targets share the dashboard scroll offset", async () => {
+  const [dashboard, appCss] = await Promise.all([
+    readFile(dashboardUrl, "utf8"),
+    readFile(appCssUrl, "utf8"),
+  ])
+
+  for (const target of ["dashboard", "runs", "agents", "workflows"]) {
+    assert.match(
+      dashboard,
+      new RegExp(
+        `<(?=[^>]*id="${target}")(?=[^>]*className="[^"]*wyse-dashboard-target[^"]*")[^>]*>`
+      )
+    )
+  }
+
+  assert.match(appCss, /\.wyse-dashboard-target\s*{\s*@apply scroll-mt-24;\s*}/)
+})
+
+test("the mobile navbar keeps controls while compacting redundant content", async () => {
+  const [navbar, appCss] = await Promise.all([
+    readFile(navbarUrl, "utf8"),
+    readFile(appCssUrl, "utf8"),
+  ])
+
+  assert.match(navbar, /<LocaleToggle\s*\/>/)
+  assert.match(navbar, /<ThemeToggle\s*\/>/)
+  assert.match(navbar, /className="site-navbar-brand-copy"/)
+  assert.match(navbar, /className="site-navbar-actions"/)
+  assert.match(navbar, /className="site-navbar-cta"/)
+  assert.match(
+    appCss,
+    /\.site-navbar-brand-copy\s*{\s*@apply hidden [^;]*sm:flex;\s*}/
+  )
+  assert.match(
+    appCss,
+    /\.site-navbar-cta\s*{\s*@apply hidden sm:inline-flex;\s*}/
+  )
+  assert.match(
+    appCss,
+    /\.site-navbar-actions\s*{\s*@apply [^;]*gap-1[^;]*sm:gap-3;\s*}/
+  )
+})

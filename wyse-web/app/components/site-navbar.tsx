@@ -95,7 +95,7 @@ export function SiteNavbar() {
       ref={navRef}
       className="fixed inset-x-0 top-4 z-50 px-4 md:top-6 md:px-8"
     >
-      <div className="relative isolate mx-auto flex h-12 w-full max-w-5xl items-center justify-between gap-4 px-3">
+      <div className="site-navbar-shell">
         <div ref={glassRef} aria-hidden="true" className="site-navbar-glass">
           <GlassSurface
             width="100%"
@@ -118,11 +118,11 @@ export function SiteNavbar() {
 
         <a
           href="/"
-          className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
+          className="site-navbar-brand"
           aria-label="运筹 Stratum home"
         >
           <StratumMark animated={false} variant="compact" className="size-7" />
-          <span className="flex min-w-0 items-baseline gap-1.5 truncate">
+          <span className="site-navbar-brand-copy">
             <span className="font-heading font-semibold">运筹</span>
             <span className="text-xs text-muted-foreground">Stratum</span>
           </span>
@@ -162,11 +162,15 @@ export function SiteNavbar() {
           </NavigationMenuList>
         </NavigationMenu>
 
-        <div className="relative z-10 flex items-center gap-3">
+        <div className="site-navbar-actions">
           <Separator orientation="vertical" className="hidden md:block" />
           <LocaleToggle />
           <ThemeToggle />
-          <Button render={<a href="#dashboard" />} size="lg">
+          <Button
+            className="site-navbar-cta"
+            render={<a href="#dashboard" />}
+            size="lg"
+          >
             {t("hero.enter")}
           </Button>
         </div>

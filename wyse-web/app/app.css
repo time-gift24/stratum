@@ -379,6 +379,26 @@
     min-height: 100%;
   }
 
+  .site-navbar-shell {
+    @apply relative isolate mx-auto flex h-12 w-full max-w-5xl items-center justify-between gap-2 px-3 sm:gap-4;
+  }
+
+  .site-navbar-brand {
+    @apply relative z-10 flex min-w-0 shrink items-center gap-2 text-sm font-medium md:text-base;
+  }
+
+  .site-navbar-brand-copy {
+    @apply hidden min-w-0 items-baseline gap-1.5 truncate sm:flex;
+  }
+
+  .site-navbar-actions {
+    @apply relative z-10 flex shrink-0 items-center gap-1 sm:gap-3;
+  }
+
+  .site-navbar-cta {
+    @apply hidden sm:inline-flex;
+  }
+
   .stratum-mark--compact path {
     fill: var(--stratum-mark-compact);
     stroke: var(--stratum-mark-compact);
@@ -413,7 +433,11 @@
   }
 
   .wyse-dashboard {
-    @apply mx-auto grid w-full max-w-6xl scroll-mt-24 gap-6 px-4 pb-12 md:px-8 md:pb-20;
+    @apply mx-auto grid w-full max-w-6xl gap-6 px-4 pb-12 md:px-8 md:pb-20;
+  }
+
+  .wyse-dashboard-target {
+    @apply scroll-mt-24;
   }
 
   .wyse-dashboard-overview {

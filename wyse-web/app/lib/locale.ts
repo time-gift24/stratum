@@ -34,14 +34,17 @@ export const messages = {
     "locale.toggle": "切换显示语言",
     "locale.option.zh": "中文",
     "locale.option.en": "EN",
+    "theme.toggle": "切换深色模式",
   },
   en: {
     "hero.title": "Build typed agents",
-    "hero.body": "A Rust-first runtime for agents, tools, and reliable execution paths.",
+    "hero.body":
+      "A Rust-first runtime for agents, tools, and reliable execution paths.",
     "hero.enter": "Open workspace",
     "nav.product": "Product",
     "nav.workspace": "Workspace",
-    "nav.workspace.description": "View runtime activity and work that needs attention.",
+    "nav.workspace.description":
+      "View runtime activity and work that needs attention.",
     "nav.agents": "Agents",
     "nav.agents.description": "Manage agent configuration and status.",
     "nav.workflows": "Workflows",
@@ -51,7 +54,8 @@ export const messages = {
     "nav.settings": "Settings",
     "dashboard.eyebrow": "Runtime overview",
     "dashboard.title": "What is executing now",
-    "dashboard.body": "Review active work, queued tasks, and runs that need confirmation.",
+    "dashboard.body":
+      "Review active work, queued tasks, and runs that need confirmation.",
     "dashboard.primary": "View all runs",
     "status.running": "Running",
     "status.queued": "Queued",
@@ -59,10 +63,12 @@ export const messages = {
     "dashboard.recent": "Recent execution",
     "dashboard.shortcuts": "Quick open",
     "dashboard.empty.title": "New runs will appear here",
-    "dashboard.empty.body": "Connect a runtime to show live execution records here.",
+    "dashboard.empty.body":
+      "Connect a runtime to show live execution records here.",
     "locale.toggle": "Change display language",
     "locale.option.zh": "中文",
     "locale.option.en": "EN",
+    "theme.toggle": "Toggle dark theme",
   },
 } as const satisfies Record<Locale, Record<string, string>>
 

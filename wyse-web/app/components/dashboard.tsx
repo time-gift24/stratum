@@ -18,7 +18,7 @@ export function Dashboard({ locale, t }: DashboardProps) {
   const { runs, shortcuts } = getDashboardSample(locale)
 
   return (
-    <section id="dashboard" className="wyse-dashboard">
+    <section id="dashboard" className="wyse-dashboard wyse-dashboard-target">
       <header className="wyse-dashboard-overview">
         <div className="wyse-dashboard-copy">
           <p className="wyse-dashboard-eyebrow">{t("dashboard.eyebrow")}</p>
@@ -40,7 +40,10 @@ export function Dashboard({ locale, t }: DashboardProps) {
         ))}
       </div>
 
-      <section id="runs" className="wyse-dashboard-timeline">
+      <section
+        id="runs"
+        className="wyse-dashboard-timeline wyse-dashboard-target"
+      >
         <h2 className="wyse-dashboard-section-title">
           {t("dashboard.recent")}
         </h2>
@@ -70,14 +73,14 @@ export function Dashboard({ locale, t }: DashboardProps) {
         >
           <a
             id="agents"
-            className="wyse-dashboard-shortcut"
+            className="wyse-dashboard-shortcut wyse-dashboard-target"
             href={shortcuts[0].href}
           >
             {shortcuts[0].title}
           </a>
           <a
             id="workflows"
-            className="wyse-dashboard-shortcut"
+            className="wyse-dashboard-shortcut wyse-dashboard-target"
             href={shortcuts[1].href}
           >
             {shortcuts[1].title}
