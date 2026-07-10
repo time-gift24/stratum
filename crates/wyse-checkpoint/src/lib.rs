@@ -1,10 +1,12 @@
 //! Checkpoint persistence primitives for Wyse runtimes.
 
+mod decorator;
 mod definition;
 mod error;
 mod filesystem;
 mod state;
 
+pub use decorator::CheckpointEventStreamBus;
 pub use definition::AgentCheckpoint;
 pub use error::CheckpointError;
 pub use filesystem::FilesystemAgentCheckpoint;

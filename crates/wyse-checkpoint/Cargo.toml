@@ -14,11 +14,11 @@ thiserror.workspace = true
 tracing.workspace = true
 wyse-core.workspace = true
 wyse-filesystem.workspace = true
+wyse-infra.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
 tokio.workspace = true
-wyse-infra.workspace = true
 
 [lints]
 workspace = true

@@ -33,6 +33,13 @@ pub enum EventStreamBusError {
     /// Event envelope deserialization failed.
     #[error("failed to deserialize stream envelope")]
     Deserialize(#[source] serde_json::Error),
+    /// Durable event persistence failed.
+    #[error("event persistence failed")]
+    Persistence {
+        /// Underlying persistence error.
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
     /// NATS operation failed.
     #[error("nats operation failed")]
     Nats {
@@ -43,6 +50,13 @@ pub enum EventStreamBusError {
 }
 
 impl EventStreamBusError {
+    /// Wraps a durable event persistence failure.
+    pub fn persistence(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Persistence {
+            source: Box::new(source),
+        }
+    }
+
     pub(crate) fn nats(source: impl Error + Send + Sync + 'static) -> Self {
         Self::Nats {
             source: Box::new(source),
