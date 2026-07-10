@@ -55,18 +55,6 @@ pub enum AgentError {
         #[source]
         source: CheckpointError,
     },
-    /// Agent checkpoint state serialization failed.
-    #[error("failed to encode agent checkpoint state")]
-    CheckpointEncode(#[source] serde_json::Error),
-    /// Agent checkpoint state deserialization failed.
-    #[error("failed to decode agent checkpoint state")]
-    CheckpointDecode(#[source] serde_json::Error),
-    /// Agent checkpoint state version is not supported.
-    #[error("unsupported agent checkpoint state version: {version}")]
-    UnsupportedCheckpointVersion {
-        /// Stored state version.
-        version: u32,
-    },
     /// The requested checkpoint cannot be resumed.
     #[error("agent checkpoint is not waiting for retry")]
     CheckpointNotRetryable,

@@ -3,7 +3,13 @@ use std::{io::Write, sync::Arc};
 use futures_util::StreamExt;
 use wyse_agent::AgentError;
 use wyse_agent_builtin::build_default_agent;
-use wyse_core::{AgentEvent, ChatMessage, ModelId, ModelIdParseError, RuntimeEvent};
+use wyse_checkpoint::{AgentCheckpoint, CheckpointError, FilesystemAgentCheckpoint};
+use wyse_core::{
+    AgentEvent, AgentId, ChatMessage, ModelId, ModelIdParseError, ReplayStart, RuntimeEvent,
+};
+use wyse_filesystem::{
+    Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
+};
 use wyse_infra::{
     EventStreamBus,
     event_stream_bus::{EventStreamBusError, InMemoryEventStreamBus},
@@ -44,6 +50,12 @@ enum SimpleAgentError {
     UnsupportedDeepSeekModel { model: ModelId },
     #[error("agent operation failed")]
     Agent(#[from] AgentError),
+    #[error("failed to create checkpoint directory")]
+    CheckpointDirectory(#[source] std::io::Error),
+    #[error("checkpoint filesystem operation failed")]
+    Filesystem(#[from] FilesystemError),
+    #[error("checkpoint operation failed")]
+    Checkpoint(#[from] CheckpointError),
     #[error("event stream failed")]
     EventStream(#[from] EventStreamBusError),
     #[error("failed to encode event")]
@@ -131,14 +143,29 @@ async fn main() -> Result<(), SimpleAgentError> {
     let llm_provider = configured_providers(&config)?.get(&model)?;
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let event_bus: Arc<dyn EventStreamBus> = bus.clone();
-    let agent = build_default_agent(event_bus, llm_provider)?;
-    let run_id = agent.run_turn(ChatMessage::user(prompt)).await?;
-    let mut stream = bus.subscribe_run(run_id).await?;
+    let agent_id = AgentId::new();
+    let checkpoint_dir = std::env::temp_dir().join(format!("wyse-simple-agent-{agent_id}"));
+    std::fs::create_dir(&checkpoint_dir).map_err(SimpleAgentError::CheckpointDirectory)?;
+    let filesystem: Arc<dyn Filesystem> = Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
+        root: checkpoint_dir,
+        max_file_bytes: None,
+    })?);
+    let checkpoint = Arc::new(FilesystemAgentCheckpoint::new(
+        filesystem,
+        VirtualPath::try_from("/").expect("root checkpoint path is valid"),
+    ));
+    checkpoint
+        .initialize(agent_id, "default-agent".to_owned())
+        .await?;
+    let agent_checkpoint: Arc<dyn AgentCheckpoint> = checkpoint;
+    let agent = build_default_agent(agent_id, agent_checkpoint, event_bus, llm_provider)?;
+    agent.run_turn(ChatMessage::user(prompt)).await?;
+    let mut stream = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
 
-    while let Some(envelope) = stream.next().await {
-        let envelope = envelope?;
+    while let Some(record) = stream.next().await {
+        let envelope = record?.envelope;
         serde_json::to_writer(&mut stdout, &envelope)?;
         writeln!(stdout)?;
         stdout.flush()?;
