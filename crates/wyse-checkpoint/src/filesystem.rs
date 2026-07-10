@@ -1,0 +1,608 @@
+//! Filesystem-backed agent checkpoint storage.
+
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+use wyse_core::{
+    AgentEvent, AgentId, ChatMessage, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
+    StreamEnvelope, TokenUsage, TurnId,
+};
+use wyse_filesystem::{
+    CasExpectation, CasUpdateError, Entry, Filesystem, FilesystemError, VirtualPath, cas_update,
+};
+
+use crate::{
+    AGENT_STATE_VERSION, AgentCheckpoint, AgentState, AgentStatus, CheckpointError,
+    MAX_HISTORY_PAGE_SIZE,
+};
+
+/// Filesystem-backed checkpoint for one agent root.
+#[derive(Clone)]
+pub struct FilesystemAgentCheckpoint {
+    filesystem: Arc<dyn Filesystem>,
+    root: VirtualPath,
+}
+
+impl FilesystemAgentCheckpoint {
+    /// Creates a checkpoint rooted at an agent-visible virtual path.
+    #[must_use]
+    pub fn new(filesystem: Arc<dyn Filesystem>, root: VirtualPath) -> Self {
+        Self { filesystem, root }
+    }
+
+    /// Creates the initial agent state and message directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paths are invalid, the checkpoint already exists,
+    /// or the filesystem cannot create it.
+    pub async fn initialize(
+        &self,
+        agent_id: AgentId,
+        name: String,
+    ) -> Result<AgentState, CheckpointError> {
+        let state = AgentState::new(agent_id, name);
+        self.filesystem.create_dir(&self.messages_path()?).await?;
+        self.filesystem
+            .put(
+                &self.agent_path()?,
+                encode_agent_state(&state)?,
+                CasExpectation::Absent,
+            )
+            .await?;
+        Ok(state)
+    }
+
+    fn agent_path(&self) -> Result<VirtualPath, CheckpointError> {
+        self.child_path("agent.json")
+    }
+
+    fn messages_path(&self) -> Result<VirtualPath, CheckpointError> {
+        self.child_path("messages")
+    }
+
+    fn message_path(&self, seq: u64) -> Result<VirtualPath, CheckpointError> {
+        self.child_path(&format!("messages/{seq}.json"))
+    }
+
+    fn child_path(&self, suffix: &str) -> Result<VirtualPath, CheckpointError> {
+        let path = if self.root.as_str() == "/" {
+            format!("/{suffix}")
+        } else {
+            format!("{}/{suffix}", self.root.as_str())
+        };
+        VirtualPath::try_from(path.as_str()).map_err(|source| {
+            CheckpointError::Filesystem(FilesystemError::InvalidVirtualPath { path, source })
+        })
+    }
+
+    async fn read_state(&self) -> Result<AgentState, CheckpointError> {
+        let path = self.agent_path()?;
+        let Some(record) = self.filesystem.get(&path).await? else {
+            return Err(CheckpointError::AgentMissing);
+        };
+        let state = decode_agent_state(&record.entry)?;
+        validate_state(&state)?;
+        Ok(state)
+    }
+
+    async fn read_message(
+        &self,
+        state: &AgentState,
+        seq: u64,
+    ) -> Result<Option<StreamEnvelope>, CheckpointError> {
+        let Some(record) = self.filesystem.get(&self.message_path(seq)?).await? else {
+            return Ok(None);
+        };
+        let envelope = decode_message(&record.entry).inspect_err(|_| {
+            trace_checkpoint_corruption(state, seq);
+        })?;
+        validate_message(&envelope, state.agent_id, seq, None, None).inspect_err(|_| {
+            trace_checkpoint_corruption(state, seq);
+        })?;
+        Ok(Some(envelope))
+    }
+
+    async fn commit_sequence(
+        &self,
+        expected_previous: u64,
+        seq: u64,
+    ) -> Result<AgentState, CheckpointError> {
+        let updated_at = Utc::now();
+        let attempts = AtomicU64::new(0);
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &self.agent_path()?,
+            decode_agent_state,
+            encode_agent_state,
+            |current| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                validate_state(current)?;
+                if current.last_seq != expected_previous && current.last_seq != seq {
+                    return Err(CheckpointError::MessageBeyondFrontier {
+                        seq,
+                        frontier: current.last_seq,
+                    });
+                }
+                let mut next = current.clone();
+                next.last_seq = seq;
+                next.updated_at = updated_at;
+                Ok(next)
+            },
+        )
+        .await;
+        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), Some(seq));
+        result.map_err(CheckpointError::from)
+    }
+
+    async fn reconcile_frontier(&self, state: AgentState) -> Result<AgentState, CheckpointError> {
+        self.validate_committed_messages(&state).await?;
+
+        let frontier = state
+            .last_seq
+            .checked_add(1)
+            .ok_or(CheckpointError::SequenceOverflow)?;
+        let Some(frontier_message) = self.read_message(&state, frontier).await? else {
+            return Ok(state);
+        };
+        validate_message(
+            &frontier_message,
+            state.agent_id,
+            frontier,
+            state.run_id,
+            state.turn_id,
+        )
+        .inspect_err(|_| trace_checkpoint_corruption(&state, frontier))?;
+
+        let beyond = frontier
+            .checked_add(1)
+            .ok_or(CheckpointError::SequenceOverflow)?;
+        if self.read_message(&state, beyond).await?.is_some() {
+            trace_checkpoint_corruption(&state, beyond);
+            return Err(CheckpointError::MessageBeyondFrontier {
+                seq: beyond,
+                frontier,
+            });
+        }
+
+        tracing::info!(
+            agent_id = %state.agent_id,
+            run_id = ?state.run_id,
+            turn_id = ?state.turn_id,
+            seq = frontier,
+            reconciliation_count = 1_u64,
+            "checkpoint frontier reconciliation"
+        );
+        self.commit_sequence(state.last_seq, frontier).await
+    }
+
+    async fn validate_committed_messages(&self, state: &AgentState) -> Result<(), CheckpointError> {
+        for seq in 1..=state.last_seq {
+            if self.read_message(state, seq).await?.is_none() {
+                trace_checkpoint_corruption(state, seq);
+                return Err(CheckpointError::MissingCommittedMessage { seq });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentCheckpoint for FilesystemAgentCheckpoint {
+    async fn load_agent(&self) -> Result<AgentState, CheckpointError> {
+        let state = self.read_state().await?;
+        self.reconcile_frontier(state).await
+    }
+
+    async fn update_state(
+        &self,
+        status: AgentStatus,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        usage: TokenUsage,
+    ) -> Result<AgentState, CheckpointError> {
+        let updated_at = Utc::now();
+        let attempts = AtomicU64::new(0);
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &self.agent_path()?,
+            decode_agent_state,
+            encode_agent_state,
+            |current| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                validate_state(current)?;
+                let mut next = current.clone();
+                next.status = status;
+                next.run_id = run_id;
+                next.turn_id = turn_id;
+                next.usage = usage;
+                next.updated_at = updated_at;
+                Ok(next)
+            },
+        )
+        .await;
+        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
+        result.map_err(CheckpointError::from)
+    }
+
+    async fn append_message(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        timestamp: DateTime<Utc>,
+        source: EventSource,
+        message: ChatMessage,
+        metadata: BTreeMap<String, Value>,
+    ) -> Result<StreamEnvelope, CheckpointError> {
+        let mut append_attempt = 0_u64;
+        loop {
+            append_attempt = append_attempt.saturating_add(1);
+            let state = self.read_state().await?;
+            self.validate_committed_messages(&state).await?;
+            let seq = state
+                .last_seq
+                .checked_add(1)
+                .ok_or(CheckpointError::SequenceOverflow)?;
+            let envelope = StreamEnvelope {
+                run_id,
+                timestamp,
+                source: source.clone(),
+                event: RuntimeEvent::Agent {
+                    agent_id: state.agent_id,
+                    event: AgentEvent::Message {
+                        seq,
+                        turn_id,
+                        message: message.clone(),
+                    },
+                },
+                metadata: metadata.clone(),
+            };
+            validate_message(&envelope, state.agent_id, seq, Some(run_id), Some(turn_id))?;
+
+            match self
+                .filesystem
+                .put(
+                    &self.message_path(seq)?,
+                    encode_message(&envelope)?,
+                    CasExpectation::Absent,
+                )
+                .await
+            {
+                Ok(_) => {
+                    self.commit_sequence(state.last_seq, seq).await?;
+                    return Ok(envelope);
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => {
+                    let existing = self
+                        .read_message(&state, seq)
+                        .await?
+                        .ok_or(CheckpointError::MissingCommittedMessage { seq })?;
+                    validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
+                        .inspect_err(|_| trace_checkpoint_corruption(&state, seq))?;
+                    let beyond = seq
+                        .checked_add(1)
+                        .ok_or(CheckpointError::SequenceOverflow)?;
+                    if self.read_message(&state, beyond).await?.is_some() {
+                        trace_checkpoint_corruption(&state, beyond);
+                        return Err(CheckpointError::MessageBeyondFrontier {
+                            seq: beyond,
+                            frontier: seq,
+                        });
+                    }
+                    self.commit_sequence(state.last_seq, seq).await?;
+                    if existing == envelope {
+                        return Ok(existing);
+                    }
+                    tracing::info!(
+                        agent_id = %state.agent_id,
+                        run_id = %run_id,
+                        turn_id = %turn_id,
+                        seq,
+                        retry_count = append_attempt,
+                        "checkpoint append retry"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, CheckpointError> {
+        let started = std::time::Instant::now();
+        if query.limit == 0 || query.limit > MAX_HISTORY_PAGE_SIZE {
+            return Err(CheckpointError::InvalidHistoryLimit {
+                actual: query.limit,
+                maximum: MAX_HISTORY_PAGE_SIZE,
+            });
+        }
+        let state = self.load_agent().await?;
+        let through_seq = query.through_seq.unwrap_or(state.last_seq);
+        if through_seq > state.last_seq {
+            return Err(CheckpointError::HistoryBarrierBeyondLast {
+                through_seq,
+                last_seq: state.last_seq,
+            });
+        }
+        if query.after_seq > through_seq {
+            return Err(CheckpointError::InvalidHistoryRange {
+                after_seq: query.after_seq,
+                through_seq,
+            });
+        }
+
+        let available = through_seq - query.after_seq;
+        let count = available.min(u64::try_from(query.limit).expect("history limit fits u64"));
+        let mut events = Vec::with_capacity(usize::try_from(count).expect("page size fits usize"));
+        for offset in 1..=count {
+            let seq = query
+                .after_seq
+                .checked_add(offset)
+                .ok_or(CheckpointError::SequenceOverflow)?;
+            let event = self
+                .read_message(&state, seq)
+                .await?
+                .ok_or(CheckpointError::MissingCommittedMessage { seq })?;
+            events.push(event);
+        }
+        let next_front_seq = events
+            .last()
+            .and_then(|event| event.event.business_seq())
+            .unwrap_or(query.after_seq);
+        let page = HistoryPage {
+            through_seq,
+            events,
+            next_front_seq,
+            has_more: next_front_seq < through_seq,
+        };
+        tracing::info!(
+            agent_id = %state.agent_id,
+            run_id = ?state.run_id,
+            turn_id = ?state.turn_id,
+            seq = page.next_front_seq,
+            event_count = page.events.len(),
+            latency_micros = started.elapsed().as_micros(),
+            "checkpoint history page"
+        );
+        Ok(page)
+    }
+}
+
+fn decode_agent_state(entry: &Entry) -> Result<AgentState, CheckpointError> {
+    serde_json::from_slice(entry.contents()).map_err(CheckpointError::DecodeState)
+}
+
+fn encode_agent_state(state: &AgentState) -> Result<Entry, CheckpointError> {
+    serde_json::to_vec(state)
+        .map(Entry::new)
+        .map_err(CheckpointError::Encode)
+}
+
+fn decode_message(entry: &Entry) -> Result<StreamEnvelope, CheckpointError> {
+    let value: Value =
+        serde_json::from_slice(entry.contents()).map_err(CheckpointError::DecodeMessage)?;
+    validate_strict_message_json(&value).map_err(CheckpointError::DecodeMessage)?;
+    serde_json::from_value(value).map_err(CheckpointError::DecodeMessage)
+}
+
+fn encode_message(envelope: &StreamEnvelope) -> Result<Entry, CheckpointError> {
+    serde_json::to_vec(envelope)
+        .map(Entry::new)
+        .map_err(CheckpointError::Encode)
+}
+
+fn validate_state(state: &AgentState) -> Result<(), CheckpointError> {
+    if state.state_version != AGENT_STATE_VERSION {
+        return Err(CheckpointError::UnsupportedStateVersion {
+            version: state.state_version,
+        });
+    }
+    Ok(())
+}
+
+fn validate_message(
+    envelope: &StreamEnvelope,
+    expected_agent_id: AgentId,
+    path_seq: u64,
+    expected_run_id: Option<RunId>,
+    expected_turn_id: Option<TurnId>,
+) -> Result<(), CheckpointError> {
+    if let Some(expected) = expected_run_id
+        && envelope.run_id != expected
+    {
+        return Err(CheckpointError::RunMismatch {
+            expected,
+            actual: envelope.run_id,
+        });
+    }
+    if let EventSource::Agent { agent_id, .. } = &envelope.source
+        && *agent_id != expected_agent_id
+    {
+        return Err(CheckpointError::AgentMismatch {
+            expected: expected_agent_id,
+            actual: *agent_id,
+        });
+    }
+    let RuntimeEvent::Agent { agent_id, event } = &envelope.event else {
+        return Err(CheckpointError::UnexpectedMessageEvent);
+    };
+    if *agent_id != expected_agent_id {
+        return Err(CheckpointError::AgentMismatch {
+            expected: expected_agent_id,
+            actual: *agent_id,
+        });
+    }
+    let AgentEvent::Message { seq, turn_id, .. } = event else {
+        return Err(CheckpointError::UnexpectedMessageEvent);
+    };
+    if *seq != path_seq {
+        return Err(CheckpointError::MessageSequenceMismatch {
+            path_seq,
+            event_seq: *seq,
+        });
+    }
+    if let Some(expected) = expected_turn_id
+        && *turn_id != expected
+    {
+        return Err(CheckpointError::TurnMismatch {
+            expected,
+            actual: *turn_id,
+        });
+    }
+    Ok(())
+}
+
+fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> {
+    let envelope = strict_object(value)?;
+    strict_keys(
+        envelope,
+        &["run_id", "timestamp", "source", "event"],
+        &["run_id", "timestamp", "source", "event", "metadata"],
+    )?;
+    validate_strict_source(&envelope["source"])?;
+
+    let runtime_event = strict_object(&envelope["event"])?;
+    strict_keys(runtime_event, &["type", "data"], &["type", "data"])?;
+    if runtime_event["type"] != "agent" {
+        return Err(strict_json_error());
+    }
+    let runtime_data = strict_object(&runtime_event["data"])?;
+    strict_keys(runtime_data, &["agent_id", "event"], &["agent_id", "event"])?;
+
+    let agent_event = strict_object(&runtime_data["event"])?;
+    strict_keys(agent_event, &["type", "data"], &["type", "data"])?;
+    if agent_event["type"] != "message" {
+        return Err(strict_json_error());
+    }
+    let message_data = strict_object(&agent_event["data"])?;
+    strict_keys(
+        message_data,
+        &["seq", "turn_id", "message"],
+        &["seq", "turn_id", "message"],
+    )?;
+    validate_strict_chat_message(&message_data["message"])
+}
+
+fn validate_strict_source(value: &Value) -> Result<(), serde_json::Error> {
+    let source = strict_object(value)?;
+    let Some(source_type) = source.get("type").and_then(Value::as_str) else {
+        return Err(strict_json_error());
+    };
+    match source_type {
+        "run" => strict_keys(source, &["type"], &["type"]),
+        "node" => strict_keys(source, &["type", "node_id"], &["type", "node_id"]),
+        "agent" => strict_keys(
+            source,
+            &["type", "node_id", "agent_id"],
+            &["type", "node_id", "agent_id"],
+        ),
+        _ => Err(strict_json_error()),
+    }
+}
+
+fn validate_strict_chat_message(value: &Value) -> Result<(), serde_json::Error> {
+    let message = strict_object(value)?;
+    strict_keys(
+        message,
+        &["role", "content"],
+        &[
+            "role",
+            "content",
+            "tool_calls",
+            "reasoning_content",
+            "tool_call_id",
+        ],
+    )?;
+    let content = strict_object(&message["content"])?;
+    strict_keys(content, &["type", "data"], &["type", "data"])?;
+    if !matches!(content["type"].as_str(), Some("text" | "json")) {
+        return Err(strict_json_error());
+    }
+    if let Some(tool_calls) = message.get("tool_calls") {
+        let Some(tool_calls) = tool_calls.as_array() else {
+            return Err(strict_json_error());
+        };
+        for tool_call in tool_calls {
+            strict_keys(
+                strict_object(tool_call)?,
+                &["call_id", "name", "arguments"],
+                &["call_id", "name", "arguments"],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn strict_object(value: &Value) -> Result<&serde_json::Map<String, Value>, serde_json::Error> {
+    value.as_object().ok_or_else(strict_json_error)
+}
+
+fn strict_keys(
+    object: &serde_json::Map<String, Value>,
+    required: &[&str],
+    allowed: &[&str],
+) -> Result<(), serde_json::Error> {
+    if required.iter().any(|key| !object.contains_key(*key))
+        || object.keys().any(|key| !allowed.contains(&key.as_str()))
+    {
+        return Err(strict_json_error());
+    }
+    Ok(())
+}
+
+fn strict_json_error() -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid strict checkpoint message shape",
+    ))
+}
+
+fn trace_cas_outcome(
+    result: &Result<AgentState, CasUpdateError<CheckpointError>>,
+    attempt_count: u64,
+    seq: Option<u64>,
+) {
+    let state = result.as_ref().ok();
+    let agent_id = state.map(|state| state.agent_id);
+    let run_id = state.and_then(|state| state.run_id);
+    let turn_id = state.and_then(|state| state.turn_id);
+    if attempt_count > 1 {
+        tracing::warn!(
+            agent_id = ?agent_id,
+            run_id = ?run_id,
+            turn_id = ?turn_id,
+            seq = ?seq,
+            retry_count = attempt_count - 1,
+            "checkpoint cas retry"
+        );
+    }
+    if matches!(result, Err(CasUpdateError::RetriesExhausted)) {
+        tracing::error!(
+            agent_id = ?agent_id,
+            run_id = ?run_id,
+            turn_id = ?turn_id,
+            seq = ?seq,
+            attempt_count,
+            exhaustion_count = 1_u64,
+            "checkpoint cas retries exhausted"
+        );
+    }
+}
+
+fn trace_checkpoint_corruption(state: &AgentState, seq: u64) {
+    tracing::error!(
+        agent_id = %state.agent_id,
+        run_id = ?state.run_id,
+        turn_id = ?state.turn_id,
+        seq,
+        corruption_count = 1_u64,
+        "checkpoint corruption"
+    );
+}
