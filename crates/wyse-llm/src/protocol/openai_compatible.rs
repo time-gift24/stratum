@@ -28,6 +28,8 @@ pub struct OpenAICompatibleProvider {
     base_url: String,
     api_key: ApiKey,
     model: ModelId,
+    #[builder(default = "openai_compatible".to_owned())]
+    provider_name: String,
 }
 
 impl OpenAICompatibleProvider {
@@ -39,7 +41,15 @@ impl OpenAICompatibleProvider {
             base_url: base_url.into(),
             api_key,
             model,
+            provider_name: "openai_compatible".to_owned(),
         }
+    }
+
+    /// Sets the provider name reported in runtime metadata.
+    #[must_use]
+    pub fn with_provider_name(mut self, provider_name: impl Into<String>) -> Self {
+        self.provider_name = provider_name.into();
+        self
     }
 
     fn chat_completions_url(&self) -> Result<Url, LlmError> {
@@ -61,7 +71,7 @@ impl OpenAICompatibleProvider {
 #[async_trait]
 impl LlmProvider for OpenAICompatibleProvider {
     fn provider_name(&self) -> &str {
-        "openai_compatible"
+        &self.provider_name
     }
 
     fn model_id(&self) -> ModelId {
@@ -521,9 +531,21 @@ mod tests {
 
     use super::*;
     use crate::{
-        ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, StructuredOutput, ToolCall,
-        ToolSpec,
+        ApiKey, ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, LlmProvider,
+        StructuredOutput, ToolCall, ToolSpec,
     };
+
+    #[test]
+    fn configured_provider_name_overrides_compatible_default() {
+        let provider = OpenAICompatibleProvider::new(
+            "https://api.openai.com/v1",
+            ApiKey::new("test-key"),
+            ModelId::from("gpt-4.1-mini"),
+        )
+        .with_provider_name("openai");
+
+        assert_eq!(provider.provider_name(), "openai");
+    }
 
     #[test]
     fn request_maps_messages_tools_and_json_schema() {
