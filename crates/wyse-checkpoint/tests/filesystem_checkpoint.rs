@@ -744,3 +744,38 @@ async fn pagination_reads_only_the_requested_message_paths() {
     }
     assert_eq!(filesystem.list_count(), 0);
 }
+
+#[tokio::test]
+async fn append_reads_only_state_and_the_constant_size_frontier() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    checkpoint
+        .initialize(AgentId::new(), "a".to_owned())
+        .await
+        .expect("initialize");
+    append_messages(&checkpoint, 10).await;
+    filesystem.reset_read_counts();
+
+    checkpoint
+        .append_message(
+            RunId::new(),
+            TurnId::new(),
+            DateTime::<Utc>::UNIX_EPOCH,
+            EventSource::Run,
+            ChatMessage::user("message 11"),
+            BTreeMap::new(),
+        )
+        .await
+        .expect("append after long history");
+
+    assert_eq!(filesystem.list_count(), 0);
+    for seq in 1..=10 {
+        assert_eq!(
+            filesystem.read_count(&format!("/agents/a/messages/{seq}.json")),
+            0
+        );
+    }
+    assert_eq!(filesystem.read_count("/agents/a/messages/11.json"), 1);
+    assert_eq!(filesystem.read_count("/agents/a/messages/12.json"), 1);
+}

@@ -14,7 +14,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 /// # Errors
 ///
 /// Returns an error when the supplied agent wiring is incomplete.
-pub fn build_default_agent(
+pub async fn build_default_agent(
     agent_id: AgentId,
     checkpoint: Arc<dyn AgentCheckpoint>,
     event_bus: Arc<dyn EventStreamBus>,
@@ -29,4 +29,5 @@ pub fn build_default_agent(
         .event_bus(event_bus)
         .checkpoint(checkpoint)
         .build()
+        .await
 }

@@ -311,10 +311,14 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         let mut append_attempt = 0_u64;
         loop {
             append_attempt = append_attempt.saturating_add(1);
-            let (state, message_sequences) = self.read_integrity_snapshot().await?;
-            let seq = self
-                .validate_integrity_snapshot(&state, &message_sequences)
-                .await?;
+            let state = self.read_state().await?;
+            let seq = state
+                .last_seq
+                .checked_add(1)
+                .ok_or(CheckpointError::SequenceOverflow)?;
+            let beyond = seq
+                .checked_add(1)
+                .ok_or(CheckpointError::SequenceOverflow)?;
             let envelope = StreamEnvelope {
                 run_id,
                 timestamp,
@@ -331,6 +335,32 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
             };
             validate_message(&envelope, state.agent_id, seq, Some(run_id), Some(turn_id))?;
 
+            let existing = self.read_message(&state, seq).await?;
+            if self.read_message(&state, beyond).await?.is_some() {
+                trace_checkpoint_corruption(&state, beyond);
+                return Err(CheckpointError::MessageBeyondFrontier {
+                    seq: beyond,
+                    frontier: seq,
+                });
+            }
+            if let Some(existing) = existing {
+                validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
+                    .inspect_err(|_| trace_checkpoint_corruption(&state, seq))?;
+                self.commit_sequence(state.last_seq, seq).await?;
+                if existing == envelope {
+                    return Ok(existing);
+                }
+                tracing::info!(
+                    agent_id = %state.agent_id,
+                    run_id = %run_id,
+                    turn_id = %turn_id,
+                    seq,
+                    retry_count = append_attempt,
+                    "checkpoint append retry"
+                );
+                continue;
+            }
+
             match self
                 .filesystem
                 .put(
@@ -345,34 +375,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                     return Ok(envelope);
                 }
                 Err(FilesystemError::VersionMismatch { .. }) => {
-                    let existing = self
-                        .read_message(&state, seq)
-                        .await?
-                        .ok_or(CheckpointError::MissingCommittedMessage { seq })?;
-                    validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
-                        .inspect_err(|_| trace_checkpoint_corruption(&state, seq))?;
-                    let beyond = seq
-                        .checked_add(1)
-                        .ok_or(CheckpointError::SequenceOverflow)?;
-                    if self.read_message(&state, beyond).await?.is_some() {
-                        trace_checkpoint_corruption(&state, beyond);
-                        return Err(CheckpointError::MessageBeyondFrontier {
-                            seq: beyond,
-                            frontier: seq,
-                        });
-                    }
-                    self.commit_sequence(state.last_seq, seq).await?;
-                    if existing == envelope {
-                        return Ok(existing);
-                    }
-                    tracing::info!(
-                        agent_id = %state.agent_id,
-                        run_id = %run_id,
-                        turn_id = %turn_id,
-                        seq,
-                        retry_count = append_attempt,
-                        "checkpoint append retry"
-                    );
+                    continue;
                 }
                 Err(error) => return Err(error.into()),
             }
