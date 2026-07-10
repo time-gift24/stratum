@@ -13,9 +13,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use wyse_core::{DangerLevel, ToolKind, ToolName, ToolSpec};
 
-use crate::{
-    Tool, ToolAuthorization, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry,
-};
+use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 
 pub use apply_patch::ApplyPatchTool;
 pub use file_metadata::FileMetadataTool;
@@ -76,7 +74,7 @@ impl ToolRegistry for BuiltinToolRegistry {
         Ok(())
     }
 
-    fn authorization(&self, name: &ToolName) -> Result<ToolAuthorization, ToolError> {
+    fn authorization(&self, name: &ToolName) -> Result<Option<(ToolKind, DangerLevel)>, ToolError> {
         let registered = self
             .tools
             .get(name)
@@ -89,14 +87,7 @@ impl ToolRegistry for BuiltinToolRegistry {
             }
             ToolPermissionMode::RequireApproval => false,
         };
-        Ok(if allowed {
-            ToolAuthorization::Allowed
-        } else {
-            ToolAuthorization::RequireApproval {
-                tool_kind: registered.tool_kind,
-                danger_level: registered.danger_level,
-            }
-        })
+        Ok((!allowed).then_some((registered.tool_kind, registered.danger_level)))
     }
 
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>> {

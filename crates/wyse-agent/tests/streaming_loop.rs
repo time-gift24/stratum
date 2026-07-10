@@ -29,8 +29,8 @@ use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
 use wyse_tools::{
-    BuiltinToolRegistry, EchoTool, Tool, ToolAuthorization, ToolError, ToolInput, ToolOutput,
-    ToolPermissionMode, ToolRegistry,
+    BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
+    ToolRegistry,
 };
 
 #[derive(Debug)]
@@ -131,8 +131,11 @@ impl ToolRegistry for BlockingToolRegistry {
         })
     }
 
-    fn authorization(&self, _name: &ToolName) -> Result<ToolAuthorization, ToolError> {
-        Ok(ToolAuthorization::Allowed)
+    fn authorization(
+        &self,
+        _name: &ToolName,
+    ) -> Result<Option<(ToolKind, DangerLevel)>, ToolError> {
+        Ok(None)
     }
 
     fn get(&self, _name: &ToolName) -> Option<Arc<dyn wyse_tools::Tool>> {

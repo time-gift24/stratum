@@ -561,8 +561,8 @@ impl Agent {
         .await?;
 
         let name = ToolName::from(tool_call.name.as_str());
-        let authorization = match self.tool_registry.authorization(&name) {
-            Ok(authorization) => authorization,
+        let approval_metadata = match self.tool_registry.authorization(&name) {
+            Ok(approval_metadata) => approval_metadata,
             Err(error) => {
                 return self
                     .tool_failure_message(turn_index, llm_call_id, tool_call, error.to_string())
@@ -570,7 +570,7 @@ impl Agent {
             }
         };
 
-        if let Some((tool_kind, danger_level)) = authorization.approval_metadata() {
+        if let Some((tool_kind, danger_level)) = approval_metadata {
             let approval_id = ApprovalId::new();
             self.publish_required_agent_event(
                 AgentEvent::ToolApprovalRequested {

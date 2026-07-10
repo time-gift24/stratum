@@ -435,14 +435,11 @@ fn permission_modes_apply_the_declared_matrix() {
             .register(Arc::new(EchoTool::new()), kind, danger_level)
             .expect("echo registers");
 
-        let authorization = registry
+        let approval_metadata = registry
             .authorization(&ToolName::from("echo"))
             .expect("echo is registered");
 
-        assert_eq!(
-            authorization.approval_metadata().is_some(),
-            expected_approval
-        );
+        assert_eq!(approval_metadata.is_some(), expected_approval);
     }
 }
 

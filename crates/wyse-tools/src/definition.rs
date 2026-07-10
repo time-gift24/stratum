@@ -19,31 +19,6 @@ pub enum ToolPermissionMode {
     RequireApproval,
 }
 
-/// Result of authorizing one registered tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ToolAuthorization {
-    Allowed,
-    RequireApproval {
-        tool_kind: ToolKind,
-        danger_level: DangerLevel,
-    },
-}
-
-impl ToolAuthorization {
-    /// Returns metadata when the tool call requires approval.
-    #[must_use]
-    pub const fn approval_metadata(self) -> Option<(ToolKind, DangerLevel)> {
-        match self {
-            Self::Allowed => None,
-            Self::RequireApproval {
-                tool_kind,
-                danger_level,
-            } => Some((tool_kind, danger_level)),
-        }
-    }
-}
-
 /// Input passed to one runtime tool call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -107,12 +82,12 @@ pub trait ToolRegistry: Send + Sync {
         danger_level: DangerLevel,
     ) -> Result<(), ToolError>;
 
-    /// Returns the authorization result for a registered tool.
+    /// Returns approval metadata for a registered tool, or `None` when it is allowed.
     ///
     /// # Errors
     ///
     /// Returns an error when the tool is not registered.
-    fn authorization(&self, name: &ToolName) -> Result<ToolAuthorization, ToolError>;
+    fn authorization(&self, name: &ToolName) -> Result<Option<(ToolKind, DangerLevel)>, ToolError>;
 
     /// Returns a registered tool by name.
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>>;
