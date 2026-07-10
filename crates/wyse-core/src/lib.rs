@@ -639,15 +639,16 @@ pub enum LlmEvent {
 pub enum AgentEvent {
     /// One complete message committed to agent history.
     Message {
-        /// Monotonic business sequence for complete messages.
-        seq: u64,
         /// Turn that produced the message.
         turn_id: TurnId,
         /// Complete message payload.
         message: ChatMessage,
     },
     /// Agent run started.
-    Started,
+    Started {
+        /// Turn being run.
+        turn_id: TurnId,
+    },
     /// Agent run finished.
     Finished {
         /// Why the run finished.
@@ -659,9 +660,14 @@ pub enum AgentEvent {
     Failed {
         /// Error text safe to expose to callers.
         error_text: String,
+        /// Token usage accumulated by the run.
+        usage: TokenUsage,
     },
     /// Agent run was cancelled.
-    Cancelled,
+    Cancelled {
+        /// Token usage accumulated by the run.
+        usage: TokenUsage,
+    },
     /// A tool call requires user approval.
     ToolApprovalRequested {
         /// Approval request identity.
@@ -696,28 +702,17 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
-    /// Returns the complete-message business sequence, when present.
-    #[must_use]
-    pub const fn business_seq(&self) -> Option<u64> {
-        match self {
-            Self::Message { seq, .. } => Some(*seq),
-            Self::Started
-            | Self::Finished { .. }
-            | Self::Failed { .. }
-            | Self::Cancelled
-            | Self::Llm { .. } => None,
-        }
-    }
-
     /// Returns the serialized event type name.
     #[must_use]
     pub const fn event_type(&self) -> &'static str {
         match self {
             Self::Message { .. } => "message",
-            Self::Started => "started",
+            Self::Started { .. } => "started",
             Self::Finished { .. } => "finished",
             Self::Failed { .. } => "failed",
-            Self::Cancelled => "cancelled",
+            Self::Cancelled { .. } => "cancelled",
+            Self::ToolApprovalRequested { .. } => "tool_approval_requested",
+            Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
             Self::Llm { .. } => "llm",
         }
     }
@@ -782,24 +777,6 @@ pub enum RuntimeEvent {
 }
 
 impl RuntimeEvent {
-    /// Returns the complete-message business sequence, when present.
-    #[must_use]
-    pub const fn business_seq(&self) -> Option<u64> {
-        match self {
-            Self::Agent { event, .. } => event.business_seq(),
-            Self::RunStarted
-            | Self::RunFinished { .. }
-            | Self::RunFailed { .. }
-            | Self::RunCancelled
-            | Self::NodeStarted
-            | Self::NodeOutput { .. }
-            | Self::NodeFinished
-            | Self::NodeFailed { .. }
-            | Self::Llm { .. }
-            | Self::PlanUpdated { .. } => None,
-        }
-    }
-
     /// Returns the serialized event type name.
     #[must_use]
     pub const fn event_type(&self) -> &'static str {
@@ -853,6 +830,9 @@ pub enum ReplayStart {
 /// One event in a workflow run stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEnvelope {
+    /// Monotonic business sequence for persisted complete messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business_seq: Option<u64>,
     /// Workflow run identity.
     pub run_id: RunId,
     /// Event creation time.
@@ -864,6 +844,14 @@ pub struct StreamEnvelope {
     /// Runtime-only metadata; not for business payloads.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, Value>,
+}
+
+impl StreamEnvelope {
+    /// Returns the complete-message business sequence, when present.
+    #[must_use]
+    pub const fn business_seq(&self) -> Option<u64> {
+        self.business_seq
+    }
 }
 
 /// One transport event and its replay cursor.
@@ -902,9 +890,11 @@ pub struct HistoryPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn agent_envelope(event: AgentEvent) -> StreamEnvelope {
+    fn agent_envelope(business_seq: Option<u64>, event: AgentEvent) -> StreamEnvelope {
         StreamEnvelope {
+            business_seq,
             run_id: RunId::new(),
             timestamp: Utc::now(),
             source: EventSource::Run,
@@ -917,28 +907,41 @@ mod tests {
     }
 
     #[test]
-    fn only_complete_agent_message_has_business_sequence() {
-        let message = AgentEvent::Message {
-            seq: 7,
-            turn_id: TurnId::new(),
-            message: ChatMessage::user("hello"),
-        };
-        let delta = AgentEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::TextDelta {
-                role: LlmCallRole::Assistant,
-                delta: "hel".to_owned(),
+    fn only_complete_agent_message_has_business_sequence() -> serde_json::Result<()> {
+        let message = agent_envelope(
+            Some(7),
+            AgentEvent::Message {
+                turn_id: TurnId::new(),
+                message: ChatMessage::user("hello"),
             },
-        };
+        );
+        let delta = agent_envelope(
+            None,
+            AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::ReasoningDelta {
+                    delta: "thinking".to_owned(),
+                },
+            },
+        );
 
         assert_eq!(message.business_seq(), Some(7));
         assert_eq!(delta.business_seq(), None);
+        assert_eq!(serde_json::to_value(&message)?["business_seq"], json!(7));
+        assert!(serde_json::to_value(&delta)?.get("business_seq").is_none());
+
+        Ok(())
     }
 
     #[test]
     fn stream_envelope_has_no_top_level_sequence() {
-        let value =
-            serde_json::to_value(agent_envelope(AgentEvent::Started)).expect("serialize envelope");
+        let value = serde_json::to_value(agent_envelope(
+            None,
+            AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
+        ))
+        .expect("serialize envelope");
 
         assert!(value.get("seq").is_none());
     }
@@ -1099,7 +1102,9 @@ mod tests {
     fn runtime_agent_event_type_is_agent() {
         let event = RuntimeEvent::Agent {
             agent_id: AgentId::new(),
-            event: AgentEvent::Started,
+            event: AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
         };
 
         assert_eq!(event.event_type(), "agent");
@@ -1211,6 +1216,9 @@ mod tests {
             approval_id,
             decision: ApprovalDecision::Approve,
         };
+
+        assert_eq!(requested.event_type(), "tool_approval_requested");
+        assert_eq!(resolved.event_type(), "tool_approval_resolved");
 
         let requested_json = serde_json::to_value(requested).expect("requested event serializes");
         let resolved_json = serde_json::to_value(resolved).expect("resolved event serializes");
