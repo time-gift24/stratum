@@ -4,7 +4,9 @@ use chrono::Utc;
 use futures_util::{StreamExt, future::try_join_all};
 use serde_json::json;
 use tokio::time::{Instant, sleep, timeout};
-use wyse_core::{EventSource, RunId, RuntimeEvent, StreamEnvelope};
+use wyse_core::{
+    AgentEvent, AgentId, EventSource, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
+};
 use wyse_infra::{
     EventStream, EventStreamBus, NatsEventStreamBusConfig, create_nats_event_stream_bus,
 };
@@ -13,16 +15,18 @@ const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:44227";
 
 #[tokio::test]
 #[ignore = "requires wyse-infra-test NATS container"]
-async fn nats_event_stream_bus_publishes_and_subscribes_run_events() -> Result<(), Box<dyn Error>> {
+async fn nats_event_stream_bus_publishes_and_subscribes_agent_events() -> Result<(), Box<dyn Error>>
+{
     let nats_url =
         std::env::var("WYSE_INFRA_TEST_NATS_URL").unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned());
     let bus = wait_for_bus(&nats_url).await?;
     let run_id = RunId::new();
-    let envelopes = envelopes(run_id);
-    let mut first_stream = bus.subscribe_run(run_id).await?;
-    let mut second_stream = bus.subscribe_run(run_id).await?;
+    let agent_id = AgentId::new();
+    let envelopes = envelopes(run_id, agent_id);
+    let mut first_stream = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
+    let mut second_stream = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
 
-    eprintln!("subscribed two streams for run_id={run_id}");
+    eprintln!("subscribed two streams for agent_id={agent_id}");
     sleep(Duration::from_millis(10)).await;
 
     eprintln!("publishing {} envelopes concurrently", envelopes.len());
@@ -54,7 +58,8 @@ async fn nats_event_stream_bus_replays_events_published_before_subscription()
         std::env::var("WYSE_INFRA_TEST_NATS_URL").unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned());
     let bus = wait_for_bus(&nats_url).await?;
     let run_id = RunId::new();
-    let envelopes = envelopes(run_id);
+    let agent_id = AgentId::new();
+    let envelopes = envelopes(run_id, agent_id);
 
     try_join_all(
         envelopes
@@ -64,8 +69,8 @@ async fn nats_event_stream_bus_replays_events_published_before_subscription()
     )
     .await?;
 
-    let mut first_stream = bus.subscribe_run(run_id).await?;
-    let mut second_stream = bus.subscribe_run(run_id).await?;
+    let mut first_stream = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
+    let mut second_stream = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
     let first_received =
         receive_envelopes("replay-sub-1", &mut first_stream, envelopes.len()).await?;
     let second_received =
@@ -110,10 +115,11 @@ async fn receive_envelopes(
     let mut envelopes = Vec::with_capacity(count);
 
     for _ in 0..count {
-        let envelope = timeout(Duration::from_secs(5), stream.next())
+        let record = timeout(Duration::from_secs(5), stream.next())
             .await?
             .transpose()?
             .ok_or_else(|| format!("{subscriber} ended before receiving all envelopes"))?;
+        let envelope = record.envelope;
 
         eprintln!(
             "{subscriber} received pub_index={:?} event_type={} metadata={:?}",
@@ -127,7 +133,7 @@ async fn receive_envelopes(
     Ok(envelopes)
 }
 
-fn envelopes(run_id: RunId) -> Vec<StreamEnvelope> {
+fn envelopes(run_id: RunId, agent_id: AgentId) -> Vec<StreamEnvelope> {
     (1..=5)
         .map(|seq| {
             let mut metadata = BTreeMap::new();
@@ -138,12 +144,9 @@ fn envelopes(run_id: RunId) -> Vec<StreamEnvelope> {
                 run_id,
                 timestamp: Utc::now(),
                 source: EventSource::Run,
-                event: RuntimeEvent::NodeOutput {
-                    output: json!({
-                        "value": "ok",
-                        "seq": seq,
-                        "items": [seq, seq + 10, seq + 20],
-                    }),
+                event: RuntimeEvent::Agent {
+                    agent_id,
+                    event: AgentEvent::Started,
                 },
                 metadata,
             }
