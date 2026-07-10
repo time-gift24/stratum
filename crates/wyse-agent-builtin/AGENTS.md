@@ -1,6 +1,6 @@
 # wyse-agent-builtin
 
-- `ModelRef` is always `provider:model`; accept it only through `MODEL`.
+- `ModelId` is always `provider:model`; accept it only through `MODEL`.
 - `API_KEY` is the only credential environment variable. Never log it.
 - Binaries subscribe through `EventStreamBus` and write complete NDJSON
   `StreamEnvelope` values; do not hide reasoning or metadata.

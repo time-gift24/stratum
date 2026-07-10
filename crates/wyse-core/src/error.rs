@@ -2,10 +2,10 @@
 
 use thiserror::Error;
 
-/// Error returned when a model reference is not canonical.
+/// Error returned when a model id is not canonical.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ModelRefParseError {
+pub enum ModelIdParseError {
     /// The value is not exactly `provider:model`.
-    #[error("model reference must use provider:model")]
+    #[error("model id must use provider:model")]
     InvalidFormat,
 }

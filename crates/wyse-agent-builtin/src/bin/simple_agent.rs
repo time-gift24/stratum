@@ -3,7 +3,7 @@ use std::{io::Write, sync::Arc};
 use futures_util::StreamExt;
 use wyse_agent::AgentError;
 use wyse_agent_builtin::{DefaultAgentError, build_default_agent};
-use wyse_core::{AgentEvent, ChatMessage, ModelRef, ModelRefParseError, RuntimeEvent};
+use wyse_core::{AgentEvent, ChatMessage, ModelId, ModelIdParseError, RuntimeEvent};
 use wyse_infra::{
     EventStreamBus,
     event_stream_bus::{EventStreamBusError, InMemoryEventStreamBus},
@@ -20,8 +20,8 @@ enum SimpleAgentError {
     MissingPrompt,
     #[error("expected exactly one prompt argument")]
     TooManyArguments,
-    #[error("invalid model reference")]
-    ModelRef(#[from] ModelRefParseError),
+    #[error("invalid model id")]
+    ModelId(#[from] ModelIdParseError),
     #[error("default agent setup failed")]
     DefaultAgent(#[from] DefaultAgentError),
     #[error("agent start failed")]
@@ -59,7 +59,7 @@ fn prompt_from_args(mut args: impl Iterator<Item = String>) -> Result<String, Si
 #[tokio::main]
 async fn main() -> Result<(), SimpleAgentError> {
     let api_key = ApiKey::new(required_environment("API_KEY")?);
-    let model: ModelRef = required_environment("MODEL")?.parse()?;
+    let model: ModelId = required_environment("MODEL")?.parse()?;
     let prompt = prompt_from_args(std::env::args().skip(1))?;
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let event_bus: Arc<dyn EventStreamBus> = bus.clone();

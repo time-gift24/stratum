@@ -8,10 +8,10 @@ use wyse_core::ModelId;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DefaultAgentError {
-    /// The model reference selects a provider unavailable in this crate.
+    /// The model id selects a provider unavailable in this crate.
     #[error("unsupported model provider: {provider}")]
     UnsupportedProvider { provider: String },
-    /// The model reference selects a DeepSeek model unsupported by `wyse-llm`.
+    /// The model id selects a DeepSeek model unsupported by `wyse-llm`.
     #[error("unsupported deepseek model: {model}")]
     UnsupportedDeepSeekModel { model: ModelId },
     /// The agent builder rejected the supplied wiring.

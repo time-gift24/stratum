@@ -28,8 +28,6 @@ pub struct OpenAICompatibleProvider {
     base_url: String,
     api_key: ApiKey,
     model: ModelId,
-    #[builder(default = "openai_compatible".to_owned())]
-    provider_name: String,
 }
 
 impl OpenAICompatibleProvider {
@@ -41,15 +39,7 @@ impl OpenAICompatibleProvider {
             base_url: base_url.into(),
             api_key,
             model,
-            provider_name: "openai_compatible".to_owned(),
         }
-    }
-
-    /// Sets the provider name reported in runtime metadata.
-    #[must_use]
-    pub fn with_provider_name(mut self, provider_name: impl Into<String>) -> Self {
-        self.provider_name = provider_name.into();
-        self
     }
 
     fn chat_completions_url(&self) -> Result<Url, LlmError> {
@@ -70,10 +60,6 @@ impl OpenAICompatibleProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAICompatibleProvider {
-    fn provider_name(&self) -> &str {
-        &self.provider_name
-    }
-
     fn model_id(&self) -> ModelId {
         self.model.clone()
     }
@@ -303,7 +289,7 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
         .map(message_to_value)
         .collect::<Result<Vec<_>, _>>()?;
     let mut payload = json!({
-        "model": request.model.as_str(),
+        "model": request.model.model_name(),
         "messages": messages,
         "stream": stream,
     });
@@ -527,29 +513,17 @@ fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wyse_core::{CallId, ModelId};
+    use wyse_core::CallId;
 
     use super::*;
     use crate::{
-        ApiKey, ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, LlmProvider,
-        StructuredOutput, ToolCall, ToolSpec,
+        ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, StructuredOutput, ToolCall,
+        ToolSpec,
     };
 
     #[test]
-    fn configured_provider_name_overrides_compatible_default() {
-        let provider = OpenAICompatibleProvider::new(
-            "https://api.openai.com/v1",
-            ApiKey::new("test-key"),
-            ModelId::from("gpt-4.1-mini"),
-        )
-        .with_provider_name("openai");
-
-        assert_eq!(provider.provider_name(), "openai");
-    }
-
-    #[test]
     fn request_maps_messages_tools_and_json_schema() {
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini"))
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
             .with_message(ChatMessage::system("be brief"))
             .with_message(ChatMessage::user("answer"));
         let request = ChatRequest {
@@ -738,7 +712,8 @@ mod tests {
             name: "get_weather".to_owned(),
             arguments: json!({"city": "Paris"}),
         }];
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message);
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(message);
 
         let payload = to_chat_payload(&request, false).expect("payload maps");
         let tool_call = &payload["messages"][0]["tool_calls"][0];
@@ -759,7 +734,8 @@ mod tests {
     fn tool_message_maps_call_id() {
         let mut message = ChatMessage::text(ChatRole::Tool, "sunny");
         message.tool_call_id = Some(CallId::from("call-1"));
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message);
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(message);
 
         let payload = to_chat_payload(&request, false).expect("payload maps");
         let message = &payload["messages"][0];
@@ -772,7 +748,8 @@ mod tests {
     #[test]
     fn tool_json_message_maps_call_id_and_string_content() {
         let message = ChatMessage::tool(CallId::from("call-1"), json!({"ok": true}));
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini")).with_message(message);
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(message);
 
         let payload = to_chat_payload(&request, false).expect("payload maps");
         let message = &payload["messages"][0];

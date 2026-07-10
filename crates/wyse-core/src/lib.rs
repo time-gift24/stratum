@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub use error::ModelRefParseError;
+pub use error::ModelIdParseError;
 
 /// Identity of one workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -207,84 +207,92 @@ macro_rules! string_id {
 }
 
 string_id!(NodeId, "Identity of a workflow node.");
-string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
 
-/// Canonical identity of a provider-local model.
+/// Canonical identity of a provider model.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ModelRef {
-    provider: String,
-    model: ModelId,
-}
+pub struct ModelId(String);
 
-impl ModelRef {
-    /// Returns the canonical provider name.
-    #[must_use]
-    pub fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    /// Returns the provider-local model identifier.
-    #[must_use]
-    pub fn model(&self) -> &ModelId {
-        &self.model
-    }
-}
-
-impl fmt::Display for ModelRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.provider, self.model)
-    }
-}
-
-impl FromStr for ModelRef {
-    type Err = ModelRefParseError;
-
-    /// Parses a canonical `provider:model` reference.
+impl ModelId {
+    /// Creates a canonical provider-scoped model id.
     ///
     /// # Errors
     ///
-    /// Returns [`ModelRefParseError::InvalidFormat`] when the value is not canonical.
+    /// Returns [`ModelIdParseError::InvalidFormat`] when either segment is invalid.
+    pub fn new(provider: &str, model: &str) -> Result<Self, ModelIdParseError> {
+        format!("{provider}:{model}").parse()
+    }
+
+    /// Returns the canonical provider name.
+    #[must_use]
+    pub fn provider_name(&self) -> &str {
+        self.0.split_once(':').expect("validated model id").0
+    }
+
+    /// Returns the provider-local model name.
+    #[must_use]
+    pub fn model_name(&self) -> &str {
+        self.0.split_once(':').expect("validated model id").1
+    }
+
+    /// Returns the canonical model id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ModelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for ModelId {
+    type Err = ModelIdParseError;
+
+    /// Parses a canonical `provider:model` id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelIdParseError::InvalidFormat`] when the value is not canonical.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let Some((provider, model)) = value.split_once(':') else {
-            return Err(ModelRefParseError::InvalidFormat);
+            return Err(ModelIdParseError::InvalidFormat);
         };
         if provider.is_empty()
             || model.is_empty()
             || model.contains(':')
-            || provider.trim() != provider
-            || model.trim() != model
+            || provider.chars().any(char::is_whitespace)
+            || model.chars().any(char::is_whitespace)
         {
-            return Err(ModelRefParseError::InvalidFormat);
+            return Err(ModelIdParseError::InvalidFormat);
         }
 
-        Ok(Self {
-            provider: provider.to_owned(),
-            model: ModelId::from(model),
-        })
+        Ok(Self(value.to_owned()))
     }
 }
 
-impl TryFrom<String> for ModelRef {
-    type Error = ModelRefParseError;
+impl TryFrom<String> for ModelId {
+    type Error = ModelIdParseError;
 
-    /// Converts a canonical `provider:model` reference.
+    /// Converts a canonical `provider:model` id.
     ///
     /// # Errors
     ///
-    /// Returns [`ModelRefParseError::InvalidFormat`] when the value is not canonical.
+    /// Returns [`ModelIdParseError::InvalidFormat`] when the value is not canonical.
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value.parse()
     }
 }
 
-impl From<ModelRef> for String {
-    fn from(value: ModelRef) -> Self {
-        value.to_string()
+impl From<ModelId> for String {
+    fn from(value: ModelId) -> Self {
+        value.0
     }
 }
 
@@ -698,38 +706,31 @@ mod tests {
     }
 
     #[test]
-    fn model_id_round_trips_string() {
-        let model_id = ModelId::from("gpt-4.1-mini");
+    fn model_id_round_trips_provider_and_model_name() {
+        let model: ModelId = "openai:gpt-4.1-mini".parse().expect("model id parses");
+        let constructed = ModelId::new("openai", "gpt-4.1-mini").expect("model id constructs");
+        let converted =
+            ModelId::try_from("openai:gpt-4.1-mini".to_owned()).expect("model id converts");
 
-        assert_eq!(model_id.as_str(), "gpt-4.1-mini");
-        assert_eq!(model_id.to_string(), "gpt-4.1-mini");
+        assert_eq!(model.provider_name(), "openai");
+        assert_eq!(model.model_name(), "gpt-4.1-mini");
+        assert_eq!(model.as_str(), "openai:gpt-4.1-mini");
+        assert_eq!(model, constructed);
+        assert_eq!(model, converted);
     }
 
     #[test]
-    fn model_ref_round_trips_provider_and_model() {
-        let model_ref: ModelRef = "openai:gpt-4.1-mini".parse().expect("model ref parses");
-
-        assert_eq!(model_ref.provider(), "openai");
-        assert_eq!(model_ref.model().as_str(), "gpt-4.1-mini");
-        assert_eq!(model_ref.to_string(), "openai:gpt-4.1-mini");
-        assert_eq!(
-            serde_json::to_string(&model_ref).expect("model ref serializes"),
-            "\"openai:gpt-4.1-mini\"",
-        );
-    }
-
-    #[test]
-    fn model_ref_rejects_noncanonical_values() {
+    fn model_id_rejects_noncanonical_values() {
         for value in [
-            "openai",
+            "gpt-4.1-mini",
             ":gpt",
             "openai:",
             "openai:gpt:mini",
-            " openai:gpt",
-            "openai :gpt",
+            "open ai:gpt",
+            "openai:gpt mini",
             "openai: gpt",
         ] {
-            assert!(value.parse::<ModelRef>().is_err(), "{value} should fail");
+            assert!(value.parse::<ModelId>().is_err(), "{value} should fail");
         }
     }
 
