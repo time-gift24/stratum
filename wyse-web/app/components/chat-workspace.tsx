@@ -1,33 +1,38 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
+  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Clock3Icon,
   PlusIcon,
-  SendIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { AgentApprovalCard } from "~/components/agent-approval-card"
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputButton,
+  PromptInputFooter,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "~/components/ai-elements/prompt-input"
+import {
+  finishApprovalSubmission,
+  startApprovalSubmission,
+} from "~/components/agent-approval-submissions"
+import { AgentMessageList } from "~/components/agent-message-list"
 import GlassSurface from "~/components/GlassSurface"
-import { StratumMark } from "~/components/stratum-mark"
-import { Bubble, BubbleContent } from "~/components/ui/bubble"
 import { Button } from "~/components/ui/button"
 import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "~/components/ui/card"
-import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-  MessageFooter,
-  MessageHeader,
-} from "~/components/ui/message"
+import { Separator } from "~/components/ui/separator"
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -36,56 +41,110 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "~/components/ui/message-scroller"
-import { Textarea } from "~/components/ui/textarea"
-
-const historyItems = [
-  { id: "current", titleKey: "chat.history.current", timeKey: "chat.time.now" },
-  {
-    id: "tool-policy",
-    titleKey: "chat.history.toolPolicy",
-    timeKey: "chat.time.yesterday",
-  },
-  {
-    id: "runtime-plan",
-    titleKey: "chat.history.runtimePlan",
-    timeKey: "chat.time.lastWeek",
-  },
-] as const
-
-const messages = [
-  {
-    id: "assistant-intro",
-    role: "assistant",
-    bodyKey: "chat.messages.assistantIntro",
-    timeKey: "chat.time.now",
-  },
-  {
-    id: "user-question",
-    role: "user",
-    bodyKey: "chat.messages.userQuestion",
-    timeKey: "chat.time.now",
-  },
-  {
-    id: "assistant-answer",
-    role: "assistant",
-    bodyKey: "chat.messages.assistantAnswer",
-    timeKey: "chat.time.now",
-  },
-] as const
+import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
 export function ChatWorkspace() {
   const { t } = useTranslation()
+  const conversation = useAgentConversation()
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  const [composerText, setComposerText] = useState("")
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submittingApprovalIds, setSubmittingApprovalIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set())
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const { state } = conversation
+  const isAgentBusy =
+    state.phase === "recovering" || state.view?.status === "running"
+  const activeAgent =
+    state.agentId === null
+      ? undefined
+      : conversation.recentAgents.find(
+          (agent) => agent.agentId === state.agentId
+        )
+  const historicalAgents = activeAgent
+    ? conversation.recentAgents.filter(
+        (agent) => agent.agentId !== activeAgent.agentId
+      )
+    : conversation.recentAgents
+
+  const renderConversationEntry = (
+    agent: (typeof conversation.recentAgents)[number]
+  ) => {
+    const isCurrent = agent.agentId === state.agentId
+    const isMissing = state.phase === "missing" && isCurrent
+
+    return (
+      <div key={agent.agentId} className="flex items-center gap-1">
+        <Button
+          variant={isCurrent ? "secondary" : "ghost"}
+          size="lg"
+          className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
+          onClick={() => conversation.selectAgent(agent.agentId)}
+        >
+          <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+            <span className="w-full truncate">{agent.title}</span>
+            <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
+              <Clock3Icon aria-hidden="true" />
+              {agent.lastOpenedAt}
+            </span>
+          </span>
+        </Button>
+        {isMissing ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => conversation.removeRecentAgent(agent.agentId)}
+          >
+            {t("chat.removeLocalEntry")}
+          </Button>
+        ) : null}
+      </div>
+    )
+  }
+
+  const submitMessage = async () => {
+    const text = composerText.trim()
+    if (text === "" || isSubmitting || isAgentBusy) return
+
+    setIsSubmitting(true)
+    try {
+      const sent =
+        state.agentId === null
+          ? await conversation.createConversation(text)
+          : await conversation.sendMessage(text)
+      if (sent) setComposerText("")
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const resolveApproval = async (
+    approvalId: string,
+    decision: "approve" | "reject"
+  ) => {
+    setSubmittingApprovalIds((approvalIds) =>
+      startApprovalSubmission(approvalIds, approvalId)
+    )
+    try {
+      await conversation.resolveApproval(approvalId, decision)
+    } finally {
+      setSubmittingApprovalIds((approvalIds) =>
+        finishApprovalSubmission(approvalIds, approvalId)
+      )
+    }
+  }
 
   return (
     <section
       id="longzhong"
-      className="min-h-[100dvh] scroll-mt-20 px-4 pt-4 pb-8 md:px-8 md:pb-10"
+      className="h-[100dvh] overflow-hidden px-4 pt-4 pb-8 md:px-8 md:pb-10"
     >
-      <div className="relative mx-auto w-full max-w-5xl">
+      <div className="relative mx-auto flex h-full w-full max-w-5xl flex-col 2xl:block">
         <Card
           size="sm"
-          className="relative mb-6 w-full bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="relative mb-6 w-full shrink-0 bg-transparent ring-0 2xl:absolute 2xl:top-16 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
         >
           <div className="absolute inset-0 -z-10">
             <GlassSurface
@@ -136,107 +195,124 @@ export function ChatWorkspace() {
                 size="icon-sm"
                 aria-label={t("chat.history.new")}
                 title={t("chat.history.new")}
+                onClick={() => {
+                  conversation.selectAgent(null)
+                  composerRef.current?.focus()
+                }}
               >
                 <PlusIcon aria-hidden="true" />
               </Button>
             </CardAction>
           </CardHeader>
+          {activeAgent ? (
+            <CardContent data-slot="active-conversation" className="pt-0">
+              {renderConversationEntry(activeAgent)}
+            </CardContent>
+          ) : null}
+          {activeAgent && historicalAgents.length > 0 ? (
+            <Separator
+              data-slot="history-divider"
+              className="mx-(--card-spacing) w-auto"
+            />
+          ) : null}
           {isHistoryOpen ? (
-            <CardContent id="chat-history" className="flex flex-col gap-1.5">
-              {historyItems.map((item, index) => (
-                <Button
-                  key={item.id}
-                  variant={index === 0 ? "secondary" : "ghost"}
-                  size="lg"
-                  className="h-auto w-full justify-start py-2 text-left"
-                >
-                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                    <span className="w-full truncate">{t(item.titleKey)}</span>
-                    <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
-                      <Clock3Icon aria-hidden="true" />
-                      {t(item.timeKey)}
-                    </span>
-                  </span>
-                </Button>
-              ))}
+            <CardContent
+              id="chat-history"
+              data-slot="history-conversations"
+              className="flex flex-col gap-1.5"
+            >
+              {historicalAgents.map(renderConversationEntry)}
             </CardContent>
           ) : null}
         </Card>
 
         <div
           data-slot="chat-main"
-          className="flex h-[80dvh] min-h-[36rem] min-w-0 flex-col"
+          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4 2xl:h-full"
         >
           <MessageScrollerProvider autoScroll>
             <MessageScroller className="flex-1">
               <MessageScrollerViewport>
                 <MessageScrollerContent className="w-full px-1 py-6 md:px-6">
-                  {messages.map((message) => {
-                    const isUser = message.role === "user"
-
-                    return (
-                      <MessageScrollerItem
-                        key={message.id}
-                        messageId={message.id}
-                        scrollAnchor={isUser}
-                      >
-                        <Message align={isUser ? "end" : "start"}>
-                          {isUser ? null : (
-                            <MessageAvatar>
-                              <StratumMark
-                                animated={false}
-                                variant="compact"
-                                className="size-6"
-                              />
-                            </MessageAvatar>
-                          )}
-                          <MessageContent>
-                            <MessageHeader>
-                              {isUser ? t("chat.you") : t("chat.assistant")}
-                            </MessageHeader>
-                            <Bubble
-                              variant={isUser ? "secondary" : "ghost"}
-                              align={isUser ? "end" : "start"}
-                            >
-                              <BubbleContent>
-                                {t(message.bodyKey)}
-                              </BubbleContent>
-                            </Bubble>
-                            <MessageFooter>{t(message.timeKey)}</MessageFooter>
-                          </MessageContent>
-                        </Message>
-                      </MessageScrollerItem>
-                    )
-                  })}
+                  <AgentMessageList
+                    messages={state.messages}
+                    drafts={state.drafts}
+                    tools={state.tools}
+                  />
+                  {Object.values(state.approvals).map((approval) => (
+                    <MessageScrollerItem
+                      key={approval.approvalId}
+                      messageId={`approval:${approval.approvalId}`}
+                    >
+                      <AgentApprovalCard
+                        approval={approval}
+                        submitting={submittingApprovalIds.has(
+                          approval.approvalId
+                        )}
+                        onDecision={(decision) => {
+                          void resolveApproval(approval.approvalId, decision)
+                        }}
+                      />
+                    </MessageScrollerItem>
+                  ))}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
               <MessageScrollerButton />
             </MessageScroller>
           </MessageScrollerProvider>
 
-          <Card size="sm" className="w-full shrink-0">
-            <CardHeader>
-              <CardTitle>{t("chat.composer.title")}</CardTitle>
-              <CardDescription>
-                {t("chat.composer.description")}
-              </CardDescription>
-            </CardHeader>
+          <Card size="sm" className="w-full shrink-0 bg-transparent ring-0">
             <CardContent>
-              <Textarea
-                aria-label={t("chat.composer.label")}
-                placeholder={t("chat.composer.placeholder")}
-                rows={2}
-              />
+              <PromptInput
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void submitMessage()
+                }}
+              >
+                <PromptInputBody>
+                  <PromptInputTextarea
+                    ref={composerRef}
+                    aria-label={t("chat.composer.label")}
+                    disabled={isSubmitting || isAgentBusy}
+                    onChange={(event) => setComposerText(event.target.value)}
+                    placeholder={t("chat.composer.placeholder")}
+                    value={composerText}
+                  />
+                </PromptInputBody>
+                <PromptInputFooter>
+                  <PromptInputTools>
+                    {state.phase === "connection_error" ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => conversation.reconnect()}
+                      >
+                        {t("chat.reconnect")}
+                      </PromptInputButton>
+                    ) : state.agentId !== null && isAgentBusy ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => void conversation.cancel()}
+                      >
+                        {t("chat.cancel")}
+                      </PromptInputButton>
+                    ) : null}
+                  </PromptInputTools>
+                  <PromptInputSubmit
+                    aria-label={t("chat.composer.send")}
+                    className={
+                      composerText.trim() === ""
+                        ? "bg-muted text-muted-foreground hover:bg-muted"
+                        : undefined
+                    }
+                    disabled={
+                      isSubmitting || isAgentBusy || composerText.trim() === ""
+                    }
+                  >
+                    <ArrowUpIcon aria-hidden="true" />
+                  </PromptInputSubmit>
+                </PromptInputFooter>
+              </PromptInput>
             </CardContent>
-            <CardFooter className="justify-between gap-3 border-t">
-              <p className="text-[0.625rem] text-muted-foreground">
-                {t("chat.composer.hint")}
-              </p>
-              <Button type="button" size="lg">
-                {t("chat.composer.send")}
-                <SendIcon data-icon="inline-end" aria-hidden="true" />
-              </Button>
-            </CardFooter>
           </Card>
         </div>
       </div>

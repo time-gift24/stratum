@@ -183,6 +183,7 @@ const GlassSurface = ({
     borderRadius: `${borderRadius}px`,
     "--glass-frost": backgroundOpacity,
     "--glass-saturation": saturation,
+    "--glass-displace": `${displace}px`,
     "--filter-id": `url(#${filterId})`,
   } as CSSProperties
 

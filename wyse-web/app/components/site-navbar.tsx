@@ -41,7 +41,9 @@ export function SiteNavbar() {
   const handleSectionNavigation = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
 
-    const section = event.currentTarget.hash.slice(1) as "overview" | "longzhong"
+    const section = event.currentTarget.hash.slice(1) as
+      | "overview"
+      | "longzhong"
     const target = document.getElementById(section)
 
     if (!target) {
@@ -51,9 +53,7 @@ export function SiteNavbar() {
     const reduceMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)"
     ).matches
-    const scrollOffset = 80 // matches scroll-mt-20
-    const targetY =
-      target.getBoundingClientRect().top + window.scrollY - scrollOffset
+    const targetY = target.getBoundingClientRect().top + window.scrollY
 
     if (reduceMotion) {
       window.scrollTo(0, targetY)
@@ -226,7 +226,7 @@ export function SiteNavbar() {
             brightness={68}
             opacity={0.5}
             blur={100}
-            displace={0}
+            displace={2.2}
             backgroundOpacity={0.05}
             saturation={1.15}
             distortionScale={-40}
