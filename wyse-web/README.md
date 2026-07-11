@@ -19,3 +19,17 @@ To use the components in your app, import them as follows:
 ```tsx
 import { Button } from "@/components/ui/button";
 ```
+
+## Agent API development
+
+Copy `.env.example` to `.env.local` and set the API base URL and default
+template name. The API origin must appear in `api.allowed_origins` in
+`wyse-api` configuration.
+
+```bash
+pnpm install
+pnpm dev
+pnpm typecheck
+pnpm test
+pnpm build
+```
