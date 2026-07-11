@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { MoonIcon, SunIcon } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import { Switch } from "~/components/ui/switch"
 
@@ -22,6 +23,7 @@ function applyTheme(theme: Theme) {
 }
 
 export function ThemeToggle() {
+  const { t } = useTranslation()
   const [theme, setTheme] = useState<Theme>("light")
 
   useEffect(() => {
@@ -39,7 +41,7 @@ export function ThemeToggle() {
       )}
       <Switch
         checked={isDark}
-        aria-label="Toggle dark theme"
+        aria-label={t("theme.toggle")}
         onCheckedChange={(checked) => {
           const nextTheme = checked ? "dark" : "light"
           applyTheme(nextTheme)

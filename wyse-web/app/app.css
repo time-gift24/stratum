@@ -113,11 +113,11 @@
     0 1.25rem 4rem oklch(0.48 0.04 236 / 9%), inset 0 1px 0 oklch(1 0 0 / 58%);
   --wyse-shadow-pressed: inset 0 1px 2px oklch(0.35 0.02 236 / 12%);
 
-  --radius: 1.125rem;
+  --radius: 1rem;
   --radius-wyse-control: 999rem;
-  --radius-wyse-panel: 3rem;
-  --radius-wyse-shell: clamp(2rem, 6vw, 4rem);
-  --radius-wyse-field: 0.875rem;
+  --radius-wyse-panel: 0.75rem;
+  --radius-wyse-shell: 1rem;
+  --radius-wyse-field: 0.5rem;
   --z-grain: 60;
 
   --background: var(--wyse-canvas);
@@ -315,18 +315,14 @@
     @apply border-border outline-ring/50;
   }
   body {
-    min-height: 100dvh;
+    @apply min-h-dvh text-foreground antialiased;
     background: var(--wyse-bg-canvas);
-    color: var(--foreground);
     text-rendering: optimizeLegibility;
-    -webkit-font-smoothing: antialiased;
   }
   body::before {
+    @apply pointer-events-none fixed inset-0;
     content: "";
-    position: fixed;
-    inset: 0;
     z-index: var(--z-grain);
-    pointer-events: none;
     background-image: var(--wyse-bg-grain);
     background-size: var(--wyse-grain-size);
     opacity: var(--wyse-grain-opacity);
@@ -339,43 +335,29 @@
 
 @layer components {
   .wyse-page-shell {
-    border: 1px solid var(--wyse-line);
-    border-radius: var(--radius-wyse-shell);
+    @apply overflow-hidden rounded-shell border border-wyse-line shadow-wyse-panel;
     background: var(--wyse-bg-paper);
-    box-shadow: var(--wyse-shadow-panel);
-    overflow: hidden;
   }
 
   .wyse-paper-surface {
-    border: 1px solid var(--wyse-line);
-    border-radius: var(--radius-wyse-panel);
+    @apply rounded-5xl border border-wyse-line shadow-wyse-soft;
     background: var(--wyse-bg-paper);
-    box-shadow: var(--wyse-shadow-soft);
   }
 
   .wyse-glass-band {
-    border: 1px solid var(--wyse-line);
+    @apply border border-wyse-line shadow-wyse-soft;
     background: var(--wyse-bg-glass-band);
-    box-shadow: var(--wyse-shadow-soft);
     backdrop-filter: blur(18px) saturate(130%);
     -webkit-backdrop-filter: blur(18px) saturate(130%);
   }
 
   .site-navbar-glass {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    visibility: hidden;
-    opacity: 0;
-    transform: scale(0.985);
-    transform-origin: 50% 50%;
+    @apply invisible absolute inset-0 z-0 pointer-events-none opacity-0 scale-[0.985];
     will-change: opacity, transform;
   }
 
   .site-navbar-glass .glass-surface {
-    min-width: 100%;
-    min-height: 100%;
+    @apply min-h-full min-w-full;
   }
 
   .stratum-mark--compact path {
@@ -470,13 +452,13 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .wyse-glass-band {
-    background: var(--wyse-paper);
+    @apply bg-wyse-paper;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
 
   .site-navbar-glass .glass-surface {
-    background: var(--wyse-paper);
+    @apply bg-wyse-paper;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
