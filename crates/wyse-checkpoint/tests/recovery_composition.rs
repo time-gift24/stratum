@@ -43,6 +43,22 @@ fn unsequenced_message_envelope(agent_id: AgentId, text: &str) -> StreamEnvelope
     }
 }
 
+fn visible_business_sequences(
+    history: &[StreamEnvelope],
+    buffered: &[StreamEnvelope],
+    through_seq: u64,
+) -> Vec<u64> {
+    history
+        .iter()
+        .chain(
+            buffered
+                .iter()
+                .filter(|envelope| envelope.business_seq().is_some_and(|seq| seq > through_seq)),
+        )
+        .map(|envelope| envelope.business_seq().expect("complete message sequence"))
+        .collect()
+}
+
 #[tokio::test]
 async fn consumer_first_recovery_delivers_buffered_message_after_fixed_barrier() {
     let agent_id = AgentId::new();
@@ -75,10 +91,16 @@ async fn consumer_first_recovery_delivers_buffered_message_after_fixed_barrier()
         .envelope
         .business_seq()
         .expect("complete message sequence");
+    let visible_sequences = visible_business_sequences(
+        &first_page.events,
+        std::slice::from_ref(&buffered.envelope),
+        barrier,
+    );
 
     assert_eq!(barrier, 1);
     assert_eq!(first_page.events[0].business_seq(), Some(1));
     assert!(buffered_seq > barrier);
+    assert_eq!(visible_sequences, [1, 2]);
 }
 
 #[tokio::test]
@@ -111,7 +133,13 @@ async fn consumer_first_recovery_classifies_buffered_message_inside_barrier_as_d
         .envelope
         .business_seq()
         .expect("complete message sequence");
+    let visible_sequences = visible_business_sequences(
+        &page.events,
+        std::slice::from_ref(&buffered.envelope),
+        page.through_seq,
+    );
 
     assert_eq!(page.through_seq, 2);
     assert!(buffered_seq <= page.through_seq);
+    assert_eq!(visible_sequences, [1, 2]);
 }
