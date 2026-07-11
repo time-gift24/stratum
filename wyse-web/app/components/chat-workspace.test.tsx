@@ -1,14 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AgentApprovalCard } from "~/components/agent-approval-card"
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
 } from "~/components/agent-approval-submissions"
-import type { ApprovalRequest } from "~/features/agent-conversation/types"
+import type {
+  ApprovalRequest,
+  ConversationState,
+} from "~/features/agent-conversation/types"
 
-const readyState = {
+const readyState: ConversationState = {
   agentId: null,
   view: null,
   messages: [],
@@ -19,9 +22,11 @@ const readyState = {
   error: null,
 }
 
+let conversationState = readyState
+
 vi.mock("~/hooks/use-agent-conversation", () => ({
   useAgentConversation: () => ({
-    state: readyState,
+    state: conversationState,
     recentAgents: [],
     selectAgent: vi.fn(),
     createConversation: vi.fn(),
@@ -33,6 +38,10 @@ vi.mock("~/hooks/use-agent-conversation", () => ({
     removeRecentAgent: vi.fn(),
   }),
 }))
+
+beforeEach(() => {
+  conversationState = readyState
+})
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -48,7 +57,8 @@ describe("ChatWorkspace", () => {
 
     expect(html).toContain('data-slot="chat-main"')
     expect(html).toContain('id="longzhong" class="h-[100dvh]')
-    expect(html).toContain("2xl:h-[100dvh]")
+    expect(html).toContain("flex min-h-0 min-w-0 flex-1 flex-col pb-4")
+    expect(html).not.toContain("2xl:h-[100dvh]")
     expect(html).not.toContain("min-h-[36rem]")
     expect(html).not.toContain("scroll-mt-20")
     expect(html.indexOf('data-slot="message-scroller"')).toBeLessThan(
@@ -76,6 +86,41 @@ describe("ChatWorkspace", () => {
     expect(html.indexOf('data-slot="chat-main"')).toBeLessThan(
       html.indexOf('data-slot="prompt-input"')
     )
+  })
+
+  it("does not fill an idle composer with a connection state or resume action", async () => {
+    conversationState = {
+      ...readyState,
+      agentId: "agent-1",
+      phase: "ready",
+      view: {
+        agent_id: "agent-1",
+        agent_name: "default",
+        status: "idle",
+        run_id: null,
+        turn_id: null,
+        last_seq: 0,
+        updated_at: "2026-07-12T00:00:00Z",
+      },
+    }
+    const { ChatWorkspace } = await import("~/components/chat-workspace")
+    const html = renderToStaticMarkup(<ChatWorkspace />)
+
+    expect(html).not.toContain("chat.ready")
+    expect(html).not.toContain("chat.continue")
+  })
+
+  it("does not expose a stale conversation status or reconnect action in the composer", async () => {
+    conversationState = {
+      ...readyState,
+      agentId: "agent-1",
+      phase: "missing",
+    }
+    const { ChatWorkspace } = await import("~/components/chat-workspace")
+    const html = renderToStaticMarkup(<ChatWorkspace />)
+
+    expect(html).not.toContain("chat.missingConversation")
+    expect(html).not.toContain("chat.reconnect")
   })
 
   it("keeps each approval card disabled until its own decision settles", async () => {

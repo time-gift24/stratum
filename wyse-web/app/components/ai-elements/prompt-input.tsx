@@ -65,7 +65,7 @@ export function PromptInputTextarea({
   return (
     <InputGroupTextarea
       className={cn(
-        "field-sizing-content max-h-48 min-h-36 px-5 pt-5 pb-1",
+        "field-sizing-content max-h-40 min-h-[4rem] px-5 pt-3 pb-1",
         className
       )}
       name="message"
@@ -73,6 +73,7 @@ export function PromptInputTextarea({
       onCompositionStart={() => setIsComposing(true)}
       onKeyDown={handleKeyDown}
       placeholder={placeholder}
+      rows={2}
       {...props}
     />
   )
@@ -85,7 +86,7 @@ export function PromptInputFooter({
   return (
     <InputGroupAddon
       align="block-end"
-      className={cn("justify-between gap-1 px-5 pt-1 pb-4", className)}
+      className={cn("justify-between gap-1 px-5 pt-1 pb-3", className)}
       {...props}
     />
   )

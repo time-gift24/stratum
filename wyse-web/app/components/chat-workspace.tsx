@@ -88,20 +88,6 @@ export function ChatWorkspace() {
     }
   }
 
-  const statusText = isSubmitting
-    ? t(state.agentId === null ? "chat.creating" : "chat.sending")
-    : state.phase === "connection_error"
-      ? `${t("chat.connectionFailed")}: ${state.error?.message ?? ""}`
-      : state.phase === "missing"
-        ? t("chat.missingConversation")
-        : state.phase === "recovering"
-          ? t("chat.connecting")
-          : state.view?.status === "running"
-            ? t("chat.sending")
-            : state.agentId === null
-              ? ""
-              : t("chat.ready")
-
   return (
     <section
       id="longzhong"
@@ -215,7 +201,7 @@ export function ChatWorkspace() {
 
         <div
           data-slot="chat-main"
-          className="flex min-h-0 min-w-0 flex-1 flex-col 2xl:h-[100dvh]"
+          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4"
         >
           <MessageScrollerProvider autoScroll>
             <MessageScroller className="flex-1">
@@ -268,34 +254,21 @@ export function ChatWorkspace() {
                 </PromptInputBody>
                 <PromptInputFooter>
                   <PromptInputTools>
-                    <div className="flex min-w-0 items-center gap-3">
-                      <span className="truncate">{statusText}</span>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {state.phase === "connection_error" ||
-                        state.phase === "missing" ? (
-                          <PromptInputButton
-                            variant="outline"
-                            onClick={() => conversation.reconnect()}
-                          >
-                            {t("chat.reconnect")}
-                          </PromptInputButton>
-                        ) : state.agentId !== null && isAgentBusy ? (
-                          <PromptInputButton
-                            variant="outline"
-                            onClick={() => void conversation.cancel()}
-                          >
-                            {t("chat.cancel")}
-                          </PromptInputButton>
-                        ) : state.agentId !== null ? (
-                          <PromptInputButton
-                            variant="outline"
-                            onClick={() => void conversation.resume()}
-                          >
-                            {t("chat.continue")}
-                          </PromptInputButton>
-                        ) : null}
-                      </div>
-                    </div>
+                    {state.phase === "connection_error" ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => conversation.reconnect()}
+                      >
+                        {t("chat.reconnect")}
+                      </PromptInputButton>
+                    ) : state.agentId !== null && isAgentBusy ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => void conversation.cancel()}
+                      >
+                        {t("chat.cancel")}
+                      </PromptInputButton>
+                    ) : null}
                   </PromptInputTools>
                   <PromptInputSubmit
                     aria-label={t("chat.composer.send")}
