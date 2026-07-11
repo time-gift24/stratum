@@ -1,10 +1,10 @@
 //! Error types for agent runtime operations.
 
 use thiserror::Error;
-use wyse_checkpoint::CheckpointError;
-use wyse_core::{CallId, ChatRole};
+use wyse_core::{AgentId, CallId, ChatRole};
 use wyse_infra::event_stream_bus::EventStreamBusError;
 use wyse_llm::LlmError;
+use wyse_store::{AgentStatus, StoreError};
 
 /// Error returned by agent operations.
 #[derive(Debug, Error)]
@@ -48,35 +48,41 @@ pub enum AgentError {
         #[source]
         source: EventStreamBusError,
     },
-    /// Checkpoint persistence failed.
-    #[error("checkpoint operation failed")]
-    Checkpoint {
-        /// Underlying checkpoint error.
+    /// Agent store operation failed.
+    #[error("agent store operation failed")]
+    Store {
+        /// Underlying store error.
         #[source]
-        source: CheckpointError,
+        source: StoreError,
     },
-    /// Agent checkpoint state serialization failed.
-    #[error("failed to encode agent checkpoint state")]
-    CheckpointEncode(#[source] serde_json::Error),
-    /// Agent checkpoint state deserialization failed.
-    #[error("failed to decode agent checkpoint state")]
-    CheckpointDecode(#[source] serde_json::Error),
-    /// Agent checkpoint state version is not supported.
-    #[error("unsupported agent checkpoint state version: {version}")]
-    UnsupportedCheckpointVersion {
-        /// Stored state version.
-        version: u32,
+    /// Persisted state cannot be resumed because it is not running.
+    #[error("persisted agent is not running: {actual:?}")]
+    ResumeNotRunning {
+        /// Persisted status.
+        actual: AgentStatus,
     },
-    /// The requested checkpoint cannot be resumed.
-    #[error("agent checkpoint is not waiting for retry")]
-    CheckpointNotRetryable,
-    /// The checkpoint belongs to a different agent.
-    #[error("checkpoint agent mismatch: expected {expected}, actual {actual}")]
-    CheckpointAgentMismatch {
-        /// Expected agent id.
-        expected: wyse_core::AgentId,
-        /// Actual agent id stored in the checkpoint.
-        actual: wyse_core::AgentId,
+    /// Persisted running state has no run identity.
+    #[error("persisted running agent has no run id")]
+    ResumeRunMissing,
+    /// Persisted running state has no turn identity.
+    #[error("persisted running agent has no turn id")]
+    ResumeTurnMissing,
+    /// Persisted state belongs to another agent.
+    #[error("resume agent mismatch: expected {expected}, actual {actual}")]
+    ResumeAgentMismatch {
+        /// Built agent identity.
+        expected: AgentId,
+        /// Persisted agent identity.
+        actual: AgentId,
+    },
+    /// Persisted message history cannot form a resumable conversation.
+    #[error("invalid resume history")]
+    InvalidResumeHistory,
+    /// A persisted iteration cannot be represented by the loop implementation.
+    #[error("iteration cannot be represented: {iteration}")]
+    IterationOutOfRange {
+        /// Persisted iteration.
+        iteration: u64,
     },
     /// A required builder field was not provided.
     #[error("missing builder field: {field}")]
@@ -119,8 +125,8 @@ impl From<EventStreamBusError> for AgentError {
     }
 }
 
-impl From<CheckpointError> for AgentError {
-    fn from(source: CheckpointError) -> Self {
-        Self::Checkpoint { source }
+impl From<StoreError> for AgentError {
+    fn from(source: StoreError) -> Self {
+        Self::Store { source }
     }
 }
