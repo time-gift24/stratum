@@ -3,6 +3,7 @@
 import { useRef, type MouseEvent } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
+import { ScrollToPlugin } from "gsap/ScrollToPlugin"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
 import { useTranslation } from "react-i18next"
 
@@ -21,7 +22,9 @@ import {
 import { Separator } from "~/components/ui/separator"
 import { cn } from "~/lib/utils"
 
-gsap.registerPlugin(useGSAP, ScrollTrigger)
+gsap.registerPlugin(useGSAP, ScrollTrigger, ScrollToPlugin)
+
+const NAV_DURATION = 0.4
 
 export function SiteNavbar() {
   const { t } = useTranslation()
@@ -31,24 +34,39 @@ export function SiteNavbar() {
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
+  const setActiveSectionRef = useRef<
+    ((section: "overview" | "longzhong") => void) | null
+  >(null)
 
   const handleSectionNavigation = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
 
-    const section = event.currentTarget.hash.slice(1)
+    const section = event.currentTarget.hash.slice(1) as "overview" | "longzhong"
     const target = document.getElementById(section)
 
     if (!target) {
       return
     }
 
-    target.scrollIntoView({
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-        ? "auto"
-        : "smooth",
-      block: "start",
-    })
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)"
+    ).matches
+    const scrollOffset = 80 // matches scroll-mt-20
+    const targetY =
+      target.getBoundingClientRect().top + window.scrollY - scrollOffset
+
+    if (reduceMotion) {
+      window.scrollTo(0, targetY)
+    } else {
+      gsap.to(window, {
+        scrollTo: targetY,
+        duration: NAV_DURATION,
+        ease: "circ.inOut",
+      })
+    }
+
     window.history.replaceState(null, "", `#${section}`)
+    setActiveSectionRef.current?.(section)
   }
 
   useGSAP(
@@ -92,12 +110,22 @@ export function SiteNavbar() {
         })
       }
 
-      let activeSection: "overview" | "longzhong" = "overview"
+      let activeSection: "overview" | "longzhong" | null = null
 
-      const setActiveSection = (section: "overview" | "longzhong") => {
+      const setActiveSection = (
+        section: "overview" | "longzhong",
+        instant = false
+      ) => {
         const target = section === "overview" ? overviewLink : longzhongLink
         const navBounds = sectionNav.getBoundingClientRect()
         const linkBounds = target.getBoundingClientRect()
+        const wasSame = section === activeSection
+
+        // Skip when same section and not forced instant — prevents
+        // ScrollTrigger.onEnter from disrupting the click-driven animation
+        if (wasSame && !instant) {
+          return
+        }
 
         activeSection = section
         overviewLink.dataset.active = String(section === "overview")
@@ -109,14 +137,25 @@ export function SiteNavbar() {
           overviewLink.removeAttribute("aria-current")
           longzhongLink.setAttribute("aria-current", "page")
         }
+
+        if (instant) {
+          gsap.set(indicator, {
+            x: linkBounds.left - navBounds.left,
+            scaleX: linkBounds.width,
+          })
+          return
+        }
+
         gsap.to(indicator, {
           x: linkBounds.left - navBounds.left,
           scaleX: linkBounds.width,
-          duration: reduceMotion ? 0 : 0.5,
-          ease: "power3.inOut",
+          duration: reduceMotion ? 0 : NAV_DURATION,
+          ease: "power3.in",
           overwrite: "auto",
         })
       }
+
+      setActiveSectionRef.current = setActiveSection
 
       let glassVisible = window.scrollY > 12
 
@@ -142,7 +181,7 @@ export function SiteNavbar() {
         scaleX: 0,
         transformOrigin: "left center",
       })
-      setActiveSection(activeSection)
+      setActiveSection("overview")
 
       ScrollTrigger.create({
         id: "site-navbar-glass",
@@ -160,8 +199,14 @@ export function SiteNavbar() {
         onEnter: () => setActiveSection("longzhong"),
         onEnterBack: () => setActiveSection("longzhong"),
         onLeaveBack: () => setActiveSection("overview"),
-        onRefresh: () => setActiveSection(activeSection),
+        onRefresh: () => {
+          if (activeSection) setActiveSection(activeSection, true)
+        },
       })
+
+      return () => {
+        setActiveSectionRef.current = null
+      }
     },
     { scope: navRef }
   )
@@ -177,18 +222,18 @@ export function SiteNavbar() {
             width="100%"
             height="100%"
             borderRadius={12}
-            borderWidth={0.085}
-            brightness={58}
-            opacity={0.86}
-            blur={12}
-            displace={0.35}
-            backgroundOpacity={0.18}
-            saturation={1.35}
-            distortionScale={-120}
+            borderWidth={0.1}
+            brightness={68}
+            opacity={0.5}
+            blur={100}
+            displace={0}
+            backgroundOpacity={0.05}
+            saturation={1.15}
+            distortionScale={-40}
             redOffset={0}
-            greenOffset={10}
-            blueOffset={22}
-            mixBlendMode="screen"
+            greenOffset={2}
+            blueOffset={4}
+            mixBlendMode="normal"
           />
         </div>
 
