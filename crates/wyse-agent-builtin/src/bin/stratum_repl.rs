@@ -1,20 +1,30 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    io::{BufRead, Write},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use clap::Parser;
+use futures_util::StreamExt;
 use thiserror::Error;
 use wyse_agent::{Agent, AgentError};
 use wyse_agent_builtin::build_default_agent;
-use wyse_core::{AgentId, ModelId, ModelIdParseError};
+use wyse_core::{
+    AgentEvent, AgentId, ChatContent, ChatMessage, ChatRole, ModelId, ModelIdParseError,
+    ReplayStart, RuntimeEvent,
+};
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
     VirtualPathError,
 };
-use wyse_infra::{EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus};
+use wyse_infra::{
+    EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
+};
 use wyse_llm::{
     ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError, LlmProvider,
     OpenAICompatibleProvider,
 };
-use wyse_store::{AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
+use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
 
 const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_AGENT_NAME: &str = "default-agent";
@@ -61,6 +71,7 @@ struct ProviderConfig {
 struct Session {
     agent_id: AgentId,
     agent: Agent,
+    store: Arc<dyn AgentStore>,
     bus: Arc<dyn EventStreamBus>,
     storage_root: PathBuf,
 }
@@ -103,14 +114,31 @@ async fn main() -> Result<(), ReplError> {
     let config = Config::read()?;
     let agent_id = args.resume.unwrap_or_else(AgentId::new);
     let session = compose_session(&config, agent_id, args.resume.is_none()).await?;
+    let mut output = std::io::stdout();
+    writeln!(output, "agent id: {}", session.agent_id)?;
+    writeln!(output, "storage root: {}", session.storage_root.display())?;
+    restore_session(&session, args.debug, &mut output).await?;
 
-    let _ = (
-        args.debug,
-        session.agent_id,
-        &session.agent,
-        &session.bus,
-        &session.storage_root,
-    );
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut line = String::new();
+    loop {
+        write!(output, "> ")?;
+        output.flush()?;
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let input = line.trim_end_matches(['\r', '\n']);
+        if input == "/quit" {
+            break;
+        }
+        drive_turn(&session, input, args.debug, &mut output).await?;
+        output.flush()?;
+    }
     Ok(())
 }
 
@@ -120,6 +148,9 @@ async fn compose_session(
     initialize: bool,
 ) -> Result<Session, ReplError> {
     std::fs::create_dir_all(&config.stratum.storage_root)?;
+    if initialize {
+        std::fs::create_dir(config.stratum.storage_root.join(agent_id.to_string()))?;
+    }
     let filesystem: Arc<dyn Filesystem> = Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
         root: config.stratum.storage_root.clone(),
         max_file_bytes: None,
@@ -139,14 +170,91 @@ async fn compose_session(
         store.clone(),
         Arc::new(InMemoryEventStreamBus::default()),
     ));
-    let agent = build_default_agent(agent_id, store, bus.clone(), select_provider(config)?)?;
+    let agent = build_default_agent(
+        agent_id,
+        store.clone(),
+        bus.clone(),
+        select_provider(config)?,
+    )?;
 
     Ok(Session {
         agent_id,
         agent,
+        store,
         bus,
         storage_root: config.stratum.storage_root.clone(),
     })
+}
+
+async fn restore_session<W: Write>(
+    session: &Session,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    let state = session.store.load_agent().await?;
+    if state.status == AgentStatus::Running {
+        let mut events = session
+            .bus
+            .subscribe_agent(session.agent_id, ReplayStart::New)
+            .await?;
+        session.agent.resume().await?;
+        consume_turn_events(&mut events, debug, output).await
+    } else {
+        session.agent.load_history().await?;
+        Ok(())
+    }
+}
+
+async fn drive_turn<W: Write>(
+    session: &Session,
+    input: &str,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    let mut events = session
+        .bus
+        .subscribe_agent(session.agent_id, ReplayStart::New)
+        .await?;
+    session.agent.run_turn(ChatMessage::user(input)).await?;
+    consume_turn_events(&mut events, debug, output).await
+}
+
+async fn consume_turn_events<W: Write>(
+    events: &mut EventStream,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    while let Some(record) = events.next().await {
+        let record = record?;
+        if debug {
+            serde_json::to_writer(&mut *output, &record.envelope)?;
+            output.write_all(b"\n")?;
+        }
+        let RuntimeEvent::Agent { event, .. } = &record.envelope.event else {
+            continue;
+        };
+        match event {
+            AgentEvent::Message { message, .. } if message.role == ChatRole::Assistant => {
+                match &message.content {
+                    ChatContent::Text(text) => output.write_all(text.as_bytes())?,
+                    ChatContent::Json(value) => serde_json::to_writer(&mut *output, value)?,
+                    _ => continue,
+                }
+                output.write_all(b"\n")?;
+            }
+            AgentEvent::Failed { error_text, .. } => {
+                eprintln!("agent failed: {error_text}");
+                return Ok(());
+            }
+            AgentEvent::Cancelled { .. } => {
+                eprintln!("agent cancelled");
+                return Ok(());
+            }
+            AgentEvent::Finished { .. } => return Ok(()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
@@ -199,10 +307,211 @@ fn select_provider(config: &Config) -> Result<Arc<dyn LlmProvider>, ReplError> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-    use wyse_core::AgentId;
+    use std::{fs, sync::Arc};
 
-    use super::{Args, Config, ReplError, agent_root, select_provider};
+    use clap::Parser;
+    use wyse_core::{AgentEvent, AgentId, RuntimeEvent, StreamEnvelope};
+    use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
+    use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
+    use wyse_llm::{ChatStreamEvent, FinishReason, MockLlmProvider};
+    use wyse_store::{AgentState, AgentStore, FilesystemAgentStore, StoreEventStreamBus};
+
+    use super::{
+        Args, Config, ReplError, Session, agent_root, drive_turn, restore_session, select_provider,
+    };
+
+    async fn test_session(
+        root: &std::path::Path,
+        agent_id: AgentId,
+        provider: MockLlmProvider,
+        initialize: bool,
+    ) -> Result<Session, ReplError> {
+        if initialize {
+            fs::create_dir(root.join(agent_id.to_string()))?;
+        }
+        let filesystem: Arc<dyn Filesystem> =
+            Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
+                root: root.to_path_buf(),
+                max_file_bytes: None,
+            })?);
+        let store = Arc::new(FilesystemAgentStore::new(filesystem, agent_root(agent_id)?));
+        if initialize {
+            store.initialize(agent_id, "test-agent".to_owned()).await?;
+        }
+        let store: Arc<dyn AgentStore> = store;
+        let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+            store.clone(),
+            Arc::new(InMemoryEventStreamBus::default()),
+        ));
+        let agent = wyse_agent_builtin::build_default_agent(
+            agent_id,
+            store.clone(),
+            bus.clone(),
+            Arc::new(provider),
+        )?;
+
+        Ok(Session {
+            agent_id,
+            agent,
+            store,
+            bus,
+            storage_root: root.to_path_buf(),
+        })
+    }
+
+    fn mock_response(text: &str) -> MockLlmProvider {
+        MockLlmProvider::new().with_stream_events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: text.to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ])
+    }
+
+    fn assistant_messages(envelopes: &[StreamEnvelope]) -> Vec<StreamEnvelope> {
+        envelopes
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event,
+                    RuntimeEvent::Agent {
+                        event: AgentEvent::Message { message, .. },
+                        ..
+                    } if message.role == wyse_core::ChatRole::Assistant
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn drive_turn_renders_bus_events_and_matches_persisted_messages() -> Result<(), ReplError>
+    {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let provider = MockLlmProvider::new()
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "first response".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ])
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "second response".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ]);
+        let session = test_session(&root, agent_id, provider, true).await?;
+        let mut output = Vec::new();
+
+        drive_turn(&session, "first input", false, &mut output).await?;
+        drive_turn(&session, "second input", false, &mut output).await?;
+
+        let output = String::from_utf8(output).expect("renderer writes UTF-8");
+        assert!(output.contains("first response"));
+        assert!(output.contains("second response"));
+        assert!(!output.lines().any(|line| line.starts_with('{')));
+
+        let state: AgentState = serde_json::from_slice(&fs::read(
+            root.join(agent_id.to_string()).join("agent.json"),
+        )?)?;
+        assert_eq!(state.last_seq, 4);
+        let persisted = (1..=4)
+            .map(|seq| -> Result<StreamEnvelope, ReplError> {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect::<Result<Vec<_>, ReplError>>()?;
+        assert_eq!(
+            persisted
+                .iter()
+                .map(StreamEnvelope::business_seq)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3), Some(4)]
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drive_turn_debug_emits_assistant_envelope_from_bus() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, mock_response("debug response"), true).await?;
+        let mut output = Vec::new();
+
+        drive_turn(&session, "debug input", true, &mut output).await?;
+
+        let envelopes = String::from_utf8(output)
+            .expect("debug renderer writes UTF-8")
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(serde_json::from_str::<StreamEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let persisted: Vec<StreamEnvelope> = (1..=2)
+            .map(|seq| -> Result<StreamEnvelope, ReplError> {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect::<Result<_, ReplError>>()?;
+        assert_eq!(
+            assistant_messages(&envelopes),
+            assistant_messages(&persisted)
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_session_loads_finished_history_and_advances_existing_store()
+    -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let first = test_session(&root, agent_id, mock_response("first response"), true).await?;
+        drive_turn(&first, "first input", false, &mut Vec::new()).await?;
+
+        let restored =
+            test_session(&root, agent_id, mock_response("resumed response"), false).await?;
+        restore_session(&restored, false, &mut Vec::new()).await?;
+        drive_turn(&restored, "second input", false, &mut Vec::new()).await?;
+
+        let state: AgentState = serde_json::from_slice(&fs::read(
+            root.join(agent_id.to_string()).join("agent.json"),
+        )?)?;
+        assert_eq!(state.last_seq, 4);
+        assert!(
+            root.join(agent_id.to_string())
+                .join("messages/1.json")
+                .is_file()
+        );
+        assert!(
+            root.join(agent_id.to_string())
+                .join("messages/4.json")
+                .is_file()
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
 
     #[test]
     fn parses_resume_and_debug_arguments() -> Result<(), ReplError> {

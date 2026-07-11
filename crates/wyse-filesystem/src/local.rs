@@ -1,12 +1,21 @@
 //! Local sandbox filesystem backend.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use tokio::fs;
 
 use crate::{
-    DirEntry, FileMetadata, FileType, Filesystem, FilesystemError, VirtualPath, VirtualPathError,
+    CasExpectation, DirEntry, Entry, FileMetadata, FileType, Filesystem, FilesystemError,
+    RecordVersion, VersionedEntry, VirtualPath, VirtualPathError,
 };
 
 /// Configuration for [`LocalFilesystem`].
@@ -23,6 +32,8 @@ pub struct LocalFilesystemConfig {
 pub struct LocalFilesystem {
     root: PathBuf,
     max_file_bytes: Option<u64>,
+    records: Arc<Mutex<BTreeMap<VirtualPath, RecordVersion>>>,
+    next_record_version: Arc<AtomicU64>,
 }
 
 impl LocalFilesystem {
@@ -48,6 +59,8 @@ impl LocalFilesystem {
         Ok(Self {
             root,
             max_file_bytes: config.max_file_bytes,
+            records: Arc::new(Mutex::new(BTreeMap::new())),
+            next_record_version: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -128,6 +141,168 @@ impl LocalFilesystem {
 
 #[async_trait]
 impl Filesystem for LocalFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let root = self.root.clone();
+        let path = path.clone();
+        let error_path = path.clone();
+        let records = Arc::clone(&self.records);
+        let next_record_version = Arc::clone(&self.next_record_version);
+        let max_file_bytes = self.max_file_bytes;
+
+        tokio::task::spawn_blocking(move || {
+            let host = host_path(&root, &path);
+            let metadata = match std::fs::symlink_metadata(&host) {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => return Err(FilesystemError::local_io("metadata", path, source)),
+            };
+            if metadata.file_type().is_symlink() {
+                return Err(FilesystemError::PathEscapesSandbox { path });
+            }
+            let canonical = std::fs::canonicalize(&host).map_err(|source| {
+                FilesystemError::local_io("canonicalize", path.clone(), source)
+            })?;
+            if !canonical.starts_with(&root) {
+                return Err(FilesystemError::PathEscapesSandbox { path });
+            }
+            if !metadata.is_file() {
+                return Err(FilesystemError::NotAFile { path });
+            }
+            if max_file_bytes.is_some_and(|max| metadata.len() > max) {
+                return Err(FilesystemError::ContentTooLarge { path });
+            }
+
+            let mut records = records
+                .lock()
+                .expect("local filesystem record mutex should not be poisoned");
+            let contents = std::fs::read(&canonical)
+                .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
+            let version = match records.get(&path) {
+                Some(version) => *version,
+                None => {
+                    let value = next_record_version
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                            value.checked_add(1)
+                        })
+                        .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
+                    let version = RecordVersion::from_backend(value);
+                    records.insert(path.clone(), version);
+                    version
+                }
+            };
+            Ok(Some(VersionedEntry {
+                entry: Entry::new(contents),
+                version,
+            }))
+        })
+        .await
+        .map_err(|error| {
+            FilesystemError::local_io("cas_get", error_path, std::io::Error::other(error))
+        })?
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_len(
+            path,
+            u64::try_from(entry.contents().len())
+                .map_err(|_| FilesystemError::ContentTooLarge { path: path.clone() })?,
+        )?;
+        let root = self.root.clone();
+        let path = path.clone();
+        let error_path = path.clone();
+        let records = Arc::clone(&self.records);
+        let next_record_version = Arc::clone(&self.next_record_version);
+
+        tokio::task::spawn_blocking(move || {
+            let host = host_path(&root, &path);
+            let metadata = match std::fs::symlink_metadata(&host) {
+                Ok(metadata) => Some(metadata),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => {
+                    return Err(FilesystemError::local_io("metadata", path.clone(), source));
+                }
+            };
+            let target = if let Some(metadata) = metadata.as_ref() {
+                if metadata.file_type().is_symlink() {
+                    return Err(FilesystemError::PathEscapesSandbox { path });
+                }
+                if !metadata.is_file() {
+                    return Err(FilesystemError::NotAFile { path });
+                }
+                let canonical = std::fs::canonicalize(&host).map_err(|source| {
+                    FilesystemError::local_io("canonicalize", path.clone(), source)
+                })?;
+                if !canonical.starts_with(&root) {
+                    return Err(FilesystemError::PathEscapesSandbox { path });
+                }
+                canonical
+            } else {
+                let parent = host.parent().unwrap_or(&root);
+                let canonical_parent = std::fs::canonicalize(parent).map_err(|source| {
+                    FilesystemError::local_io("canonicalize_parent", path.clone(), source)
+                })?;
+                if !canonical_parent.starts_with(&root) {
+                    return Err(FilesystemError::PathEscapesSandbox { path });
+                }
+                host
+            };
+
+            let mut records = records
+                .lock()
+                .expect("local filesystem record mutex should not be poisoned");
+            let current = if metadata.is_some() {
+                Some(match records.get(&path) {
+                    Some(version) => *version,
+                    None => {
+                        let value = next_record_version
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                                value.checked_add(1)
+                            })
+                            .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
+                        let version = RecordVersion::from_backend(value);
+                        records.insert(path.clone(), version);
+                        version
+                    }
+                })
+            } else {
+                None
+            };
+            match cas {
+                CasExpectation::Absent if current.is_some() => {
+                    return Err(FilesystemError::VersionMismatch { path });
+                }
+                CasExpectation::Version(expected) if current != Some(expected) => {
+                    return Err(FilesystemError::VersionMismatch { path });
+                }
+                _ => {}
+            }
+            let value = next_record_version
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_add(1)
+                })
+                .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
+            let version = RecordVersion::from_backend(value);
+            let temporary = target.with_extension(format!("wyse-{value}.tmp"));
+            std::fs::write(&temporary, entry.into_contents())
+                .map_err(|source| FilesystemError::local_io("write", path.clone(), source))?;
+            if let Err(source) = std::fs::rename(&temporary, &target) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(FilesystemError::local_io("rename", path, source));
+            }
+            records.insert(path, version);
+            Ok(version)
+        })
+        .await
+        .map_err(|error| {
+            FilesystemError::local_io("cas_put", error_path, std::io::Error::other(error))
+        })?
+    }
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let host = self.ensure_existing_inside_root(path).await?;
         let metadata = fs::metadata(&host)
@@ -240,6 +415,14 @@ impl Filesystem for LocalFilesystem {
     }
 }
 
+fn host_path(root: &std::path::Path, path: &VirtualPath) -> PathBuf {
+    let mut host = root.to_path_buf();
+    for segment in path.segments() {
+        host.push(segment);
+    }
+    host
+}
+
 fn child_virtual_path(
     parent: &VirtualPath,
     file_name: &str,
@@ -274,7 +457,7 @@ fn file_type_from_file_type(file_type: &std::fs::FileType) -> FileType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Filesystem, VirtualPath};
+    use crate::{CasExpectation, Entry, Filesystem, VirtualPath};
 
     #[tokio::test]
     async fn reads_writes_lists_and_removes_inside_sandbox() {
@@ -312,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_filesystem_fails_closed_for_cas() {
+    async fn local_filesystem_compares_records_and_rejects_stale_versions() {
         let temp = std::env::temp_dir().join(format!("wyse-fs-cas-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&temp).await;
         tokio::fs::create_dir_all(&temp)
@@ -325,9 +508,37 @@ mod tests {
         .expect("filesystem is valid");
         let path = VirtualPath::try_from("/agent.json").expect("valid path");
 
-        let error = filesystem.get(&path).await.expect_err("CAS is unsupported");
+        assert!(filesystem.get(&path).await.expect("read record").is_none());
+        let first = filesystem
+            .put(&path, Entry::new(b"one".to_vec()), CasExpectation::Absent)
+            .await
+            .expect("create record");
+        let stored = filesystem
+            .get(&path)
+            .await
+            .expect("read record")
+            .expect("record exists");
+        assert_eq!(stored.version, first);
+        assert_eq!(stored.entry.contents(), b"one");
 
-        assert!(matches!(error, FilesystemError::UnsupportedCas));
+        filesystem
+            .put(
+                &path,
+                Entry::new(b"two".to_vec()),
+                CasExpectation::Version(stored.version),
+            )
+            .await
+            .expect("update matching record");
+        let error = filesystem
+            .put(
+                &path,
+                Entry::new(b"three".to_vec()),
+                CasExpectation::Version(stored.version),
+            )
+            .await
+            .expect_err("stale version is rejected");
+
+        assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
 
