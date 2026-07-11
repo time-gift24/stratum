@@ -1,59 +1,67 @@
-import type { HTMLAttributes, ReactNode } from "react"
+"use client"
+
+import { cjk } from "@streamdown/cjk"
+import { code } from "@streamdown/code"
+import { math } from "@streamdown/math"
+import { mermaid } from "@streamdown/mermaid"
+import type { HTMLAttributes } from "react"
+import { memo } from "react"
+import { Streamdown } from "streamdown"
 
 import { cn } from "~/lib/utils"
 
-type MessageProps = HTMLAttributes<HTMLDivElement> & {
-  from: "user" | "assistant" | "tool"
+export type MessageRole = "user" | "assistant" | "tool" | "system"
+
+export type MessageProps = HTMLAttributes<HTMLDivElement> & {
+  from: MessageRole
 }
 
-export function AiMessage({ from, className, ...props }: MessageProps) {
-  return (
-    <article
-      data-slot="ai-message"
-      data-from={from}
-      className={cn(
-        "group/ai-message flex w-full min-w-0 flex-col gap-1.5",
-        from === "user" ? "items-end" : "items-start",
-        className
-      )}
-      {...props}
-    />
-  )
-}
+export const Message = ({ className, from, ...props }: MessageProps) => (
+  <div
+    className={cn(
+      "group flex w-full max-w-[95%] flex-col gap-2",
+      from === "user" ? "is-user ml-auto justify-end" : "is-assistant",
+      className
+    )}
+    {...props}
+  />
+)
 
-export function AiMessageHeader({ children }: { children: ReactNode }) {
-  return (
-    <p className="px-1 text-[0.625rem] font-medium tracking-wide text-muted-foreground">
-      {children}
-    </p>
-  )
-}
+export type MessageContentProps = HTMLAttributes<HTMLDivElement>
 
-export function AiMessageContent({
-  from,
+export const MessageContent = ({
+  children,
   className,
   ...props
-}: HTMLAttributes<HTMLDivElement> & { from: MessageProps["from"] }) {
-  return (
-    <div
-      data-slot="ai-message-content"
-      className={cn(
-        "max-w-[min(44rem,92%)] whitespace-pre-wrap break-words text-sm/relaxed",
-        from === "user"
-          ? "rounded-[14px] rounded-tr-sm border border-border/70 bg-secondary px-3.5 py-2.5 text-secondary-foreground"
-          : "w-full border-l-2 border-primary/25 py-0.5 pl-3 text-foreground",
-        className
-      )}
-      {...props}
-    />
-  )
+}: MessageContentProps) => (
+  <div
+    className={cn(
+      "is-user:dark flex w-fit max-w-full min-w-0 flex-col gap-2 overflow-hidden text-sm",
+      "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
+      "group-[.is-assistant]:text-foreground",
+      className
+    )}
+    {...props}
+  >
+    {children}
+  </div>
+)
+
+export type MessageResponseProps = {
+  children: string
+  className?: string
 }
 
-export function AiStreamingMark({ label }: { label: string }) {
-  return (
-    <span
-      aria-label={label}
-      className="mr-1 inline-block size-1.5 rounded-full bg-primary align-middle motion-safe:animate-pulse"
-    />
+const streamdownPlugins = { cjk, code, math, mermaid }
+
+export const MessageResponse = memo(
+  ({ children, className }: MessageResponseProps) => (
+    <Streamdown className={className} plugins={streamdownPlugins}>
+      {children}
+    </Streamdown>
   )
-}
+)
+
+Message.displayName = "Message"
+MessageContent.displayName = "MessageContent"
+MessageResponse.displayName = "MessageResponse"

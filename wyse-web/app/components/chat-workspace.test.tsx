@@ -71,8 +71,8 @@ describe("ChatWorkspace", () => {
     const html = renderToStaticMarkup(<ChatWorkspace />)
 
     expect(html).toContain('data-slot="prompt-input"')
-    expect(html).toContain('data-slot="prompt-input-body"')
-    expect(html).toContain('data-slot="prompt-input-tools"')
+    expect(html).toContain('data-slot="input-group"')
+    expect(html).toContain('data-slot="input-group-addon"')
     expect(html.indexOf('data-slot="chat-main"')).toBeLessThan(
       html.indexOf('data-slot="prompt-input"')
     )

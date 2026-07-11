@@ -91,7 +91,7 @@ describe("AgentMessageList", () => {
       </MessageScrollerProvider>
     )
 
-    expect(html).toContain('aria-label="流式输出中"')
+    expect(html).toContain("流式输出中")
     expect(html.indexOf("正在思考")).toBeLessThan(html.indexOf("partial"))
   })
 })

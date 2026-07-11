@@ -1,5 +1,6 @@
-import { useRef, useState, type KeyboardEvent } from "react"
+import { useRef, useState } from "react"
 import {
+  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Clock3Icon,
@@ -11,6 +12,7 @@ import { AgentApprovalCard } from "~/components/agent-approval-card"
 import {
   PromptInput,
   PromptInputBody,
+  PromptInputButton,
   PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
@@ -86,13 +88,6 @@ export function ChatWorkspace() {
     }
   }
 
-  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault()
-      void submitMessage()
-    }
-  }
-
   const statusText = isSubmitting
     ? t(state.agentId === null ? "chat.creating" : "chat.sending")
     : state.phase === "connection_error"
@@ -101,9 +96,9 @@ export function ChatWorkspace() {
         ? t("chat.missingConversation")
         : state.phase === "recovering"
           ? t("chat.connecting")
-            : state.view?.status === "running"
-              ? t("chat.sending")
-              : state.agentId === null
+          : state.view?.status === "running"
+            ? t("chat.sending")
+            : state.agentId === null
               ? ""
               : t("chat.ready")
 
@@ -255,57 +250,55 @@ export function ChatWorkspace() {
 
           <Card size="sm" className="w-full shrink-0 bg-transparent ring-0">
             <CardContent>
-              <PromptInput onSubmit={(event) => {
-                event.preventDefault()
-                void submitMessage()
-              }}>
+              <PromptInput
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void submitMessage()
+                }}
+              >
                 <PromptInputBody>
                   <PromptInputTextarea
                     ref={composerRef}
                     aria-label={t("chat.composer.label")}
                     disabled={isSubmitting || isAgentBusy}
                     onChange={(event) => setComposerText(event.target.value)}
-                    onKeyDown={onComposerKeyDown}
                     placeholder={t("chat.composer.placeholder")}
                     value={composerText}
                   />
                 </PromptInputBody>
                 <PromptInputFooter>
                   <PromptInputTools>
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span className="truncate">{statusText}</span>
-                    <div className="flex shrink-0 items-center gap-2">
-                {state.phase === "connection_error" ||
-                state.phase === "missing" ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => conversation.reconnect()}
-                  >
-                    {t("chat.reconnect")}
-                  </Button>
-                ) : state.agentId !== null && isAgentBusy ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void conversation.cancel()}
-                  >
-                    {t("chat.cancel")}
-                  </Button>
-                ) : state.agentId !== null ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void conversation.resume()}
-                  >
-                    {t("chat.continue")}
-                  </Button>
-                ) : null}
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="truncate">{statusText}</span>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {state.phase === "connection_error" ||
+                        state.phase === "missing" ? (
+                          <PromptInputButton
+                            variant="outline"
+                            onClick={() => conversation.reconnect()}
+                          >
+                            {t("chat.reconnect")}
+                          </PromptInputButton>
+                        ) : state.agentId !== null && isAgentBusy ? (
+                          <PromptInputButton
+                            variant="outline"
+                            onClick={() => void conversation.cancel()}
+                          >
+                            {t("chat.cancel")}
+                          </PromptInputButton>
+                        ) : state.agentId !== null ? (
+                          <PromptInputButton
+                            variant="outline"
+                            onClick={() => void conversation.resume()}
+                          >
+                            {t("chat.continue")}
+                          </PromptInputButton>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
                   </PromptInputTools>
                   <PromptInputSubmit
-                    ariaLabel={t("chat.composer.send")}
+                    aria-label={t("chat.composer.send")}
                     className={
                       composerText.trim() === ""
                         ? "bg-muted text-muted-foreground hover:bg-muted"
@@ -314,7 +307,9 @@ export function ChatWorkspace() {
                     disabled={
                       isSubmitting || isAgentBusy || composerText.trim() === ""
                     }
-                  />
+                  >
+                    <ArrowUpIcon aria-hidden="true" />
+                  </PromptInputSubmit>
                 </PromptInputFooter>
               </PromptInput>
             </CardContent>

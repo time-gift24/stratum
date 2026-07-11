@@ -1,18 +1,23 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { AiReasoning } from "~/components/ai-elements/reasoning"
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from "~/components/ai-elements/reasoning"
 
-describe("AiReasoning", () => {
-  it("renders a completed, collapsed reasoning disclosure after a stream ends", () => {
+describe("Reasoning", () => {
+  it("uses the AI Elements trigger and content composition while streaming", () => {
     const html = renderToStaticMarkup(
-      <AiReasoning completeLabel="推理完成" thinkingLabel="正在思考">
-        Checking the request…
-      </AiReasoning>
+      <Reasoning isStreaming>
+        <ReasoningTrigger getThinkingMessage={() => "正在思考"} />
+        <ReasoningContent>Checking the request…</ReasoningContent>
+      </Reasoning>
     )
 
-    expect(html).toContain('data-state="complete"')
-    expect(html).toContain("推理完成")
-    expect(html).not.toContain("<details open")
+    expect(html).toContain('data-slot="collapsible"')
+    expect(html).toContain("正在思考")
+    expect(html).toContain("Checking the request…")
   })
 })
