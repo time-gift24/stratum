@@ -668,6 +668,25 @@ async fn load_history_restores_finished_conversation_for_next_turn() {
 }
 
 #[tokio::test]
+async fn load_history_rejects_running_store_before_request() {
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.load_history().await,
+        Err(AgentError::LoadHistoryRunning)
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
 async fn load_history_rejects_persisted_agent_mismatch_before_request() {
     let actual = AgentId::new();
     let run_id = RunId::new();

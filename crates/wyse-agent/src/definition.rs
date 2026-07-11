@@ -210,8 +210,9 @@ impl Agent {
     ///
     /// # Errors
     ///
-    /// Returns an error when an operation is active, the store identity differs,
-    /// or the persisted history cannot be read as contiguous agent messages.
+    /// Returns an error when an operation is active, the persisted turn must be resumed,
+    /// the store identity differs, or the persisted history cannot be read as contiguous
+    /// agent messages.
     pub async fn load_history(&self) -> Result<(), AgentError> {
         if self
             .active
@@ -222,6 +223,9 @@ impl Agent {
         }
         let _active_guard = ActiveGuard::new(&self.active);
         let state = self.store.load_agent().await?;
+        if state.status == AgentStatus::Running {
+            return Err(AgentError::LoadHistoryRunning);
+        }
         if state.agent_id != self.id {
             return Err(AgentError::ResumeAgentMismatch {
                 expected: self.id,
