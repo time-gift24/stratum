@@ -1,4 +1,11 @@
-import { Clock3Icon, PlusIcon, SendIcon } from "lucide-react"
+import { useState } from "react"
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  Clock3Icon,
+  PlusIcon,
+  SendIcon,
+} from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/GlassSurface"
@@ -68,6 +75,7 @@ const messages = [
 
 export function ChatWorkspace() {
   const { t } = useTranslation()
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false)
 
   return (
     <section
@@ -77,7 +85,7 @@ export function ChatWorkspace() {
       <div className="relative mx-auto w-full max-w-5xl">
         <Card
           size="sm"
-          className="relative mb-6 h-[80dvh] w-full bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="relative mb-6 w-full bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
         >
           <div className="absolute inset-0 -z-10">
             <GlassSurface
@@ -99,39 +107,60 @@ export function ChatWorkspace() {
             />
           </div>
 
-          <CardHeader>
-            <CardTitle>{t("chat.history.title")}</CardTitle>
-            <CardDescription>{t("chat.history.description")}</CardDescription>
-            <CardAction>
+          <CardHeader className="grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto] items-center gap-2">
+            <button
+              type="button"
+              aria-controls="chat-history"
+              aria-expanded={isHistoryOpen}
+              className="-m-1 flex min-w-0 items-center gap-1 rounded-sm p-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+              onClick={() => setIsHistoryOpen((open) => !open)}
+            >
+              <CardTitle className="truncate">
+                {t("chat.history.title")}
+              </CardTitle>
+              {isHistoryOpen ? (
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-4 shrink-0"
+                />
+              ) : (
+                <ChevronRightIcon
+                  aria-hidden="true"
+                  className="size-4 shrink-0"
+                />
+              )}
+            </button>
+            <CardAction className="col-start-2 row-span-1 row-start-1 self-center">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon-sm"
                 aria-label={t("chat.history.new")}
                 title={t("chat.history.new")}
               >
-                <PlusIcon aria-hidden="true" data-icon="inline-start" />
-                {t("chat.history.new")}
+                <PlusIcon aria-hidden="true" />
               </Button>
             </CardAction>
           </CardHeader>
-          <CardContent className="flex flex-1 flex-col gap-1.5 overflow-y-auto">
-            {historyItems.map((item, index) => (
-              <Button
-                key={item.id}
-                variant={index === 0 ? "secondary" : "ghost"}
-                size="lg"
-                className="h-auto w-full justify-start py-2 text-left"
-              >
-                <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                  <span className="w-full truncate">{t(item.titleKey)}</span>
-                  <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
-                    <Clock3Icon aria-hidden="true" />
-                    {t(item.timeKey)}
+          {isHistoryOpen ? (
+            <CardContent id="chat-history" className="flex flex-col gap-1.5">
+              {historyItems.map((item, index) => (
+                <Button
+                  key={item.id}
+                  variant={index === 0 ? "secondary" : "ghost"}
+                  size="lg"
+                  className="h-auto w-full justify-start py-2 text-left"
+                >
+                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+                    <span className="w-full truncate">{t(item.titleKey)}</span>
+                    <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
+                      <Clock3Icon aria-hidden="true" />
+                      {t(item.timeKey)}
+                    </span>
                   </span>
-                </span>
-              </Button>
-            ))}
-          </CardContent>
+                </Button>
+              ))}
+            </CardContent>
+          ) : null}
         </Card>
 
         <div
