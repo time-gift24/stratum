@@ -162,15 +162,6 @@ pub struct LinkCardinalityConstraint {
     pub cardinality: Cardinality,
 }
 
-/// A consistent repository view used to validate a schema against shared instances.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SchemaValidationSnapshot {
-    /// All objects visible in the validation view.
-    pub objects: Vec<ObjectRecord>,
-    /// All links visible in the same validation view.
-    pub links: Vec<LinkRecord>,
-}
-
 /// One cursor page of stored records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page<T> {
@@ -183,13 +174,6 @@ pub struct Page<T> {
 /// Storage operations required by the ontology service.
 #[async_trait]
 pub trait OntologyRepository: Send + Sync {
-    /// Inserts an immutable published revision idempotently.
-    ///
-    /// # Errors
-    ///
-    /// Returns an ontology error when persistence fails.
-    async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError>;
-
     /// Validates every current instance and atomically inserts a revision.
     ///
     /// Implementations must linearize this operation with all object and link
@@ -246,16 +230,6 @@ pub trait OntologyRepository: Send + Sync {
     ///
     /// Returns an ontology error when persistence fails.
     async fn delete_tag(&self, name: &TagName) -> Result<(), OntologyError>;
-
-    /// Reads all shared instances from one consistent validation view.
-    ///
-    /// Implementations must obtain both collections from the same snapshot; a
-    /// database backend can use one repeatable-read transaction for this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns an ontology error when persistence fails.
-    async fn schema_validation_snapshot(&self) -> Result<SchemaValidationSnapshot, OntologyError>;
 
     /// Persists a new object.
     ///

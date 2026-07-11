@@ -928,8 +928,8 @@ mod tests {
         Cardinality, DraftName, FilesystemDraftStore, LinkCardinalityConstraint, LinkId,
         LinkRecord, LinkType, LinkTypeId, NewLinkRecord, NewObjectRecord, ObjectId, ObjectRecord,
         ObjectType, ObjectTypeId, OntologyError, OntologyRepository, Page, PropertyType,
-        PropertyTypeId, PublishedRevision, RevisionId, SchemaDocument, SchemaValidationSnapshot,
-        TagName, ValueType, revision_id,
+        PropertyTypeId, PublishedRevision, RevisionId, SchemaDocument, TagName, ValueType,
+        revision_id,
     };
 
     #[derive(Default)]
@@ -1017,7 +1017,6 @@ mod tests {
         instances: Mutex<MemoryInstances>,
         revisions: Mutex<BTreeMap<RevisionId, PublishedRevision>>,
         tags: Mutex<BTreeMap<TagName, RevisionId>>,
-        snapshot_reads: AtomicUsize,
         publish_writes: AtomicUsize,
     }
 
@@ -1072,14 +1071,6 @@ mod tests {
 
     #[async_trait]
     impl OntologyRepository for MemoryRepository {
-        async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
-            self.revisions
-                .lock()
-                .expect("memory repository mutex is not poisoned")
-                .insert(revision.id.clone(), revision);
-            Ok(())
-        }
-
         async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
             let _write_gate = self
                 .write_gate
@@ -1184,20 +1175,6 @@ mod tests {
                 .expect("memory repository mutex is not poisoned")
                 .remove(name);
             Ok(())
-        }
-
-        async fn schema_validation_snapshot(
-            &self,
-        ) -> Result<SchemaValidationSnapshot, OntologyError> {
-            self.snapshot_reads.fetch_add(1, Ordering::SeqCst);
-            let instances = self
-                .instances
-                .lock()
-                .expect("memory repository mutex is not poisoned");
-            Ok(SchemaValidationSnapshot {
-                objects: instances.objects.values().cloned().collect(),
-                links: instances.links.values().cloned().collect(),
-            })
         }
 
         async fn create_object(
@@ -1505,7 +1482,6 @@ mod tests {
             }),
             revisions: Mutex::new(BTreeMap::new()),
             tags: Mutex::new(BTreeMap::new()),
-            snapshot_reads: AtomicUsize::new(0),
             publish_writes: AtomicUsize::new(0),
         };
 
@@ -1534,7 +1510,6 @@ mod tests {
             .await
             .expect("valid draft can be published");
 
-        assert_eq!(repository.snapshot_reads.load(Ordering::SeqCst), 0);
         assert_eq!(repository.publish_writes.load(Ordering::SeqCst), 1);
     }
 
@@ -1560,9 +1535,10 @@ mod tests {
             schema: incompatible_schema,
         };
         repository
-            .insert_revision(incompatible.clone())
-            .await
-            .expect("test setup stores immutable revision");
+            .revisions
+            .lock()
+            .expect("memory repository mutex is not poisoned")
+            .insert(incompatible.id.clone(), incompatible.clone());
 
         assert!(matches!(
             service.put_tag(&TagName::online(), &incompatible.id).await,
@@ -2078,7 +2054,6 @@ mod tests {
                 instances: Mutex::new(MemoryInstances::default()),
                 revisions: Mutex::new(BTreeMap::new()),
                 tags: Mutex::new(BTreeMap::new()),
-                snapshot_reads: AtomicUsize::new(0),
                 publish_writes: AtomicUsize::new(0),
             }),
         )
@@ -2150,7 +2125,6 @@ mod tests {
                 online_revision.clone(),
             )])),
             tags: Mutex::new(BTreeMap::from([(TagName::online(), online_revision.id)])),
-            snapshot_reads: AtomicUsize::new(0),
             publish_writes: AtomicUsize::new(0),
         });
         OntologyService::new(drafts, repository)

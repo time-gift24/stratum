@@ -18,7 +18,7 @@ use wyse_ontology::{
     Cardinality, DraftName, FilesystemDraftStore, LinkCardinalityConstraint, LinkId, LinkRecord,
     LinkType, LinkTypeId, NewLinkRecord, NewObjectRecord, ObjectId, ObjectRecord, ObjectType,
     ObjectTypeId, OntologyError, OntologyRepository, Page, PropertyType, PropertyTypeId,
-    PublishedRevision, RevisionId, SchemaDocument, SchemaValidationSnapshot, TagName, ValueType,
+    PublishedRevision, RevisionId, SchemaDocument, TagName, ValueType,
 };
 use wyse_ontology_api::router;
 
@@ -796,13 +796,6 @@ struct MemoryInstances {
 
 #[async_trait]
 impl OntologyRepository for MemoryRepository {
-    async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
-        self.revisions
-            .lock()
-            .map_err(|_| repository_error())?
-            .insert(revision.id.clone(), revision);
-        Ok(())
-    }
     async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
         wyse_ontology::validate_published_revision(&revision)?;
         let instances = self.instances.lock().map_err(|_| repository_error())?;
@@ -878,13 +871,6 @@ impl OntologyRepository for MemoryRepository {
             .map_err(|_| repository_error())?
             .remove(name);
         Ok(())
-    }
-    async fn schema_validation_snapshot(&self) -> Result<SchemaValidationSnapshot, OntologyError> {
-        let instances = self.instances.lock().map_err(|_| repository_error())?;
-        Ok(SchemaValidationSnapshot {
-            objects: instances.objects.values().cloned().collect(),
-            links: instances.links.values().cloned().collect(),
-        })
     }
     async fn create_object(
         &self,

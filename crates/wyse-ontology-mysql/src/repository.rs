@@ -9,8 +9,8 @@ use uuid::Uuid;
 use wyse_ontology::{
     Cardinality, LinkCardinalityConstraint, LinkId, LinkRecord, NewLinkRecord, NewObjectRecord,
     ObjectId, ObjectRecord, ObjectTypeId, OntologyError, OntologyRepository, Page,
-    PublishedRevision, RevisionId, SchemaValidationSnapshot, TagName, canonical_schema_bytes,
-    validate_published_revision, validate_schema_instances,
+    PublishedRevision, RevisionId, TagName, canonical_schema_bytes, validate_published_revision,
+    validate_schema_instances,
 };
 
 use crate::error::MySqlOntologyRepositoryError;
@@ -111,35 +111,14 @@ impl SqlxOntologyRepository {
 
 #[async_trait]
 impl OntologyRepository for SqlxOntologyRepository {
-    async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
-        validate_published_revision(&revision)?;
-        let schema_json =
-            String::from_utf8(canonical_schema_bytes(&revision.schema)?).map_err(|_| {
-                repository_error(MySqlOntologyRepositoryError::InvalidPersisted {
-                    kind: "canonical schema UTF-8",
-                })
-            })?;
-        sqlx::query(
-            "INSERT INTO ontology_revisions (revision_id, schema_json, schema_format_version) \
-             VALUES (?, CAST(? AS JSON), ?) \
-             ON DUPLICATE KEY UPDATE revision_id = revision_id",
-        )
-        .bind(revision.id.as_str())
-        .bind(schema_json)
-        .bind(revision.schema.schema_version)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        Ok(())
-    }
-
     async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
         validate_published_revision(&revision)?;
         let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
         let operation = async {
             let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
-            let snapshot = schema_validation_snapshot_transaction(&mut transaction).await?;
-            validate_schema_instances(&revision.schema, &snapshot.objects, &snapshot.links)?;
+            let objects = object_records_in_transaction(&mut transaction).await?;
+            let links = link_records_in_transaction(&mut transaction).await?;
+            validate_schema_instances(&revision.schema, &objects, &links)?;
             insert_revision_transaction(&mut transaction, &revision).await?;
             transaction.commit().await.map_err(sqlx_error)
         }
@@ -193,8 +172,9 @@ impl OntologyRepository for SqlxOntologyRepository {
                 .ok_or_else(|| OntologyError::RevisionMissing {
                     id: revision_id.clone(),
                 })?;
-            let snapshot = schema_validation_snapshot_transaction(&mut transaction).await?;
-            validate_schema_instances(&revision.schema, &snapshot.objects, &snapshot.links)?;
+            let objects = object_records_in_transaction(&mut transaction).await?;
+            let links = link_records_in_transaction(&mut transaction).await?;
+            validate_schema_instances(&revision.schema, &objects, &links)?;
             put_tag_transaction(&mut transaction, &TagName::online(), revision_id).await?;
             transaction.commit().await.map_err(sqlx_error)
         }
@@ -219,34 +199,6 @@ impl OntologyRepository for SqlxOntologyRepository {
             .await
             .map_err(sqlx_error)?;
         Ok(())
-    }
-
-    async fn schema_validation_snapshot(&self) -> Result<SchemaValidationSnapshot, OntologyError> {
-        let mut connection = self.pool.acquire().await.map_err(sqlx_error)?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .execute(&mut *connection)
-            .await
-            .map_err(sqlx_error)?;
-        let mut transaction = connection.begin().await.map_err(sqlx_error)?;
-        let objects =
-            sqlx::query("SELECT id, object_type_id, values_json, version FROM objects ORDER BY id")
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(sqlx_error)?
-                .into_iter()
-                .map(object_from_row)
-                .collect::<Result<Vec<_>, _>>()?;
-        let links = sqlx::query(
-            "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links ORDER BY id",
-        )
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?
-        .into_iter()
-        .map(link_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-        transaction.commit().await.map_err(sqlx_error)?;
-        Ok(SchemaValidationSnapshot { objects, links })
     }
 
     async fn create_object(
@@ -478,18 +430,22 @@ impl OntologyRepository for SqlxOntologyRepository {
     }
 }
 
-async fn schema_validation_snapshot_transaction(
+async fn object_records_in_transaction(
     transaction: &mut Transaction<'_, MySql>,
-) -> Result<SchemaValidationSnapshot, OntologyError> {
-    let objects =
-        sqlx::query("SELECT id, object_type_id, values_json, version FROM objects ORDER BY id")
-            .fetch_all(&mut **transaction)
-            .await
-            .map_err(sqlx_error)?
-            .into_iter()
-            .map(object_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-    let links = sqlx::query(
+) -> Result<Vec<ObjectRecord>, OntologyError> {
+    sqlx::query("SELECT id, object_type_id, values_json, version FROM objects ORDER BY id")
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(sqlx_error)?
+        .into_iter()
+        .map(object_from_row)
+        .collect()
+}
+
+async fn link_records_in_transaction(
+    transaction: &mut Transaction<'_, MySql>,
+) -> Result<Vec<LinkRecord>, OntologyError> {
+    sqlx::query(
         "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links ORDER BY id",
     )
     .fetch_all(&mut **transaction)
@@ -497,8 +453,7 @@ async fn schema_validation_snapshot_transaction(
     .map_err(sqlx_error)?
     .into_iter()
     .map(link_from_row)
-    .collect::<Result<Vec<_>, _>>()?;
-    Ok(SchemaValidationSnapshot { objects, links })
+    .collect()
 }
 
 async fn insert_revision_transaction(
