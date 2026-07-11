@@ -244,6 +244,52 @@ describe("conversationReducer", () => {
     expect(state.drafts).toEqual({})
   })
 
+  it.each(["finished", "failed", "cancelled"] as const)(
+    "clears pending approvals when an Agent is %s",
+    (terminalEvent) => {
+      const state = reduceAll(initialConversationState, [
+        { type: "recovery_started", agentId: "agent-1" },
+        { type: "view_loaded", view: agentView() },
+        {
+          type: "envelope_received",
+          envelope: agentEnvelope("agent-1", {
+            type: "tool_approval_requested",
+            data: {
+              approval_id: "approval-1",
+              agent_name: "coding-agent",
+              call_id: "call-1",
+              tool_name: "read_file",
+              arguments: {},
+              tool_kind: "read",
+              danger_level: "low",
+            },
+          }),
+        },
+        {
+          type: "envelope_received",
+          envelope: agentEnvelope(
+            "agent-1",
+            terminalEvent === "cancelled"
+              ? { type: "cancelled", data: { usage: null } }
+              : terminalEvent === "finished"
+                ? {
+                    type: "finished",
+                    data: { finish_reason: "stop", usage: null },
+                  }
+                : {
+                    type: "failed",
+                    data: { error_text: "failed", usage: null },
+                  }
+          ),
+        },
+      ])
+
+      expect(state.view?.status).toBe("idle")
+      expect(state.drafts).toEqual({})
+      expect(state.approvals).toEqual({})
+    }
+  )
+
   it("ignores an envelope for an Agent other than the selected Agent", () => {
     const state = reduceAll(initialConversationState, [
       { type: "recovery_started", agentId: "agent-1" },

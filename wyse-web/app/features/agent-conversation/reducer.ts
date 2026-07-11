@@ -80,7 +80,7 @@ function projectAgentEvent(
     case "finished":
     case "failed":
     case "cancelled":
-      return { ...updateViewStatus(state, "idle"), drafts: {} }
+      return { ...updateViewStatus(state, "idle"), drafts: {}, approvals: {} }
     case "tool_approval_requested": {
       const approval: ApprovalRequest = {
         approvalId: event.data.approval_id,
