@@ -1254,6 +1254,37 @@ impl EventStreamBus for FailingApprovalBus {
     }
 }
 
+#[derive(Clone, Default)]
+struct BlockingCancelledBus {
+    inner: InMemoryEventStreamBus,
+    cancelled_entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl EventStreamBus for BlockingCancelledBus {
+    async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        if matches!(
+            &envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Cancelled { .. },
+                ..
+            }
+        ) {
+            self.cancelled_entered.notify_waiters();
+            return pending().await;
+        }
+        self.inner.publish(envelope).await
+    }
+
+    async fn subscribe_agent(
+        &self,
+        agent_id: AgentId,
+        replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        self.inner.subscribe_agent(agent_id, replay_start).await
+    }
+}
+
 fn test_agent_id() -> AgentId {
     "0197fcb8-7500-7000-8000-000000000001"
         .parse()
@@ -1575,6 +1606,32 @@ async fn approval_cancellation_wins_before_tool_execution() {
 }
 
 #[tokio::test]
+async fn cancellation_clears_active_approval_before_publishing() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bus = Arc::new(BlockingCancelledBus::default());
+    let agent = approval_agent(&calls, approval_provider(), bus.clone());
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let cancelled_entered = bus.cancelled_entered.notified();
+    tokio::pin!(cancelled_entered);
+
+    agent.stop();
+    timeout(Duration::from_secs(1), &mut cancelled_entered)
+        .await
+        .expect("cancel publication starts");
+    let result = agent
+        .resolve_tool_approval(approval_id, ApprovalDecision::Approve)
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn approval_request_publish_failure_prevents_tool_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let bus = Arc::new(FailingApprovalBus::default());
@@ -1635,7 +1692,7 @@ async fn duplicate_approval_decisions_execute_tool_once() {
     let duplicate = if first.is_err() { first } else { second };
     assert!(matches!(
         duplicate,
-        Err(AgentError::ApprovalNotFound { .. } | AgentError::NoActiveTurn)
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

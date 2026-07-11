@@ -350,6 +350,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "agent_busy",
             "agent already has an active run",
         ),
+        HostError::Agent(AgentError::ApprovalCommandBusy { .. }) => (
+            StatusCode::CONFLICT,
+            "agent_busy",
+            "agent approval command is busy",
+        ),
         HostError::Agent(AgentError::ResumeNotRunning { .. }) => (
             StatusCode::CONFLICT,
             "resume_not_running",

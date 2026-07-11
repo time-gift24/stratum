@@ -16,6 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 use tower::ServiceExt;
@@ -23,15 +24,18 @@ use wyse_agent::AgentError;
 use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
-    AgentEvent, AgentId, ApprovalId, ChatMessage, EventSource, HistoryPage, ModelId, RunId,
-    RuntimeEvent, StreamEnvelope, TurnId,
+    AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventSource, HistoryPage, ModelId,
+    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, TurnId,
 };
 use wyse_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, LocalFilesystem,
     LocalFilesystemConfig, RecordVersion, VersionedEntry, VirtualPath,
 };
 use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
-use wyse_llm::{ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, LlmProviderManager};
+use wyse_llm::{
+    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
+    LlmProviderManager,
+};
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
 
 struct Fixture {
@@ -224,6 +228,59 @@ impl LlmProvider for PendingProvider {
 
     async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
         std::future::pending().await
+    }
+}
+
+struct ApprovalProvider {
+    model: ModelId,
+    requests: AtomicUsize,
+}
+
+impl ApprovalProvider {
+    fn new(model: ModelId) -> Self {
+        Self {
+            model,
+            requests: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ApprovalProvider {
+    fn model_id(&self) -> ModelId {
+        self.model.clone()
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability("chat"))
+    }
+
+    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        let events = if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    call_id: Some(CallId::from("call-1")),
+                    name: Some("echo".to_owned()),
+                    arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+                }),
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: None,
+                },
+            ]
+        } else {
+            vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "done".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
 
@@ -1294,6 +1351,88 @@ async fn approval_before_any_request_conflicts_while_provider_is_pending() {
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "approval_not_active");
+}
+
+#[tokio::test]
+async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(ApprovalProvider::new(fixture.model.clone())))
+        .expect("provider registers");
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        bus.clone() as Arc<dyn EventStreamBus>,
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(host);
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "use the tool"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let mut events = bus
+        .subscribe_agent(agent_id, ReplayStart::All)
+        .await
+        .expect("subscription opens");
+    let approval_id = timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = events
+                .next()
+                .await
+                .expect("approval event")
+                .expect("event is valid")
+                .envelope;
+            if let RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalRequested { approval_id, .. },
+                ..
+            } = envelope.event
+            {
+                return approval_id;
+            }
+        }
+    })
+    .await
+    .expect("approval request is published");
+    let request = || {
+        Request::post(format!("/v1/agents/{agent_id}/approvals/{approval_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"decision": "approve"}).to_string()))
+            .expect("request builds")
+    };
+
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(request()),
+        app.clone().oneshot(request())
+    );
+    let first = first.expect("first request completes");
+    let second = second.expect("second request completes");
+    let (accepted, conflict) = if first.status() == StatusCode::NO_CONTENT {
+        (first, second)
+    } else {
+        (second, first)
+    };
+
+    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let body = to_bytes(conflict.into_body(), usize::MAX)
         .await
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("error body is json");

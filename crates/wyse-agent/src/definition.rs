@@ -110,10 +110,8 @@ impl<'a> ActiveApprovalGuard<'a> {
             approval_id,
         }
     }
-}
 
-impl Drop for ActiveApprovalGuard<'_> {
-    fn drop(&mut self) {
+    pub(crate) fn clear(&mut self) {
         let mut active_approval = self
             .active_approval
             .lock()
@@ -121,6 +119,12 @@ impl Drop for ActiveApprovalGuard<'_> {
         if *active_approval == Some(self.approval_id) {
             *active_approval = None;
         }
+    }
+}
+
+impl Drop for ActiveApprovalGuard<'_> {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -463,23 +467,37 @@ impl Agent {
             .expect("turn command mutex should not be poisoned")
             .clone()
             .ok_or(AgentError::NoActiveTurn)?;
-        if *self
-            .active_approval
-            .lock()
-            .expect("active approval mutex should not be poisoned")
-            != Some(approval_id)
         {
-            return Err(AgentError::ApprovalNotFound { approval_id });
+            let mut active_approval = self
+                .active_approval
+                .lock()
+                .expect("active approval mutex should not be poisoned");
+            if *active_approval != Some(approval_id) {
+                return Err(AgentError::ApprovalNotFound { approval_id });
+            }
+            *active_approval = None;
         }
         let (response, receiver) = oneshot::channel();
-        sender
-            .send(TurnCommand::ResolveToolApproval {
-                approval_id,
-                decision,
-                response,
-            })
-            .await
-            .map_err(|_| AgentError::NoActiveTurn)?;
+        match sender.try_send(TurnCommand::ResolveToolApproval {
+            approval_id,
+            decision,
+            response,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let mut active_approval = self
+                    .active_approval
+                    .lock()
+                    .expect("active approval mutex should not be poisoned");
+                if active_approval.is_none() && !sender.is_closed() {
+                    *active_approval = Some(approval_id);
+                }
+                return Err(AgentError::ApprovalCommandBusy { approval_id });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(AgentError::NoActiveTurn);
+            }
+        }
         receiver.await.map_err(|_| AgentError::NoActiveTurn)?
     }
 

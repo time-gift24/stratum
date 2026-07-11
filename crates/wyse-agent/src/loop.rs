@@ -774,7 +774,7 @@ impl Agent {
 
         if let Some((tool_kind, danger_level)) = approval_metadata {
             let approval_id = ApprovalId::new();
-            let active_approval =
+            let mut active_approval =
                 ActiveApprovalGuard::new(self.active_approval.as_ref(), approval_id);
             self.publish_required_agent_event(
                 AgentEvent::ToolApprovalRequested {
@@ -795,6 +795,7 @@ impl Agent {
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => {
+                        active_approval.clear();
                         self.publish_cancelled().await?;
                         return Err(AgentError::Cancelled);
                     }
@@ -812,6 +813,7 @@ impl Agent {
                             }));
                             continue;
                         }
+                        active_approval.clear();
                         let _ = response.send(Ok(()));
                         break decision;
                     }
