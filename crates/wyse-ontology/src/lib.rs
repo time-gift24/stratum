@@ -17,9 +17,9 @@ pub use id::{
     TagName,
 };
 pub use repository::{
-    LinkRecord, NewLinkRecord, NewObjectRecord, ObjectRecord, OntologyRepository, Page,
-    PublishedRevision, SchemaValidationSnapshot,
+    LinkCardinalityConstraint, LinkRecord, NewLinkRecord, NewObjectRecord, ObjectRecord,
+    OntologyRepository, Page, PublishedRevision, SchemaValidationSnapshot,
 };
 pub use schema::{Cardinality, LinkType, ObjectType, PropertyType, SchemaDocument, ValueType};
-pub use service::OntologyService;
+pub use service::{CreateLink, CreateObject, OntologyService, ReplaceLink, ReplaceObject};
 pub use value::validate_object_values;

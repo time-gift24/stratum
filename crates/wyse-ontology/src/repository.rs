@@ -5,7 +5,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    LinkId, LinkTypeId, ObjectId, ObjectTypeId, OntologyError, RevisionId, SchemaDocument, TagName,
+    Cardinality, LinkId, LinkTypeId, ObjectId, ObjectTypeId, OntologyError, RevisionId,
+    SchemaDocument, TagName,
 };
 
 /// A published immutable schema revision.
@@ -67,6 +68,13 @@ pub struct NewLinkRecord {
     pub source_object_id: ObjectId,
     /// Target object identity.
     pub target_object_id: ObjectId,
+}
+
+/// One schema-derived cardinality constraint applied to a link write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkCardinalityConstraint {
+    /// Multiplicity that must hold after the write.
+    pub cardinality: Cardinality,
 }
 
 /// A consistent repository view used to validate a schema against shared instances.
@@ -190,12 +198,16 @@ pub trait OntologyRepository: Send + Sync {
         force: bool,
     ) -> Result<(), OntologyError>;
 
-    /// Persists a new link.
+    /// Atomically checks every cardinality constraint and persists a new link.
     ///
     /// # Errors
     ///
     /// Returns an ontology error when persistence fails.
-    async fn create_link(&self, link: NewLinkRecord) -> Result<LinkRecord, OntologyError>;
+    async fn create_link_with_cardinality(
+        &self,
+        link: NewLinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+    ) -> Result<LinkRecord, OntologyError>;
 
     /// Loads a link by identity.
     ///
@@ -215,12 +227,16 @@ pub trait OntologyRepository: Send + Sync {
         limit: u32,
     ) -> Result<Page<LinkRecord>, OntologyError>;
 
-    /// Replaces a link conditionally on its version.
+    /// Atomically checks every cardinality constraint and replaces a link conditionally on its version.
     ///
     /// # Errors
     ///
     /// Returns an ontology error when persistence fails.
-    async fn replace_link(&self, link: LinkRecord) -> Result<LinkRecord, OntologyError>;
+    async fn replace_link_with_cardinality(
+        &self,
+        link: LinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+    ) -> Result<LinkRecord, OntologyError>;
 
     /// Deletes a link conditionally on its version.
     ///
@@ -228,17 +244,4 @@ pub trait OntologyRepository: Send + Sync {
     ///
     /// Returns an ontology error when persistence fails.
     async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError>;
-
-    /// Lists relevant links while checking cardinality.
-    ///
-    /// # Errors
-    ///
-    /// Returns an ontology error when persistence fails.
-    async fn links_for_cardinality(
-        &self,
-        type_id: LinkTypeId,
-        source: ObjectId,
-        target: ObjectId,
-        excluding: Option<LinkId>,
-    ) -> Result<Vec<LinkRecord>, OntologyError>;
 }

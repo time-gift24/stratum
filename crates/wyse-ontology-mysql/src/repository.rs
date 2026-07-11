@@ -7,9 +7,9 @@ use serde_json::{Map, Value};
 use sqlx::{Acquire, MySql, MySqlPool, Row, Transaction};
 use uuid::Uuid;
 use wyse_ontology::{
-    LinkId, LinkRecord, LinkTypeId, NewLinkRecord, NewObjectRecord, ObjectId, ObjectRecord,
-    ObjectTypeId, OntologyError, OntologyRepository, Page, PublishedRevision, RevisionId,
-    SchemaValidationSnapshot, TagName, canonical_schema_bytes,
+    Cardinality, LinkCardinalityConstraint, LinkId, LinkRecord, NewLinkRecord, NewObjectRecord,
+    ObjectId, ObjectRecord, ObjectTypeId, OntologyError, OntologyRepository, Page,
+    PublishedRevision, RevisionId, SchemaValidationSnapshot, TagName, canonical_schema_bytes,
 };
 
 use crate::error::MySqlOntologyRepositoryError;
@@ -245,25 +245,12 @@ impl OntologyRepository for SqlxOntologyRepository {
         Ok(())
     }
 
-    async fn create_link(&self, link: NewLinkRecord) -> Result<LinkRecord, OntologyError> {
-        sqlx::query(
-            "INSERT INTO links (id, link_type_id, source_object_id, target_object_id, version) \
-             VALUES (?, ?, ?, ?, 1)",
-        )
-        .bind(link.id.to_string())
-        .bind(link.link_type_id.to_string())
-        .bind(link.source_object_id.to_string())
-        .bind(link.target_object_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        Ok(LinkRecord {
-            id: link.id,
-            link_type_id: link.link_type_id,
-            source_object_id: link.source_object_id,
-            target_object_id: link.target_object_id,
-            version: 1,
-        })
+    async fn create_link_with_cardinality(
+        &self,
+        link: NewLinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+    ) -> Result<LinkRecord, OntologyError> {
+        create_link_with_cardinality(&self.pool, link, constraints).await
     }
 
     async fn get_link(&self, id: LinkId) -> Result<Option<LinkRecord>, OntologyError> {
@@ -308,25 +295,12 @@ impl OntologyRepository for SqlxOntologyRepository {
         page(rows, limit, link_from_row, |link| link.id.as_uuid())
     }
 
-    async fn replace_link(&self, link: LinkRecord) -> Result<LinkRecord, OntologyError> {
-        let result = sqlx::query(
-            "UPDATE links SET source_object_id = ?, target_object_id = ?, version = version + 1, updated_at = UTC_TIMESTAMP(6) \
-             WHERE id = ? AND version = ?",
-        )
-        .bind(link.source_object_id.to_string())
-        .bind(link.target_object_id.to_string())
-        .bind(link.id.to_string())
-        .bind(link.version)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        if result.rows_affected() == 0 {
-            return Err(link_write_failure(&self.pool, link.id).await?);
-        }
-        Ok(LinkRecord {
-            version: link.version + 1,
-            ..link
-        })
+    async fn replace_link_with_cardinality(
+        &self,
+        link: LinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+    ) -> Result<LinkRecord, OntologyError> {
+        replace_link_with_cardinality(&self.pool, link, constraints).await
     }
 
     async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
@@ -341,37 +315,171 @@ impl OntologyRepository for SqlxOntologyRepository {
         }
         Ok(())
     }
+}
 
-    async fn links_for_cardinality(
-        &self,
-        type_id: LinkTypeId,
-        source: ObjectId,
-        target: ObjectId,
-        excluding: Option<LinkId>,
-    ) -> Result<Vec<LinkRecord>, OntologyError> {
-        let rows = match excluding {
-            Some(excluding) => sqlx::query(
-                "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links \
-                 WHERE link_type_id = ? AND (source_object_id = ? OR target_object_id = ?) AND id <> ?",
-            )
-            .bind(type_id.to_string())
-            .bind(source.to_string())
-            .bind(target.to_string())
-            .bind(excluding.to_string())
-            .fetch_all(&self.pool)
-            .await,
-            None => sqlx::query(
-                "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links \
-                 WHERE link_type_id = ? AND (source_object_id = ? OR target_object_id = ?)",
-            )
-            .bind(type_id.to_string())
-            .bind(source.to_string())
-            .bind(target.to_string())
-            .fetch_all(&self.pool)
-            .await,
+async fn create_link_with_cardinality(
+    pool: &MySqlPool,
+    link: NewLinkRecord,
+    constraints: &[LinkCardinalityConstraint],
+) -> Result<LinkRecord, OntologyError> {
+    let mut transaction = pool.begin().await.map_err(sqlx_error)?;
+    lock_objects(
+        &mut transaction,
+        [link.source_object_id, link.target_object_id].into_iter(),
+    )
+    .await?;
+    ensure_cardinality(&mut transaction, &link_record(&link), constraints, None).await?;
+    sqlx::query(
+        "INSERT INTO links (id, link_type_id, source_object_id, target_object_id, version) \
+         VALUES (?, ?, ?, ?, 1)",
+    )
+    .bind(link.id.to_string())
+    .bind(link.link_type_id.to_string())
+    .bind(link.source_object_id.to_string())
+    .bind(link.target_object_id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(sqlx_error)?;
+    transaction.commit().await.map_err(sqlx_error)?;
+    Ok(link_record(&link))
+}
+
+async fn replace_link_with_cardinality(
+    pool: &MySqlPool,
+    link: LinkRecord,
+    constraints: &[LinkCardinalityConstraint],
+) -> Result<LinkRecord, OntologyError> {
+    let mut transaction = pool.begin().await.map_err(sqlx_error)?;
+    let current = sqlx::query(
+        "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links WHERE id = ? FOR UPDATE",
+    )
+    .bind(link.id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(sqlx_error)?
+    .map(link_from_row)
+    .transpose()?;
+    let Some(current) = current else {
+        return Err(OntologyError::LinkMissing { id: link.id });
+    };
+    if current.version != link.version {
+        return Err(OntologyError::LinkVersionConflict { id: link.id });
+    }
+    lock_objects(
+        &mut transaction,
+        [
+            current.source_object_id,
+            current.target_object_id,
+            link.source_object_id,
+            link.target_object_id,
+        ]
+        .into_iter(),
+    )
+    .await?;
+    ensure_cardinality(&mut transaction, &link, constraints, Some(link.id)).await?;
+    sqlx::query(
+        "UPDATE links SET source_object_id = ?, target_object_id = ?, version = version + 1, updated_at = UTC_TIMESTAMP(6) \
+         WHERE id = ? AND version = ?",
+    )
+    .bind(link.source_object_id.to_string())
+    .bind(link.target_object_id.to_string())
+    .bind(link.id.to_string())
+    .bind(link.version)
+    .execute(&mut *transaction)
+    .await
+    .map_err(sqlx_error)?;
+    let updated = LinkRecord {
+        version: link.version + 1,
+        ..link
+    };
+    transaction.commit().await.map_err(sqlx_error)?;
+    Ok(updated)
+}
+
+fn link_record(link: &NewLinkRecord) -> LinkRecord {
+    LinkRecord {
+        id: link.id,
+        link_type_id: link.link_type_id,
+        source_object_id: link.source_object_id,
+        target_object_id: link.target_object_id,
+        version: 1,
+    }
+}
+
+async fn lock_objects(
+    transaction: &mut Transaction<'_, MySql>,
+    ids: impl Iterator<Item = ObjectId>,
+) -> Result<(), OntologyError> {
+    let mut ids = ids.collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        let locked = sqlx::query("SELECT id FROM objects WHERE id = ? FOR UPDATE")
+            .bind(id.to_string())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(sqlx_error)?;
+        if locked.is_none() {
+            return Err(OntologyError::ObjectMissing { id });
         }
-        .map_err(sqlx_error)?;
-        rows.into_iter().map(link_from_row).collect()
+    }
+    Ok(())
+}
+
+async fn ensure_cardinality(
+    transaction: &mut Transaction<'_, MySql>,
+    candidate: &LinkRecord,
+    constraints: &[LinkCardinalityConstraint],
+    excluding: Option<LinkId>,
+) -> Result<(), OntologyError> {
+    let rows = match excluding {
+        Some(excluding) => sqlx::query(
+            "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links \
+             WHERE link_type_id = ? AND (source_object_id = ? OR target_object_id = ?) AND id <> ? FOR UPDATE",
+        )
+        .bind(candidate.link_type_id.to_string())
+        .bind(candidate.source_object_id.to_string())
+        .bind(candidate.target_object_id.to_string())
+        .bind(excluding.to_string())
+        .fetch_all(&mut **transaction)
+        .await,
+        None => sqlx::query(
+            "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links \
+             WHERE link_type_id = ? AND (source_object_id = ? OR target_object_id = ?) FOR UPDATE",
+        )
+        .bind(candidate.link_type_id.to_string())
+        .bind(candidate.source_object_id.to_string())
+        .bind(candidate.target_object_id.to_string())
+        .fetch_all(&mut **transaction)
+        .await,
+    }
+    .map_err(sqlx_error)?;
+    let links = rows
+        .into_iter()
+        .map(link_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_count = links
+        .iter()
+        .filter(|link| link.source_object_id == candidate.source_object_id)
+        .count();
+    let target_count = links
+        .iter()
+        .filter(|link| link.target_object_id == candidate.target_object_id)
+        .count();
+    if constraints
+        .iter()
+        .all(|constraint| match constraint.cardinality {
+            Cardinality::OneToOne => source_count == 0 && target_count == 0,
+            Cardinality::OneToMany => target_count == 0,
+            Cardinality::ManyToOne => source_count == 0,
+            Cardinality::ManyToMany => true,
+        })
+    {
+        Ok(())
+    } else {
+        Err(OntologyError::CardinalityConflict {
+            link_type_id: candidate.link_type_id,
+        })
     }
 }
 

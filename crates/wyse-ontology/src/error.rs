@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::{DraftName, LinkId, ObjectId, RevisionId, TagName};
+use crate::{DraftName, LinkId, LinkTypeId, ObjectId, ObjectTypeId, RevisionId, TagName};
 use wyse_filesystem::FilesystemError;
 
 /// Error returned by ontology domain operations.
@@ -87,6 +87,12 @@ pub enum OntologyError {
         /// Identity of the referenced object.
         id: ObjectId,
     },
+    /// A selected schema does not define the requested object type.
+    #[error("object type {id} does not exist in the selected schema")]
+    ObjectTypeMissing {
+        /// Identity of the missing object type.
+        id: ObjectTypeId,
+    },
     /// A link instance does not exist.
     #[error("link {id} does not exist")]
     LinkMissing {
@@ -98,6 +104,30 @@ pub enum OntologyError {
     LinkVersionConflict {
         /// Identity of the concurrently changed link.
         id: LinkId,
+    },
+    /// A selected schema does not define the requested link type.
+    #[error("link type {id} does not exist in the selected schema")]
+    LinkTypeMissing {
+        /// Identity of the missing link type.
+        id: LinkTypeId,
+    },
+    /// Link endpoints do not satisfy the selected link type.
+    #[error("link endpoints are invalid")]
+    LinkEndpointInvalid {
+        /// Every discovered endpoint failure.
+        diagnostics: Vec<String>,
+    },
+    /// A new or replaced link would violate its cardinality.
+    #[error("link type {link_type_id} cardinality would be violated")]
+    CardinalityConflict {
+        /// Identity of the constrained link type.
+        link_type_id: LinkTypeId,
+    },
+    /// A requested page size is outside the supported range.
+    #[error("page limit must be between 1 and 100")]
+    InvalidPageLimit {
+        /// Unsupported requested page size.
+        limit: u32,
     },
     /// A repository operation failed.
     #[error("ontology repository operation failed")]
