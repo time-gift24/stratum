@@ -10,8 +10,8 @@ use thiserror::Error;
 use wyse_agent::{Agent, AgentError};
 use wyse_agent_builtin::build_default_agent;
 use wyse_core::{
-    AgentEvent, AgentId, ChatContent, ChatMessage, ChatRole, ModelId, ModelIdParseError,
-    ReplayStart, RuntimeEvent,
+    AgentEvent, AgentId, ChatContent, ChatMessage, ChatRole, DangerLevel, ModelId,
+    ModelIdParseError, ReplayStart, RuntimeEvent, ToolKind,
 };
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
@@ -25,6 +25,7 @@ use wyse_llm::{
     OpenAICompatibleProvider,
 };
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
+use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolPermissionMode, ToolRegistry};
 
 const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_AGENT_NAME: &str = "default-agent";
@@ -98,6 +99,8 @@ enum ReplError {
     EventStreamBus(#[from] EventStreamBusError),
     #[error("llm operation failed")]
     Llm(#[from] LlmError),
+    #[error("tool operation failed")]
+    Tool(#[from] ToolError),
     #[error("json encoding failed")]
     Json(#[from] serde_json::Error),
     #[error("event stream closed before a terminal agent event")]
@@ -177,6 +180,7 @@ async fn compose_session(
         store.clone(),
         bus.clone(),
         select_provider(config)?,
+        approval_registry()?,
     )?;
 
     Ok(Session {
@@ -259,6 +263,12 @@ async fn consume_turn_events<W: Write>(
     Err(ReplError::EventStreamClosed)
 }
 
+fn approval_registry() -> Result<Arc<dyn ToolRegistry>, ReplError> {
+    let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+    registry.register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)?;
+    Ok(Arc::new(registry))
+}
+
 fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
     VirtualPath::try_from(format!("/{agent_id}").as_str()).map_err(ReplError::from)
 }
@@ -311,18 +321,19 @@ fn select_provider(config: &Config) -> Result<Arc<dyn LlmProvider>, ReplError> {
 mod tests {
     use std::{fs, sync::Arc};
 
+    use super::{
+        Args, Config, ReplError, Session, agent_root, approval_registry, consume_turn_events,
+        drive_turn, restore_session, select_provider,
+    };
     use clap::Parser;
-    use wyse_core::{AgentEvent, AgentId, RuntimeEvent, StreamEnvelope};
+    use wyse_core::{
+        AgentEvent, AgentId, DangerLevel, RuntimeEvent, StreamEnvelope, ToolKind, ToolName,
+    };
     use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
     use wyse_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
     use wyse_llm::{ChatStreamEvent, FinishReason, MockLlmProvider};
     use wyse_store::{
         AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus,
-    };
-
-    use super::{
-        Args, Config, ReplError, Session, agent_root, consume_turn_events, drive_turn,
-        restore_session, select_provider,
     };
 
     async fn test_session(
@@ -353,6 +364,7 @@ mod tests {
             store.clone(),
             bus.clone(),
             Arc::new(provider),
+            approval_registry()?,
         )?;
 
         Ok(Session {
@@ -362,6 +374,21 @@ mod tests {
             bus,
             storage_root: root.to_path_buf(),
         })
+    }
+
+    #[test]
+    fn approval_registry_registers_echo_as_low_danger_read_tool() -> Result<(), ReplError> {
+        let registry = approval_registry()?;
+
+        let specs = registry.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name.as_str(), "echo");
+        assert_eq!(
+            registry.authorization(&ToolName::from("echo"))?,
+            Some((ToolKind::Read, DangerLevel::Low))
+        );
+
+        Ok(())
     }
 
     fn mock_response(text: &str) -> MockLlmProvider {
