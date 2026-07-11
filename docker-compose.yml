@@ -26,13 +26,24 @@ services:
       nats:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "18080:8080"
     volumes:
       - wyse-agent-data:/var/lib/wyse
       - ./templates:/var/lib/wyse/agents/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
+
+  wyse-web:
+    build:
+      context: ./wyse-web
+      args:
+        VITE_WYSE_API_BASE_URL: ${VITE_WYSE_API_BASE_URL:-http://127.0.0.1:18080}
+        VITE_DEFAULT_AGENT_NAME: ${VITE_DEFAULT_AGENT_NAME:-coding-agent}
+    depends_on:
+      - wyse-api
+    ports:
+      - "5173:3000"
 
 volumes:
   nats-data:

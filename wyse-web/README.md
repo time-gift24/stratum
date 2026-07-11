@@ -1,30 +1,13 @@
-# React Router + shadcn/ui
+# Wyse Web
 
-This is a template for a new React Router project with React, TypeScript, and shadcn/ui.
-
-## Adding components
-
-To add components to your app, run the following command:
+The Compose frontend is available at `http://localhost:5173` and connects to
+the local Wyse API at `http://127.0.0.1:18080`.
 
 ```bash
-npx shadcn@latest add button
+podman compose up --build
 ```
 
-This will place the ui components in the `components` directory.
-
-## Using components
-
-To use the components in your app, import them as follows:
-
-```tsx
-import { Button } from "@/components/ui/button";
-```
-
-## Agent API development
-
-Copy `.env.example` to `.env.local` and set the API base URL and default
-template name. The API origin must appear in `api.allowed_origins` in
-`wyse-api` configuration.
+For local frontend development, copy `.env.example` to `.env.local` and run:
 
 ```bash
 pnpm install

@@ -1,22 +1,35 @@
-FROM node:20-alpine AS development-dependencies-env
-COPY . /app
-WORKDIR /app
-RUN npm ci
+FROM node:22-alpine AS build
 
-FROM node:20-alpine AS production-dependencies-env
-COPY ./package.json package-lock.json /app/
 WORKDIR /app
-RUN npm ci --omit=dev
 
-FROM node:20-alpine AS build-env
-COPY . /app/
-COPY --from=development-dependencies-env /app/node_modules /app/node_modules
-WORKDIR /app
-RUN npm run build
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
 
-FROM node:20-alpine
-COPY ./package.json package-lock.json /app/
-COPY --from=production-dependencies-env /app/node_modules /app/node_modules
-COPY --from=build-env /app/build /app/build
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+
+ARG VITE_WYSE_API_BASE_URL
+ARG VITE_DEFAULT_AGENT_NAME
+ENV VITE_WYSE_API_BASE_URL=$VITE_WYSE_API_BASE_URL
+ENV VITE_DEFAULT_AGENT_NAME=$VITE_DEFAULT_AGENT_NAME
+
+RUN pnpm build
+
+FROM node:22-alpine
+
 WORKDIR /app
-CMD ["npm", "run", "start"]
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=3000
+
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+
+COPY --from=build /app/build ./build
+
+EXPOSE 3000
+
+CMD ["pnpm", "start"]
