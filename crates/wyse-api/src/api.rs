@@ -3,7 +3,7 @@
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        OriginalUri, Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION},
@@ -177,12 +177,11 @@ async fn get_events(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
     headers: HeaderMap,
-    query: Result<Query<EventStreamParams>, QueryRejection>,
+    OriginalUri(uri): OriginalUri,
 ) -> Result<impl IntoResponse, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
-    let Query(query) = query.map_err(|_| HostError::InvalidRequest)?;
     find_agent(&state, agent_id)?;
-    let replay_start = replay_start(&headers, query)?;
+    let replay_start = replay_start(&headers, &uri)?;
     let events = state
         .event_bus()
         .subscribe_agent(agent_id, replay_start)
@@ -201,16 +200,18 @@ async fn get_events(
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-fn replay_start(headers: &HeaderMap, query: EventStreamParams) -> Result<ReplayStart, HostError> {
+fn replay_start(headers: &HeaderMap, uri: &axum::http::Uri) -> Result<ReplayStart, HostError> {
     if let Some(cursor) = headers.get("last-event-id") {
-        return parse_cursor(cursor.to_str().map_err(|_| HostError::InvalidEventCursor)?);
+        return parse_cursor(cursor.to_str().map_err(|_| HostError::InvalidCursor)?);
     }
+    let Query(query) =
+        Query::<EventStreamParams>::try_from_uri(uri).map_err(|_| HostError::InvalidRequest)?;
     if let Some(cursor) = query.after_cursor {
         return parse_cursor(&cursor);
     }
     match query.replay.as_deref() {
         Some("new") => Ok(ReplayStart::New),
-        None => Ok(ReplayStart::All),
+        Some("all") | None => Ok(ReplayStart::All),
         Some(_) => Err(HostError::InvalidRequest),
     }
 }
@@ -220,7 +221,7 @@ fn parse_cursor(cursor: &str) -> Result<ReplayStart, HostError> {
         .parse()
         .map(EventCursor::from_transport_sequence)
         .map(ReplayStart::After)
-        .map_err(|_| HostError::InvalidEventCursor)
+        .map_err(|_| HostError::InvalidCursor)
 }
 
 fn event_record_to_sse(record: EventRecord) -> Result<SseEvent, serde_json::Error> {
@@ -393,9 +394,9 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "invalid_history_query",
             "history query is invalid",
         ),
-        HostError::InvalidEventCursor => (
+        HostError::InvalidCursor => (
             StatusCode::BAD_REQUEST,
-            "invalid_event_cursor",
+            "invalid_cursor",
             "event cursor is invalid",
         ),
         HostError::ResumeRequired => (

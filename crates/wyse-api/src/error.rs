@@ -81,7 +81,7 @@ pub enum HostError {
     InvalidHistoryQuery,
     /// An event replay cursor could not be decoded.
     #[error("event cursor is invalid")]
-    InvalidEventCursor,
+    InvalidCursor,
     /// A persisted running turn must be resumed before other run control.
     #[error("agent has an unfinished persisted turn")]
     ResumeRequired,
