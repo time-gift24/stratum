@@ -17,8 +17,8 @@ use tower::ServiceExt;
 use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
-    AgentEvent, AgentId, ChatMessage, EventSource, ModelId, RunId, RuntimeEvent, StreamEnvelope,
-    TurnId,
+    AgentEvent, AgentId, ApprovalId, ChatMessage, EventSource, HistoryPage, ModelId, RunId,
+    RuntimeEvent, StreamEnvelope, TurnId,
 };
 use wyse_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, LocalFilesystem,
@@ -103,12 +103,7 @@ prompt = "be helpful"
             .expect("store initializes");
         let run_id = RunId::new();
         let turn_id = TurnId::new();
-        if status == AgentStatus::Running {
-            store
-                .update_state(status, Some(run_id), Some(turn_id), Default::default())
-                .await
-                .expect("state updates");
-        } else if status != AgentStatus::Idle {
+        if status != AgentStatus::Idle {
             store
                 .append_message(StreamEnvelope {
                     business_seq: None,
@@ -175,6 +170,15 @@ prompt = "be helpful"
             .await
             .expect("request completes")
     }
+
+    async fn request(&self, request: Request<Body>) -> (Arc<HostState>, axum::response::Response) {
+        let host = self.restore_host().await.expect("host restores");
+        let response = router(Arc::clone(&host))
+            .oneshot(request)
+            .await
+            .expect("request completes");
+        (host, response)
+    }
 }
 
 impl Drop for Fixture {
@@ -197,6 +201,23 @@ impl LlmProvider for TestProvider {
 
     async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
         Err(LlmError::MockExhausted)
+    }
+}
+
+struct PendingProvider(ModelId);
+
+#[async_trait]
+impl LlmProvider for PendingProvider {
+    fn model_id(&self) -> ModelId {
+        self.0.clone()
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        std::future::pending().await
+    }
+
+    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        std::future::pending().await
     }
 }
 
@@ -640,5 +661,405 @@ async fn creation_cleanup_http_response_does_not_expose_error_details() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body is readable");
-    assert!(body.is_empty());
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "internal_error");
+    assert!(!body.to_string().contains("secret"));
+}
+
+#[tokio::test]
+async fn get_agent_returns_not_found_json_for_unknown_agent() {
+    let fixture = Fixture::new().await;
+    let agent_id = AgentId::new();
+
+    let (_, response) = fixture
+        .request(
+            Request::get(format!("/v1/agents/{agent_id}"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert!(!body.to_string().contains(&agent_id.to_string()));
+}
+
+#[tokio::test]
+async fn get_agent_projects_only_public_view_fields() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::get(format!("/v1/agents/{agent_id}"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("view body is json");
+    let mut keys = body
+        .as_object()
+        .expect("view is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "agent_id",
+            "agent_name",
+            "last_seq",
+            "run_id",
+            "status",
+            "turn_id",
+            "updated_at",
+            "usage",
+        ]
+    );
+    assert_eq!(body["agent_name"], "coding-agent");
+}
+
+#[tokio::test]
+async fn history_uses_a_fixed_barrier_across_pages() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+
+    let (_, first) = fixture
+        .request(
+            Request::get(format!(
+                "/v1/agents/{agent_id}/messages?after_seq=0&limit=1"
+            ))
+            .body(Body::empty())
+            .expect("request builds"),
+        )
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: HistoryPage = serde_json::from_slice(
+        &to_bytes(first.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("history decodes");
+
+    let (_, second) = fixture
+        .request(
+            Request::get(format!(
+                "/v1/agents/{agent_id}/messages?after_seq={}&through_seq={}&limit=1",
+                first.next_front_seq, first.through_seq
+            ))
+            .body(Body::empty())
+            .expect("request builds"),
+        )
+        .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: HistoryPage = serde_json::from_slice(
+        &to_bytes(second.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("history decodes");
+    assert_eq!(second.through_seq, first.through_seq);
+}
+
+#[tokio::test]
+async fn post_message_rejects_blank_text_as_bad_request() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": " \n\t"}).to_string()))
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_message");
+    assert!(!body.to_string().contains("\\n"));
+}
+
+#[tokio::test]
+async fn post_message_returns_accepted_after_durable_append() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+
+    let (host, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "hello"}).to_string()))
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("accepted body is json");
+    assert!(body["run_id"].is_string());
+    assert_eq!(
+        host.agent(agent_id)
+            .expect("agent exists")
+            .store
+            .load_agent()
+            .await
+            .expect("state loads")
+            .last_seq,
+        1
+    );
+}
+
+#[tokio::test]
+async fn needs_resume_blocks_messages_and_cancel() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Running)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let app = router(host);
+
+    for request in [
+        Request::post(format!("/v1/agents/{agent_id}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"text": "hello"}).to_string()))
+            .expect("request builds"),
+        Request::post(format!("/v1/agents/{agent_id}/cancel"))
+            .body(Body::empty())
+            .expect("request builds"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable");
+        let body: Value = serde_json::from_slice(&body).expect("error body is json");
+        assert_eq!(body["error"]["code"], "resume_required");
+    }
+}
+
+#[tokio::test]
+async fn resume_rechecks_store_and_clears_stale_marker() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Running)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let hosted = host.agent(agent_id).expect("agent exists");
+    hosted
+        .store
+        .update_state(AgentStatus::Failed, None, None, Default::default())
+        .await
+        .expect("state updates");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "resume_not_running");
+    assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
+}
+
+#[tokio::test]
+async fn cancel_is_accepted_without_an_active_turn() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/cancel"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn approval_without_active_turn_is_a_conflict() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let approval_id = ApprovalId::new();
+
+    let (_, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/approvals/{approval_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"decision": "approve"}).to_string()))
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "approval_not_active");
+}
+
+#[tokio::test]
+async fn post_message_maps_an_active_run_to_agent_busy() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(PendingProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(host);
+    let request = || {
+        Request::post(format!("/v1/agents/{agent_id}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"text": "hello"}).to_string()))
+            .expect("request builds")
+    };
+
+    let accepted = app
+        .clone()
+        .oneshot(request())
+        .await
+        .expect("request completes");
+    let busy = app.oneshot(request()).await.expect("request completes");
+
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    let body = to_bytes(busy.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "agent_busy");
+}
+
+#[tokio::test]
+async fn resume_accepts_a_persisted_running_turn_and_clears_marker() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Running)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
+}
+
+#[tokio::test]
+async fn message_preamble_failure_marks_existing_agent_for_resume() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let filesystem = Arc::new(FailFirstMessageFilesystem::new(Arc::clone(
+        &fixture.filesystem,
+    )));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        filesystem as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "hello"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(host.agent(agent_id).expect("agent exists").needs_resume());
+}
+
+#[tokio::test]
+async fn malformed_json_uses_the_unified_error_body() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"#))
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_request");
 }

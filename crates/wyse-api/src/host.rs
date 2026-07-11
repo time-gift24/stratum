@@ -75,6 +75,14 @@ impl HostedAgent {
     pub fn needs_resume(&self) -> bool {
         self.needs_resume.load(Ordering::Acquire)
     }
+
+    pub(crate) fn mark_needs_resume(&self) {
+        self.needs_resume.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn clear_needs_resume(&self) {
+        self.needs_resume.store(false, Ordering::Release);
+    }
 }
 
 impl HostState {

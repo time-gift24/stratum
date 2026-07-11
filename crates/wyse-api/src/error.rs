@@ -70,6 +70,18 @@ pub enum HostError {
     /// Initial user text is empty after trimming.
     #[error("initial agent text must not be empty")]
     EmptyText,
+    /// A follow-up user message is empty after trimming.
+    #[error("agent message must not be empty")]
+    InvalidMessage,
+    /// An HTTP request body or path parameter is invalid.
+    #[error("request is invalid")]
+    InvalidRequest,
+    /// A history query could not be decoded.
+    #[error("history query is invalid")]
+    InvalidHistoryQuery,
+    /// A persisted running turn must be resumed before other run control.
+    #[error("agent has an unfinished persisted turn")]
+    ResumeRequired,
     /// Agent creation failed and the partial state could not be fully removed.
     #[error("agent creation failed and cleanup failed: {cleanup}")]
     CreationCleanup {
