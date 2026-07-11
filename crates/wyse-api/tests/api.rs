@@ -3458,7 +3458,7 @@ async fn creation_mutation_timeout_preserves_the_uncertain_side_effect() {
     .expect("host restores");
 
     let error = timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(4),
         host.create_agent(
             "coding-agent".parse().expect("name parses"),
             "new".to_owned(),

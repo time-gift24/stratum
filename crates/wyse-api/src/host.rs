@@ -16,7 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use wyse_agent::Agent;
-use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{AgentId, ChatMessage, DangerLevel, ToolKind};
 use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
@@ -31,7 +31,7 @@ const TEMPLATE_ROOT: &str = "/templates";
 const DEFINITION_FILE: &str = "definition.toml";
 const ADMISSION_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const CREATION_CLEANUP_GRACE: Duration = Duration::from_secs(1);
-const CREATION_STAGE_GRACE: Duration = Duration::from_secs(1);
+const CREATION_STAGE_GRACE: Duration = Duration::from_secs(3);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -181,7 +181,7 @@ impl HostState {
             let input = std::str::from_utf8(&bytes)
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = ResolvedAgentDefinition::parse(input)?;
-            validate_definition_model(&config, &definition)?;
+            config.validate_model_configured(&definition.model)?;
             let store: Arc<dyn AgentStore> =
                 Arc::new(FilesystemAgentStore::new(Arc::clone(&filesystem), root));
             let state = store.load_agent().await?;
@@ -638,27 +638,4 @@ fn tool_registry(definition: &ResolvedAgentDefinition) -> Result<Arc<dyn ToolReg
         registry.register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)?;
     }
     Ok(Arc::new(registry))
-}
-
-fn validate_definition_model(
-    config: &Config,
-    definition: &ResolvedAgentDefinition,
-) -> Result<(), HostError> {
-    let provider = match definition.model.provider_name() {
-        "deepseek" => config.llm.deepseek.as_ref(),
-        "openai" => config.llm.openai.as_ref(),
-        _ => None,
-    };
-    if provider.is_some_and(|provider| {
-        provider
-            .models
-            .iter()
-            .any(|model| model == definition.model.model_name())
-    }) {
-        return Ok(());
-    }
-    Err(ConfigError::ModelNotConfigured {
-        model: definition.model.clone(),
-    }
-    .into())
 }

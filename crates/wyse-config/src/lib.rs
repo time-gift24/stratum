@@ -253,7 +253,13 @@ impl Config {
         self.validate_model_configured(&self.llm.default)
     }
 
-    fn validate_model_configured(&self, model: &ModelId) -> Result<(), ConfigError> {
+    /// Validates that a model is declared by its configured provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::ModelNotConfigured`] when the provider is absent or does not list
+    /// the model.
+    pub fn validate_model_configured(&self, model: &ModelId) -> Result<(), ConfigError> {
         let provider = match model.provider_name() {
             "deepseek" => self.llm.deepseek.as_ref(),
             "openai" => self.llm.openai.as_ref(),
