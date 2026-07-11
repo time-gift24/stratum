@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use wyse_core::{
-    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, EventSource, LlmCallId,
-    LlmEvent, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
+    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, ChatRole, EventSource,
+    LlmCallId, LlmEvent, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
 };
 use wyse_llm::{ChatRequest, ChatStream, ChatStreamEvent, FinishReason};
 use wyse_tools::ToolInput;
@@ -42,8 +42,99 @@ enum ResumeBoundary {
     },
     ReconcileTools {
         assistant_index: usize,
-        committed_call_ids: HashSet<CallId>,
+        next_tool_index: usize,
     },
+}
+
+struct ActiveTurnSummary {
+    assistant_count: u64,
+    end: ActiveTurnEnd,
+}
+
+enum ActiveTurnEnd {
+    UserOnly,
+    Terminal,
+    ToolCalls {
+        assistant_index: usize,
+        answered_count: usize,
+        call_count: usize,
+    },
+}
+
+fn validate_active_turn(active_turn: &[ChatMessage]) -> Result<ActiveTurnSummary, AgentError> {
+    if active_turn.first().map(|message| message.role) != Some(ChatRole::User) {
+        return Err(AgentError::InvalidResumeHistory);
+    }
+
+    let mut cursor = 1;
+    let mut assistant_count = 0_usize;
+    let mut end = ActiveTurnEnd::UserOnly;
+    while cursor < active_turn.len() {
+        let assistant_index = cursor;
+        let assistant = &active_turn[cursor];
+        if assistant.role != ChatRole::Assistant {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+        assistant_count = assistant_count
+            .checked_add(1)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+        cursor = cursor
+            .checked_add(1)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+
+        let mut call_ids = HashSet::with_capacity(assistant.tool_calls.len());
+        if !assistant
+            .tool_calls
+            .iter()
+            .all(|tool_call| call_ids.insert(&tool_call.call_id))
+        {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+
+        if assistant.tool_calls.is_empty() {
+            if cursor != active_turn.len() {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            end = ActiveTurnEnd::Terminal;
+            break;
+        }
+
+        let mut answered_count = 0_usize;
+        while active_turn
+            .get(cursor)
+            .is_some_and(|message| message.role == ChatRole::Tool)
+        {
+            let expected_call = assistant
+                .tool_calls
+                .get(answered_count)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+            let result = &active_turn[cursor];
+            if result.tool_call_id.as_ref() != Some(&expected_call.call_id) {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            answered_count = answered_count
+                .checked_add(1)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+        }
+
+        end = ActiveTurnEnd::ToolCalls {
+            assistant_index,
+            answered_count,
+            call_count: assistant.tool_calls.len(),
+        };
+        if answered_count < assistant.tool_calls.len() && cursor != active_turn.len() {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+    }
+
+    Ok(ActiveTurnSummary {
+        assistant_count: u64::try_from(assistant_count)
+            .map_err(|_| AgentError::InvalidResumeHistory)?,
+        end,
+    })
 }
 
 impl Agent {
@@ -227,72 +318,45 @@ impl Agent {
         let active_turn = history
             .get(active_turn_start..)
             .ok_or(AgentError::InvalidResumeHistory)?;
-        let assistant_count = u64::try_from(
-            active_turn
-                .iter()
-                .filter(|message| message.role == wyse_core::ChatRole::Assistant)
-                .count(),
-        )
-        .map_err(|_| AgentError::InvalidResumeHistory)?;
+        let summary = validate_active_turn(active_turn)?;
 
-        let boundary = match assistant_count.cmp(&next_iteration) {
-            Ordering::Equal => {
-                if active_turn.last().is_some_and(|message| {
-                    message.role == wyse_core::ChatRole::Assistant && message.tool_calls.is_empty()
-                }) {
-                    ResumeBoundary::Finish {
-                        advance_iteration: false,
-                    }
-                } else {
-                    ResumeBoundary::Continue
-                }
-            }
-            Ordering::Greater if next_iteration.checked_add(1) == Some(assistant_count) => {
-                let relative_index = active_turn
-                    .iter()
-                    .rposition(|message| message.role == wyse_core::ChatRole::Assistant)
-                    .ok_or(AgentError::InvalidResumeHistory)?;
+        let boundary = match (summary.assistant_count.cmp(&next_iteration), summary.end) {
+            (Ordering::Equal, ActiveTurnEnd::UserOnly) => ResumeBoundary::Continue,
+            (Ordering::Equal, ActiveTurnEnd::Terminal) => ResumeBoundary::Finish {
+                advance_iteration: false,
+            },
+            (
+                Ordering::Equal,
+                ActiveTurnEnd::ToolCalls {
+                    answered_count,
+                    call_count,
+                    ..
+                },
+            ) if answered_count == call_count => ResumeBoundary::Continue,
+            (
+                Ordering::Greater,
+                ActiveTurnEnd::ToolCalls {
+                    assistant_index: relative_index,
+                    answered_count,
+                    ..
+                },
+            ) if next_iteration.checked_add(1) == Some(summary.assistant_count) => {
                 let assistant_index = active_turn_start
                     .checked_add(relative_index)
                     .ok_or(AgentError::InvalidResumeHistory)?;
-                let assistant = history
-                    .get(assistant_index)
-                    .ok_or(AgentError::InvalidResumeHistory)?;
-                if assistant.tool_calls.is_empty() {
-                    if assistant_index.checked_add(1) != Some(history.len()) {
-                        return Err(AgentError::InvalidResumeHistory);
-                    }
-                    ResumeBoundary::Finish {
-                        advance_iteration: true,
-                    }
-                } else {
-                    let committed_call_ids = history
-                        .get(
-                            assistant_index
-                                .checked_add(1)
-                                .ok_or(AgentError::InvalidResumeHistory)?..,
-                        )
-                        .ok_or(AgentError::InvalidResumeHistory)?
-                        .iter()
-                        .map(|message| {
-                            if message.role != wyse_core::ChatRole::Tool {
-                                return Err(AgentError::InvalidResumeHistory);
-                            }
-                            message
-                                .tool_call_id
-                                .clone()
-                                .ok_or(AgentError::InvalidResumeHistory)
-                        })
-                        .collect::<Result<HashSet<_>, _>>()?;
-                    ResumeBoundary::ReconcileTools {
-                        assistant_index,
-                        committed_call_ids,
-                    }
+                ResumeBoundary::ReconcileTools {
+                    assistant_index,
+                    next_tool_index: answered_count,
                 }
             }
-            Ordering::Less | Ordering::Greater => {
-                return Err(AgentError::InvalidResumeHistory);
+            (Ordering::Greater, ActiveTurnEnd::Terminal)
+                if next_iteration.checked_add(1) == Some(summary.assistant_count) =>
+            {
+                ResumeBoundary::Finish {
+                    advance_iteration: true,
+                }
             }
+            _ => return Err(AgentError::InvalidResumeHistory),
         };
 
         Ok(ResumeContinuation {
@@ -329,7 +393,7 @@ impl Agent {
             }
             ResumeBoundary::ReconcileTools {
                 assistant_index,
-                committed_call_ids,
+                next_tool_index,
             } => {
                 let tool_calls = continuation
                     .history
@@ -350,10 +414,10 @@ impl Agent {
                     }
                 })?;
                 let turn_id = self.current_turn().expect("turn id should be set");
-                for tool_call in tool_calls
-                    .iter()
-                    .filter(|tool_call| !committed_call_ids.contains(&tool_call.call_id))
-                {
+                let missing_tool_calls = tool_calls
+                    .get(next_tool_index..)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                for tool_call in missing_tool_calls {
                     if self
                         .cancel_token()
                         .expect("cancel token should be set")

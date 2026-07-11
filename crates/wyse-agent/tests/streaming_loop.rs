@@ -27,7 +27,7 @@ use wyse_infra::event_stream_bus::{
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError};
+use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
 use wyse_tools::{
     BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
     ToolRegistry,
@@ -44,6 +44,7 @@ enum ProviderResponse {
 struct RecordingProvider {
     requests: Mutex<Vec<ChatRequest>>,
     responses: Mutex<VecDeque<ProviderResponse>>,
+    order: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
 impl RecordingProvider {
@@ -51,6 +52,15 @@ impl RecordingProvider {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(VecDeque::from(responses)),
+            order: None,
+        }
+    }
+
+    fn with_order(responses: Vec<ProviderResponse>, order: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(VecDeque::from(responses)),
+            order: Some(order),
         }
     }
 
@@ -73,6 +83,9 @@ impl LlmProvider for RecordingProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
+        if let Some(order) = &self.order {
+            order.lock().expect("order mutex").push("request");
+        }
         self.requests
             .lock()
             .expect("requests mutex should not be poisoned")
@@ -99,6 +112,7 @@ struct TestStore {
     history: Mutex<Vec<StreamEnvelope>>,
     completed: Mutex<Vec<(RunId, TurnId, u64, TokenUsage)>>,
     load_entered: Option<Arc<tokio::sync::Notify>>,
+    order: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
 impl TestStore {
@@ -108,6 +122,7 @@ impl TestStore {
             history: Mutex::new(Vec::new()),
             completed: Mutex::new(Vec::new()),
             load_entered: None,
+            order: None,
         }
     }
 
@@ -117,6 +132,21 @@ impl TestStore {
             history: Mutex::new(history),
             completed: Mutex::new(Vec::new()),
             load_entered: None,
+            order: None,
+        }
+    }
+
+    fn with_state_and_order(
+        state: AgentState,
+        history: Vec<StreamEnvelope>,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(state),
+            history: Mutex::new(history),
+            completed: Mutex::new(Vec::new()),
+            load_entered: None,
+            order: Some(order),
         }
     }
 
@@ -169,7 +199,12 @@ impl AgentStore for TestStore {
             .checked_add(1)
             .ok_or(StoreError::IterationOverflow)?;
         state.usage = usage;
-        Ok(state.clone())
+        let updated = state.clone();
+        drop(state);
+        if let Some(order) = &self.order {
+            order.lock().expect("order mutex").push("complete");
+        }
+        Ok(updated)
     }
 
     async fn append_message(
@@ -183,6 +218,10 @@ impl AgentStore for TestStore {
             .ok_or(StoreError::SequenceOverflow)?;
         envelope.business_seq = Some(seq);
         history.push(envelope.clone());
+        drop(history);
+        if let Some(order) = &self.order {
+            order.lock().expect("order mutex").push("append");
+        }
         Ok(envelope)
     }
 
@@ -246,6 +285,60 @@ fn assistant_tool_call(call_id: &str, arguments: serde_json::Value) -> ChatMessa
         name: "counting".to_owned(),
         arguments,
     }])
+}
+
+fn assistant_tool_calls(call_ids: &[&str]) -> ChatMessage {
+    ChatMessage::assistant("").with_tool_calls(
+        call_ids
+            .iter()
+            .map(|call_id| ToolCall {
+                call_id: CallId::from(*call_id),
+                name: "counting".to_owned(),
+                arguments: json!({"call_id": call_id}),
+            })
+            .collect(),
+    )
+}
+
+async fn assert_invalid_active_turn_history(
+    case: &str,
+    messages: Vec<ChatMessage>,
+    next_iteration: u64,
+) {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let last_seq = u64::try_from(messages.len()).expect("test history length fits u64");
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.next_iteration = next_iteration;
+    state.last_seq = last_seq;
+    let history = messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let seq = u64::try_from(index)
+                .expect("test history index fits u64")
+                .checked_add(1)
+                .expect("test history sequence does not overflow");
+            persisted_message(seq, run_id, turn_id, message)
+        })
+        .collect();
+    let store = Arc::new(TestStore::with_state(state, history));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    let result = agent.resume().await;
+    assert!(
+        matches!(result, Err(AgentError::InvalidResumeHistory)),
+        "{case}: expected invalid resume history, got {result:?}"
+    );
+    assert!(provider.requests().is_empty(), "{case}: must not call LLM");
 }
 
 fn agent_with_store(
@@ -531,6 +624,105 @@ async fn resume_finishes_advanced_terminal_assistant_without_another_advance_or_
 }
 
 #[tokio::test]
+async fn resume_rejects_duplicate_assistant_tool_call_ids() {
+    assert_invalid_active_turn_history(
+        "duplicate assistant call ids",
+        vec![
+            ChatMessage::user("use tools"),
+            assistant_tool_calls(&["call-1", "call-1"]),
+        ],
+        0,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_rejects_tool_results_that_are_not_an_ordered_prefix() {
+    for (case, results) in [
+        (
+            "unknown result call id",
+            vec![ChatMessage::tool("call-x", json!({}))],
+        ),
+        (
+            "duplicate result call id",
+            vec![
+                ChatMessage::tool("call-1", json!({})),
+                ChatMessage::tool("call-1", json!({})),
+            ],
+        ),
+        (
+            "out-of-order result call id",
+            vec![ChatMessage::tool("call-2", json!({}))],
+        ),
+    ] {
+        let mut messages = vec![
+            ChatMessage::user("use tools"),
+            assistant_tool_calls(&["call-1", "call-2"]),
+        ];
+        messages.extend(results);
+        assert_invalid_active_turn_history(case, messages, 0).await;
+    }
+}
+
+#[tokio::test]
+async fn resume_rejects_invalid_active_turn_role_grammar() {
+    for (case, messages, next_iteration) in [
+        (
+            "user is not first",
+            vec![ChatMessage::assistant("early"), ChatMessage::user("late")],
+            1,
+        ),
+        (
+            "extra user",
+            vec![ChatMessage::user("first"), ChatMessage::user("second")],
+            0,
+        ),
+        (
+            "system after user",
+            vec![ChatMessage::user("first"), ChatMessage::system("system")],
+            0,
+        ),
+        (
+            "orphan tool",
+            vec![
+                ChatMessage::user("first"),
+                ChatMessage::tool("call-1", json!({})),
+            ],
+            0,
+        ),
+        (
+            "terminal assistant followed by tool",
+            vec![
+                ChatMessage::user("first"),
+                ChatMessage::assistant("done"),
+                ChatMessage::tool("call-1", json!({})),
+            ],
+            1,
+        ),
+        (
+            "terminal assistant followed by assistant",
+            vec![
+                ChatMessage::user("first"),
+                ChatMessage::assistant("done"),
+                ChatMessage::assistant("again"),
+            ],
+            2,
+        ),
+        (
+            "incomplete tool iteration followed by assistant",
+            vec![
+                ChatMessage::user("first"),
+                assistant_tool_calls(&["call-1"]),
+                ChatMessage::assistant("too early"),
+            ],
+            2,
+        ),
+    ] {
+        assert_invalid_active_turn_history(case, messages, next_iteration).await;
+    }
+}
+
+#[tokio::test]
 async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continues() {
     let run_id = RunId::new();
     let turn_id = TurnId::new();
@@ -551,7 +743,8 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
             arguments: json!({"value": 2}),
         },
     ]);
-    let store = Arc::new(TestStore::with_state(
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(TestStore::with_state_and_order(
         state,
         vec![
             persisted_message(1, run_id, turn_id, ChatMessage::user("use tools")),
@@ -563,6 +756,7 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
                 ChatMessage::tool(CallId::from("call-1"), json!({"value": 1})),
             ),
         ],
+        Arc::clone(&order),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::Allow);
@@ -573,8 +767,14 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
             DangerLevel::Low,
         )
         .expect("tool registers");
-    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
-    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let provider = Arc::new(RecordingProvider::with_order(
+        vec![ProviderResponse::Pending],
+        Arc::clone(&order),
+    ));
+    let bus = Arc::new(StoreEventStreamBus::new(
+        store.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    ));
     let agent = Agent::builder()
         .id(test_agent_id())
         .name("test-agent")
@@ -599,6 +799,10 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
     assert_eq!(
         *store.completed.lock().expect("completed mutex"),
         vec![(run_id, turn_id, 0, TokenUsage::default())]
+    );
+    assert_eq!(
+        *order.lock().expect("order mutex"),
+        vec!["append", "complete", "request"]
     );
     agent.stop();
 }
