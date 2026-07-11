@@ -331,7 +331,7 @@ mod tests {
             )],
         };
 
-        assert_eq!(schema.validate(), Ok(()));
+        assert!(schema.validate().is_ok());
     }
 
     #[test]

@@ -287,20 +287,20 @@ mod tests {
 
     #[test]
     fn draft_name_rejects_a_path_separator() {
-        assert_eq!(
+        assert!(matches!(
             DraftName::try_from("draft/name".to_owned()),
             Err(OntologyError::InvalidDraftName)
-        );
+        ));
     }
 
     #[test]
     fn revision_id_rejects_an_uppercase_hexadecimal_digit() {
         let revision = format!("{}A", "a".repeat(63));
 
-        assert_eq!(
+        assert!(matches!(
             RevisionId::try_from(revision),
             Err(OntologyError::InvalidRevisionId)
-        );
+        ));
     }
 
     #[test]
