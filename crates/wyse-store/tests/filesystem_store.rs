@@ -98,6 +98,317 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
 }
 
 #[tokio::test]
+async fn complete_iteration_advances_and_persists_usage() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem, root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let usage = TokenUsage {
+        input_tokens: 2,
+        output_tokens: 3,
+        total_tokens: 5,
+    };
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start run");
+
+    let completed = store
+        .complete_iteration(run_id, turn_id, 0, usage)
+        .await
+        .expect("complete iteration");
+
+    assert_eq!(completed.next_iteration, 1);
+    assert_eq!(completed.usage, usage);
+    let persisted = store.load_agent().await.expect("load persisted state");
+    assert_eq!(persisted.next_iteration, 1);
+    assert_eq!(persisted.usage, usage);
+}
+
+#[tokio::test]
+async fn complete_iteration_rejects_non_running_state_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .complete_iteration(RunId::new(), TurnId::new(), 0, TokenUsage::default())
+        .await
+        .expect_err("idle state is not running");
+
+    assert!(matches!(
+        error,
+        StoreError::AgentNotRunning {
+            actual: AgentStatus::Idle
+        }
+    ));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn complete_iteration_rejects_run_mismatch_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let other_run_id = RunId::new();
+    let turn_id = TurnId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start run");
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .complete_iteration(other_run_id, turn_id, 0, TokenUsage::default())
+        .await
+        .expect_err("run mismatch");
+
+    assert!(matches!(
+        error,
+        StoreError::RunMismatch { expected, actual }
+            if expected == run_id && actual == other_run_id
+    ));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn complete_iteration_rejects_turn_mismatch_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let other_turn_id = TurnId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start run");
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .complete_iteration(run_id, other_turn_id, 0, TokenUsage::default())
+        .await
+        .expect_err("turn mismatch");
+
+    assert!(matches!(
+        error,
+        StoreError::TurnMismatch { expected, actual }
+            if expected == turn_id && actual == other_turn_id
+    ));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn complete_iteration_rejects_iteration_mismatch_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start run");
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .complete_iteration(run_id, turn_id, 1, TokenUsage::default())
+        .await
+        .expect_err("iteration mismatch");
+
+    assert!(matches!(
+        error,
+        StoreError::IterationMismatch {
+            expected: 0,
+            actual: 1
+        }
+    ));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn complete_iteration_rejects_iteration_overflow_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.next_iteration = u64::MAX;
+    filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .complete_iteration(run_id, turn_id, u64::MAX, TokenUsage::default())
+        .await
+        .expect_err("iteration overflow");
+
+    assert!(matches!(error, StoreError::IterationOverflow));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem, root);
+    let agent_id = AgentId::new();
+    let old_run_id = RunId::new();
+    let old_turn_id = TurnId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start old run");
+    store
+        .complete_iteration(old_run_id, old_turn_id, 0, TokenUsage::default())
+        .await
+        .expect("complete old iteration");
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+
+    let started = store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start new run");
+    assert_eq!(started.next_iteration, 0);
+    store
+        .complete_iteration(run_id, turn_id, 0, TokenUsage::default())
+        .await
+        .expect("complete new iteration");
+
+    for status in [
+        AgentStatus::Finished,
+        AgentStatus::Failed,
+        AgentStatus::Cancelled,
+    ] {
+        let terminal = store
+            .update_state(status, Some(run_id), Some(turn_id), TokenUsage::default())
+            .await
+            .expect("store terminal state");
+        assert_eq!(terminal.next_iteration, 1);
+    }
+}
+
+#[tokio::test]
 async fn append_rejects_an_already_sequenced_message() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");

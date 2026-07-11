@@ -4,6 +4,8 @@ use thiserror::Error;
 use wyse_core::{AgentId, ChatRole, RunId, TurnId};
 use wyse_filesystem::{CasUpdateError, FilesystemError};
 
+use crate::AgentStatus;
+
 /// Error returned by agent store operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -20,6 +22,23 @@ pub enum StoreError {
         /// Unsupported schema version.
         version: u32,
     },
+    /// An iteration can only complete while the agent is running.
+    #[error("agent is not running: {actual:?}")]
+    AgentNotRunning {
+        /// Current persisted agent status.
+        actual: AgentStatus,
+    },
+    /// The requested iteration differs from the durable frontier.
+    #[error("iteration mismatch: expected {expected}, actual {actual}")]
+    IterationMismatch {
+        /// Current durable iteration frontier.
+        expected: u64,
+        /// Requested iteration.
+        actual: u64,
+    },
+    /// The next iteration cannot be represented.
+    #[error("iteration overflow")]
+    IterationOverflow,
     /// The next message sequence cannot be represented.
     #[error("message sequence overflow")]
     SequenceOverflow,

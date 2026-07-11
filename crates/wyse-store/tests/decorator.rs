@@ -72,6 +72,9 @@ impl AgentStore for RecordingStore {
                 usage,
             });
         let mut state = self.state.lock().expect("state lock");
+        if status == AgentStatus::Running && state.run_id != run_id {
+            state.next_iteration = 0;
+        }
         state.status = status;
         state.run_id = run_id;
         state.turn_id = turn_id;
@@ -92,6 +95,16 @@ impl AgentStore for RecordingStore {
         }
         envelope.business_seq = Some(1);
         Ok(envelope)
+    }
+
+    async fn complete_iteration(
+        &self,
+        _run_id: RunId,
+        _turn_id: TurnId,
+        _iteration: u64,
+        _usage: TokenUsage,
+    ) -> Result<AgentState, StoreError> {
+        Err(StoreError::AgentMissing)
     }
 
     async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
@@ -213,10 +226,19 @@ async fn state_events_commit_matching_status_run_turn_and_usage() {
         output_tokens: 7,
         total_tokens: 13,
     };
+    {
+        let mut state = store.state.lock().expect("state lock");
+        state.status = AgentStatus::Running;
+        state.run_id = Some(RunId::new());
+        state.turn_id = Some(TurnId::new());
+        state.next_iteration = 3;
+    }
 
     bus.publish(envelope(agent_id, run_id, AgentEvent::Started { turn_id }))
         .await
         .expect("publish started");
+    assert_eq!(store.state.lock().expect("state lock").next_iteration, 0);
+    store.state.lock().expect("state lock").next_iteration = 4;
     bus.publish(envelope(
         agent_id,
         run_id,
@@ -276,6 +298,7 @@ async fn state_events_commit_matching_status_run_turn_and_usage() {
             },
         ]
     );
+    assert_eq!(store.state.lock().expect("state lock").next_iteration, 4);
 }
 
 #[tokio::test]

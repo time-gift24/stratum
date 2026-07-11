@@ -28,6 +28,20 @@ pub trait AgentStore: Send + Sync {
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError>;
 
+    /// Atomically advances the durable iteration frontier for the active turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state is not the expected running iteration or the update cannot
+    /// be committed.
+    async fn complete_iteration(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        iteration: u64,
+        usage: TokenUsage,
+    ) -> Result<AgentState, StoreError>;
+
     /// Commits an unsequenced complete agent message and returns its sequenced envelope.
     ///
     /// # Errors

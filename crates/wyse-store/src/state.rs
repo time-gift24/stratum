@@ -42,6 +42,8 @@ pub struct AgentState {
     pub run_id: Option<RunId>,
     /// Active resumable turn, when any.
     pub turn_id: Option<TurnId>,
+    /// Next LLM loop iteration that has not reached a durable boundary.
+    pub next_iteration: u64,
     /// Cumulative model token usage.
     pub usage: TokenUsage,
     /// Last committed message sequence.
@@ -61,6 +63,7 @@ impl AgentState {
             status: AgentStatus::Idle,
             run_id: None,
             turn_id: None,
+            next_iteration: 0,
             usage: TokenUsage::default(),
             last_seq: 0,
             updated_at: Utc::now(),
@@ -80,6 +83,7 @@ mod tests {
     #[test]
     fn agent_state_serializes_only_approved_fields() {
         let state = AgentState::new(AgentId::new(), "writer".to_owned());
+        assert_eq!(state.next_iteration, 0);
         let value = serde_json::to_value(state).expect("serialize state");
         let keys = value
             .as_object()
@@ -94,6 +98,7 @@ mod tests {
                 "agent_id".to_owned(),
                 "last_seq".to_owned(),
                 "name".to_owned(),
+                "next_iteration".to_owned(),
                 "run_id".to_owned(),
                 "state_version".to_owned(),
                 "status".to_owned(),

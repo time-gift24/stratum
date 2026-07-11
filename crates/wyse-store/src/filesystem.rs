@@ -284,9 +284,66 @@ impl AgentStore for FilesystemAgentStore {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 validate_state(current)?;
                 let mut next = current.clone();
+                if status == AgentStatus::Running && current.run_id != run_id {
+                    next.next_iteration = 0;
+                }
                 next.status = status;
                 next.run_id = run_id;
                 next.turn_id = turn_id;
+                next.usage = usage;
+                next.updated_at = updated_at;
+                Ok(next)
+            },
+        )
+        .await;
+        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
+        result.map_err(StoreError::from)
+    }
+
+    async fn complete_iteration(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        iteration: u64,
+        usage: TokenUsage,
+    ) -> Result<AgentState, StoreError> {
+        let updated_at = Utc::now();
+        let attempts = AtomicUsize::new(0);
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &self.agent_path()?,
+            decode_agent_state,
+            encode_agent_state,
+            |current| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                validate_state(current)?;
+                if current.status != AgentStatus::Running {
+                    return Err(StoreError::AgentNotRunning {
+                        actual: current.status,
+                    });
+                }
+                if current.run_id != Some(run_id) {
+                    return Err(StoreError::RunMismatch {
+                        expected: current.run_id.unwrap_or(run_id),
+                        actual: run_id,
+                    });
+                }
+                if current.turn_id != Some(turn_id) {
+                    return Err(StoreError::TurnMismatch {
+                        expected: current.turn_id.unwrap_or(turn_id),
+                        actual: turn_id,
+                    });
+                }
+                if current.next_iteration != iteration {
+                    return Err(StoreError::IterationMismatch {
+                        expected: current.next_iteration,
+                        actual: iteration,
+                    });
+                }
+                let mut next = current.clone();
+                next.next_iteration = iteration
+                    .checked_add(1)
+                    .ok_or(StoreError::IterationOverflow)?;
                 next.usage = usage;
                 next.updated_at = updated_at;
                 Ok(next)
