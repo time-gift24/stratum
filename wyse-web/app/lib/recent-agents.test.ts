@@ -63,6 +63,39 @@ describe("recent agents", () => {
     )
   })
 
+  it("rewrites loaded legacy records without messages or events", () => {
+    const storage = createMemoryStorage()
+    const agent = {
+      ...recentAgent("agent-1", "2026-07-11T00:00:00Z"),
+      events: ["event content"],
+      messages: ["message content"],
+      reasoning: "reasoning content",
+      toolResults: ["tool result content"],
+    }
+    storage.setItem("wyse-recent-agents", JSON.stringify([agent]))
+
+    expect(loadRecentAgents(storage)).toEqual([
+      recentAgent("agent-1", "2026-07-11T00:00:00Z"),
+    ])
+    expect(storage.getItem("wyse-recent-agents")).toBe(
+      JSON.stringify([recentAgent("agent-1", "2026-07-11T00:00:00Z")])
+    )
+  })
+
+  it("truncates and rewrites oversized legacy recent-Agent lists", () => {
+    const storage = createMemoryStorage()
+    const agents = Array.from({ length: 21 }, (_, index) =>
+      recentAgent(`agent-${index}`, `${index}`)
+    )
+    const expectedAgents = agents.slice(0, 20)
+    storage.setItem("wyse-recent-agents", JSON.stringify(agents))
+
+    expect(loadRecentAgents(storage)).toEqual(expectedAgents)
+    expect(storage.getItem("wyse-recent-agents")).toBe(
+      JSON.stringify(expectedAgents)
+    )
+  })
+
   it("removes malformed recent Agent data", () => {
     const storage = createMemoryStorage()
     storage.setItem("wyse-recent-agents", "not-json")

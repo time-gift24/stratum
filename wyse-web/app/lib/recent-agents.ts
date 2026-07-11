@@ -33,8 +33,13 @@ export const loadRecentAgents = (storage: StorageLike): RecentAgent[] => {
 
   try {
     const agents: unknown = JSON.parse(stored)
-    if (Array.isArray(agents) && agents.every(isRecentAgent))
-      return agents.map(toRecentAgent)
+    if (Array.isArray(agents) && agents.every(isRecentAgent)) {
+      const recentAgents = agents
+        .slice(0, MAX_RECENT_AGENTS)
+        .map(toRecentAgent)
+      saveRecentAgents(storage, recentAgents)
+      return recentAgents
+    }
   } catch {
     // Remove corrupt data below.
   }
