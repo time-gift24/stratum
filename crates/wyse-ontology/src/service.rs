@@ -7,8 +7,9 @@ use serde_json::{Map, Value};
 use crate::{
     DraftName, FilesystemDraftStore, GraphProjection, LinkCardinalityConstraint, LinkId,
     LinkRecord, LinkType, LinkTypeId, NewLinkRecord, NewObjectRecord, ObjectId, ObjectRecord,
-    ObjectType, ObjectTypeId, OntologyError, OntologyRepository, Page, PublishedRevision,
-    RevisionId, SchemaDocument, SchemaRef, TagName, revision_id, validate_object_values,
+    ObjectType, ObjectTypeId, OntologyError, OntologyRepository, Page, PropertyType,
+    PropertyTypeId, PublishedRevision, RevisionId, SchemaDocument, SchemaRef, TagName, ValueType,
+    revision_id, validate_object_values,
 };
 
 /// Data required to create an object instance.
@@ -73,6 +74,340 @@ impl OntologyService {
         Self { drafts, repository }
     }
 
+    /// Creates an editable schema draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when the name or schema is invalid, a draft
+    /// already exists, or the backing filesystem cannot persist the draft.
+    pub async fn create_draft(
+        &self,
+        name: DraftName,
+        schema: SchemaDocument,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.drafts.create(name, schema).await
+    }
+
+    /// Lists every editable schema draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when the backing filesystem cannot list or
+    /// decode the drafts.
+    pub async fn list_drafts(&self) -> Result<Vec<crate::Draft>, OntologyError> {
+        self.drafts.list().await
+    }
+
+    /// Loads one editable schema draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::DraftMissing`] when the draft does not exist.
+    pub async fn get_draft(&self, name: &DraftName) -> Result<crate::Draft, OntologyError> {
+        self.drafts.load(name).await
+    }
+
+    /// Deletes a draft if its current digest matches `expected_digest`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::DraftConflict`] when the draft digest is stale.
+    pub async fn delete_draft(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+    ) -> Result<(), OntologyError> {
+        self.drafts.delete(name, expected_digest).await
+    }
+
+    /// Validates one draft's static schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::SchemaInvalid`] when the stored schema is invalid.
+    pub async fn validate_draft(&self, name: &DraftName) -> Result<crate::Draft, OntologyError> {
+        let draft = self.drafts.load(name).await?;
+        draft.schema.validate()?;
+        Ok(draft)
+    }
+
+    /// Adds an object type to a draft and creates its immutable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when the draft is stale or the resulting schema is invalid.
+    pub async fn add_object_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        type_name: String,
+        description: String,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            schema.object_types.push(ObjectType {
+                id: ObjectTypeId::new(),
+                name: type_name,
+                description,
+                properties: Vec::new(),
+            });
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces an object type name and description without changing its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::ObjectTypeMissing`] when the type is absent.
+    pub async fn replace_object_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        object_type_id: ObjectTypeId,
+        type_name: String,
+        description: String,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let object_type = schema
+                .object_types
+                .iter_mut()
+                .find(|object_type| object_type.id == object_type_id)
+                .ok_or(OntologyError::ObjectTypeMissing { id: object_type_id })?;
+            object_type.name = type_name;
+            object_type.description = description;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes an object type from a draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::ObjectTypeMissing`] when the type is absent.
+    pub async fn delete_object_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        object_type_id: ObjectTypeId,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let before = schema.object_types.len();
+            schema
+                .object_types
+                .retain(|object_type| object_type.id != object_type_id);
+            if schema.object_types.len() == before {
+                return Err(OntologyError::ObjectTypeMissing { id: object_type_id });
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Adds a property type to an object type and creates its immutable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::ObjectTypeMissing`] when the parent type is absent.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the schema fields mirror one compact REST DTO without an extra wrapper type"
+    )]
+    pub async fn add_property_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        object_type_id: ObjectTypeId,
+        property_name: String,
+        description: String,
+        value_type: ValueType,
+        required: bool,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let object_type = schema
+                .object_types
+                .iter_mut()
+                .find(|object_type| object_type.id == object_type_id)
+                .ok_or(OntologyError::ObjectTypeMissing { id: object_type_id })?;
+            object_type.properties.push(PropertyType {
+                id: PropertyTypeId::new(),
+                name: property_name,
+                description,
+                value_type,
+                required,
+            });
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces one property definition without changing its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing type error when the parent or property is absent.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the schema fields mirror one compact REST DTO without an extra wrapper type"
+    )]
+    pub async fn replace_property_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        object_type_id: ObjectTypeId,
+        property_type_id: PropertyTypeId,
+        property_name: String,
+        description: String,
+        value_type: ValueType,
+        required: bool,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let object_type = schema
+                .object_types
+                .iter_mut()
+                .find(|object_type| object_type.id == object_type_id)
+                .ok_or(OntologyError::ObjectTypeMissing { id: object_type_id })?;
+            let property = object_type
+                .properties
+                .iter_mut()
+                .find(|property| property.id == property_type_id)
+                .ok_or(OntologyError::PropertyTypeMissing {
+                    object_type_id,
+                    id: property_type_id,
+                })?;
+            property.name = property_name;
+            property.description = description;
+            property.value_type = value_type;
+            property.required = required;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes a property type from an object type.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing type error when the parent or property is absent.
+    pub async fn delete_property_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        object_type_id: ObjectTypeId,
+        property_type_id: PropertyTypeId,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let object_type = schema
+                .object_types
+                .iter_mut()
+                .find(|object_type| object_type.id == object_type_id)
+                .ok_or(OntologyError::ObjectTypeMissing { id: object_type_id })?;
+            let before = object_type.properties.len();
+            object_type
+                .properties
+                .retain(|property| property.id != property_type_id);
+            if object_type.properties.len() == before {
+                return Err(OntologyError::PropertyTypeMissing {
+                    object_type_id,
+                    id: property_type_id,
+                });
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Adds a link type to a draft and creates its immutable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when the resulting schema is invalid.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the schema fields mirror one compact REST DTO without an extra wrapper type"
+    )]
+    pub async fn add_link_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        link_name: String,
+        description: String,
+        source_object_type_id: ObjectTypeId,
+        target_object_type_id: ObjectTypeId,
+        cardinality: crate::Cardinality,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            schema.link_types.push(LinkType {
+                id: LinkTypeId::new(),
+                name: link_name,
+                description,
+                source_object_type_id,
+                target_object_type_id,
+                cardinality,
+            });
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces a link type definition without changing its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::LinkTypeMissing`] when the type is absent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replace_link_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        link_type_id: LinkTypeId,
+        link_name: String,
+        description: String,
+        source_object_type_id: ObjectTypeId,
+        target_object_type_id: ObjectTypeId,
+        cardinality: crate::Cardinality,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let link_type = schema
+                .link_types
+                .iter_mut()
+                .find(|link_type| link_type.id == link_type_id)
+                .ok_or(OntologyError::LinkTypeMissing { id: link_type_id })?;
+            link_type.name = link_name;
+            link_type.description = description;
+            link_type.source_object_type_id = source_object_type_id;
+            link_type.target_object_type_id = target_object_type_id;
+            link_type.cardinality = cardinality;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes a link type from a draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::LinkTypeMissing`] when the type is absent.
+    pub async fn delete_link_type(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        link_type_id: LinkTypeId,
+    ) -> Result<crate::Draft, OntologyError> {
+        self.update_draft(name, expected_digest, move |schema| {
+            let before = schema.link_types.len();
+            schema
+                .link_types
+                .retain(|link_type| link_type.id != link_type_id);
+            if schema.link_types.len() == before {
+                return Err(OntologyError::LinkTypeMissing { id: link_type_id });
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Resolves a selected draft, revision, or tag to its schema document.
     ///
     /// # Errors
@@ -127,6 +462,15 @@ impl OntologyService {
         self.repository.list_revisions().await
     }
 
+    /// Loads one immutable published revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::RevisionMissing`] when the revision does not exist.
+    pub async fn get_revision(&self, id: &RevisionId) -> Result<PublishedRevision, OntologyError> {
+        self.load_revision(id).await
+    }
+
     /// Moves a tag to an existing published revision.
     ///
     /// # Errors
@@ -140,6 +484,18 @@ impl OntologyService {
     ) -> Result<(), OntologyError> {
         self.load_revision(revision_id).await?;
         self.repository.put_tag(name, revision_id).await
+    }
+
+    /// Resolves a tag to its target revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::TagMissing`] when the tag does not exist.
+    pub async fn get_tag(&self, name: &TagName) -> Result<RevisionId, OntologyError> {
+        self.repository
+            .get_tag(name)
+            .await?
+            .ok_or_else(|| OntologyError::TagMissing { name: name.clone() })
     }
 
     /// Deletes a non-reserved schema tag.
@@ -447,6 +803,23 @@ impl OntologyService {
             .await?
             .ok_or_else(|| OntologyError::RevisionMissing { id: id.clone() })
     }
+
+    async fn update_draft<F>(
+        &self,
+        name: &DraftName,
+        expected_digest: RevisionId,
+        update: F,
+    ) -> Result<crate::Draft, OntologyError>
+    where
+        F: FnOnce(&mut SchemaDocument) -> Result<(), OntologyError>,
+    {
+        let mut draft = self.drafts.load(name).await?;
+        update(&mut draft.schema)?;
+        draft.schema.validate()?;
+        self.drafts
+            .replace(name, expected_digest, draft.schema)
+            .await
+    }
 }
 
 fn validate_page_limit(limit: u32) -> Result<(), OntologyError> {
@@ -621,10 +994,14 @@ mod tests {
                 .entries
                 .lock()
                 .expect("memory filesystem mutex is not poisoned");
-            if !matches!(
-                (cas, entries.contains_key(path)),
-                (CasExpectation::Absent, false)
-            ) {
+            let matches = match cas {
+                CasExpectation::Absent => !entries.contains_key(path),
+                CasExpectation::Version(expected) => entries
+                    .get(path)
+                    .is_some_and(|current| current.version == expected),
+                CasExpectation::Any => true,
+            };
+            if !matches {
                 return Err(FilesystemError::VersionMismatch { path: path.clone() });
             }
             let version = RecordVersion::from_backend(1);
@@ -1340,6 +1717,33 @@ mod tests {
                 .page_objects(schema_ref, person_type_id(), None, 101)
                 .await,
             Err(OntologyError::InvalidPageLimit { limit: 101 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn schema_mutation_preserves_type_identity_and_requires_the_current_digest() {
+        let (service, _) = service_with_object(json!({ "age": 42 })).await;
+        let name = DraftName::try_from("main".to_owned()).expect("valid draft name");
+        let draft = service.get_draft(&name).await.expect("draft exists");
+        let object_type_id = draft.schema.object_types[0].id;
+
+        let updated = service
+            .replace_object_type(
+                &name,
+                draft.digest.clone(),
+                object_type_id,
+                "member".to_owned(),
+                "renamed".to_owned(),
+            )
+            .await
+            .expect("current digest updates draft");
+
+        assert_eq!(updated.schema.object_types[0].id, object_type_id);
+        assert!(matches!(
+            service
+                .add_object_type(&name, draft.digest, "company".to_owned(), String::new(),)
+                .await,
+            Err(OntologyError::DraftConflict { .. })
         ));
     }
 

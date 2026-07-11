@@ -3323,6 +3323,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyse-ontology-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "wyse-filesystem",
+ "wyse-ontology",
+]
+
+[[package]]
 name = "wyse-ontology-mysql"
 version = "0.1.0"
 dependencies = [

@@ -2,7 +2,9 @@
 
 use thiserror::Error;
 
-use crate::{DraftName, LinkId, LinkTypeId, ObjectId, ObjectTypeId, RevisionId, TagName};
+use crate::{
+    DraftName, LinkId, LinkTypeId, ObjectId, ObjectTypeId, PropertyTypeId, RevisionId, TagName,
+};
 use wyse_filesystem::FilesystemError;
 
 /// Error returned by ontology domain operations.
@@ -92,6 +94,14 @@ pub enum OntologyError {
     ObjectTypeMissing {
         /// Identity of the missing object type.
         id: ObjectTypeId,
+    },
+    /// A selected object type does not define the requested property type.
+    #[error("property type {id} does not exist in object type {object_type_id}")]
+    PropertyTypeMissing {
+        /// Identity of the object type.
+        object_type_id: ObjectTypeId,
+        /// Identity of the missing property type.
+        id: PropertyTypeId,
     },
     /// A link instance does not exist.
     #[error("link {id} does not exist")]

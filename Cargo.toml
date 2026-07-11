@@ -12,6 +12,7 @@ members = [
     "crates/stratum-tools",
     "crates/wyse-ontology",
     "crates/wyse-ontology-mysql",
+    "crates/wyse-ontology-api",
 ]
 resolver = "3"
 
