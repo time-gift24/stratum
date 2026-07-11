@@ -8,12 +8,11 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 futures-util.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml.workspace = true
 wyse-agent.workspace = true
+wyse-config.workspace = true
 wyse-core.workspace = true
 wyse-filesystem.workspace = true
 wyse-infra.workspace = true

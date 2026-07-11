@@ -2,11 +2,15 @@
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
-        OriginalUri, Path, Query, State,
+        DefaultBodyLimit, MatchedPath, OriginalUri, Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION},
+    http::{
+        HeaderMap, HeaderValue, Method, Request, StatusCode,
+        header::{CONTENT_TYPE, LOCATION},
+    },
     response::sse::{Event as SseEvent, KeepAlive},
     response::{IntoResponse, Response, Sse},
     routing::{get, post},
@@ -15,6 +19,11 @@ use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc, time::Duration};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
+use tracing::{Span, field, info_span};
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
@@ -102,7 +111,13 @@ const fn default_history_limit() -> usize {
 
 /// Builds the HTTP API router for one host state.
 pub fn router(state: Arc<HostState>) -> Router {
-    Router::new()
+    let origins = state
+        .allowed_origins()
+        .iter()
+        .filter(|origin| origin.as_str() != "*")
+        .filter_map(|origin| HeaderValue::from_str(origin).ok())
+        .collect::<Vec<_>>();
+    let router = Router::new()
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
@@ -117,13 +132,56 @@ pub fn router(state: Arc<HostState>) -> Router {
         )
         .route("/v1/agents/{agent_id}/events", get(get_events))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    let route = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map_or("unmatched", MatchedPath::as_str);
+                    info_span!(
+                        "http.request",
+                        route,
+                        method = %request.method(),
+                        status = field::Empty,
+                        latency = field::Empty,
+                    )
+                })
+                .on_response(
+                    |response: &axum::response::Response, latency: Duration, span: &Span| {
+                        span.record("status", response.status().as_u16());
+                        span.record("latency", field::debug(latency));
+                    },
+                ),
+        );
+    if origins.is_empty() {
+        router
+    } else {
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([CONTENT_TYPE]),
+        )
+    }
+}
+
+fn json_request<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, HostError> {
+    request.map(|Json(value)| value).map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            HostError::MessageTooLarge
+        } else {
+            HostError::InvalidRequest
+        }
+    })
 }
 
 async fn create_agent(
     State(state): State<Arc<HostState>>,
     request: Result<Json<CreateAgentRequest>, JsonRejection>,
 ) -> Result<Response, HostError> {
-    let Json(request) = request.map_err(|_| HostError::InvalidRequest)?;
+    let request = json_request(request)?;
     let agent_name: AgentName = request.agent_name.parse()?;
     let created = state.create_agent(agent_name, request.text).await?;
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))
@@ -254,7 +312,7 @@ async fn post_message(
     request: Result<Json<MessageRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
-    let Json(request) = request.map_err(|_| HostError::InvalidRequest)?;
+    let request = json_request(request)?;
     if request.text.trim().is_empty() {
         return Err(HostError::InvalidMessage);
     }
@@ -318,7 +376,7 @@ async fn resolve_approval(
     request: Result<Json<ApprovalRequest>, JsonRejection>,
 ) -> Result<StatusCode, HostError> {
     let Path((agent_id, approval_id)) = path.map_err(|_| HostError::InvalidRequest)?;
-    let Json(request) = request.map_err(|_| HostError::InvalidRequest)?;
+    let request = json_request(request)?;
     let hosted = find_agent(&state, agent_id)?;
     hosted
         .agent
@@ -393,6 +451,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "request is invalid",
+        ),
+        HostError::MessageTooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "message_too_large",
+            "request body is too large",
         ),
         HostError::InvalidHistoryQuery => (
             StatusCode::BAD_REQUEST,

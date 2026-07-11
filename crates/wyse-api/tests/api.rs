@@ -12,7 +12,13 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode, header::LOCATION},
+    http::{
+        Request, StatusCode,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_ORIGIN,
+            ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, LOCATION, ORIGIN,
+        },
+    },
     response::IntoResponse,
 };
 use chrono::Utc;
@@ -21,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use tower::ServiceExt;
 use wyse_agent::AgentError;
-use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
+use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router, run_from_path};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventCursor, EventRecord, EventSource,
@@ -72,6 +78,10 @@ default = "openai:test-model"
 [llm.openai]
 api_key = "test-key"
 models = ["test-model"]
+
+[api]
+bind = "127.0.0.1:0"
+allowed_origins = ["http://localhost:5173"]
 "#,
             root = root.to_string_lossy()
         ))
@@ -199,6 +209,159 @@ prompt = "be helpful"
             .expect("request completes");
         (host, response)
     }
+}
+
+#[tokio::test]
+async fn router_rejects_request_bodies_larger_than_64_kib() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .post_agent(json!({
+            "agent_name": "coding-agent",
+            "text": "x".repeat(64 * 1024),
+        }))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn cors_allows_only_an_exact_configured_origin() {
+    let fixture = Fixture::new().await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let allowed = router(Arc::clone(&host))
+        .oneshot(
+            Request::options("/v1/agents")
+                .header(ORIGIN, "http://localhost:5173")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    let denied = router(host)
+        .oneshot(
+            Request::options("/v1/agents")
+                .header(ORIGIN, "http://localhost:5174")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(
+        allowed.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"http://localhost:5173".parse().expect("origin is valid"))
+    );
+    assert_eq!(
+        allowed.headers().get(ACCESS_CONTROL_ALLOW_HEADERS),
+        Some(&"content-type".parse().expect("header is valid"))
+    );
+    assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+}
+
+#[tokio::test]
+async fn empty_allowed_origins_does_not_enable_cors() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .config
+        .api
+        .as_mut()
+        .expect("api is configured")
+        .allowed_origins
+        .clear();
+    let host = fixture.restore_host().await.expect("host restores");
+    let response = router(host)
+        .oneshot(
+            Request::options("/v1/agents")
+                .header(ORIGIN, "http://localhost:5173")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert!(
+        response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn run_from_path_rejects_missing_api_before_startup() {
+    let root = std::env::temp_dir().join(format!("wyse-api-config-{}", AgentId::new()));
+    fs::create_dir(&root).expect("temporary directory is created");
+    let path = root.join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+[agent]
+storage_root = {root:?}
+
+[llm]
+default = "openai:test-model"
+
+[llm.openai]
+api_key = "test-key"
+models = ["test-model"]
+"#,
+            root = root.to_string_lossy()
+        ),
+    )
+    .expect("config is written");
+
+    let error = run_from_path(&path)
+        .await
+        .expect_err("missing api must fail");
+
+    assert!(matches!(
+        error,
+        HostError::Config(wyse_config::ConfigError::MissingSection { section: "api" })
+    ));
+    fs::remove_dir_all(root).expect("temporary directory is removed");
+}
+
+#[tokio::test]
+async fn run_from_path_rejects_missing_nats_before_startup() {
+    let root = std::env::temp_dir().join(format!("wyse-api-config-{}", AgentId::new()));
+    fs::create_dir(&root).expect("temporary directory is created");
+    let path = root.join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+[agent]
+storage_root = {root:?}
+
+[llm]
+default = "openai:test-model"
+
+[llm.openai]
+api_key = "test-key"
+models = ["test-model"]
+
+[api]
+bind = "127.0.0.1:0"
+"#,
+            root = root.to_string_lossy()
+        ),
+    )
+    .expect("config is written");
+
+    let error = run_from_path(&path)
+        .await
+        .expect_err("missing nats must fail");
+
+    assert!(matches!(
+        error,
+        HostError::Config(wyse_config::ConfigError::MissingSection { section: "nats" })
+    ));
+    fs::remove_dir_all(root).expect("temporary directory is removed");
 }
 
 impl Drop for Fixture {
@@ -566,6 +729,52 @@ async fn restore_marks_running_agents_as_needing_resume() {
     let host = fixture.restore_host().await.expect("host restores");
 
     assert!(host.agent(agent_id).expect("agent exists").needs_resume());
+}
+
+#[tokio::test]
+async fn restore_creates_templates_and_history_for_a_new_storage_root() {
+    let root = std::env::temp_dir().join(format!("wyse-api-empty-{}", AgentId::new()));
+    fs::create_dir(&root).expect("storage root is created");
+    let filesystem: Arc<dyn Filesystem> = Arc::new(
+        LocalFilesystem::new(LocalFilesystemConfig {
+            root: root.clone(),
+            max_file_bytes: None,
+        })
+        .expect("filesystem is created"),
+    );
+    let model = ModelId::new("openai", "test-model").expect("model id is valid");
+    let config = Config::parse(&format!(
+        r#"
+[agent]
+storage_root = {root:?}
+
+[llm]
+default = "openai:test-model"
+
+[llm.openai]
+api_key = "test-key"
+models = ["test-model"]
+"#,
+        root = root.to_string_lossy()
+    ))
+    .expect("config parses");
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(model)))
+        .expect("provider registers");
+
+    HostState::restore(
+        config,
+        filesystem,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("empty root restores");
+
+    assert!(root.join("templates").is_dir());
+    assert!(root.join("history").is_dir());
+    fs::remove_dir_all(root).expect("storage root is removed");
 }
 
 #[tokio::test]

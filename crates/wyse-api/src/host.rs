@@ -100,6 +100,14 @@ impl HostState {
                 source,
             }
         })?;
+        ensure_directory(filesystem.as_ref(), &history_root).await?;
+        let template_root = VirtualPath::try_from(TEMPLATE_ROOT).map_err(|source| {
+            wyse_filesystem::FilesystemError::InvalidVirtualPath {
+                path: TEMPLATE_ROOT.to_owned(),
+                source,
+            }
+        })?;
+        ensure_directory(filesystem.as_ref(), &template_root).await?;
         let entries = filesystem.list_dir(&history_root).await?;
         let mut agents = HashMap::with_capacity(entries.len());
 
@@ -175,6 +183,13 @@ impl HostState {
 
     pub(crate) fn event_bus(&self) -> Arc<dyn EventStreamBus> {
         Arc::clone(&self.event_bus)
+    }
+
+    pub(crate) fn allowed_origins(&self) -> &[String] {
+        self.config
+            .api
+            .as_ref()
+            .map_or(&[], |api| api.allowed_origins.as_slice())
     }
 
     /// Creates an agent and durably commits its initial user message before returning.
@@ -271,6 +286,16 @@ impl HostState {
                 }
             }
         }
+    }
+}
+
+async fn ensure_directory(
+    filesystem: &dyn Filesystem,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    match filesystem.create_dir(path).await {
+        Ok(()) | Err(FilesystemError::AlreadyExists { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

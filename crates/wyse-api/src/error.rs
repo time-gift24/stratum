@@ -5,7 +5,7 @@ use std::str::Utf8Error;
 use thiserror::Error;
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
-use wyse_core::{AgentId, ToolName};
+use wyse_core::{AgentId, ModelId, ModelIdParseError, ToolName};
 use wyse_filesystem::FilesystemError;
 use wyse_infra::EventStreamBusError;
 use wyse_llm::LlmError;
@@ -40,6 +40,9 @@ pub enum AgentCleanupError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum HostError {
+    /// Host configuration or listener I/O failed.
+    #[error("host io operation failed")]
+    Io(#[from] std::io::Error),
     /// Shared configuration is invalid.
     #[error("configuration error")]
     Config(#[from] ConfigError),
@@ -76,6 +79,9 @@ pub enum HostError {
     /// An HTTP request body or path parameter is invalid.
     #[error("request is invalid")]
     InvalidRequest,
+    /// An HTTP request body exceeded the configured limit.
+    #[error("request body is too large")]
+    MessageTooLarge,
     /// A history query could not be decoded.
     #[error("history query is invalid")]
     InvalidHistoryQuery,
@@ -97,6 +103,17 @@ pub enum HostError {
     /// A definition requests a tool outside the builtin catalog.
     #[error("tool is not available: {name}")]
     ToolNotAvailable { name: ToolName },
+    /// A configured provider model name could not form a model id.
+    #[error("invalid configured model for provider {provider}")]
+    InvalidConfiguredModel {
+        provider: &'static str,
+        model: String,
+        #[source]
+        source: ModelIdParseError,
+    },
+    /// A DeepSeek model is configured but unsupported by the existing adapter.
+    #[error("unsupported deepseek model: {model}")]
+    UnsupportedDeepSeekModel { model: ModelId },
     /// A history directory is not a canonical UUIDv7 agent id.
     #[error("invalid history directory: {name}")]
     InvalidHistoryDirectory { name: String },
