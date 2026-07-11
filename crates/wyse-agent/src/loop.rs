@@ -66,22 +66,7 @@ impl Agent {
                 tools: self.tool_registry.specs(),
                 structured_output: None,
             };
-            let future = self.llm_provider.chat_stream(request);
-            tokio::pin!(future);
-            let stream = loop {
-                let cancel = self.cancel_token().expect("cancel token should be set");
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        self.publish_cancelled().await?;
-                        return Err(AgentError::Cancelled);
-                    }
-                    command = commands.recv() => {
-                        reject_inactive_command(command)?;
-                    }
-                    result = &mut future => break result,
-                }
-            };
+            let stream = self.llm_provider.chat_stream(request).await;
             let stream = match stream {
                 Ok(stream) => stream,
                 Err(source) => {

@@ -34,7 +34,6 @@ use wyse_tools::{
 enum ProviderResponse {
     Events(Vec<ChatStreamEvent>),
     StreamResults(Vec<Result<ChatStreamEvent, LlmError>>),
-    PendingStart { entered: Arc<tokio::sync::Notify> },
 }
 
 #[derive(Debug)]
@@ -86,10 +85,6 @@ impl LlmProvider for RecordingProvider {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
             }
             ProviderResponse::StreamResults(results) => Ok(Box::pin(stream::iter(results))),
-            ProviderResponse::PendingStart { entered } => {
-                entered.notify_waiters();
-                pending::<Result<ChatStream, LlmError>>().await
-            }
         }
     }
 }
@@ -862,57 +857,6 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
     })
     .await
     .expect("timed out waiting for failed event");
-}
-
-#[tokio::test]
-async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let provider = Arc::new(RecordingProvider::new(vec![
-        ProviderResponse::PendingStart {
-            entered: Arc::clone(&entered),
-        },
-    ]));
-    let bus = Arc::new(InMemoryEventStreamBus::default());
-    let agent = Agent::builder()
-        .id(test_agent_id())
-        .name("test-agent")
-        .system_prompt("be helpful")
-        .llm_provider(provider)
-        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-        .event_bus(bus)
-        .build()
-        .expect("agent should build");
-
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
-    entered.notified().await;
-    agent.stop();
-
-    let mut saw_cancelled = false;
-
-    timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = events.next().await {
-            let envelope = envelope.expect("event should be delivered").envelope;
-            let RuntimeEvent::Agent { event, .. } = envelope.event else {
-                continue;
-            };
-
-            match event {
-                AgentEvent::Cancelled { usage } => {
-                    assert_eq!(usage, TokenUsage::default());
-                    saw_cancelled = true;
-                    break;
-                }
-                AgentEvent::Failed { error_text, .. } => {
-                    panic!("unexpected failure event: {error_text}");
-                }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for cancelled event");
-
-    assert!(saw_cancelled);
 }
 
 #[tokio::test]
