@@ -1,0 +1,23 @@
+[agent]
+storage_root = "/var/lib/wyse/agents"
+
+[llm]
+default = "deepseek:deepseek-v4-flash"
+
+[llm.deepseek]
+# Replace this placeholder before sending real agent requests.
+api_key = "replace-with-deepseek-api-key"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+
+[api]
+bind = "0.0.0.0:8080"
+allowed_origins = ["http://localhost:5173"]
+
+[nats]
+url = "nats://nats:4222"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
+replicas = 1
+max_age_seconds = 604800
+max_bytes = 1073741824
+max_messages = 1000000
