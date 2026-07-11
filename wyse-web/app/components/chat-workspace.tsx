@@ -32,6 +32,7 @@ import {
   CardHeader,
   CardTitle,
 } from "~/components/ui/card"
+import { Separator } from "~/components/ui/separator"
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -55,6 +56,53 @@ export function ChatWorkspace() {
   const { state } = conversation
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
+  const activeAgent =
+    state.agentId === null
+      ? undefined
+      : conversation.recentAgents.find(
+          (agent) => agent.agentId === state.agentId
+        )
+  const historicalAgents = activeAgent
+    ? conversation.recentAgents.filter(
+        (agent) => agent.agentId !== activeAgent.agentId
+      )
+    : conversation.recentAgents
+
+  const renderConversationEntry = (
+    agent: (typeof conversation.recentAgents)[number]
+  ) => {
+    const isCurrent = agent.agentId === state.agentId
+    const isMissing = state.phase === "missing" && isCurrent
+
+    return (
+      <div key={agent.agentId} className="flex items-center gap-1">
+        <Button
+          variant={isCurrent ? "secondary" : "ghost"}
+          size="lg"
+          className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
+          onClick={() => conversation.selectAgent(agent.agentId)}
+        >
+          <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+            <span className="w-full truncate">{agent.title}</span>
+            <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
+              <Clock3Icon aria-hidden="true" />
+              {agent.lastOpenedAt}
+            </span>
+          </span>
+        </Button>
+        {isMissing ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => conversation.removeRecentAgent(agent.agentId)}
+          >
+            {t("chat.removeLocalEntry")}
+          </Button>
+        ) : null}
+      </div>
+    )
+  }
 
   const submitMessage = async () => {
     const text = composerText.trim()
@@ -156,45 +204,24 @@ export function ChatWorkspace() {
               </Button>
             </CardAction>
           </CardHeader>
+          {activeAgent ? (
+            <CardContent data-slot="active-conversation" className="pt-0">
+              {renderConversationEntry(activeAgent)}
+            </CardContent>
+          ) : null}
+          {activeAgent && historicalAgents.length > 0 ? (
+            <Separator
+              data-slot="history-divider"
+              className="mx-(--card-spacing) w-auto"
+            />
+          ) : null}
           {isHistoryOpen ? (
-            <CardContent id="chat-history" className="flex flex-col gap-1.5">
-              {conversation.recentAgents.map((agent) => {
-                const isMissing =
-                  state.phase === "missing" && state.agentId === agent.agentId
-
-                return (
-                  <div key={agent.agentId} className="flex items-center gap-1">
-                    <Button
-                      variant={
-                        state.agentId === agent.agentId ? "secondary" : "ghost"
-                      }
-                      size="lg"
-                      className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
-                      onClick={() => conversation.selectAgent(agent.agentId)}
-                    >
-                      <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                        <span className="w-full truncate">{agent.title}</span>
-                        <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
-                          <Clock3Icon aria-hidden="true" />
-                          {agent.lastOpenedAt}
-                        </span>
-                      </span>
-                    </Button>
-                    {isMissing ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          conversation.removeRecentAgent(agent.agentId)
-                        }
-                      >
-                        {t("chat.removeLocalEntry")}
-                      </Button>
-                    ) : null}
-                  </div>
-                )
-              })}
+            <CardContent
+              id="chat-history"
+              data-slot="history-conversations"
+              className="flex flex-col gap-1.5"
+            >
+              {historicalAgents.map(renderConversationEntry)}
             </CardContent>
           ) : null}
         </Card>

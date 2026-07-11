@@ -146,9 +146,7 @@ describe("useAgentConversation", () => {
     )
   })
 
-  it("refreshes an existing recent Agent when it is reopened", () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-07-11T00:02:00Z"))
+  it("does not refresh or reorder recent Agents when one is selected", () => {
     hooks.recentAgents = [
       {
         agentId: "agent-1",
@@ -160,12 +158,10 @@ describe("useAgentConversation", () => {
 
     useAgentConversation().selectAgent("agent-1")
 
-    expect(hooks.rememberRecentAgent).toHaveBeenCalledWith(expect.anything(), {
+    expect(hooks.rememberRecentAgent).not.toHaveBeenCalled()
+    expect(hooks.dispatch).toHaveBeenCalledWith({
+      type: "agent_selected",
       agentId: "agent-1",
-      agentName: "coding-agent",
-      title: "Earlier chat",
-      lastOpenedAt: "2026-07-11T00:02:00.000Z",
     })
-    vi.useRealTimers()
   })
 })

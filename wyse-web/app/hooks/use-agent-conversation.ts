@@ -51,42 +51,12 @@ export function useAgentConversation(): AgentConversation {
     if (storage) setRecentAgents(loadRecentAgents(storage))
   }, [])
 
-  const refreshRecentAgent = useCallback((agentId: string) => {
-    const lastOpenedAt = new Date().toISOString()
-    const storage = browserStorage()
-
-    if (storage) {
-      const existing = loadRecentAgents(storage).find(
-        (agent) => agent.agentId === agentId
-      )
-      if (!existing) return
-
-      rememberRecentAgent(storage, { ...existing, lastOpenedAt })
-      setRecentAgents(loadRecentAgents(storage))
-      return
-    }
-
-    setRecentAgents((agents) => {
-      const existing = agents.find((agent) => agent.agentId === agentId)
-      return existing
-        ? [
-            { ...existing, lastOpenedAt },
-            ...agents.filter((agent) => agent.agentId !== agentId),
-          ]
-        : agents
-    })
+  const selectAgent = useCallback((agentId: string | null) => {
+    selectionGeneration.current += 1
+    selectedAgentRef.current = agentId
+    setSelectedAgentId(agentId)
+    dispatch({ type: "agent_selected", agentId })
   }, [])
-
-  const selectAgent = useCallback(
-    (agentId: string | null) => {
-      if (agentId !== null) refreshRecentAgent(agentId)
-      selectionGeneration.current += 1
-      selectedAgentRef.current = agentId
-      setSelectedAgentId(agentId)
-      dispatch({ type: "agent_selected", agentId })
-    },
-    [refreshRecentAgent]
-  )
 
   useEffect(() => {
     if (selectedAgentId === null) return

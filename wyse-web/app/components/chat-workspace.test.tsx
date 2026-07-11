@@ -10,6 +10,7 @@ import type {
   ApprovalRequest,
   ConversationState,
 } from "~/features/agent-conversation/types"
+import type { RecentAgent } from "~/lib/recent-agents"
 
 const readyState: ConversationState = {
   agentId: null,
@@ -23,11 +24,12 @@ const readyState: ConversationState = {
 }
 
 let conversationState = readyState
+let conversationRecentAgents: RecentAgent[] = []
 
 vi.mock("~/hooks/use-agent-conversation", () => ({
   useAgentConversation: () => ({
     state: conversationState,
-    recentAgents: [],
+    recentAgents: conversationRecentAgents,
     selectAgent: vi.fn(),
     createConversation: vi.fn(),
     sendMessage: vi.fn(),
@@ -41,6 +43,7 @@ vi.mock("~/hooks/use-agent-conversation", () => ({
 
 beforeEach(() => {
   conversationState = readyState
+  conversationRecentAgents = []
 })
 
 vi.mock("react-i18next", () => ({
@@ -93,6 +96,53 @@ describe("ChatWorkspace", () => {
     expect(html.indexOf('data-slot="chat-main"')).toBeLessThan(
       html.indexOf('data-slot="prompt-input"')
     )
+  })
+
+  it("keeps the active conversation above the collapsed history divider", async () => {
+    conversationState = {
+      ...readyState,
+      agentId: "agent-current",
+      phase: "ready",
+      view: {
+        agent_id: "agent-current",
+        agent_name: "default",
+        status: "idle",
+        run_id: null,
+        turn_id: null,
+        last_seq: 0,
+        updated_at: "2026-07-12T00:00:00Z",
+      },
+    }
+    conversationRecentAgents = [
+      {
+        agentId: "agent-newer",
+        agentName: "default",
+        title: "Newer history",
+        lastOpenedAt: "2026-07-12T00:02:00Z",
+      },
+      {
+        agentId: "agent-current",
+        agentName: "default",
+        title: "Current conversation",
+        lastOpenedAt: "2026-07-12T00:01:00Z",
+      },
+      {
+        agentId: "agent-older",
+        agentName: "default",
+        title: "Older history",
+        lastOpenedAt: "2026-07-12T00:00:00Z",
+      },
+    ]
+    const { ChatWorkspace } = await import("~/components/chat-workspace")
+    const html = renderToStaticMarkup(<ChatWorkspace />)
+
+    expect(html).toContain('data-slot="active-conversation"')
+    expect(html).toContain('data-slot="history-divider"')
+    expect(html.indexOf("Current conversation")).toBeLessThan(
+      html.indexOf('data-slot="history-divider"')
+    )
+    expect(html).not.toContain("Newer history")
+    expect(html).not.toContain("Older history")
   })
 
   it("does not fill an idle composer with a connection state or resume action", async () => {
