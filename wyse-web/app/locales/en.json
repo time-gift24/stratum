@@ -27,23 +27,16 @@
     "you": "You",
     "history": {
       "title": "Conversation history",
-      "description": "Recent reasoning and decisions",
       "new": "New conversation"
     },
     "composer": {
-      "title": "Continue the conversation",
-      "description": "Describe the goal, constraints, or options you are weighing.",
       "label": "Message",
       "placeholder": "Ask Longzhong…",
-      "shortcut": "Enter to send",
       "send": "Send"
     },
-    "empty": "Start a new conversation to begin.",
-    "startConversation": "Start a conversation",
     "creating": "Creating conversation…",
     "sending": "Sending…",
     "connecting": "Connecting…",
-    "reconnecting": "Reconnecting…",
     "connectionFailed": "Connection failed",
     "ready": "Connected",
     "continue": "Continue",
@@ -57,8 +50,13 @@
     "toolKind": "Tool kind",
     "dangerLevel": "Danger level",
     "streamStatus": "Streaming",
-    "reasoning": "Reasoning",
-    "toolProcess": "Tool process",
+    "reasoningComplete": "Reasoning complete",
+    "thinking": "Thinking",
+    "toolStatus": {
+      "streaming": "Running",
+      "finished": "Completed",
+      "failed": "Failed"
+    },
     "unknownTool": "Unknown tool"
   },
   "errors": {

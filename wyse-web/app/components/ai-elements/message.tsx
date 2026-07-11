@@ -49,10 +49,10 @@ export function AiMessageContent({
   )
 }
 
-export function AiStreamingMark() {
+export function AiStreamingMark({ label }: { label: string }) {
   return (
     <span
-      aria-label="Streaming"
+      aria-label={label}
       className="mr-1 inline-block size-1.5 rounded-full bg-primary align-middle motion-safe:animate-pulse"
     />
   )

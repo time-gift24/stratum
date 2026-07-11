@@ -25,7 +25,11 @@ export function AgentMessageList({
   drafts,
   tools,
 }: AgentMessageListProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+    dateStyle: "short",
+    timeStyle: "short",
+  })
 
   return (
     <>
@@ -43,14 +47,22 @@ export function AgentMessageList({
             <AiMessageHeader>
               {isUser ? t("chat.you") : t("chat.assistant")}
             </AiMessageHeader>
+            {message.reasoning ? (
+              <AiReasoning
+                completeLabel={t("chat.reasoningComplete")}
+                thinkingLabel={t("chat.thinking")}
+              >
+                {message.reasoning}
+              </AiReasoning>
+            ) : null}
             <AiMessageContent from={isUser ? "user" : "assistant"}>
               {text}
             </AiMessageContent>
-            {message.reasoning ? (
-              <AiReasoning>{message.reasoning}</AiReasoning>
-            ) : null}
-            <time className="px-1 text-[0.625rem] text-muted-foreground">
-              {message.timestamp}
+            <time
+              dateTime={message.timestamp}
+              className="px-1 text-[0.625rem] text-muted-foreground"
+            >
+              {dateTimeFormat.format(new Date(message.timestamp))}
             </time>
           </AiMessage>
           </MessageScrollerItem>
@@ -64,11 +76,17 @@ export function AgentMessageList({
               {t("chat.assistant")} {t("chat.streamStatus")}
             </AiMessageHeader>
             <AiMessageContent from="assistant">
-              <AiStreamingMark />
+              <AiStreamingMark label={t("chat.streamStatus")} />
               {draft.text}
             </AiMessageContent>
             {draft.reasoning ? (
-              <AiReasoning streaming>{draft.reasoning}</AiReasoning>
+              <AiReasoning
+                streaming
+                completeLabel={t("chat.reasoningComplete")}
+                thinkingLabel={t("chat.thinking")}
+              >
+                {draft.reasoning}
+              </AiReasoning>
             ) : null}
           </AiMessage>
         </MessageScrollerItem>
@@ -81,7 +99,7 @@ export function AgentMessageList({
               <AiTool
                 key={tool.callId}
                 name={tool.name ?? t("chat.unknownTool")}
-                status={tool.status}
+                status={t(`chat.toolStatus.${tool.status}`)}
               >
                 {tool.argumentsText ? <pre>{tool.argumentsText}</pre> : null}
                 {tool.result ? (

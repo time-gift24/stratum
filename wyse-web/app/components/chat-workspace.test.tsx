@@ -35,27 +35,33 @@ vi.mock("~/hooks/use-agent-conversation", () => ({
 }))
 
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    i18n: { resolvedLanguage: "en-US" },
+    t: (key: string) => key,
+  }),
 }))
 
 describe("ChatWorkspace", () => {
-  it("keeps the established main conversation canvas and composer placement", async () => {
+  it("keeps the established full-viewport conversation canvas and composer placement", async () => {
     const { ChatWorkspace } = await import("~/components/chat-workspace")
     const html = renderToStaticMarkup(<ChatWorkspace />)
 
     expect(html).toContain('data-slot="chat-main"')
-    expect(html).toContain("h-[80dvh]")
-    expect(html).toContain("min-h-[36rem]")
+    expect(html).toContain('id="longzhong" class="h-[100dvh]')
+    expect(html).toContain("2xl:h-[100dvh]")
+    expect(html).not.toContain("min-h-[36rem]")
     expect(html.indexOf('data-slot="message-scroller"')).toBeLessThan(
       html.lastIndexOf('data-slot="card"')
     )
   })
 
-  it("renders the live empty conversation state instead of static fixture messages", async () => {
+  it("renders a blank live conversation rather than invented onboarding copy", async () => {
     const { ChatWorkspace } = await import("~/components/chat-workspace")
     const html = renderToStaticMarkup(<ChatWorkspace />)
 
-    expect(html).toContain("chat.empty")
+    expect(html).not.toContain("chat.empty")
+    expect(html).not.toContain("chat.startConversation")
+    expect(html).not.toContain(">WYSE<")
     expect(html).not.toContain("chat.messages.assistantIntro")
   })
 

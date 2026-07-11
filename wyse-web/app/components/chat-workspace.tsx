@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useRef, useState, type KeyboardEvent } from "react"
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -8,7 +8,14 @@ import {
 import { useTranslation } from "react-i18next"
 
 import { AgentApprovalCard } from "~/components/agent-approval-card"
-import { AiPromptInput } from "~/components/ai-elements/prompt-input"
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "~/components/ai-elements/prompt-input"
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
@@ -79,6 +86,13 @@ export function ChatWorkspace() {
     }
   }
 
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault()
+      void submitMessage()
+    }
+  }
+
   const statusText = isSubmitting
     ? t(state.agentId === null ? "chat.creating" : "chat.sending")
     : state.phase === "connection_error"
@@ -87,21 +101,21 @@ export function ChatWorkspace() {
         ? t("chat.missingConversation")
         : state.phase === "recovering"
           ? t("chat.connecting")
-          : state.view?.status === "running"
-            ? t("chat.sending")
-            : state.agentId === null
-              ? t("chat.empty")
+            : state.view?.status === "running"
+              ? t("chat.sending")
+              : state.agentId === null
+              ? ""
               : t("chat.ready")
 
   return (
     <section
       id="longzhong"
-      className="min-h-[100dvh] scroll-mt-20 px-4 pt-4 pb-8 md:px-8 md:pb-10"
+      className="h-[100dvh] scroll-mt-20 overflow-hidden px-4 pt-4 pb-8 md:px-8 md:pb-10"
     >
-      <div className="relative mx-auto w-full max-w-5xl">
+      <div className="relative mx-auto flex h-full w-full max-w-5xl flex-col 2xl:block">
         <Card
           size="sm"
-          className="relative mb-6 w-full bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="relative mb-6 w-full shrink-0 bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
         >
           <div className="absolute inset-0 -z-10">
             <GlassSurface
@@ -206,7 +220,7 @@ export function ChatWorkspace() {
 
         <div
           data-slot="chat-main"
-          className="flex h-[80dvh] min-h-[36rem] min-w-0 flex-col"
+          className="flex min-h-0 min-w-0 flex-1 flex-col 2xl:h-[100dvh]"
         >
           <MessageScrollerProvider autoScroll>
             <MessageScroller className="flex-1">
@@ -217,14 +231,6 @@ export function ChatWorkspace() {
                     drafts={state.drafts}
                     tools={state.tools}
                   />
-                  {state.messages.length === 0 &&
-                  Object.keys(state.drafts).length === 0 ? (
-                    <MessageScrollerItem messageId="empty-conversation">
-                      <p className="text-center text-xs/relaxed text-muted-foreground">
-                        {t("chat.empty")}
-                      </p>
-                    </MessageScrollerItem>
-                  ) : null}
                   {Object.values(state.approvals).map((approval) => (
                     <MessageScrollerItem
                       key={approval.approvalId}
@@ -249,23 +255,23 @@ export function ChatWorkspace() {
 
           <Card size="sm" className="w-full shrink-0 bg-transparent ring-0">
             <CardContent>
-              <AiPromptInput
-                inputRef={composerRef}
-                value={composerText}
-                disabled={isSubmitting || isAgentBusy}
-                label={t(
-                  state.agentId === null
-                    ? "chat.startConversation"
-                    : "chat.composer.title"
-                )}
-                description={t(
-                  state.agentId === null ? "chat.empty" : "chat.composer.description"
-                )}
-                placeholder={t("chat.composer.placeholder")}
-                shortcutHint={t("chat.composer.shortcut")}
-                onChange={setComposerText}
-                onSubmit={() => void submitMessage()}
-                footer={
+              <PromptInput onSubmit={(event) => {
+                event.preventDefault()
+                void submitMessage()
+              }}>
+                <PromptInputBody>
+                  <PromptInputTextarea
+                    ref={composerRef}
+                    aria-label={t("chat.composer.label")}
+                    disabled={isSubmitting || isAgentBusy}
+                    onChange={(event) => setComposerText(event.target.value)}
+                    onKeyDown={onComposerKeyDown}
+                    placeholder={t("chat.composer.placeholder")}
+                    value={composerText}
+                  />
+                </PromptInputBody>
+                <PromptInputFooter>
+                  <PromptInputTools>
                   <div className="flex min-w-0 items-center gap-3">
                     <span className="truncate">{statusText}</span>
                     <div className="flex shrink-0 items-center gap-2">
@@ -297,8 +303,20 @@ export function ChatWorkspace() {
                 ) : null}
                     </div>
                   </div>
-                }
-              />
+                  </PromptInputTools>
+                  <PromptInputSubmit
+                    ariaLabel={t("chat.composer.send")}
+                    className={
+                      composerText.trim() === ""
+                        ? "bg-muted text-muted-foreground hover:bg-muted"
+                        : undefined
+                    }
+                    disabled={
+                      isSubmitting || isAgentBusy || composerText.trim() === ""
+                    }
+                  />
+                </PromptInputFooter>
+              </PromptInput>
             </CardContent>
           </Card>
         </div>
