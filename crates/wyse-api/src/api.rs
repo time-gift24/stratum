@@ -96,12 +96,6 @@ struct HistoryParams {
     limit: usize,
 }
 
-#[derive(Deserialize)]
-struct EventStreamParams {
-    after_cursor: Option<String>,
-    replay: Option<String>,
-}
-
 const fn default_history_limit() -> usize {
     100
 }
@@ -204,15 +198,26 @@ fn replay_start(headers: &HeaderMap, uri: &axum::http::Uri) -> Result<ReplayStar
     if let Some(cursor) = headers.get("last-event-id") {
         return parse_cursor(cursor.to_str().map_err(|_| HostError::InvalidCursor)?);
     }
-    let Query(query) =
-        Query::<EventStreamParams>::try_from_uri(uri).map_err(|_| HostError::InvalidRequest)?;
-    if let Some(cursor) = query.after_cursor {
-        return parse_cursor(&cursor);
+    let Query(params) =
+        Query::<Vec<(String, String)>>::try_from_uri(uri).map_err(|_| HostError::InvalidRequest)?;
+    let mut after_cursors = params
+        .iter()
+        .filter(|(key, _)| key == "after_cursor")
+        .map(|(_, value)| value.as_str());
+    if let Some(cursor) = after_cursors.next() {
+        if after_cursors.next().is_some() {
+            return Err(HostError::InvalidCursor);
+        }
+        return parse_cursor(cursor);
     }
-    match query.replay.as_deref() {
-        Some("new") => Ok(ReplayStart::New),
-        Some("all") | None => Ok(ReplayStart::All),
-        Some(_) => Err(HostError::InvalidRequest),
+    let mut replay = params
+        .iter()
+        .filter(|(key, _)| key == "replay")
+        .map(|(_, value)| value.as_str());
+    match (replay.next(), replay.next()) {
+        (Some("new"), None) => Ok(ReplayStart::New),
+        (Some("all"), None) | (None, None) => Ok(ReplayStart::All),
+        _ => Err(HostError::InvalidRequest),
     }
 }
 

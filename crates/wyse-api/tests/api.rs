@@ -1626,7 +1626,7 @@ async fn event_stream_after_cursor_resumes_after_query_cursor() {
     let response = get_events(
         &fixture,
         Arc::clone(&bus),
-        format!("/v1/agents/{agent_id}/events?after_cursor=41&replay=new"),
+        format!("/v1/agents/{agent_id}/events?after_cursor=41&replay=new&replay=all"),
         None,
     )
     .await;
@@ -1636,6 +1636,56 @@ async fn event_stream_after_cursor_resumes_after_query_cursor() {
         bus.replay_starts(),
         vec![ReplayStart::After(EventCursor::from_transport_sequence(41))]
     );
+}
+
+#[tokio::test]
+async fn event_stream_invalid_after_cursor_takes_priority_over_replay() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?after_cursor=invalid&replay=new"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+    assert!(bus.replay_starts().is_empty());
+}
+
+#[tokio::test]
+async fn event_stream_rejects_repeated_after_cursor_as_invalid_cursor() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?after_cursor=40&after_cursor=41"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+    assert!(bus.replay_starts().is_empty());
 }
 
 #[tokio::test]
