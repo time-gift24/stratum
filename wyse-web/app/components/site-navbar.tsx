@@ -226,7 +226,7 @@ export function SiteNavbar() {
             brightness={68}
             opacity={0.5}
             blur={100}
-            displace={0}
+            displace={2.2}
             backgroundOpacity={0.05}
             saturation={1.15}
             distortionScale={-40}
