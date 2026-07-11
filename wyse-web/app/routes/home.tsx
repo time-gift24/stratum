@@ -1,10 +1,13 @@
 import { ArrowRightIcon } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import { SiteNavbar } from "~/components/site-navbar"
 import { StratumMark } from "~/components/stratum-mark"
 import { Button } from "~/components/ui/button"
 
 export default function Home() {
+  const { t } = useTranslation()
+
   return (
     <main className="flex min-h-[100dvh]">
       <section className="flex min-h-[100dvh] w-full flex-col px-4 py-4 md:px-8 md:py-6">
@@ -16,21 +19,20 @@ export default function Home() {
 
             <div className="flex flex-col gap-5">
               <h1 className="font-heading text-5xl leading-[0.98] font-semibold tracking-tight text-balance md:text-7xl">
-                Build typed agents
+                {t("hero.title")}
               </h1>
               <p className="mx-auto max-w-2xl text-base leading-relaxed text-muted-foreground md:text-lg">
-                A Rust-first runtime for composing agents, tools, and reliable
-                execution paths.
+                {t("hero.description")}
               </p>
             </div>
 
             <div className="flex flex-col items-center gap-3 sm:flex-row">
               <Button size="lg">
-                Get started
+                {t("actions.getStarted")}
                 <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
               </Button>
               <Button variant="outline" size="lg">
-                Learn more
+                {t("actions.learnMore")}
               </Button>
             </div>
           </div>

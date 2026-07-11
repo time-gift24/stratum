@@ -4,8 +4,10 @@ import { useRef } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
+import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/GlassSurface"
+import { LanguageToggle } from "~/components/language-toggle"
 import { StratumMark } from "~/components/stratum-mark"
 import { ThemeToggle } from "~/components/theme-toggle"
 import { Button } from "~/components/ui/button"
@@ -21,6 +23,7 @@ import { Separator } from "~/components/ui/separator"
 gsap.registerPlugin(useGSAP, ScrollTrigger)
 
 export function SiteNavbar() {
+  const { t } = useTranslation()
   const navRef = useRef<HTMLElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
 
@@ -91,12 +94,12 @@ export function SiteNavbar() {
       ref={navRef}
       className="fixed inset-x-0 top-4 z-50 px-4 md:top-6 md:px-8"
     >
-      <div className="relative isolate mx-auto flex h-12 w-full max-w-5xl items-center justify-between gap-4 px-3">
+      <div className="relative isolate mx-auto flex h-12 w-full max-w-5xl items-center gap-4 px-3">
         <div ref={glassRef} aria-hidden="true" className="site-navbar-glass">
           <GlassSurface
             width="100%"
             height="100%"
-            borderRadius={999}
+            borderRadius={12}
             borderWidth={0.085}
             brightness={58}
             opacity={0.86}
@@ -115,40 +118,37 @@ export function SiteNavbar() {
         <a
           href="/"
           className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
-          aria-label="运筹 Stratum home"
+          aria-label={`运筹 ${t("brand.home")}`}
         >
           <StratumMark animated={false} variant="compact" className="size-7" />
-          <span className="flex min-w-0 items-baseline gap-1.5 truncate">
-            <span className="font-heading font-semibold">运筹</span>
-            <span className="text-xs text-muted-foreground">Stratum</span>
-          </span>
+          <span className="truncate font-heading font-semibold">运筹</span>
         </a>
 
-        <NavigationMenu className="relative z-10 hidden flex-none md:flex">
-          <NavigationMenuList>
-            <NavigationMenuItem>
-              <NavigationMenuLink
-                render={<a href="#runtime" />}
-                className={navigationMenuTriggerStyle()}
-              >
-                Features
-              </NavigationMenuLink>
-            </NavigationMenuItem>
-            <NavigationMenuItem>
-              <NavigationMenuLink
-                render={<a href="#workflows" />}
-                className={navigationMenuTriggerStyle()}
-              >
-                About
-              </NavigationMenuLink>
-            </NavigationMenuItem>
-          </NavigationMenuList>
-        </NavigationMenu>
-
-        <div className="relative z-10 flex items-center gap-3">
+        <div className="relative z-10 ml-auto flex items-center gap-3">
+          <NavigationMenu className="hidden flex-none md:flex">
+            <NavigationMenuList>
+              <NavigationMenuItem>
+                <NavigationMenuLink
+                  render={<a href="#runtime" />}
+                  className={navigationMenuTriggerStyle()}
+                >
+                  {t("nav.features")}
+                </NavigationMenuLink>
+              </NavigationMenuItem>
+              <NavigationMenuItem>
+                <NavigationMenuLink
+                  render={<a href="#workflows" />}
+                  className={navigationMenuTriggerStyle()}
+                >
+                  {t("nav.about")}
+                </NavigationMenuLink>
+              </NavigationMenuItem>
+            </NavigationMenuList>
+          </NavigationMenu>
           <Separator orientation="vertical" className="hidden md:block" />
+          <LanguageToggle />
           <ThemeToggle />
-          <Button size="lg">Sign up</Button>
+          <Button size="lg">{t("actions.signUp")}</Button>
         </div>
       </div>
     </header>

@@ -5,7 +5,7 @@
   "scripts": {
     "build": "react-router build",
     "dev": "react-router dev",
-    "test": "node --test app/components/stratum-mark.test.mjs",
+    "test": "node --test app/components/*.test.mjs app/lib/*.test.mjs",
     "start": "react-router-serve ./build/server/index.js",
     "typecheck": "react-router typegen && tsc",
     "format": "prettier --write \"**/*.{ts,tsx}\""
@@ -20,10 +20,12 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "gsap": "^3.15.0",
+    "i18next": "^26.3.6",
     "isbot": "^5",
     "lucide-react": "^1.22.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "react-i18next": "^17.0.9",
     "react-router": "7.15.1",
     "shadcn": "^4.12.0",
     "tailwind-merge": "^3.6.0",

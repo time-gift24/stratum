@@ -1,0 +1,31 @@
+{
+  "brand": {
+    "home": "Stratum home"
+  },
+  "nav": {
+    "features": "Features",
+    "about": "About"
+  },
+  "hero": {
+    "title": "Build typed agents",
+    "description": "A Rust-first runtime for composing agents, tools, and reliable execution paths."
+  },
+  "actions": {
+    "getStarted": "Get started",
+    "learnMore": "Learn more",
+    "signUp": "Sign up"
+  },
+  "theme": {
+    "toggle": "Toggle dark theme"
+  },
+  "language": {
+    "switchToChinese": "Switch to Chinese",
+    "switchToEnglish": "Switch to English"
+  },
+  "errors": {
+    "unexpectedTitle": "Oops!",
+    "unexpectedDetails": "An unexpected error occurred.",
+    "notFoundDetails": "The requested page could not be found.",
+    "genericTitle": "Error"
+  }
+}

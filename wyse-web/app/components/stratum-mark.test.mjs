@@ -90,7 +90,7 @@ test("the Stratum mark inlines the SVG and animates only its diamond", async () 
     /<StratumMark animated=\{false\} variant="compact" className="size-7" \/>/
   )
   assert.match(navbar, />运筹<\/span>/)
-  assert.match(navbar, />Stratum<\/span>/)
+  assert.doesNotMatch(navbar, />Stratum<\/span>/)
   assert.match(home, /<StratumMark className="size-32/)
   assert.match(appCss, /\.stratum-mark--compact/)
   assert.doesNotMatch(appCss, /drop-shadow/)

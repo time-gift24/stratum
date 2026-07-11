@@ -1,0 +1,31 @@
+{
+  "brand": {
+    "home": "首页"
+  },
+  "nav": {
+    "features": "功能",
+    "about": "关于"
+  },
+  "hero": {
+    "title": "构建强类型智能体",
+    "description": "一个 Rust 优先的运行时，用于组合智能体、工具与可靠的执行路径。"
+  },
+  "actions": {
+    "getStarted": "开始使用",
+    "learnMore": "了解更多",
+    "signUp": "注册"
+  },
+  "theme": {
+    "toggle": "切换深色主题"
+  },
+  "language": {
+    "switchToChinese": "切换至中文",
+    "switchToEnglish": "切换至英文"
+  },
+  "errors": {
+    "unexpectedTitle": "出错了",
+    "unexpectedDetails": "发生了意外错误。",
+    "notFoundDetails": "找不到请求的页面。",
+    "genericTitle": "错误"
+  }
+}
