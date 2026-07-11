@@ -31,10 +31,6 @@ pub struct HostState {
         reason = "retained for the next API endpoint assembly tasks"
     )]
     filesystem: Arc<dyn Filesystem>,
-    #[allow(
-        dead_code,
-        reason = "retained for the next API endpoint assembly tasks"
-    )]
     event_bus: Arc<dyn EventStreamBus>,
     #[allow(
         dead_code,
@@ -175,6 +171,10 @@ impl HostState {
             .expect("host registry lock should not be poisoned")
             .get(&agent_id)
             .map(Arc::clone)
+    }
+
+    pub(crate) fn event_bus(&self) -> Arc<dyn EventStreamBus> {
+        Arc::clone(&self.event_bus)
     }
 
     /// Creates an agent and durably commits its initial user message before returning.

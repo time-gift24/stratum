@@ -24,14 +24,16 @@ use wyse_agent::AgentError;
 use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
-    AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventSource, HistoryPage, ModelId,
-    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, TurnId,
+    AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventCursor, EventRecord, EventSource,
+    HistoryPage, ModelId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, TurnId,
 };
 use wyse_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, LocalFilesystem,
     LocalFilesystemConfig, RecordVersion, VersionedEntry, VirtualPath,
 };
-use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
+use wyse_infra::{
+    EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
+};
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
     LlmProviderManager,
@@ -140,6 +142,14 @@ prompt = "be helpful"
     }
 
     async fn restore_host(&self) -> Result<Arc<HostState>, HostError> {
+        self.restore_host_with_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .await
+    }
+
+    async fn restore_host_with_bus(
+        &self,
+        event_bus: Arc<dyn EventStreamBus>,
+    ) -> Result<Arc<HostState>, HostError> {
         let mut providers = LlmProviderManager::new();
         providers
             .register(Arc::new(TestProvider(self.model.clone())))
@@ -147,7 +157,7 @@ prompt = "be helpful"
         HostState::restore(
             self.config.clone(),
             Arc::clone(&self.filesystem),
-            Arc::new(InMemoryEventStreamBus::default()) as Arc<dyn EventStreamBus>,
+            event_bus,
             providers,
         )
         .await
@@ -215,6 +225,57 @@ impl LlmProvider for TestProvider {
 }
 
 struct PendingProvider(ModelId);
+
+struct TestEventStreamBus {
+    replay_starts: Mutex<Vec<ReplayStart>>,
+    subscription: Mutex<Option<Result<EventStream, EventStreamBusError>>>,
+}
+
+impl TestEventStreamBus {
+    fn with_events(events: Vec<Result<EventRecord, EventStreamBusError>>) -> Self {
+        Self {
+            replay_starts: Mutex::new(Vec::new()),
+            subscription: Mutex::new(Some(Ok(Box::pin(stream::iter(events))))),
+        }
+    }
+
+    fn with_error(error: EventStreamBusError) -> Self {
+        Self {
+            replay_starts: Mutex::new(Vec::new()),
+            subscription: Mutex::new(Some(Err(error))),
+        }
+    }
+
+    fn replay_starts(&self) -> Vec<ReplayStart> {
+        self.replay_starts
+            .lock()
+            .expect("replay starts lock is not poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl EventStreamBus for TestEventStreamBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        Ok(())
+    }
+
+    async fn subscribe_agent(
+        &self,
+        _agent_id: AgentId,
+        replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        self.replay_starts
+            .lock()
+            .expect("replay starts lock is not poisoned")
+            .push(replay_start);
+        self.subscription
+            .lock()
+            .expect("subscription lock is not poisoned")
+            .take()
+            .expect("test subscription is requested once")
+    }
+}
 
 #[async_trait]
 impl LlmProvider for PendingProvider {
@@ -1437,4 +1498,236 @@ async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("error body is json");
     assert_eq!(body["error"]["code"], "approval_not_active");
+}
+
+fn event_record(agent_id: AgentId, cursor: u64, event: AgentEvent) -> EventRecord {
+    EventRecord {
+        cursor: EventCursor::from_transport_sequence(cursor),
+        envelope: StreamEnvelope {
+            business_seq: None,
+            run_id: RunId::new(),
+            timestamp: Utc::now(),
+            source: EventSource::Run,
+            event: RuntimeEvent::Agent { agent_id, event },
+            metadata: BTreeMap::new(),
+        },
+    }
+}
+
+async fn get_events(
+    fixture: &Fixture,
+    bus: Arc<TestEventStreamBus>,
+    uri: String,
+    last_event_id: Option<&str>,
+) -> axum::response::Response {
+    let host = fixture
+        .restore_host_with_bus(bus)
+        .await
+        .expect("host restores");
+    let mut request = Request::get(uri);
+    if let Some(last_event_id) = last_event_id {
+        request = request.header("last-event-id", last_event_id);
+    }
+    router(host)
+        .oneshot(request.body(Body::empty()).expect("request builds"))
+        .await
+        .expect("request completes")
+}
+
+#[tokio::test]
+async fn event_stream_defaults_to_all_and_uses_sse_wire_fields() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let record = event_record(
+        agent_id,
+        7,
+        AgentEvent::Started {
+            turn_id: TurnId::new(),
+        },
+    );
+    let expected_envelope = record.envelope.clone();
+    let bus = Arc::new(TestEventStreamBus::with_events(vec![Ok(record)]));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body = std::str::from_utf8(&body).expect("SSE body is utf-8");
+    assert!(body.contains("id: 7\n"));
+    assert!(body.contains("event: started\n"));
+    let data = body
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("SSE data field exists");
+    let envelope: StreamEnvelope = serde_json::from_str(data).expect("SSE data is an envelope");
+    assert_eq!(envelope, expected_envelope);
+    assert_eq!(bus.replay_starts(), vec![ReplayStart::All]);
+}
+
+#[tokio::test]
+async fn event_stream_replay_new_skips_retained_events() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?replay=new"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(bus.replay_starts(), vec![ReplayStart::New]);
+}
+
+#[tokio::test]
+async fn event_stream_after_cursor_resumes_after_query_cursor() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?after_cursor=41&replay=new"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        bus.replay_starts(),
+        vec![ReplayStart::After(EventCursor::from_transport_sequence(41))]
+    );
+}
+
+#[tokio::test]
+async fn last_event_id_takes_priority_over_query_replay_options() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?after_cursor=41&replay=new"),
+        Some("9"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        bus.replay_starts(),
+        vec![ReplayStart::After(EventCursor::from_transport_sequence(9))]
+    );
+}
+
+#[tokio::test]
+async fn event_stream_rejects_an_invalid_cursor_without_subscribing() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let bus = Arc::new(TestEventStreamBus::with_events(Vec::new()));
+
+    let response = get_events(
+        &fixture,
+        Arc::clone(&bus),
+        format!("/v1/agents/{agent_id}/events?after_cursor=41"),
+        Some("not-a-cursor"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_event_cursor");
+    assert!(bus.replay_starts().is_empty());
+}
+
+#[tokio::test]
+async fn event_stream_returns_gone_before_body_for_an_expired_cursor() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let cursor = EventCursor::from_transport_sequence(3);
+    let bus = Arc::new(TestEventStreamBus::with_error(
+        EventStreamBusError::CursorExpired { cursor },
+    ));
+
+    let response = get_events(
+        &fixture,
+        bus,
+        format!("/v1/agents/{agent_id}/events?after_cursor=3"),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "cursor_expired");
+    assert!(!body.to_string().contains('3'));
+}
+
+#[tokio::test]
+async fn event_stream_emits_one_safe_stream_error_then_closes() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let events = vec![
+        Ok(event_record(
+            agent_id,
+            1,
+            AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
+        )),
+        Err(EventStreamBusError::MissingAgentScope),
+        Ok(event_record(
+            agent_id,
+            2,
+            AgentEvent::Cancelled {
+                usage: Default::default(),
+            },
+        )),
+    ];
+    let bus = Arc::new(TestEventStreamBus::with_events(events));
+
+    let response = get_events(&fixture, bus, format!("/v1/agents/{agent_id}/events"), None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body closes after the stream error");
+    let body = std::str::from_utf8(&body).expect("SSE body is utf-8");
+    assert_eq!(body.matches("event: stream_error\n").count(), 1);
+    assert!(body.contains("\"code\":\"event_stream_unavailable\""));
+    assert!(!body.contains("missing agent scope"));
+    assert!(!body.contains("event: cancelled\n"));
 }

@@ -8,7 +8,9 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true
@@ -27,8 +29,6 @@ wyse-tools.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-futures-util.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

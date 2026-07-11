@@ -6,18 +6,20 @@ use axum::{
         Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::{HeaderValue, StatusCode, header::LOCATION},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION},
+    response::sse::{Event as SseEvent, KeepAlive},
+    response::{IntoResponse, Response, Sse},
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc, time::Duration};
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
-    AgentId, ApprovalDecision, ApprovalId, ChatMessage, HistoryPage, HistoryQuery, RunId,
-    TokenUsage, TurnId,
+    AgentId, ApprovalDecision, ApprovalId, ChatMessage, EventCursor, EventRecord, HistoryPage,
+    HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
 use wyse_store::{AgentState, AgentStatus, StoreError};
@@ -94,6 +96,12 @@ struct HistoryParams {
     limit: usize,
 }
 
+#[derive(Deserialize)]
+struct EventStreamParams {
+    after_cursor: Option<String>,
+    replay: Option<String>,
+}
+
 const fn default_history_limit() -> usize {
     100
 }
@@ -113,6 +121,7 @@ pub fn router(state: Arc<HostState>) -> Router {
             "/v1/agents/{agent_id}/approvals/{approval_id}",
             post(resolve_approval),
         )
+        .route("/v1/agents/{agent_id}/events", get(get_events))
         .with_state(state)
 }
 
@@ -162,6 +171,75 @@ async fn get_messages(
         })
         .await?;
     Ok(Json(page))
+}
+
+async fn get_events(
+    State(state): State<Arc<HostState>>,
+    path: Result<Path<AgentId>, PathRejection>,
+    headers: HeaderMap,
+    query: Result<Query<EventStreamParams>, QueryRejection>,
+) -> Result<impl IntoResponse, HostError> {
+    let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    let Query(query) = query.map_err(|_| HostError::InvalidRequest)?;
+    find_agent(&state, agent_id)?;
+    let replay_start = replay_start(&headers, query)?;
+    let events = state
+        .event_bus()
+        .subscribe_agent(agent_id, replay_start)
+        .await?;
+    let events = stream::unfold(Some(events), |events| async move {
+        let mut events = events?;
+        match events.next().await {
+            Some(Ok(record)) => match event_record_to_sse(record) {
+                Ok(event) => Some((Ok::<_, Infallible>(event), Some(events))),
+                Err(_) => Some((Ok(stream_error_event()), None)),
+            },
+            Some(Err(_)) => Some((Ok(stream_error_event()), None)),
+            None => None,
+        }
+    });
+    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn replay_start(headers: &HeaderMap, query: EventStreamParams) -> Result<ReplayStart, HostError> {
+    if let Some(cursor) = headers.get("last-event-id") {
+        return parse_cursor(cursor.to_str().map_err(|_| HostError::InvalidEventCursor)?);
+    }
+    if let Some(cursor) = query.after_cursor {
+        return parse_cursor(&cursor);
+    }
+    match query.replay.as_deref() {
+        Some("new") => Ok(ReplayStart::New),
+        None => Ok(ReplayStart::All),
+        Some(_) => Err(HostError::InvalidRequest),
+    }
+}
+
+fn parse_cursor(cursor: &str) -> Result<ReplayStart, HostError> {
+    cursor
+        .parse()
+        .map(EventCursor::from_transport_sequence)
+        .map(ReplayStart::After)
+        .map_err(|_| HostError::InvalidEventCursor)
+}
+
+fn event_record_to_sse(record: EventRecord) -> Result<SseEvent, serde_json::Error> {
+    let EventRecord { cursor, envelope } = record;
+    let event_type = match &envelope.event {
+        RuntimeEvent::Agent { event, .. } => event.event_type(),
+        event => event.event_type(),
+    };
+    let data = serde_json::to_string(&envelope)?;
+    Ok(SseEvent::default()
+        .id(cursor.transport_sequence().to_string())
+        .event(event_type)
+        .data(data))
+}
+
+fn stream_error_event() -> SseEvent {
+    SseEvent::default().event("stream_error").data(
+        r#"{"error":{"code":"event_stream_unavailable","message":"event stream is unavailable"}}"#,
+    )
 }
 
 async fn post_message(
@@ -314,6 +392,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::BAD_REQUEST,
             "invalid_history_query",
             "history query is invalid",
+        ),
+        HostError::InvalidEventCursor => (
+            StatusCode::BAD_REQUEST,
+            "invalid_event_cursor",
+            "event cursor is invalid",
         ),
         HostError::ResumeRequired => (
             StatusCode::CONFLICT,
