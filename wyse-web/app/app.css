@@ -113,7 +113,7 @@
     0 1.25rem 4rem oklch(0.48 0.04 236 / 9%), inset 0 1px 0 oklch(1 0 0 / 58%);
   --wyse-shadow-pressed: inset 0 1px 2px oklch(0.35 0.02 236 / 12%);
 
-  --radius: 0.5rem;
+  --radius: 1rem;
   --radius-wyse-control: 999rem;
   --radius-wyse-panel: 0.75rem;
   --radius-wyse-shell: 1rem;

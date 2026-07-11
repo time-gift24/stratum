@@ -1,6 +1,7 @@
 import { Clock3Icon, PlusIcon, SendIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import GlassSurface from "~/components/GlassSurface"
 import { StratumMark } from "~/components/stratum-mark"
 import { Bubble, BubbleContent } from "~/components/ui/bubble"
 import { Button } from "~/components/ui/button"
@@ -76,19 +77,40 @@ export function ChatWorkspace() {
       <div className="relative mx-auto w-full max-w-5xl">
         <Card
           size="sm"
-          className="mb-6 h-[80dvh] w-full 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="relative mb-6 h-[80dvh] w-full bg-transparent ring-0 2xl:absolute 2xl:top-0 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
         >
+          <div className="absolute inset-0 -z-10">
+            <GlassSurface
+              width="100%"
+              height="100%"
+              borderRadius={8}
+              borderWidth={0.06}
+              brightness={68}
+              opacity={0.94}
+              blur={10}
+              displace={0}
+              backgroundOpacity={0.45}
+              saturation={1.15}
+              distortionScale={-40}
+              redOffset={0}
+              greenOffset={2}
+              blueOffset={4}
+              mixBlendMode="normal"
+            />
+          </div>
+
           <CardHeader>
             <CardTitle>{t("chat.history.title")}</CardTitle>
             <CardDescription>{t("chat.history.description")}</CardDescription>
             <CardAction>
               <Button
                 variant="outline"
-                size="icon-lg"
+                size="sm"
                 aria-label={t("chat.history.new")}
                 title={t("chat.history.new")}
               >
-                <PlusIcon aria-hidden="true" />
+                <PlusIcon aria-hidden="true" data-icon="inline-start" />
+                {t("chat.history.new")}
               </Button>
             </CardAction>
           </CardHeader>
@@ -110,11 +132,6 @@ export function ChatWorkspace() {
               </Button>
             ))}
           </CardContent>
-          <CardFooter className="border-t">
-            <p className="text-[0.625rem] text-muted-foreground">
-              {t("chat.history.localOnly")}
-            </p>
-          </CardFooter>
         </Card>
 
         <div
