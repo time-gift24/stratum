@@ -43,6 +43,7 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
   const shellRef = useRef<HTMLDivElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
   const sectionNavRef = useRef<HTMLDivElement>(null)
+  const leftSlotRef = useRef<HTMLDivElement>(null)
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
@@ -107,8 +108,8 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
         xPercent: direction === "forward" ? -6 : 6,
         autoAlpha: 0,
         willChange: "transform, opacity",
-        duration: 0.18,
-        ease: "power2.in",
+        duration: 0.22,
+        ease: "sine.in",
         overwrite: true,
         onComplete: () => navigate(to),
       })
@@ -159,6 +160,7 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
       if (!shell) return
 
       const glass = glassRef.current
+      const leftSlotEl = leftSlotRef.current
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
@@ -166,27 +168,41 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
       if (!isLongzhong) {
         gsap.set(shell, { "--navbar-max-width": "90rem" })
         if (glass) gsap.set(glass, { opacity: 0 })
+        if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
         return
       }
 
       gsap.set(shell, { "--navbar-max-width": "90rem" })
       if (glass) gsap.set(glass, { opacity: 0 })
+      if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
 
       const tl = gsap.timeline()
       tl.to(shell, {
         "--navbar-max-width": "64rem",
         duration: reduceMotion ? 0 : 0.55,
-        ease: "power2.inOut",
+        ease: "sine.inOut",
       })
       tl.to(
         glass,
         {
           opacity: 1,
-          duration: reduceMotion ? 0 : 0.35,
-          ease: "power2.out",
+          duration: reduceMotion ? 0 : 0.4,
+          ease: "sine.inOut",
         },
-        "-=0.08"
+        "-=0.45"
       )
+      if (leftSlotEl) {
+        tl.to(
+          leftSlotEl,
+          {
+            autoAlpha: 1,
+            x: 0,
+            duration: reduceMotion ? 0 : 0.3,
+            ease: "sine.out",
+          },
+          "-=0.3"
+        )
+      }
     },
     { dependencies: [isLongzhong], scope: navRef, revertOnUpdate: true }
   )
@@ -305,7 +321,7 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
 
       {leftSlot ? (
         <div
-          data-slot="navbar-left-slot"
+          ref={leftSlotRef} data-slot="navbar-left-slot"
           className={cn(
             "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block"
           )}

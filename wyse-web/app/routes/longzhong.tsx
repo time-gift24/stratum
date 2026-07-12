@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { HistoryIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -13,6 +13,18 @@ import { Button } from "~/components/ui/button"
 export default function Longzhong() {
   const { t } = useTranslation()
   const [historyOpen, setHistoryOpen] = useState(false)
+
+  // 进入页面后 250ms 自动展开 history drawer，与 navbar timeline 同步
+  useEffect(() => {
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)"
+    ).matches
+    const timer = setTimeout(
+      () => setHistoryOpen(true),
+      reduceMotion ? 0 : 250
+    )
+    return () => clearTimeout(timer)
+  }, [])
 
   return (
     <RouteTransition>

@@ -46,7 +46,9 @@ export function ChatWorkspace({
   >(() => new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const submitButtonRef = useRef<HTMLDivElement>(null)
+  const workspaceRef = useRef<HTMLElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
+  const inputContainerRef = useRef<HTMLDivElement>(null)
 
   const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
   const isAgentBusy =
@@ -65,6 +67,42 @@ export function ChatWorkspace({
       scrollRef(null as unknown as HTMLElement)
     }
   }, [scrollRef])
+
+  // workspace 入场动画：与 navbar 收缩完全同步
+  useGSAP(
+    () => {
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches
+      const messageList = messageListRef.current
+      const inputContainer = inputContainerRef.current
+      if (!messageList || !inputContainer) return
+
+      gsap.set([messageList, inputContainer], {
+        autoAlpha: 0,
+        y: 12,
+      })
+
+      const tl = gsap.timeline({ delay: 0.12 }) // 与 navbar timeline 错开 120ms
+      tl.to(messageList, {
+        autoAlpha: 1,
+        y: 0,
+        duration: reduceMotion ? 0 : 0.45,
+        ease: "sine.out",
+      })
+      tl.to(
+        inputContainer,
+        {
+          autoAlpha: 1,
+          y: 0,
+          duration: reduceMotion ? 0 : 0.35,
+          ease: "sine.out",
+        },
+        "-=0.3"
+      )
+    },
+    { scope: workspaceRef }
+  )
 
   useGSAP(
     () => {
@@ -122,6 +160,7 @@ export function ChatWorkspace({
 
   return (
     <section
+      ref={workspaceRef}
       id="longzhong"
       className="min-h-[100dvh] w-full px-4 pt-20 pb-52 md:px-8 md:pt-24 md:pb-56"
     >
@@ -180,7 +219,7 @@ export function ChatWorkspace({
         </button>
       )}
 
-      <div className="fixed inset-x-0 bottom-0 z-40 mb-4 px-4 md:mb-6 md:px-8">
+      <div ref={inputContainerRef} className="fixed inset-x-0 bottom-0 z-40 mb-4 px-4 md:mb-6 md:px-8">
         <Card
           size="sm"
           className="prompt-input-glass mx-auto wyse-content-width bg-transparent ring-0"

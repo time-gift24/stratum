@@ -110,16 +110,7 @@ export function ChatHistory({
     <AnimatePresence initial={false}>
       {open ? (
         <div key="chat-history-drawer" className="fixed inset-0 z-40">
-          <motion.div
-            initial="hidden"
-            animate="visible"
-            exit="exit"
-            variants={backdropVariants}
-            transition={{ duration: reduceMotion ? 0 : 0.15 }}
-            onClick={onClose}
-            className="absolute inset-0 bg-transparent"
-            aria-hidden="true"
-          />
+          <div className="absolute inset-0 pointer-events-none" />
 
           <motion.aside
             id="chat-history-drawer"
