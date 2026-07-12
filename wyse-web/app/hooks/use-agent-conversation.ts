@@ -16,6 +16,7 @@ import {
   type RecentAgent,
   type StorageLike,
 } from "~/lib/recent-agents"
+import { apiConfiguration } from "~/lib/api-configuration"
 import {
   configForModel,
   configForTemplate,
@@ -92,11 +93,6 @@ export function useAgentConversation(): AgentConversation {
 
   useEffect(() => {
     const configuration = apiConfiguration()
-    if (configuration instanceof ApiError) {
-      setMetadataError(configuration)
-      setMetadataLoading(false)
-      return
-    }
 
     let active = true
     const api = createWyseApi({ baseUrl: configuration.baseUrl })
@@ -139,11 +135,6 @@ export function useAgentConversation(): AgentConversation {
     const controller = new AbortController()
     const generation = selectionGeneration.current
     const configuration = apiConfiguration()
-    if (configuration instanceof ApiError) {
-      if (generation === selectionGeneration.current)
-        dispatch({ type: "connection_error", error: configuration })
-      return () => controller.abort()
-    }
 
     const storage = browserStorage()
     const api = createWyseApi({ baseUrl: configuration.baseUrl })
@@ -209,10 +200,6 @@ export function useAgentConversation(): AgentConversation {
       }
 
       const configuration = apiConfiguration()
-      if (configuration instanceof ApiError) {
-        reportError(configuration)
-        return false
-      }
 
       if (selectedTemplate === null) {
         reportError(
@@ -268,10 +255,6 @@ export function useAgentConversation(): AgentConversation {
     }
 
     const configuration = apiConfiguration()
-    if (configuration instanceof ApiError) {
-      reportError(configuration)
-      return undefined
-    }
 
     return {
       api: createWyseApi({ baseUrl: configuration.baseUrl }),
@@ -451,17 +434,6 @@ export function useAgentConversation(): AgentConversation {
     reconnect,
     removeRecentAgent,
   }
-}
-
-function apiConfiguration(): { baseUrl: string } | ApiError {
-  const baseUrl = import.meta.env.VITE_WYSE_API_BASE_URL?.trim()
-  if (baseUrl) return { baseUrl }
-
-  return new ApiError(
-    "configuration_missing",
-    0,
-    "VITE_WYSE_API_BASE_URL is required"
-  )
 }
 
 function browserStorage(): StorageLike | undefined {

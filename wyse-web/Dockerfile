@@ -9,9 +9,6 @@ RUN pnpm install --frozen-lockfile
 
 COPY . .
 
-ARG VITE_WYSE_API_BASE_URL
-ENV VITE_WYSE_API_BASE_URL=$VITE_WYSE_API_BASE_URL
-
 RUN pnpm build
 
 FROM node:22-alpine

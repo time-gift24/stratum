@@ -1,12 +1,5 @@
 .git
-.github
+.superpowers
 target
-**/target
-node_modules
-**/node_modules
 wyse-web/build
-wyse-web/.react-router
-.DS_Store
-.env
-.env.*
-!.env.example
+wyse-web/node_modules
