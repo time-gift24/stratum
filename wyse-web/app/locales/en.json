@@ -26,8 +26,15 @@
     "assistant": "Longzhong",
     "you": "You",
     "history": {
-      "title": "Conversation history",
-      "new": "New conversation"
+      "title": "History",
+      "new": "New conversation",
+      "activeNow": "Active Now",
+      "empty": "No history yet",
+      "mock": {
+        "viteConfig": "Discussing Vite config optimization…",
+        "retryPolicy": "How to design exponential backoff for tool calls?",
+        "agentTypes": "How should a typed agent state machine be modeled?"
+      }
     },
     "composer": {
       "label": "Message",
@@ -41,6 +48,7 @@
     "ready": "Connected",
     "continue": "Continue",
     "cancel": "Cancel",
+    "scrollToBottom": "Scroll to bottom",
     "reconnect": "Reconnect",
     "missingConversation": "Conversation is missing",
     "removeLocalEntry": "Remove local entry",

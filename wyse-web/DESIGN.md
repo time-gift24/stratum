@@ -4,7 +4,7 @@
 
 运筹是一套克制、可信、偏工程工作台气质的 Agent 产品界面。整体密度为 Daily App Balanced（6/10），布局变化度为 Offset Asymmetric（6/10），动效强度为 Fluid CSS + Focused GSAP（5/10）。页面保留空气感，但工作区的信息层级必须明确；视觉重心来自留白、细分隔线和单一低饱和蓝色，而不是大圆角、霓虹光或大量悬浮卡片。
 
-当前首页 Hero 是未来 Dashboard 的临时占位，保持现有结构，不在本阶段重做。Hero 下方新增 Chat 工作区；两者是连续滚动的两个完整区段。固定 Glass 导航负责表达当前区段，不在 Chat 区重复显示“工作台”标题。
+当前首页 Hero 是未来 Dashboard 的临时占位，保持现有结构，不在本阶段重做。Chat 工作区是独立的 `Longzhong` 路由；固定导航通过左右过渡在两个页面间切换，不在 Chat 区重复显示“工作台”标题。
 
 ## 2. Color Palette & Roles
 
@@ -30,7 +30,7 @@
 
 ## 4. Component Stylings
 
-- **Glass Navigation：** 保留现有 `GlassSurface`、固定定位和滚动后显隐逻辑。桌面导航项为“概览 / 隆中对”。当前项使用文字加深与底部 `2px` Baltic Blue 短线，不增加胶囊底色。
+- **Navigation：** 固定定位、无玻璃拟态。桌面导航项为“概览 / 隆中对”。当前项使用文字加深与底部 `2px` Baltic Blue 短线，不增加胶囊底色。
 - **Active Indicator：** 一个共享元素在导航项之间移动。GSAP 只动画 `transform` 与 `scaleX`，时长 `0.28s`，`power2.out`；减少动态效果时立即定位。点击导航和滚动进入区段都必须同步选中态。
 - **Cards：** 仅历史会话栏和对话输入区使用卡片。圆角 `12px`，1px Whisper Border，阴影极轻。中央对话流没有外层卡片。
 - **Buttons：** 平面填充或描边，无外发光；按下时仅 `translateY(1px)`。触控目标至少 `44px`。
@@ -45,11 +45,11 @@
 1. **Overview (`#overview`)：** 当前 Hero / 未来 Dashboard 占位，`min-height: 100dvh`。
 2. **Longzhong Chat (`#longzhong`)：** 静态 Chat 工作区，`min-height: 100dvh`，顶部预留固定导航的安全距离。
 
-### Glass navigation
+### Navigation
 
 - 左侧品牌保持“运筹”。
 - 右侧顺序为“概览、隆中对、分隔线、语言、主题、注册”。
-- “概览”对应 `#overview`，“隆中对”对应 `#longzhong`。
+- “概览”对应 `/`，“隆中对”对应 `/longzhong`。
 - 导航选中态已经表达页面位置，因此 Chat 区不再渲染“隆中对 Chat 工作台”标题。
 
 ### Chat workspace
@@ -84,7 +84,7 @@
 - 不创建空的右侧事件栏占位。
 - 不使用三等分卡片布局。
 - 不重做当前 Hero；它是未来 Dashboard 的占位。
-- 不修改现有 GlassSurface 的滚动显隐逻辑，只扩展区段选中反馈。
+- 不引入毛玻璃或 backdrop-filter 效果。
 - 不加入流式输出、真实历史持久化、工具事件、审批事件或后端调用。
 - 不显示“滚动探索”、箭头提示或其他填充型导航文案。
 - 不使用绝对定位堆叠正文内容；每个区域都占据清晰的 Grid 空间。

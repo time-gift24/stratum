@@ -1,37 +1,37 @@
-import {
-  type CSSProperties,
-  type ReactNode,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-} from "react"
-
+import { useEffect, useRef, useState, useId, type CSSProperties } from "react"
 import "./GlassSurface.css"
 
-type BlendMode = CSSProperties["mixBlendMode"]
-
 type GlassSurfaceProps = {
-  children?: ReactNode
+  children?: React.ReactNode
   width?: number | string
   height?: number | string
   borderRadius?: number
   borderWidth?: number
   brightness?: number
+  brightnessDark?: number
   opacity?: number
+  opacityDark?: number
   blur?: number
+  blurDark?: number
   displace?: number
   backgroundOpacity?: number
+  backgroundOpacityDark?: number
   saturation?: number
+  saturationDark?: number
   distortionScale?: number
   redOffset?: number
   greenOffset?: number
   blueOffset?: number
-  xChannel?: "R" | "G" | "B"
-  yChannel?: "R" | "G" | "B"
-  mixBlendMode?: BlendMode
+  xChannel?: string
+  yChannel?: string
+  mixBlendMode?: string
   className?: string
   style?: CSSProperties
+}
+
+const isDarkMode = () => {
+  if (typeof document === "undefined") return false
+  return document.documentElement.classList.contains("dark")
 }
 
 const GlassSurface = ({
@@ -41,11 +41,16 @@ const GlassSurface = ({
   borderRadius = 20,
   borderWidth = 0.07,
   brightness = 50,
+  brightnessDark,
   opacity = 0.93,
+  opacityDark,
   blur = 11,
+  blurDark,
   displace = 0,
   backgroundOpacity = 0,
+  backgroundOpacityDark,
   saturation = 1,
+  saturationDark,
   distortionScale = -180,
   redOffset = 0,
   greenOffset = 10,
@@ -62,6 +67,7 @@ const GlassSurface = ({
   const blueGradId = `blue-grad-${uniqueId}`
 
   const [svgSupported, setSvgSupported] = useState(false)
+  const [dark, setDark] = useState(() => isDarkMode())
 
   const containerRef = useRef<HTMLDivElement>(null)
   const feImageRef = useRef<SVGFEImageElement>(null)
@@ -69,6 +75,33 @@ const GlassSurface = ({
   const greenChannelRef = useRef<SVGFEDisplacementMapElement>(null)
   const blueChannelRef = useRef<SVGFEDisplacementMapElement>(null)
   const gaussianBlurRef = useRef<SVGFEGaussianBlurElement>(null)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    const update = () => setDark(isDarkMode())
+    const media = window.matchMedia("(prefers-color-scheme: dark)")
+    const observer = new MutationObserver(update)
+
+    media.addEventListener("change", update)
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    })
+
+    return () => {
+      media.removeEventListener("change", update)
+      observer.disconnect()
+    }
+  }, [])
+
+  const effectiveBrightness = dark ? (brightnessDark ?? brightness) : brightness
+  const effectiveOpacity = dark ? (opacityDark ?? opacity) : opacity
+  const effectiveBlur = dark ? (blurDark ?? blur) : blur
+  const effectiveBackgroundOpacity = dark
+    ? (backgroundOpacityDark ?? backgroundOpacity)
+    : backgroundOpacity
+  const effectiveSaturation = dark ? (saturationDark ?? saturation) : saturation
 
   const generateDisplacementMap = () => {
     const rect = containerRef.current?.getBoundingClientRect()
@@ -91,7 +124,7 @@ const GlassSurface = ({
         <rect x="0" y="0" width="${actualWidth}" height="${actualHeight}" fill="black"></rect>
         <rect x="0" y="0" width="${actualWidth}" height="${actualHeight}" rx="${borderRadius}" fill="url(#${redGradId})" />
         <rect x="0" y="0" width="${actualWidth}" height="${actualHeight}" rx="${borderRadius}" fill="url(#${blueGradId})" style="mix-blend-mode: ${mixBlendMode}" />
-        <rect x="${edgeSize}" y="${edgeSize}" width="${actualWidth - edgeSize * 2}" height="${actualHeight - edgeSize * 2}" rx="${borderRadius}" fill="hsl(0 0% ${brightness}% / ${opacity})" style="filter:blur(${blur}px)" />
+        <rect x="${edgeSize}" y="${edgeSize}" width="${actualWidth - edgeSize * 2}" height="${actualHeight - edgeSize * 2}" rx="${borderRadius}" fill="hsl(0 0% ${effectiveBrightness}% / ${effectiveOpacity})" style="filter:blur(${effectiveBlur}px)" />
       </svg>
     `
 
@@ -122,9 +155,9 @@ const GlassSurface = ({
     height,
     borderRadius,
     borderWidth,
-    brightness,
-    opacity,
-    blur,
+    effectiveBrightness,
+    effectiveOpacity,
+    effectiveBlur,
     displace,
     distortionScale,
     redOffset,
@@ -176,21 +209,22 @@ const GlassSurface = ({
     return div.style.backdropFilter !== ""
   }
 
-  const containerStyle = {
+  const containerStyle: CSSProperties = {
     ...style,
     width: typeof width === "number" ? `${width}px` : width,
     height: typeof height === "number" ? `${height}px` : height,
     borderRadius: `${borderRadius}px`,
-    "--glass-frost": backgroundOpacity,
-    "--glass-saturation": saturation,
-    "--glass-displace": `${displace}px`,
-    "--filter-id": `url(#${filterId})`,
-  } as CSSProperties
+    ["--glass-frost" as string]: effectiveBackgroundOpacity,
+    ["--glass-saturation" as string]: effectiveSaturation,
+    ["--filter-id" as string]: `url(#${filterId})`,
+  }
 
   return (
     <div
       ref={containerRef}
-      className={`glass-surface ${svgSupported ? "glass-surface--svg" : "glass-surface--fallback"} ${className}`}
+      className={`glass-surface ${
+        svgSupported ? "glass-surface--svg" : "glass-surface--fallback"
+      } ${className}`}
       style={containerStyle}
     >
       <svg className="glass-surface__filter" xmlns="http://www.w3.org/2000/svg">
@@ -238,7 +272,7 @@ const GlassSurface = ({
               result="dispGreen"
             />
             <feColorMatrix
-              in="dispGreen"
+              in="dispRed"
               type="matrix"
               values="0 0 0 0 0
                       0 1 0 0 0

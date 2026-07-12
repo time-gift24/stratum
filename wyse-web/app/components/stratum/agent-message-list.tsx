@@ -17,16 +17,17 @@ import {
   type ToolStatus,
 } from "~/components/ai-elements/tool"
 import { CodeBlock } from "~/components/ai-elements/code-block"
-import { MessageScrollerItem } from "~/components/ui/message-scroller"
 import type {
   StableMessage,
   ToolProgress,
 } from "~/features/agent-conversation/types"
+import type { ApiError } from "~/lib/wyse-api"
 
 type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
+  error?: ApiError | null
 }
 
 function toToolStatus(status: ToolProgress["status"]): ToolStatus {
@@ -46,6 +47,7 @@ export function AgentMessageList({
   messages,
   drafts,
   tools,
+  error = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
   const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
@@ -60,15 +62,11 @@ export function AgentMessageList({
         const text = message.text ?? JSON.stringify(message.json)
 
         return (
-          <MessageScrollerItem
+          <div
             key={`${message.agentId}:${message.businessSeq}`}
-            messageId={`${message.agentId}:${message.businessSeq}`}
-            scrollAnchor={isUser}
+            className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2"
           >
             <Message from={isUser ? "user" : "assistant"}>
-              <p className="text-xs text-muted-foreground">
-                {isUser ? t("chat.you") : t("chat.assistant")}
-              </p>
               {message.reasoning ? (
                 <Reasoning>
                   <ReasoningTrigger
@@ -95,16 +93,16 @@ export function AgentMessageList({
                 {dateTimeFormat.format(new Date(message.timestamp))}
               </time>
             </Message>
-          </MessageScrollerItem>
+          </div>
         )
       })}
 
       {Object.entries(drafts).map(([callId, draft]) => (
-        <MessageScrollerItem key={callId} messageId={`draft:${callId}`}>
+        <div
+          key={callId}
+          className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2"
+        >
           <Message from="assistant">
-            <p className="text-xs text-muted-foreground">
-              {t("chat.assistant")} {t("chat.streamStatus")}
-            </p>
             {draft.reasoning ? (
               <Reasoning isStreaming>
                 <ReasoningTrigger
@@ -121,11 +119,11 @@ export function AgentMessageList({
               <MessageResponse>{draft.text}</MessageResponse>
             </MessageContent>
           </Message>
-        </MessageScrollerItem>
+        </div>
       ))}
 
       {Object.values(tools).length > 0 ? (
-        <MessageScrollerItem messageId="tool-process">
+        <div>
           <div className="flex flex-col gap-2">
             {Object.values(tools).map((tool) => (
               <Tool key={tool.callId} defaultOpen={tool.status === "streaming"}>
@@ -149,7 +147,22 @@ export function AgentMessageList({
               </Tool>
             ))}
           </div>
-        </MessageScrollerItem>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
+          <Message from="assistant">
+            <MessageContent>
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                <p className="font-medium">{t("chat.connectionFailed")}</p>
+                {error.message ? (
+                  <p className="mt-1 text-destructive/80">{error.message}</p>
+                ) : null}
+              </div>
+            </MessageContent>
+          </Message>
+        </div>
       ) : null}
     </>
   )
