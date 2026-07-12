@@ -9,8 +9,8 @@ const source = readFileSync(
 
 describe("responsive chat layout tokens", () => {
   it("keeps the medium desktop canvas and history rail compact", () => {
-    expect(source).toContain("clamp(40rem, 58vw, 64rem)")
-    expect(source).toContain("clamp(13rem, 16vw, 18rem)")
-    expect(source).toContain("@media (min-width: 1200px)")
+    expect(source).toContain("clamp(36rem, 58vw, 64rem)")
+    expect(source).toContain("clamp(12rem, 16vw, 18rem)")
+    expect(source).toContain("@media (min-width: 1024px)")
   })
 })

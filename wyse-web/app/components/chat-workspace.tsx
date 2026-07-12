@@ -330,7 +330,7 @@ export function ChatWorkspace() {
 
         <div
           data-slot="chat-main"
-          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4 lg:h-full"
+          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4"
         >
           <MessageScrollerProvider autoScroll>
             <MessageScroller className="flex-1">

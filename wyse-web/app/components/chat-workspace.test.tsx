@@ -64,9 +64,8 @@ describe("ChatWorkspace", () => {
     expect(html).toContain("wyse-history-rail")
     expect(html).not.toContain("max-w-7xl")
     expect(html).toContain('id="longzhong" class="h-[100dvh]')
-    expect(html).toContain(
-      "flex min-h-0 min-w-0 flex-1 flex-col pb-4 lg:h-full"
-    )
+    expect(html).toContain("flex min-h-0 min-w-0 flex-1 flex-col pb-4")
+    expect(html).not.toContain("lg:h-full")
     expect(html).not.toContain("2xl:h-[100dvh]")
     expect(html).not.toContain("2xl:top-16")
     expect(html).not.toContain("2xl:top-6")

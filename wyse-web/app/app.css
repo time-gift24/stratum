@@ -121,10 +121,10 @@
   --page-gutter: clamp(1rem, 2vw, 2rem);
   --content-width: min(
     calc(100vw - var(--page-gutter) * 2),
-    clamp(40rem, 58vw, 64rem)
+    clamp(36rem, 58vw, 64rem)
   );
   --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
-  --history-width: clamp(13rem, 16vw, 18rem);
+  --history-width: clamp(12rem, 16vw, 18rem);
   --text-body: clamp(0.9375rem, 0.12vw + 0.9rem, 1.0625rem);
   --z-grain: 60;
 
@@ -378,7 +378,7 @@
     width: 100%;
   }
 
-  @media (min-width: 1200px) {
+  @media (min-width: 1024px) {
     /* ponytail: keep the rail out of the chat flow once the compact canvas still fits beside it */
     .wyse-history-rail {
       position: absolute;
