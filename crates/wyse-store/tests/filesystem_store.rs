@@ -14,10 +14,10 @@ use wyse_store::{
 };
 
 fn test_model_config() -> ModelConfig {
-    ModelConfig {
-        model: ModelId::new("openai", "test-model").expect("static model is valid"),
-        parameters: serde_json::Map::new(),
-    }
+    ModelConfig::new(
+        ModelId::new("openai", "test-model").expect("static model is valid"),
+        serde_json::Map::new(),
+    )
 }
 
 fn legacy_agent_state_without_model_config(agent_id: AgentId) -> serde_json::Value {
@@ -95,7 +95,7 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
     let agent_id = AgentId::new();
 
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let first = store
@@ -137,6 +137,103 @@ async fn write_model_config_if_missing_upgrades_legacy_state_once() {
 }
 
 #[tokio::test]
+async fn legacy_state_rejects_runtime_load_before_model_config_migration() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem, root);
+
+    store
+        .initialize(AgentId::new(), "a".to_owned())
+        .await
+        .expect("initialize legacy state");
+
+    let error = store
+        .load_agent()
+        .await
+        .expect_err("legacy runtime load requires model migration");
+
+    assert!(matches!(error, StoreError::MissingModelConfig));
+}
+
+#[tokio::test]
+async fn legacy_state_rejects_runtime_updates_before_model_config_migration() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem, root);
+
+    store
+        .initialize(AgentId::new(), "a".to_owned())
+        .await
+        .expect("initialize legacy state");
+
+    let error = store
+        .update_state(
+            AgentStatus::Running,
+            Some(RunId::new()),
+            Some(TurnId::new()),
+            TokenUsage::default(),
+        )
+        .await
+        .expect_err("legacy runtime update requires model migration");
+
+    assert!(matches!(error, StoreError::MissingModelConfig));
+}
+
+#[tokio::test]
+async fn start_turn_reconciles_previous_frontier_before_changing_identity() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let old_run_id = RunId::new();
+    let old_turn_id = TurnId::new();
+    store
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
+        .await
+        .expect("initialize configured state");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("store old identity");
+    store
+        .update_state(
+            AgentStatus::Finished,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("finish old identity");
+    let old_frontier = sequenced_message_envelope(agent_id, old_run_id, old_turn_id, 1);
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&old_frontier));
+
+    let new_run_id = RunId::new();
+    let new_turn_id = TurnId::new();
+    let started = store
+        .start_turn(new_run_id, new_turn_id, test_model_config())
+        .await
+        .expect("start turn after frontier reconciliation");
+
+    assert_eq!(started.last_seq, 1);
+    assert_eq!(started.run_id, Some(new_run_id));
+    assert_eq!(started.turn_id, Some(new_turn_id));
+    let page = store
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: Some(1),
+            limit: 1,
+        })
+        .await
+        .expect("old frontier remains recoverable");
+    assert_eq!(page.events, [old_frontier]);
+}
+
+#[tokio::test]
 async fn complete_iteration_advances_and_persists_usage() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -150,7 +247,7 @@ async fn complete_iteration_advances_and_persists_usage() {
         total_tokens: 5,
     };
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -184,7 +281,7 @@ async fn running_state_rejects_a_different_run_without_writing() {
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -229,7 +326,7 @@ async fn complete_iteration_rejects_non_running_state_without_writing() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let before = filesystem
@@ -268,7 +365,7 @@ async fn complete_iteration_rejects_run_mismatch_without_writing() {
     let other_run_id = RunId::new();
     let turn_id = TurnId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -315,7 +412,7 @@ async fn complete_iteration_rejects_turn_mismatch_without_writing() {
     let turn_id = TurnId::new();
     let other_turn_id = TurnId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -361,7 +458,7 @@ async fn complete_iteration_rejects_iteration_mismatch_without_writing() {
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -409,7 +506,7 @@ async fn complete_iteration_rejects_iteration_overflow_without_writing() {
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     let mut state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     state.status = AgentStatus::Running;
@@ -447,7 +544,7 @@ async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration(
     let old_run_id = RunId::new();
     let old_turn_id = TurnId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     store
@@ -510,7 +607,7 @@ async fn append_rejects_an_already_sequenced_message() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
@@ -533,7 +630,7 @@ async fn append_rejects_a_system_message_before_writing() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
@@ -568,7 +665,7 @@ async fn load_rejects_a_committed_system_message() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     state.last_seq = 1;
@@ -604,7 +701,7 @@ async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let mut envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
@@ -646,7 +743,7 @@ async fn append_rejects_a_message_for_a_different_agent() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let other_agent_id = AgentId::new();
@@ -676,7 +773,7 @@ async fn append_rejects_a_non_message_agent_event() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let turn_id = TurnId::new();
@@ -703,7 +800,7 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     assert_eq!(state.last_seq, 0);
@@ -729,7 +826,7 @@ async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
@@ -756,7 +853,7 @@ async fn load_rejects_a_third_message_beyond_the_single_frontier() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
@@ -785,7 +882,7 @@ async fn load_rejects_noncanonical_message_filenames() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
@@ -806,7 +903,7 @@ async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplicat
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let run_id = RunId::new();
@@ -837,7 +934,7 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let run_id = RunId::new();
@@ -873,7 +970,7 @@ async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let frontier_run_id = RunId::new();
@@ -902,7 +999,7 @@ async fn append_rejects_discontiguous_message_before_advancing_frontier() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
@@ -938,7 +1035,7 @@ async fn load_rejects_missing_committed_message() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     state.last_seq = 2;
@@ -962,7 +1059,7 @@ async fn load_rejects_message_filename_body_sequence_mismatch() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     state.last_seq = 2;
@@ -990,7 +1087,7 @@ async fn load_rejects_message_for_a_different_agent() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let other_agent_id = AgentId::new();
@@ -1013,7 +1110,7 @@ async fn load_rejects_unknown_message_json_fields() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
@@ -1036,7 +1133,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut advanced_state: AgentState = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     advanced_state.last_seq = 1;
@@ -1077,7 +1174,7 @@ async fn terminal_update_reconciles_the_previous_run_frontier_before_a_new_ident
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let old_run_id = RunId::new();
@@ -1141,7 +1238,7 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut latest_state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let run_id = RunId::new();
@@ -1184,7 +1281,7 @@ async fn pagination_keeps_the_first_page_barrier_after_a_later_append() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 3).await;
@@ -1221,7 +1318,7 @@ async fn pagination_rejects_zero_and_oversized_limits() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
 
@@ -1248,7 +1345,7 @@ async fn pagination_rejects_front_beyond_barrier() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 2).await;
@@ -1277,7 +1374,7 @@ async fn pagination_rejects_barrier_beyond_last_committed_sequence() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 2).await;
@@ -1306,7 +1403,7 @@ async fn pagination_rejects_missing_path_inside_committed_range() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 2).await;
@@ -1333,7 +1430,7 @@ async fn pagination_reads_nine_and_ten_in_numeric_order() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 10).await;
@@ -1356,7 +1453,7 @@ async fn pagination_reads_only_the_requested_message_paths() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     store
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize_with_model_config(AgentId::new(), "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 5).await;
@@ -1390,7 +1487,7 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     append_messages(&store, 10).await;
@@ -1419,7 +1516,7 @@ async fn append_stops_after_the_filesystem_cas_retry_limit() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     filesystem.fail_absent_writes();
@@ -1443,7 +1540,7 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
     let mut advanced_state = store
-        .initialize(agent_id, "a".to_owned())
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     let run_id = RunId::new();

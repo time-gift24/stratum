@@ -25,9 +25,6 @@ pub enum StoreError {
     /// A current state lacks the required model configuration.
     #[error("current agent state is missing model configuration")]
     MissingModelConfig,
-    /// A model configuration migration raced with another successful migration.
-    #[error("model configuration is already persisted")]
-    ModelConfigAlreadyPersisted,
     /// An iteration can only complete while the agent is running.
     #[error("agent is not running: {actual:?}")]
     AgentNotRunning {

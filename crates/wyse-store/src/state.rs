@@ -104,10 +104,10 @@ mod tests {
     use super::*;
 
     fn test_model_config() -> ModelConfig {
-        ModelConfig {
-            model: ModelId::new("openai", "test-model").expect("static model is valid"),
-            parameters: serde_json::Map::new(),
-        }
+        ModelConfig::new(
+            ModelId::new("openai", "test-model").expect("static model is valid"),
+            serde_json::Map::new(),
+        )
     }
 
     #[test]
