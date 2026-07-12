@@ -284,7 +284,7 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
               width="100%"
               height="100%"
               borderRadius={999}
-              backgroundOpacity={isDark ? 0.35 : 0}
+              backgroundOpacity={isDark ? 0.35 : 0.15}
               saturation={isDark ? 1.6 : 1.2}
               brightness={isDark ? 28 : 55}
               opacity={isDark ? 0.78 : 0.95}
