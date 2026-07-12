@@ -11,7 +11,7 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 [api]
 bind = "0.0.0.0:8080"
-allowed_origins = ["http://localhost:5173"]
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 [nats]
 url = "nats://nats:4222"
