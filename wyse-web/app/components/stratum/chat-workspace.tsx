@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { useStickToBottom } from "use-stick-to-bottom"
+import { cn } from "~/lib/utils"
 
 import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import { ChatHistory } from "~/components/stratum/chat-history"
@@ -110,6 +111,39 @@ export function ChatWorkspace({
       )
     },
     { scope: workspaceRef }
+  )
+
+  // 输入框位置切换动画：居中 <-> 底部
+  useGSAP(
+    () => {
+      const container = inputContainerRef.current
+      if (!container) return
+
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches
+
+      if (state.agentId === null) {
+        // 居中状态
+        gsap.to(container, {
+          yPercent: -50,
+          top: "50%",
+          bottom: "auto",
+          duration: reduceMotion ? 0 : 0.5,
+          ease: "sine.inOut",
+        })
+      } else {
+        // 底部状态 - 直接向下移动，无宽度变化
+        gsap.to(container, {
+          yPercent: 0,
+          top: "auto",
+          bottom: 0,
+          duration: reduceMotion ? 0 : 0.5,
+          ease: "sine.inOut",
+        })
+      }
+    },
+    { dependencies: [state.agentId], scope: workspaceRef }
   )
 
   useGSAP(
@@ -230,7 +264,7 @@ export function ChatWorkspace({
       <div
         ref={inputContainerRef}
         className={cn(
-          "fixed inset-x-0 z-40 mb-4 px-4 md:mb-6 md:px-8",
+          "fixed inset-x-0 z-40 mb-0 wyse-content-width mx-auto px-4 md:px-0",
           state.agentId === null
             ? "top-1/2 -translate-y-1/2"
             : "bottom-0"
@@ -238,10 +272,7 @@ export function ChatWorkspace({
       >
         <Card
           size="sm"
-          className={cn(
-            "prompt-input-glass mx-auto bg-transparent ring-0",
-            state.agentId === null ? "max-w-2xl" : "wyse-content-width"
-          )}
+          className="prompt-input-glass mx-auto wyse-content-width bg-transparent ring-0"
         >
           <CardContent>
             <PromptInput
