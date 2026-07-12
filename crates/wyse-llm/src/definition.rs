@@ -47,7 +47,7 @@ pub trait ConfigurableLlmProvider: LlmProvider {
 }
 
 /// A registered model and the schema for its provider-specific parameters.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ModelDescriptor {
     /// Canonical provider-scoped model identity.

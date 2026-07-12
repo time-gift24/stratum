@@ -28,7 +28,7 @@ use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, EventCursor, EventRecord, HistoryPage,
-    HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    HistoryQuery, ModelConfig, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
 use wyse_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -57,6 +57,8 @@ pub struct AgentView {
     pub agent_name: String,
     /// Persisted runtime status.
     pub status: AgentStatus,
+    /// Persisted model and provider-specific parameters for future turns.
+    pub model_config: ModelConfig,
     /// Current run identity, when present.
     pub run_id: Option<RunId>,
     /// Current turn identity, when present.
@@ -88,6 +90,13 @@ struct CreateAgentRequest {
 #[serde(deny_unknown_fields)]
 struct MessageRequest {
     text: String,
+    #[serde(default)]
+    model_config: Option<ModelConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct ModelsResponse {
+    models: Vec<wyse_llm::ModelDescriptor>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +128,7 @@ pub fn router(state: Arc<HostState>) -> Router {
         })
         .collect::<Vec<_>>();
     let router = Router::new()
+        .route("/v1/models", get(get_models))
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
@@ -207,7 +217,13 @@ async fn get_agent(
     record_agent_id(agent_id);
     let hosted = find_agent(&state, agent_id)?;
     let persisted = hosted.store.load_agent().await?;
-    Ok(Json(persisted.into()))
+    Ok(Json(AgentView::try_from(persisted)?))
+}
+
+async fn get_models(State(state): State<Arc<HostState>>) -> Json<ModelsResponse> {
+    Json(ModelsResponse {
+        models: state.models(),
+    })
 }
 
 async fn get_messages(
@@ -328,7 +344,9 @@ async fn post_message(
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let request = json_request(request)?;
-    let run_id = state.start_message(agent_id, request.text, None).await?;
+    let run_id = state
+        .start_message(agent_id, request.text, request.model_config)
+        .await?;
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
@@ -477,18 +495,22 @@ fn record_agent_id(agent_id: AgentId) {
     Span::current().record("agent_id", field::display(agent_id));
 }
 
-impl From<AgentState> for AgentView {
-    fn from(state: AgentState) -> Self {
-        Self {
+impl TryFrom<AgentState> for AgentView {
+    type Error = HostError;
+
+    fn try_from(state: AgentState) -> Result<Self, Self::Error> {
+        let model_config = state.model_config.ok_or(StoreError::MissingModelConfig)?;
+        Ok(Self {
             agent_id: state.agent_id,
             agent_name: state.name,
             status: state.status,
+            model_config,
             run_id: state.run_id,
             turn_id: state.turn_id,
             usage: state.usage,
             last_seq: state.last_seq,
             updated_at: state.updated_at,
-        }
+        })
     }
 }
 
@@ -539,6 +561,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::BAD_REQUEST,
             "invalid_message",
             "message text must not be blank",
+        ),
+        HostError::InvalidModelParameters => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_model_parameters",
+            "model parameters are invalid",
         ),
         HostError::InvalidRequest => (
             StatusCode::BAD_REQUEST,

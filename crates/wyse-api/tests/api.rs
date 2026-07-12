@@ -2174,6 +2174,7 @@ async fn get_agent_projects_only_public_view_fields() {
             "agent_id",
             "agent_name",
             "last_seq",
+            "model_config",
             "run_id",
             "status",
             "turn_id",
@@ -2182,6 +2183,124 @@ async fn get_agent_projects_only_public_view_fields() {
         ]
     );
     assert_eq!(body["agent_name"], "coding-agent");
+}
+
+#[tokio::test]
+async fn models_lists_configured_models_with_provider_schema() {
+    let fixture = Fixture::new().await;
+
+    let (_, response) = fixture
+        .request(
+            Request::get("/v1/models")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("models body is json");
+    assert_eq!(body["models"][0]["parameters_schema"]["type"], "object");
+    assert!(body["models"][0].get("default_parameters").is_none());
+}
+
+#[tokio::test]
+async fn message_model_config_is_persisted_and_returned_by_agent_view() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let model_config = fixture.deepseek_model_config();
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"text": "next", "model_config": model_config}).to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = router(host)
+        .oneshot(
+            Request::get(format!("/v1/agents/{agent_id}"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("view body is json");
+    assert_eq!(
+        body["model_config"],
+        serde_json::to_value(fixture.deepseek_model_config()).expect("config serializes")
+    );
+}
+
+#[tokio::test]
+async fn invalid_model_parameters_return_422_without_mutating_state() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let before = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "text": "next",
+                        "model_config": {
+                            "model": "openai:test-model",
+                            "parameters": {"x": true}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_model_parameters");
+    assert!(!body.to_string().contains("\"x\""));
+    let after = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(after.model_config, before.model_config);
 }
 
 #[tokio::test]

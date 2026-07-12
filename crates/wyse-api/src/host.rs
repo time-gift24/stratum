@@ -20,7 +20,7 @@ use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{AgentId, ChatMessage, DangerLevel, ModelConfig, ToolKind};
 use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
-use wyse_llm::{LlmProviderManager, ModelDescriptor};
+use wyse_llm::{LlmError, LlmProviderManager, ModelDescriptor};
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
 use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
@@ -328,7 +328,9 @@ impl HostState {
         let candidate = tokio::select! {
             biased;
             () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
-            result = self.prepare_message_agent(&hosted, requested) => result?,
+            result = self.prepare_message_agent(&hosted, requested) => {
+                result.map_err(map_model_parameter_error)?
+            },
         };
         let result = tokio::select! {
             biased;
@@ -700,6 +702,15 @@ async fn ensure_directory(
     match filesystem.create_dir(path).await {
         Ok(()) | Err(FilesystemError::AlreadyExists { .. }) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn map_model_parameter_error(error: HostError) -> HostError {
+    match error {
+        HostError::Llm(LlmError::InvalidModelParameters { .. }) => {
+            HostError::InvalidModelParameters
+        }
+        error => error,
     }
 }
 
