@@ -3,7 +3,6 @@
 import { Clock3Icon, PlusIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import GlassSurface from "~/components/GlassSurface"
 import { Button } from "~/components/ui/button"
 import {
   Card,
@@ -38,26 +37,6 @@ export function ChatHistory({
       size="sm"
       className="wyse-history-rail relative shrink-0 bg-transparent ring-0"
     >
-      <div className="absolute inset-0 -z-10">
-        <GlassSurface
-          width="100%"
-          height="100%"
-          borderRadius={8}
-          borderWidth={0.06}
-          brightness={68}
-          opacity={0.94}
-          blur={10}
-          displace={0}
-          backgroundOpacity={0.45}
-          saturation={1.15}
-          distortionScale={-40}
-          redOffset={0}
-          greenOffset={2}
-          blueOffset={4}
-          mixBlendMode="normal"
-        />
-      </div>
-
       <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
         <CardTitle className="truncate">{t("chat.history.title")}</CardTitle>
         <CardAction>

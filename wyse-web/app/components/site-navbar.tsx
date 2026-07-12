@@ -6,7 +6,6 @@ import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import GlassSurface from "~/components/GlassSurface"
 import { LanguageToggle } from "~/components/language-toggle"
 import { StratumMark } from "~/components/stratum-mark"
 import { ThemeToggle } from "~/components/theme-toggle"
@@ -33,7 +32,6 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
-  const glassRef = useRef<HTMLDivElement>(null)
   const sectionNavRef = useRef<HTMLDivElement>(null)
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
@@ -87,19 +85,11 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
 
   useGSAP(
     (_, contextSafe) => {
-      const glass = glassRef.current
       const sectionNav = sectionNavRef.current
       const overviewLink = overviewLinkRef.current
       const longzhongLink = longzhongLinkRef.current
       const indicator = indicatorRef.current
-      if (
-        !glass ||
-        !sectionNav ||
-        !overviewLink ||
-        !longzhongLink ||
-        !indicator
-      )
-        return
+      if (!sectionNav || !overviewLink || !longzhongLink || !indicator) return
 
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
@@ -127,28 +117,6 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
         duration: reduceMotion ? 0 : 0.28,
         ease: "power2.out",
       })
-
-      const setGlassVisible = contextSafe((visible: boolean) => {
-        gsap.to(glass, {
-          autoAlpha: visible ? 1 : 0,
-          scale: visible ? 1 : 0.985,
-          duration: reduceMotion ? 0 : visible ? 0.28 : 0.2,
-          ease: visible ? "power2.out" : "power2.in",
-          overwrite: true,
-        })
-      })
-      const updateGlass = contextSafe(() =>
-        setGlassVisible(window.scrollY > 12)
-      )
-
-      gsap.set(glass, {
-        autoAlpha: window.scrollY > 12 ? 1 : 0,
-        scale: window.scrollY > 12 ? 1 : 0.985,
-        transformOrigin: "50% 50%",
-      })
-      window.addEventListener("scroll", updateGlass, { passive: true })
-
-      return () => window.removeEventListener("scroll", updateGlass)
     },
     { dependencies: [activeSection], scope: navRef, revertOnUpdate: true }
   )
@@ -159,26 +127,6 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
       className="fixed inset-x-0 top-4 z-50 px-4 md:top-6 md:px-8"
     >
       <div className="wyse-content-width relative isolate mx-auto flex h-12 items-center gap-4 px-3">
-        <div ref={glassRef} aria-hidden="true" className="site-navbar-glass">
-          <GlassSurface
-            width="100%"
-            height="100%"
-            borderRadius={12}
-            borderWidth={0.1}
-            brightness={68}
-            opacity={0.5}
-            blur={100}
-            displace={2.2}
-            backgroundOpacity={0.05}
-            saturation={1.15}
-            distortionScale={-40}
-            redOffset={0}
-            greenOffset={2}
-            blueOffset={4}
-            mixBlendMode="normal"
-          />
-        </div>
-
         <Link
           to="/"
           onClick={(event) => navigateWithTransition(event, "/", "back")}

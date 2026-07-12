@@ -35,8 +35,6 @@
   --wyse-ink-muted: oklch(0.522 0.017 235);
   --wyse-line: oklch(0.55 0.028 236 / 16%);
   --wyse-line-strong: oklch(0.47 0.032 236 / 24%);
-  --wyse-glass: oklch(1 0 0 / 58%);
-  --wyse-glass-strong: oklch(1 0 0 / 76%);
   --wyse-action: var(--wyse-blue-fusion);
   --wyse-action-ink: var(--wyse-cloud-dancer);
   --wyse-accent: var(--wyse-almost-aqua);
@@ -80,18 +78,6 @@
       transparent 30rem
     ),
     linear-gradient(180deg, var(--wyse-paper), var(--wyse-paper-soft));
-  --wyse-bg-glass-band:
-    linear-gradient(180deg, var(--wyse-glass-strong), var(--wyse-glass)),
-    radial-gradient(
-      circle at 18% 0%,
-      color-mix(in oklch, var(--wyse-cloud-dancer) 72%, transparent),
-      transparent 26rem
-    ),
-    radial-gradient(
-      circle at 88% 100%,
-      color-mix(in oklch, var(--wyse-ice-melt) 38%, transparent),
-      transparent 28rem
-    );
   --wyse-bg-grain:
     radial-gradient(
       circle at 20% 30%,
@@ -136,7 +122,7 @@
   --popover-foreground: var(--wyse-ink);
   --primary: var(--wyse-action);
   --primary-foreground: var(--wyse-action-ink);
-  --secondary: var(--wyse-glass);
+  --secondary: var(--wyse-paper-soft);
   --secondary-foreground: var(--wyse-ink);
   --muted: var(--wyse-paper-soft);
   --muted-foreground: var(--wyse-ink-muted);
@@ -155,7 +141,7 @@
   --sidebar-foreground: var(--wyse-ink);
   --sidebar-primary: var(--wyse-action);
   --sidebar-primary-foreground: var(--wyse-action-ink);
-  --sidebar-accent: var(--wyse-glass);
+  --sidebar-accent: var(--wyse-paper-soft);
   --sidebar-accent-foreground: var(--wyse-ink);
   --sidebar-border: var(--wyse-line);
   --sidebar-ring: var(--wyse-focus);
@@ -174,8 +160,6 @@
   --wyse-ink-muted: oklch(0.685 0.015 238);
   --wyse-line: oklch(0.94 0.006 100 / 13%);
   --wyse-line-strong: oklch(0.94 0.006 100 / 21%);
-  --wyse-glass: oklch(1 0 0 / 8%);
-  --wyse-glass-strong: oklch(1 0 0 / 14%);
   --wyse-action: var(--wyse-baltic-sea);
   --wyse-action-ink: oklch(0.18 0.03 236);
   --wyse-accent: color-mix(
@@ -216,13 +200,6 @@
       transparent 30rem
     ),
     linear-gradient(180deg, var(--wyse-paper), var(--wyse-paper-soft));
-  --wyse-bg-glass-band:
-    linear-gradient(180deg, var(--wyse-glass-strong), var(--wyse-glass)),
-    radial-gradient(
-      circle at 18% 0%,
-      color-mix(in oklch, var(--wyse-cloud-cover) 24%, transparent),
-      transparent 28rem
-    );
   --wyse-bg-grain:
     radial-gradient(
       circle at 20% 30%,
@@ -285,7 +262,6 @@
   --color-wyse-ink-soft: var(--wyse-ink-soft);
   --color-wyse-ink-muted: var(--wyse-ink-muted);
   --color-wyse-line: var(--wyse-line);
-  --color-wyse-glass: var(--wyse-glass);
   --color-wyse-action: var(--wyse-action);
   --color-wyse-accent: var(--wyse-accent);
   --color-wyse-cloud-dancer: var(--wyse-cloud-dancer);
@@ -354,22 +330,6 @@
     background: var(--wyse-bg-paper);
   }
 
-  .wyse-glass-band {
-    @apply border border-wyse-line shadow-wyse-soft;
-    background: var(--wyse-bg-glass-band);
-    backdrop-filter: blur(18px) saturate(130%);
-    -webkit-backdrop-filter: blur(18px) saturate(130%);
-  }
-
-  .site-navbar-glass {
-    @apply pointer-events-none invisible absolute inset-0 z-0 scale-[0.985] opacity-0;
-    will-change: opacity, transform;
-  }
-
-  .site-navbar-glass .glass-surface {
-    @apply min-h-full min-w-full;
-  }
-
   .wyse-content-width {
     width: var(--content-width);
     max-width: 100%;
@@ -409,8 +369,6 @@
     --wyse-ink-muted: oklch(0.685 0.015 238);
     --wyse-line: oklch(0.94 0.006 100 / 13%);
     --wyse-line-strong: oklch(0.94 0.006 100 / 21%);
-    --wyse-glass: oklch(1 0 0 / 8%);
-    --wyse-glass-strong: oklch(1 0 0 / 14%);
     --wyse-action: var(--wyse-baltic-sea);
     --wyse-action-ink: oklch(0.18 0.03 236);
     --wyse-accent: color-mix(
@@ -451,13 +409,6 @@
         transparent 30rem
       ),
       linear-gradient(180deg, var(--wyse-paper), var(--wyse-paper-soft));
-    --wyse-bg-glass-band:
-      linear-gradient(180deg, var(--wyse-glass-strong), var(--wyse-glass)),
-      radial-gradient(
-        circle at 18% 0%,
-        color-mix(in oklch, var(--wyse-cloud-cover) 24%, transparent),
-        transparent 28rem
-      );
     --wyse-bg-grain:
       radial-gradient(
         circle at 20% 30%,
@@ -476,20 +427,6 @@
     --wyse-shadow-soft:
       0 1.25rem 4rem oklch(0 0 0 / 25%), inset 0 1px 0 oklch(1 0 0 / 10%);
     --wyse-shadow-pressed: inset 0 1px 2px oklch(0 0 0 / 24%);
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .wyse-glass-band {
-    @apply bg-wyse-paper;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-
-  .site-navbar-glass .glass-surface {
-    @apply bg-wyse-paper;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
   }
 }
 
