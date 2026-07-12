@@ -35,7 +35,7 @@ the host boundary because a provider owns its own parameter vocabulary. The
 host rejects a non-object `parameters` value before invoking a provider.
 
 The initial configuration for a newly created agent uses the resolved template
-model plus that model's provider-defined default parameters. The template and
+model plus the default embedded in that model's provider schema. The template and
 the persisted `definition.toml` remain the original template definition; they
 do not override an existing agent's current configuration.
 
@@ -44,8 +44,8 @@ do not override an existing agent's current configuration.
 `wyse-llm` will add a narrow `ConfigurableLlmProvider` trait alongside
 `LlmProvider`. A configurable provider is registered by `ModelId` and must:
 
-1. return a JSON Schema for its parameters;
-2. return a complete default parameter object; and
+1. return a JSON Schema for its parameters, including the complete default
+   parameter object in the schema's `default` value; and
 3. validate a complete parameter object and construct a configured
    `Arc<dyn LlmProvider>`.
 
@@ -90,9 +90,9 @@ model-id order. Each item contains:
   "model": "deepseek:deepseek-v4-pro",
   "parameters_schema": {
     "type": "object",
-    "description": "provider-defined complete parameter object"
-  },
-  "default_parameters": { "thinking": { "type": "disabled" } }
+    "description": "provider-defined complete parameter object",
+    "default": { "thinking": { "type": "disabled" } }
+  }
 }
 ```
 
