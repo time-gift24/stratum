@@ -1,12 +1,17 @@
 "use client"
 
-import { useRef, type MouseEvent } from "react"
+import { useEffect, useRef, useState, type MouseEvent } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/react-bits/GlassSurface"
+
+const isDarkMode = () => {
+  if (typeof document === "undefined") return false
+  return document.documentElement.classList.contains("dark")
+}
 import { LanguageToggle } from "~/components/stratum/language-toggle"
 import { StratumMark } from "~/components/stratum/stratum-mark"
 import { ThemeToggle } from "~/components/stratum/theme-toggle"
@@ -42,6 +47,26 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
   const { contextSafe } = useGSAP({ scope: navRef })
 
   const isLongzhong = activeSection === "longzhong"
+  const [isDark, setIsDark] = useState(() => isDarkMode())
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    const update = () => setIsDark(isDarkMode())
+    const media = window.matchMedia("(prefers-color-scheme: dark)")
+    const observer = new MutationObserver(update)
+
+    media.addEventListener("change", update)
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    })
+
+    return () => {
+      media.removeEventListener("change", update)
+      observer.disconnect()
+    }
+  }, [])
 
   const navigateWithTransition = contextSafe(
     (
@@ -259,16 +284,12 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
               width="100%"
               height="100%"
               borderRadius={999}
-              backgroundOpacity={0.12}
-              backgroundOpacityDark={0.2}
-              saturation={1.2}
-              saturationDark={1.4}
-              brightness={50}
-              brightnessDark={40}
-              opacity={0.93}
-              opacityDark={0.85}
-              blur={11}
-              blurDark={14}
+              backgroundOpacity={isDark ? 0.35 : 0.15}
+              saturation={isDark ? 1.6 : 1.2}
+              brightness={isDark ? 28 : 55}
+              opacity={isDark ? 0.78 : 0.95}
+              blur={isDark ? 16 : 11}
+              displace={4}
               className="navbar-glass"
             />
           </div>

@@ -159,6 +159,12 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 即使内部还在演进，公共 API 也要看起来稳定、克制。
 - 保留用户在工作区中的改动，不要回滚无关文件。
 
+## 前端组件约束
+
+- `app/components/ui/*`、`app/components/react-bits/*`、`app/components/ai-elements/*` 视为外部/可复用组件，未经允许不得直接修改其内部实现。
+- 需要适配主题、尺寸或行为时，在使用方组件（如 `site-navbar.tsx`、`chat-workspace.tsx`）中通过 props、CSS 变量或包裹层解决。
+- 确需修改上述组件时，必须先向用户说明原因并获明确同意。
+
 ## 前端设计上下文
 
 前端设计约束由 impeccable skill 管理，两个文件构成完整上下文：
