@@ -39,7 +39,15 @@
     "composer": {
       "label": "输入消息",
       "placeholder": "向隆中对提问……",
-      "send": "发送"
+      "send": "发送",
+      "agent": "智能体",
+      "model": "模型",
+      "thinking": "思考",
+      "disabled": "关闭",
+      "high": "高",
+      "max": "最大",
+      "loadingConfiguration": "正在加载配置……",
+      "selectAgent": "选择智能体"
     },
     "creating": "正在创建对话……",
     "sending": "正在发送……",

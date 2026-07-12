@@ -16,12 +16,38 @@ import {
   type RecentAgent,
   type StorageLike,
 } from "~/lib/recent-agents"
+import {
+  configForModel,
+  configForTemplate,
+  withThinkingLevel,
+  type AgentTemplateView,
+  type ModelConfig,
+  type ModelDescriptor,
+} from "~/lib/model-config"
 import { createWyseApi, ApiError } from "~/lib/wyse-api"
 import { subscribeToAgentEvents } from "~/lib/wyse-event-stream"
+
+export type ComposerConfiguration = {
+  agentTemplates: readonly AgentTemplateView[]
+  models: readonly ModelDescriptor[]
+  metadataLoading: boolean
+  metadataError: ApiError | null
+  selectedTemplate: AgentTemplateView | null
+  agentName: string | null
+  persistedModelConfig: ModelConfig | null
+  currentModelConfig: ModelConfig | null
+  selectedModelConfig: ModelConfig | null
+  existingAgent: boolean
+  turnRunning: boolean
+  selectTemplate(template: AgentTemplateView): void
+  selectModel(descriptor: ModelDescriptor): void
+  setThinkingLevel(level: "disabled" | "high" | "max"): void
+}
 
 export type AgentConversation = {
   state: ConversationState
   recentAgents: readonly RecentAgent[]
+  composerConfiguration: ComposerConfiguration
   selectAgent(agentId: string | null): void
   createConversation(text: string): Promise<boolean>
   sendMessage(text: string): Promise<boolean>
@@ -43,6 +69,18 @@ export function useAgentConversation(): AgentConversation {
   const [recentAgents, setRecentAgents] = useState<readonly RecentAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [reconnectVersion, setReconnectVersion] = useState(0)
+  const [agentTemplates, setAgentTemplates] = useState<
+    readonly AgentTemplateView[]
+  >([])
+  const [models, setModels] = useState<readonly ModelDescriptor[]>([])
+  const [metadataLoading, setMetadataLoading] = useState(true)
+  const [metadataError, setMetadataError] = useState<ApiError | null>(null)
+  const [selectedTemplate, setSelectedTemplate] =
+    useState<AgentTemplateView | null>(null)
+  const [requestedModelConfig, setRequestedModelConfig] =
+    useState<ModelConfig | null>(null)
+  const [acceptedModelConfig, setAcceptedModelConfig] =
+    useState<ModelConfig | null>(null)
   const selectedAgentRef = useRef<string | null>(null)
   const selectionGeneration = useRef(0)
 
@@ -51,12 +89,48 @@ export function useAgentConversation(): AgentConversation {
     if (storage) setRecentAgents(loadRecentAgents(storage))
   }, [])
 
+  useEffect(() => {
+    const configuration = apiConfiguration()
+    if (configuration instanceof ApiError) {
+      setMetadataError(configuration)
+      setMetadataLoading(false)
+      return
+    }
+
+    let active = true
+    const api = createWyseApi({ baseUrl: configuration.baseUrl })
+    void Promise.all([api.getAgentTemplates(), api.getModels()]).then(
+      ([templates, descriptors]) => {
+        if (!active) return
+        setAgentTemplates(templates)
+        setModels(descriptors)
+        setMetadataError(null)
+        setMetadataLoading(false)
+      },
+      (error: unknown) => {
+        if (!active) return
+        setMetadataError(toApiError(error))
+        setMetadataLoading(false)
+      }
+    )
+
+    return () => {
+      active = false
+    }
+  }, [])
+
   const selectAgent = useCallback((agentId: string | null) => {
     selectionGeneration.current += 1
     selectedAgentRef.current = agentId
+    if (agentId === null) setSelectedTemplate(null)
     setSelectedAgentId(agentId)
     dispatch({ type: "agent_selected", agentId })
   }, [])
+
+  useEffect(() => {
+    setRequestedModelConfig(null)
+    setAcceptedModelConfig(null)
+  }, [state.agentId])
 
   useEffect(() => {
     if (selectedAgentId === null) return
@@ -139,11 +213,22 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
 
+      if (selectedTemplate === null) {
+        reportError(
+          new ApiError(
+            "agent_template_not_selected",
+            400,
+            "select an agent first"
+          )
+        )
+        return false
+      }
+
       const generation = selectionGeneration.current
       try {
         const created = await createWyseApi({
           baseUrl: configuration.baseUrl,
-        }).createAgent({ agentName: configuration.agentName, text: prompt })
+        }).createAgent({ agentName: selectedTemplate.agent_name, text: prompt })
         if (generation !== selectionGeneration.current) return false
 
         const recentAgent: RecentAgent = {
@@ -169,7 +254,7 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
     },
-    [reportError, selectAgent]
+    [reportError, selectAgent, selectedTemplate]
   )
 
   const selectedClient = useCallback(() => {
@@ -208,8 +293,20 @@ export function useAgentConversation(): AgentConversation {
       const client = selectedClient()
       if (!client) return false
 
+      const selectedConfig = requestedModelConfig
       try {
-        await client.api.sendMessage(client.agentId, message)
+        await client.api.sendMessage(
+          client.agentId,
+          message,
+          selectedConfig ?? undefined
+        )
+        if (
+          selectedConfig !== null &&
+          client.generation === selectionGeneration.current
+        ) {
+          setAcceptedModelConfig(selectedConfig)
+          setRequestedModelConfig(null)
+        }
         return true
       } catch (error) {
         if (
@@ -220,7 +317,13 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
     },
-    [reportError, selectedClient, state.phase, state.view?.status]
+    [
+      reportError,
+      requestedModelConfig,
+      selectedClient,
+      state.phase,
+      state.view?.status,
+    ]
   )
 
   const resume = useCallback(async () => {
@@ -282,9 +385,60 @@ export function useAgentConversation(): AgentConversation {
     )
   }, [])
 
+  const selectTemplate = useCallback((template: AgentTemplateView) => {
+    setSelectedTemplate(template)
+  }, [])
+
+  const persistedModelConfig = state.view?.model_config ?? null
+  const currentModelConfig =
+    state.agentId === null
+      ? selectedTemplate === null
+        ? null
+        : configForTemplate(selectedTemplate)
+      : (acceptedModelConfig ?? persistedModelConfig)
+  const selectedModelConfig = requestedModelConfig ?? currentModelConfig
+
+  const selectModel = useCallback((descriptor: ModelDescriptor) => {
+    if (selectedAgentRef.current === null) return
+    setRequestedModelConfig(configForModel(descriptor))
+  }, [])
+
+  const setThinkingLevel = useCallback(
+    (level: "disabled" | "high" | "max") => {
+      if (selectedAgentRef.current === null || selectedModelConfig === null)
+        return
+      setRequestedModelConfig({
+        ...selectedModelConfig,
+        parameters: withThinkingLevel(selectedModelConfig.parameters, level),
+      })
+    },
+    [selectedModelConfig]
+  )
+
+  const composerConfiguration: ComposerConfiguration = {
+    agentTemplates,
+    models,
+    metadataLoading,
+    metadataError,
+    selectedTemplate,
+    agentName:
+      state.agentId === null
+        ? (selectedTemplate?.agent_name ?? null)
+        : (state.view?.agent_name ?? null),
+    persistedModelConfig,
+    currentModelConfig,
+    selectedModelConfig,
+    existingAgent: state.agentId !== null,
+    turnRunning: state.view?.status === "running",
+    selectTemplate,
+    selectModel,
+    setThinkingLevel,
+  }
+
   return {
     state,
     recentAgents,
+    composerConfiguration,
     selectAgent,
     createConversation,
     sendMessage,
@@ -296,15 +450,14 @@ export function useAgentConversation(): AgentConversation {
   }
 }
 
-function apiConfiguration(): { baseUrl: string; agentName: string } | ApiError {
+function apiConfiguration(): { baseUrl: string } | ApiError {
   const baseUrl = import.meta.env.VITE_WYSE_API_BASE_URL?.trim()
-  const agentName = import.meta.env.VITE_DEFAULT_AGENT_NAME?.trim()
-  if (baseUrl && agentName) return { baseUrl, agentName }
+  if (baseUrl) return { baseUrl }
 
   return new ApiError(
     "configuration_missing",
     0,
-    "VITE_WYSE_API_BASE_URL and VITE_DEFAULT_AGENT_NAME are required"
+    "VITE_WYSE_API_BASE_URL is required"
   )
 }
 

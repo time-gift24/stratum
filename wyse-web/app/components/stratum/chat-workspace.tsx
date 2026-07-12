@@ -10,6 +10,7 @@ import { cn } from "~/lib/utils"
 
 import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import { ChatHistory } from "~/components/stratum/chat-history"
+import { ModelConfigMenu } from "~/components/stratum/model-config-menu"
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
@@ -262,11 +263,11 @@ export function ChatWorkspace({
 
       <div
         ref={inputContainerRef}
-        className="fixed inset-x-0 z-40 wyse-content-width mx-auto px-4 md:px-0"
+        className="wyse-content-width fixed inset-x-0 z-40 mx-auto px-4 md:px-0"
       >
         <Card
           size="sm"
-          className="prompt-input-glass mx-auto wyse-content-width bg-transparent ring-0"
+          className="prompt-input-glass wyse-content-width mx-auto bg-transparent ring-0"
         >
           <CardContent>
             <PromptInput
@@ -303,7 +304,13 @@ export function ChatWorkspace({
                     </PromptInputButton>
                   ) : null}
                 </PromptInputTools>
-                <div ref={submitButtonRef} className="inline-flex">
+                <div
+                  ref={submitButtonRef}
+                  className="inline-flex items-center gap-1"
+                >
+                  <ModelConfigMenu
+                    configuration={conversation.composerConfiguration}
+                  />
                   <PromptInputSubmit
                     aria-label={t("chat.composer.send")}
                     className={

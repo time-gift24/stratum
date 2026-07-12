@@ -19,6 +19,7 @@ export type AgentView = {
   agent_id: string
   agent_name: string
   status: "idle" | "running"
+  model_config: ModelConfig
   run_id: string | null
   turn_id: string | null
   last_seq: number
