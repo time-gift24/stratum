@@ -109,7 +109,9 @@ export function ChatWorkspace() {
           duration: 0.25,
           ease: "power2.out",
         })
-        const items = wrapper.querySelectorAll<HTMLElement>("[data-history-item]")
+        const items = wrapper.querySelectorAll<HTMLElement>(
+          "[data-history-item]"
+        )
         if (items.length > 0) {
           gsap.fromTo(
             items,
@@ -233,12 +235,12 @@ export function ChatWorkspace() {
   return (
     <section
       id="longzhong"
-      className="h-[100dvh] overflow-hidden px-4 pt-4 pb-8 md:px-8 md:pb-10"
+      className="h-[100dvh] overflow-visible px-4 pt-4 pb-8 md:px-8 md:pb-10"
     >
-      <div className="relative mx-auto flex h-full w-full max-w-5xl flex-col 2xl:block">
+      <div className="wyse-content-width relative mx-auto flex h-full flex-col gap-(--layout-gap)">
         <Card
           size="sm"
-          className="relative mb-6 w-full shrink-0 bg-transparent ring-0 2xl:absolute 2xl:top-16 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="wyse-history-rail relative mb-6 shrink-0 bg-transparent ring-0 lg:mb-0"
         >
           <div className="absolute inset-0 -z-10">
             <GlassSurface
@@ -275,9 +277,7 @@ export function ChatWorkspace() {
                 aria-hidden="true"
                 className="size-4 shrink-0 transition-transform duration-200 ease-out"
                 style={{
-                  transform: isHistoryOpen
-                    ? "rotate(0deg)"
-                    : "rotate(-90deg)",
+                  transform: isHistoryOpen ? "rotate(0deg)" : "rotate(-90deg)",
                 }}
               />
             </button>
@@ -330,7 +330,7 @@ export function ChatWorkspace() {
 
         <div
           data-slot="chat-main"
-          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4 2xl:h-full"
+          className="flex min-h-0 min-w-0 flex-1 flex-col pb-4 lg:h-full"
         >
           <MessageScrollerProvider autoScroll>
             <MessageScroller className="flex-1">
@@ -340,12 +340,13 @@ export function ChatWorkspace() {
                     messages={state.messages}
                     drafts={state.drafts}
                     tools={state.tools}
+                    failure={state.failure}
                   />
                   {Object.values(state.approvals).map((approval) => (
                     <MessageScrollerItem
                       key={approval.approvalId}
                       messageId={`approval:${approval.approvalId}`}
-                      className="animate-in fade-in-0 slide-in-from-bottom-3 zoom-in-[0.96] duration-300"
+                      className="animate-in duration-300 fade-in-0 slide-in-from-bottom-3 zoom-in-[0.96]"
                     >
                       <AgentApprovalCard
                         approval={approval}
@@ -409,7 +410,9 @@ export function ChatWorkspace() {
                           : undefined
                       }
                       disabled={
-                        isSubmitting || isAgentBusy || composerText.trim() === ""
+                        isSubmitting ||
+                        isAgentBusy ||
+                        composerText.trim() === ""
                       }
                     >
                       <ArrowUpIcon aria-hidden="true" />

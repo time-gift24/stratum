@@ -8,6 +8,11 @@ const source = readFileSync(
 )
 
 describe("SiteNavbar section navigation", () => {
+  it("uses the shared responsive content width", () => {
+    expect(source).toContain("wyse-content-width")
+    expect(source).not.toContain("max-w-5xl")
+  })
+
   it("does not retain the removed 80px Longzhong anchor offset", () => {
     expect(source).not.toMatch(/window\.scrollY\s*-\s*scrollOffset/)
   })

@@ -216,7 +216,7 @@ export function SiteNavbar() {
       ref={navRef}
       className="fixed inset-x-0 top-4 z-50 px-4 md:top-6 md:px-8"
     >
-      <div className="relative isolate mx-auto flex h-12 w-full max-w-5xl items-center gap-4 px-3">
+      <div className="wyse-content-width relative isolate mx-auto flex h-12 items-center gap-4 px-3">
         <div ref={glassRef} aria-hidden="true" className="site-navbar-glass">
           <GlassSurface
             width="100%"

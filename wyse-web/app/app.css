@@ -118,6 +118,14 @@
   --radius-wyse-panel: 0.75rem;
   --radius-wyse-shell: 1rem;
   --radius-wyse-field: 0.5rem;
+  --page-gutter: clamp(1rem, 2vw, 2rem);
+  --content-width: min(
+    calc(100vw - var(--page-gutter) * 2),
+    clamp(48rem, 70vw, 64rem)
+  );
+  --layout-gap: clamp(1rem, 1.5vw, 1.5rem);
+  --history-width: 18rem;
+  --text-body: clamp(1rem, 0.12vw + 0.96rem, 1.0625rem);
   --z-grain: 60;
 
   --background: var(--wyse-canvas);
@@ -316,6 +324,7 @@
   }
   body {
     @apply min-h-dvh text-foreground antialiased;
+    font-size: var(--text-body);
     background: var(--wyse-bg-canvas);
     text-rendering: optimizeLegibility;
   }
@@ -352,12 +361,31 @@
   }
 
   .site-navbar-glass {
-    @apply invisible absolute inset-0 z-0 pointer-events-none opacity-0 scale-[0.985];
+    @apply pointer-events-none invisible absolute inset-0 z-0 scale-[0.985] opacity-0;
     will-change: opacity, transform;
   }
 
   .site-navbar-glass .glass-surface {
     @apply min-h-full min-w-full;
+  }
+
+  .wyse-content-width {
+    width: var(--content-width);
+    max-width: 100%;
+  }
+
+  .wyse-history-rail {
+    width: 100%;
+  }
+
+  @media (min-width: 1680px) {
+    /* ponytail: keep the rail out of the chat flow only when it fits beside the centered canvas */
+    .wyse-history-rail {
+      position: absolute;
+      top: 0;
+      right: calc(100% + var(--layout-gap));
+      width: var(--history-width);
+    }
   }
 
   .stratum-mark--compact path {

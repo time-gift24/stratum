@@ -19,6 +19,7 @@ const readyState: ConversationState = {
   drafts: {},
   tools: {},
   approvals: {},
+  failure: null,
   phase: "empty" as const,
   error: null,
 }
@@ -59,12 +60,15 @@ describe("ChatWorkspace", () => {
     const html = renderToStaticMarkup(<ChatWorkspace />)
 
     expect(html).toContain('data-slot="chat-main"')
+    expect(html).toContain("wyse-content-width")
+    expect(html).toContain("wyse-history-rail")
+    expect(html).not.toContain("max-w-7xl")
     expect(html).toContain('id="longzhong" class="h-[100dvh]')
     expect(html).toContain(
-      "flex min-h-0 min-w-0 flex-1 flex-col pb-4 2xl:h-full"
+      "flex min-h-0 min-w-0 flex-1 flex-col pb-4 lg:h-full"
     )
     expect(html).not.toContain("2xl:h-[100dvh]")
-    expect(html).toContain("2xl:top-16")
+    expect(html).not.toContain("2xl:top-16")
     expect(html).not.toContain("2xl:top-6")
     expect(html).not.toContain("2xl:top-0")
     expect(html).not.toContain("2xl:top-1/2")
