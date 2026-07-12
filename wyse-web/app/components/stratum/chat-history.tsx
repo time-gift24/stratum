@@ -11,7 +11,7 @@ import {
 import { useTranslation } from "react-i18next"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 
-import { AnimatedList } from "~/components/AnimatedList"
+import { AnimatedList } from "~/components/react-bits/AnimatedList"
 import { Button } from "~/components/ui/button"
 import type { ConversationState } from "~/features/agent-conversation/types"
 import type { RecentAgent } from "~/lib/recent-agents"
