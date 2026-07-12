@@ -27,8 +27,8 @@ use tracing::{Span, field, info_span};
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, EventCursor, EventRecord,
-    HistoryPage, HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, EventCursor, EventRecord, HistoryPage,
+    HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
 use wyse_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -328,37 +328,7 @@ async fn post_message(
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let request = json_request(request)?;
-    let _admission = state.admit()?;
-    if request.text.trim().is_empty() {
-        return Err(HostError::InvalidMessage);
-    }
-    let hosted = find_agent(&state, agent_id)?;
-    if hosted.needs_resume() {
-        return Err(HostError::ResumeRequired);
-    }
-    let shutdown = state.shutdown_token();
-    let run = hosted.agent.run_turn(ChatMessage::user(request.text));
-    let result = tokio::select! {
-        biased;
-        () = shutdown.cancelled() => {
-            hosted.mark_needs_resume();
-            hosted.agent.stop();
-            return Err(HostError::HostShuttingDown);
-        }
-        result = run => result,
-    };
-    let run_id = match result {
-        Ok(run_id) => run_id,
-        Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
-        Err(error) => {
-            hosted.mark_needs_resume();
-            return Err(error.into());
-        }
-    };
-    if state.is_shutting_down() {
-        hosted.agent.stop();
-        return Err(HostError::HostShuttingDown);
-    }
+    let run_id = state.start_message(agent_id, request.text, None).await?;
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
@@ -371,6 +341,7 @@ async fn resume_agent(
     record_agent_id(agent_id);
     let _admission = state.admit()?;
     let hosted = find_agent(&state, agent_id)?;
+    let _transition = hosted.begin_transition()?;
     let operation = async {
         let persisted = hosted.store.load_agent().await?;
         if persisted.status != AgentStatus::Running {
@@ -381,13 +352,13 @@ async fn resume_agent(
             .into());
         }
         reconcile_started_only(&hosted, &persisted).await?;
-        hosted.agent.resume().await.map_err(HostError::from)
+        hosted.agent().resume().await.map_err(HostError::from)
     };
     let shutdown = state.shutdown_token();
     let result = tokio::select! {
         biased;
         () = shutdown.cancelled() => {
-            hosted.agent.stop();
+            hosted.agent().stop();
             return Err(HostError::HostShuttingDown);
         }
         result = operation => result,
@@ -401,7 +372,7 @@ async fn resume_agent(
         Err(error) => return Err(error),
     };
     if state.is_shutting_down() {
-        hosted.agent.stop();
+        hosted.agent().stop();
         return Err(HostError::HostShuttingDown);
     }
     hosted.clear_needs_resume();
@@ -474,7 +445,8 @@ async fn cancel_agent(
     if hosted.needs_resume() {
         return Err(HostError::ResumeRequired);
     }
-    hosted.agent.stop();
+    let _transition = hosted.begin_transition()?;
+    hosted.agent().stop();
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -487,8 +459,9 @@ async fn resolve_approval(
     record_agent_id(agent_id);
     let request = json_request(request)?;
     let hosted = find_agent(&state, agent_id)?;
+    let _transition = hosted.begin_transition()?;
     hosted
-        .agent
+        .agent()
         .resolve_tool_approval(approval_id, request.decision)
         .await?;
     Ok(StatusCode::NO_CONTENT)

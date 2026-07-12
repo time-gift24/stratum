@@ -23,7 +23,7 @@ use axum::{
 };
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::time::timeout;
 use tower::ServiceExt;
 use wyse_agent::AgentError;
@@ -31,7 +31,8 @@ use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router, ru
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventCursor, EventRecord, EventSource,
-    HistoryPage, ModelId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope, ToolCallDelta, TurnId,
+    HistoryPage, ModelConfig, ModelId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
+    ToolCallDelta, TurnId,
 };
 use wyse_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, LocalFilesystem,
@@ -41,8 +42,8 @@ use wyse_infra::{
     EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
 };
 use wyse_llm::{
-    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
-    LlmProviderManager,
+    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, FinishReason,
+    LlmError, LlmProvider, LlmProviderManager,
 };
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
 
@@ -120,7 +121,7 @@ prompt = "be helpful"
                 .expect("agent root is valid"),
         );
         store
-            .initialize(agent_id, name.to_owned())
+            .initialize_with_model_config(agent_id, name.to_owned(), self.default_model_config())
             .await
             .expect("store initializes");
         let run_id = RunId::new();
@@ -151,6 +152,40 @@ prompt = "be helpful"
         agent_id
     }
 
+    async fn persist_legacy_agent(&self, name: &str, status: AgentStatus) -> AgentId {
+        let agent_id = self.persist_agent(name, status).await;
+        let state_path = self
+            .root
+            .join("history")
+            .join(agent_id.to_string())
+            .join("agent.json");
+        let mut state: Value =
+            serde_json::from_slice(&fs::read(&state_path).expect("agent state is readable"))
+                .expect("agent state is json");
+        state["state_version"] = json!(1);
+        state
+            .as_object_mut()
+            .expect("agent state is an object")
+            .remove("model_config");
+        fs::write(
+            state_path,
+            serde_json::to_vec(&state).expect("legacy state encodes"),
+        )
+        .expect("legacy state is written");
+        agent_id
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model.clone(), Map::new())
+    }
+
+    fn deepseek_model_config(&self) -> ModelConfig {
+        ModelConfig::new(
+            ModelId::new("deepseek", "test-model").expect("model id is valid"),
+            Map::new(),
+        )
+    }
+
     async fn restore_host(&self) -> Result<Arc<HostState>, HostError> {
         self.restore_host_with_bus(Arc::new(InMemoryEventStreamBus::default()))
             .await
@@ -163,6 +198,9 @@ prompt = "be helpful"
         let mut providers = LlmProviderManager::new();
         providers
             .register(Arc::new(TestProvider(self.model.clone())))
+            .expect("provider registers");
+        providers
+            .register(Arc::new(TestProvider(self.deepseek_model_config().model)))
             .expect("provider registers");
         HostState::restore(
             self.config.clone(),
@@ -370,6 +408,7 @@ impl Drop for Fixture {
     }
 }
 
+#[derive(Clone)]
 struct TestProvider(ModelId);
 
 #[async_trait]
@@ -387,6 +426,27 @@ impl LlmProvider for TestProvider {
     }
 }
 
+impl ConfigurableLlmProvider for TestProvider {
+    fn parameter_schema(&self) -> Value {
+        json!({"type": "object", "additionalProperties": false, "default": {}})
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model_id(), Map::new())
+    }
+
+    fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if parameters.is_empty() {
+            Ok(Arc::new(self.clone()))
+        } else {
+            Err(LlmError::InvalidModelParameters {
+                model: self.model_id(),
+            })
+        }
+    }
+}
+
+#[derive(Clone)]
 struct PendingProvider(ModelId);
 
 struct TestEventStreamBus {
@@ -526,6 +586,26 @@ impl LlmProvider for PendingProvider {
     }
 }
 
+impl ConfigurableLlmProvider for PendingProvider {
+    fn parameter_schema(&self) -> Value {
+        json!({"type": "object", "additionalProperties": false, "default": {}})
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model_id(), Map::new())
+    }
+
+    fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if parameters.is_empty() {
+            Ok(Arc::new(self.clone()))
+        } else {
+            Err(LlmError::InvalidModelParameters {
+                model: self.model_id(),
+            })
+        }
+    }
+}
+
 struct ApprovalProvider {
     model: ModelId,
     requests: AtomicUsize,
@@ -579,10 +659,31 @@ impl LlmProvider for ApprovalProvider {
     }
 }
 
+impl ConfigurableLlmProvider for ApprovalProvider {
+    fn parameter_schema(&self) -> Value {
+        json!({"type": "object", "additionalProperties": false, "default": {}})
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model_id(), Map::new())
+    }
+
+    fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if parameters.is_empty() {
+            Ok(Arc::new(Self::new(self.model.clone())))
+        } else {
+            Err(LlmError::InvalidModelParameters {
+                model: self.model_id(),
+            })
+        }
+    }
+}
+
 struct FailFirstMessageFilesystem {
     inner: Arc<dyn Filesystem>,
     created_root: Mutex<Option<VirtualPath>>,
     cleanup_failure: Option<CleanupFailure>,
+    fail_start_turn: AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -597,6 +698,7 @@ impl FailFirstMessageFilesystem {
             inner,
             created_root: Mutex::new(None),
             cleanup_failure: None,
+            fail_start_turn: AtomicBool::new(false),
         }
     }
 
@@ -605,6 +707,16 @@ impl FailFirstMessageFilesystem {
             inner,
             created_root: Mutex::new(None),
             cleanup_failure: Some(cleanup_failure),
+            fail_start_turn: AtomicBool::new(false),
+        }
+    }
+
+    fn failing_start_turn(inner: Arc<dyn Filesystem>) -> Self {
+        Self {
+            inner,
+            created_root: Mutex::new(None),
+            cleanup_failure: None,
+            fail_start_turn: AtomicBool::new(true),
         }
     }
 
@@ -642,6 +754,11 @@ impl Filesystem for FailFirstMessageFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        if path.as_str().ends_with("/agent.json")
+            && self.fail_start_turn.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
         if path.as_str().ends_with("/messages/1.json") {
             return Err(FilesystemError::PermissionDenied { path: path.clone() });
         }
@@ -1204,6 +1321,100 @@ async fn restore_loads_complete_history_directories() {
 }
 
 #[tokio::test]
+async fn restore_migrates_missing_model_config_from_definition_default() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_legacy_agent("coding-agent", AgentStatus::Finished)
+        .await;
+
+    let host = fixture.restore_host().await.expect("host restores");
+    let state = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+
+    assert_eq!(state.model_config, Some(fixture.default_model_config()));
+}
+
+#[tokio::test]
+async fn configured_start_replaces_agent_only_after_turn_is_accepted() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+
+    let result = host
+        .start_message(
+            agent_id,
+            "hello".to_owned(),
+            Some(fixture.deepseek_model_config()),
+        )
+        .await;
+
+    assert!(result.is_ok());
+    let state = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(state.model_config, Some(fixture.deepseek_model_config()));
+}
+
+#[tokio::test]
+async fn configured_start_failure_keeps_the_active_agent_and_model_config() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let filesystem = Arc::new(FailFirstMessageFilesystem::failing_start_turn(Arc::clone(
+        &fixture.filesystem,
+    )));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    providers
+        .register(Arc::new(TestProvider(
+            fixture.deepseek_model_config().model,
+        )))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    let result = host
+        .start_message(
+            agent_id,
+            "hello".to_owned(),
+            Some(fixture.deepseek_model_config()),
+        )
+        .await;
+
+    assert!(result.is_err());
+    let hosted = host.agent(agent_id).expect("agent exists");
+    assert!(!hosted.needs_resume());
+    let state = hosted.store.load_agent().await.expect("state loads");
+    assert_eq!(state.status, AgentStatus::Finished);
+    assert_eq!(state.model_config, Some(fixture.default_model_config()));
+    assert!(
+        host.start_message(agent_id, "retry".to_owned(), None)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn restore_marks_running_agents_as_needing_resume() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
@@ -1300,37 +1511,37 @@ async fn restore_rejects_corrupt_definition() {
 }
 
 #[tokio::test]
-async fn restore_rejects_definition_whose_model_was_removed() {
+async fn restore_uses_persisted_model_config_when_definition_model_was_removed() {
     let fixture = Fixture::new().await;
-    fixture
+    let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Finished)
         .await;
-    let mut config = fixture.config.clone();
-    config
-        .llm
-        .openai
-        .as_mut()
-        .expect("openai is configured")
-        .models
-        .clear();
+    let definition_path = fixture
+        .root
+        .join("history")
+        .join(agent_id.to_string())
+        .join("definition.toml");
+    let definition = fs::read_to_string(&definition_path).expect("definition is readable");
+    fs::write(
+        definition_path,
+        definition.replace("openai:test-model", "deepseek:test-model"),
+    )
+    .expect("definition model is rewritten");
     let mut providers = LlmProviderManager::new();
     providers
         .register(Arc::new(TestProvider(fixture.model.clone())))
         .expect("provider registers");
 
-    let result = HostState::restore(
-        config,
+    let host = HostState::restore(
+        fixture.config.clone(),
         Arc::clone(&fixture.filesystem),
         Arc::new(InMemoryEventStreamBus::default()),
         providers,
     )
-    .await;
-    let error = match result {
-        Ok(_) => panic!("restore should fail"),
-        Err(error) => error,
-    };
+    .await
+    .expect("persisted configuration restores");
 
-    assert!(matches!(error, HostError::Config(_)));
+    assert!(host.agent(agent_id).is_some());
 }
 
 #[tokio::test]
@@ -2745,7 +2956,7 @@ async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
         .await
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("error body is json");
-    assert_eq!(body["error"]["code"], "approval_not_active");
+    assert_eq!(body["error"]["code"], "agent_busy");
 }
 
 fn event_record(agent_id: AgentId, cursor: u64, event: AgentEvent) -> EventRecord {
