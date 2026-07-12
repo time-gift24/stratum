@@ -17,8 +17,8 @@ import {
   type ToolStatus,
 } from "~/components/ai-elements/tool"
 import { CodeBlock } from "~/components/ai-elements/code-block"
-import { MessageScrollerItem } from "~/components/ui/message-scroller"
 import type {
+  ConversationFailure,
   StableMessage,
   ToolProgress,
 } from "~/features/agent-conversation/types"
@@ -27,6 +27,7 @@ type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
+  failure?: ConversationFailure | null
 }
 
 function toToolStatus(status: ToolProgress["status"]): ToolStatus {
@@ -46,6 +47,7 @@ export function AgentMessageList({
   messages,
   drafts,
   tools,
+  failure = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
   const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
@@ -60,11 +62,9 @@ export function AgentMessageList({
         const text = message.text ?? JSON.stringify(message.json)
 
         return (
-          <MessageScrollerItem
+          <div
             key={`${message.agentId}:${message.businessSeq}`}
-            messageId={`${message.agentId}:${message.businessSeq}`}
-            scrollAnchor={isUser}
-            className="animate-in fade-in-0 slide-in-from-bottom-2 duration-200"
+            className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2"
           >
             <Message from={isUser ? "user" : "assistant"}>
               {message.reasoning ? (
@@ -93,12 +93,15 @@ export function AgentMessageList({
                 {dateTimeFormat.format(new Date(message.timestamp))}
               </time>
             </Message>
-          </MessageScrollerItem>
+          </div>
         )
       })}
 
       {Object.entries(drafts).map(([callId, draft]) => (
-        <MessageScrollerItem key={callId} messageId={`draft:${callId}`} className="animate-in fade-in-0 slide-in-from-bottom-2 duration-200">
+        <div
+          key={callId}
+          className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2"
+        >
           <Message from="assistant">
             {draft.reasoning ? (
               <Reasoning isStreaming>
@@ -116,11 +119,11 @@ export function AgentMessageList({
               <MessageResponse>{draft.text}</MessageResponse>
             </MessageContent>
           </Message>
-        </MessageScrollerItem>
+        </div>
       ))}
 
       {Object.values(tools).length > 0 ? (
-        <MessageScrollerItem messageId="tool-process">
+        <div>
           <div className="flex flex-col gap-2">
             {Object.values(tools).map((tool) => (
               <Tool key={tool.callId} defaultOpen={tool.status === "streaming"}>
@@ -144,7 +147,26 @@ export function AgentMessageList({
               </Tool>
             ))}
           </div>
-        </MessageScrollerItem>
+        </div>
+      ) : null}
+
+      {failure ? (
+        <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
+          <Message from="assistant">
+            <MessageContent>
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                <p className="font-medium">{t("chat.failure.title")}</p>
+                <p className="mt-1 text-destructive/80">{failure.text}</p>
+              </div>
+            </MessageContent>
+            <time
+              dateTime={failure.timestamp}
+              className="px-1 text-[0.625rem] text-muted-foreground"
+            >
+              {dateTimeFormat.format(new Date(failure.timestamp))}
+            </time>
+          </Message>
+        </div>
       ) : null}
     </>
   )
