@@ -28,8 +28,8 @@ services:
     ports:
       - "18080:8080"
     volumes:
-      - wyse-agent-data:/var/lib/wyse
-      - ./templates:/var/lib/wyse/agents/templates:ro
+      - wyse-agent-data:/var/lib/stratum
+      - ./templates:/var/lib/stratum/agents/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
