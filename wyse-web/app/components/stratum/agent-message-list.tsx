@@ -21,11 +21,13 @@ import type {
   StableMessage,
   ToolProgress,
 } from "~/features/agent-conversation/types"
+import type { ApiError } from "~/lib/wyse-api"
 
 type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
+  error?: ApiError | null
 }
 
 function toToolStatus(status: ToolProgress["status"]): ToolStatus {
@@ -45,6 +47,7 @@ export function AgentMessageList({
   messages,
   drafts,
   tools,
+  error = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
   const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
@@ -147,6 +150,20 @@ export function AgentMessageList({
         </div>
       ) : null}
 
+      {error ? (
+        <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
+          <Message from="assistant">
+            <MessageContent>
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                <p className="font-medium">{t("chat.connectionFailed")}</p>
+                {error.message ? (
+                  <p className="mt-1 text-destructive/80">{error.message}</p>
+                ) : null}
+              </div>
+            </MessageContent>
+          </Message>
+        </div>
+      ) : null}
     </>
   )
 }

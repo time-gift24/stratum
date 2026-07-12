@@ -7,6 +7,13 @@ import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { useStickToBottom } from "use-stick-to-bottom"
 
+import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
+import { ChatHistory } from "~/components/stratum/chat-history"
+import {
+  finishApprovalSubmission,
+  startApprovalSubmission,
+} from "~/components/stratum/agent-approval-submissions"
+import { AgentMessageList } from "~/components/stratum/agent-message-list"
 import {
   PromptInput,
   PromptInputBody,
@@ -16,18 +23,20 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "~/components/ai-elements/prompt-input"
-import {
-  finishApprovalSubmission,
-  startApprovalSubmission,
-} from "~/components/stratum/agent-approval-submissions"
-import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
-import { AgentMessageList } from "~/components/stratum/agent-message-list"
 import { Card, CardContent } from "~/components/ui/card"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
 gsap.registerPlugin(useGSAP)
 
-export function ChatWorkspace() {
+type ChatWorkspaceProps = {
+  historyOpen?: boolean
+  onHistoryOpenChange?(open: boolean): void
+}
+
+export function ChatWorkspace({
+  historyOpen = false,
+  onHistoryOpenChange,
+}: ChatWorkspaceProps) {
   const { t } = useTranslation()
   const conversation = useAgentConversation()
   const [composerText, setComposerText] = useState("")
@@ -38,7 +47,8 @@ export function ChatWorkspace() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const submitButtonRef = useRef<HTMLDivElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
-  const { state } = conversation
+
+  const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
 
@@ -115,6 +125,16 @@ export function ChatWorkspace() {
       id="longzhong"
       className="min-h-[100dvh] w-full px-4 pt-20 pb-52 md:px-8 md:pt-24 md:pb-56"
     >
+      <ChatHistory
+        open={historyOpen}
+        onClose={() => onHistoryOpenChange?.(false)}
+        state={state}
+        recentAgents={recentAgents}
+        onSelectAgent={selectAgent}
+        onRemoveAgent={removeRecentAgent}
+        onNewConversation={() => selectAgent(null)}
+      />
+
       <div className="wyse-content-width mx-auto">
         <div data-slot="chat-main" className="flex min-w-0 flex-col">
           <div
@@ -129,6 +149,7 @@ export function ChatWorkspace() {
               messages={state.messages}
               drafts={state.drafts}
               tools={state.tools}
+              error={state.error}
             />
             {Object.values(state.approvals).map((approval) => (
               <div
@@ -152,17 +173,17 @@ export function ChatWorkspace() {
         <button
           type="button"
           onClick={() => scrollToBottom()}
-          className="fixed bottom-28 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-background/90 p-2 text-foreground shadow-wyse-soft backdrop-blur-sm transition-transform hover:scale-105"
+          className="fixed bottom-28 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-background/90 p-2 text-foreground shadow-wyse-soft transition-transform hover:scale-105"
           aria-label={t("chat.scrollToBottom")}
         >
           <ArrowDownIcon className="size-4" aria-hidden="true" />
         </button>
       )}
 
-      <div className="fixed inset-x-0 bottom-4 z-40 px-4 md:bottom-6 md:px-8">
+      <div className="fixed inset-x-0 bottom-0 z-40 mb-4 px-4 md:mb-6 md:px-8">
         <Card
           size="sm"
-          className="wyse-content-width prompt-input-glass mx-auto bg-transparent ring-0"
+          className="prompt-input-glass mx-auto wyse-content-width bg-transparent ring-0"
         >
           <CardContent>
             <PromptInput

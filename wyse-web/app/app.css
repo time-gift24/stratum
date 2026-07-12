@@ -335,17 +335,19 @@
     max-width: 100%;
   }
 
-  .wyse-history-rail {
-    width: 100%;
+  .wyse-history-drawer {
+    position: absolute;
+    top: 4.5rem;
+    left: 0;
+    width: min(85vw, 280px);
+    transform-origin: top right;
   }
 
-  @media (min-width: 1024px) {
-    /* ponytail: keep the rail out of the chat flow once the compact canvas still fits beside it */
-    .wyse-history-rail {
-      position: absolute;
-      top: 0;
-      right: calc(100% + var(--layout-gap));
-      width: var(--history-width);
+  @media (min-width: 1536px) {
+    .wyse-history-drawer {
+      left: auto;
+      right: calc(50% + 33rem);
+      width: min(calc(50% - 33rem - 1rem), 16rem);
     }
   }
 

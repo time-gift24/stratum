@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState, type MouseEvent } from "react"
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
@@ -32,9 +32,11 @@ type SiteSection = "overview" | "longzhong"
 
 type SiteNavbarProps = {
   activeSection: SiteSection
+  leftSlot?: ReactNode
+  rightSlot?: ReactNode
 }
 
-export function SiteNavbar({ activeSection }: SiteNavbarProps) {
+export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarProps) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
@@ -191,6 +193,9 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
 
   const NavContent = (
     <div className="relative z-10 flex h-12 w-full items-center gap-4 px-3">
+      {leftSlot ? (
+        <div className="flex items-center 2xl:hidden">{leftSlot}</div>
+      ) : null}
       <Link
         to="/"
         onClick={(event) => navigateWithTransition(event, "/", "back")}
@@ -255,6 +260,7 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
           />
         </div>
         <Separator orientation="vertical" className="hidden md:block" />
+        {rightSlot}
         <LanguageToggle />
         <ThemeToggle />
         <Button size="lg">{t("actions.signUp")}</Button>
@@ -265,7 +271,7 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
   return (
     <header
       ref={navRef}
-      className="fixed inset-x-0 top-4 z-50 px-4 md:top-6 md:px-8"
+      className="fixed inset-x-0 top-0 z-50 mt-4 md:mt-6 px-4 md:px-8"
     >
       <div
         ref={shellRef}
@@ -296,6 +302,18 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
         )}
         {NavContent}
       </div>
+
+      {leftSlot ? (
+        <div
+          data-slot="navbar-left-slot"
+          className={cn(
+            "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block"
+          )}
+          style={{ right: "calc(50% + 33rem)" }}
+        >
+          <div className="pointer-events-auto">{leftSlot}</div>
+        </div>
+      ) : null}
     </header>
   )
 }
