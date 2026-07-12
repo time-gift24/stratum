@@ -141,8 +141,13 @@ describe("ChatWorkspace", () => {
     expect(html.indexOf("Current conversation")).toBeLessThan(
       html.indexOf('data-slot="history-divider"')
     )
-    expect(html).not.toContain("Newer history")
-    expect(html).not.toContain("Older history")
+    // History items stay mounted for the expand animation but are collapsed.
+    expect(html).toContain("Newer history")
+    expect(html).toContain("Older history")
+    // The wrapper div is collapsed: aria-hidden + height:0 + opacity:0.
+    expect(html).toMatch(
+      /<div[^>]*overflow-hidden[^>]*aria-hidden="true"[^>]*style="height:0;opacity:0"[^>]*>/
+    )
   })
 
   it("does not fill an idle composer with a connection state or resume action", async () => {

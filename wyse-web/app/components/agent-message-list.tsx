@@ -64,11 +64,9 @@ export function AgentMessageList({
             key={`${message.agentId}:${message.businessSeq}`}
             messageId={`${message.agentId}:${message.businessSeq}`}
             scrollAnchor={isUser}
+            className="animate-in fade-in-0 slide-in-from-bottom-2 duration-200"
           >
             <Message from={isUser ? "user" : "assistant"}>
-              <p className="text-xs text-muted-foreground">
-                {isUser ? t("chat.you") : t("chat.assistant")}
-              </p>
               {message.reasoning ? (
                 <Reasoning>
                   <ReasoningTrigger
@@ -100,11 +98,8 @@ export function AgentMessageList({
       })}
 
       {Object.entries(drafts).map(([callId, draft]) => (
-        <MessageScrollerItem key={callId} messageId={`draft:${callId}`}>
+        <MessageScrollerItem key={callId} messageId={`draft:${callId}`} className="animate-in fade-in-0 slide-in-from-bottom-2 duration-200">
           <Message from="assistant">
-            <p className="text-xs text-muted-foreground">
-              {t("chat.assistant")} {t("chat.streamStatus")}
-            </p>
             {draft.reasoning ? (
               <Reasoning isStreaming>
                 <ReasoningTrigger

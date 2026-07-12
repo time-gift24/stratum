@@ -1,12 +1,15 @@
+"use client"
+
 import { useRef, useState } from "react"
 import {
   ArrowUpIcon,
   ChevronDownIcon,
-  ChevronRightIcon,
   Clock3Icon,
   PlusIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { useGSAP } from "@gsap/react"
+import gsap from "gsap"
 
 import { AgentApprovalCard } from "~/components/agent-approval-card"
 import {
@@ -43,6 +46,8 @@ import {
 } from "~/components/ui/message-scroller"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
+gsap.registerPlugin(useGSAP)
+
 export function ChatWorkspace() {
   const { t } = useTranslation()
   const conversation = useAgentConversation()
@@ -53,6 +58,8 @@ export function ChatWorkspace() {
     ReadonlySet<string>
   >(() => new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const historyContentRef = useRef<HTMLDivElement>(null)
+  const submitButtonRef = useRef<HTMLDivElement>(null)
   const { state } = conversation
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
@@ -67,6 +74,79 @@ export function ChatWorkspace() {
         (agent) => agent.agentId !== activeAgent.agentId
       )
     : conversation.recentAgents
+
+  useGSAP(
+    () => {
+      const wrapper = historyContentRef.current
+      if (!wrapper) return
+
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches
+
+      if (reduceMotion) {
+        gsap.set(wrapper, {
+          height: isHistoryOpen ? "auto" : 0,
+          opacity: isHistoryOpen ? 1 : 0,
+        })
+        return
+      }
+
+      if (isHistoryOpen) {
+        gsap.to(wrapper, {
+          height: "auto",
+          opacity: 1,
+          duration: 0.25,
+          ease: "power2.out",
+        })
+        const items = wrapper.querySelectorAll<HTMLElement>("[data-history-item]")
+        if (items.length > 0) {
+          gsap.fromTo(
+            items,
+            { opacity: 0, y: 8 },
+            {
+              opacity: 1,
+              y: 0,
+              duration: 0.2,
+              stagger: 0.04,
+              ease: "power2.out",
+              delay: 0.05,
+            }
+          )
+        }
+      } else {
+        gsap.to(wrapper, {
+          height: 0,
+          opacity: 0,
+          duration: 0.2,
+          ease: "power2.in",
+        })
+      }
+    },
+    { dependencies: [isHistoryOpen] }
+  )
+
+  useGSAP(
+    () => {
+      const btn = submitButtonRef.current
+      if (!btn) return
+
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches
+      if (reduceMotion) {
+        gsap.set(btn, { scale: 1 })
+        return
+      }
+
+      if (isSubmitting) {
+        gsap.to(btn, { scale: 0.92, duration: 0.1, ease: "power2.out" })
+      } else {
+        gsap.to(btn, { scale: 1, duration: 0.2, ease: "expo.out" })
+      }
+    },
+    { dependencies: [isSubmitting] }
+  )
 
   const renderConversationEntry = (
     agent: (typeof conversation.recentAgents)[number]
@@ -177,17 +257,15 @@ export function ChatWorkspace() {
               <CardTitle className="truncate">
                 {t("chat.history.title")}
               </CardTitle>
-              {isHistoryOpen ? (
-                <ChevronDownIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0"
-                />
-              ) : (
-                <ChevronRightIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0"
-                />
-              )}
+              <ChevronDownIcon
+                aria-hidden="true"
+                className="size-4 shrink-0 transition-transform duration-200 ease-out"
+                style={{
+                  transform: isHistoryOpen
+                    ? "rotate(0deg)"
+                    : "rotate(-90deg)",
+                }}
+              />
             </button>
             <CardAction className="col-start-2 row-span-1 row-start-1 self-center">
               <Button
@@ -210,19 +288,28 @@ export function ChatWorkspace() {
             </CardContent>
           ) : null}
           {activeAgent && historicalAgents.length > 0 ? (
-            <Separator
-              data-slot="history-divider"
-              className="mx-(--card-spacing) w-auto"
-            />
-          ) : null}
-          {isHistoryOpen ? (
-            <CardContent
-              id="chat-history"
-              data-slot="history-conversations"
-              className="flex flex-col gap-1.5"
+            <div
+              ref={historyContentRef}
+              className="overflow-hidden"
+              aria-hidden={!isHistoryOpen}
+              style={{ height: 0, opacity: 0 }}
             >
-              {historicalAgents.map(renderConversationEntry)}
-            </CardContent>
+              <Separator
+                data-slot="history-divider"
+                className="mx-(--card-spacing) w-auto"
+              />
+              <CardContent
+                id="chat-history"
+                data-slot="history-conversations"
+                className="flex flex-col gap-1.5"
+              >
+                {historicalAgents.map((agent) => (
+                  <div key={agent.agentId} data-history-item>
+                    {renderConversationEntry(agent)}
+                  </div>
+                ))}
+              </CardContent>
+            </div>
           ) : null}
         </Card>
 
@@ -243,6 +330,7 @@ export function ChatWorkspace() {
                     <MessageScrollerItem
                       key={approval.approvalId}
                       messageId={`approval:${approval.approvalId}`}
+                      className="animate-in fade-in-0 slide-in-from-bottom-3 zoom-in-[0.96] duration-300"
                     >
                       <AgentApprovalCard
                         approval={approval}
@@ -297,19 +385,21 @@ export function ChatWorkspace() {
                       </PromptInputButton>
                     ) : null}
                   </PromptInputTools>
-                  <PromptInputSubmit
-                    aria-label={t("chat.composer.send")}
-                    className={
-                      composerText.trim() === ""
-                        ? "bg-muted text-muted-foreground hover:bg-muted"
-                        : undefined
-                    }
-                    disabled={
-                      isSubmitting || isAgentBusy || composerText.trim() === ""
-                    }
-                  >
-                    <ArrowUpIcon aria-hidden="true" />
-                  </PromptInputSubmit>
+                  <div ref={submitButtonRef} className="inline-flex">
+                    <PromptInputSubmit
+                      aria-label={t("chat.composer.send")}
+                      className={
+                        composerText.trim() === ""
+                          ? "bg-muted text-muted-foreground hover:bg-muted"
+                          : undefined
+                      }
+                      disabled={
+                        isSubmitting || isAgentBusy || composerText.trim() === ""
+                      }
+                    >
+                      <ArrowUpIcon aria-hidden="true" />
+                    </PromptInputSubmit>
+                  </div>
                 </PromptInputFooter>
               </PromptInput>
             </CardContent>
