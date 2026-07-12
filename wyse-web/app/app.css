@@ -373,18 +373,10 @@
   }
 
   .prompt-input-glass {
-    background: color-mix(in oklch, var(--wyse-canvas) 86%, transparent);
-    backdrop-filter: blur(28px) saturate(1.6);
-    -webkit-backdrop-filter: blur(28px) saturate(1.6);
+    background: var(--wyse-canvas);
     box-shadow:
       0 -1.5rem 2.5rem color-mix(in oklch, var(--wyse-canvas) 60%, transparent),
       var(--wyse-shadow-soft);
-  }
-
-  .dark .prompt-input-glass {
-    background: color-mix(in oklch, var(--wyse-canvas) 92%, transparent);
-    backdrop-filter: blur(32px) saturate(1.7);
-    -webkit-backdrop-filter: blur(32px) saturate(1.7);
   }
 
 }
