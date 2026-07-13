@@ -8,13 +8,13 @@ import gsap from "gsap"
 import { useStickToBottom } from "use-stick-to-bottom"
 import { cn } from "~/lib/utils"
 
-import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import { ChatHistory } from "~/components/stratum/chat-history"
 import {
   AgentConfigMenu,
   ModelConfigMenu,
 } from "~/components/stratum/model-config-menu"
 import {
+  type ApprovalDecision,
   finishApprovalSubmission,
   startApprovalSubmission,
 } from "~/components/stratum/agent-approval-submissions"
@@ -46,9 +46,9 @@ export function ChatWorkspace({
   const conversation = useAgentConversation()
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [submittingApprovalIds, setSubmittingApprovalIds] = useState<
-    ReadonlySet<string>
-  >(() => new Set())
+  const [approvalSubmissions, setApprovalSubmissions] = useState<
+    ReadonlyMap<string, ApprovalDecision>
+  >(() => new Map())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const submitButtonRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLElement>(null)
@@ -191,14 +191,14 @@ export function ChatWorkspace({
     approvalId: string,
     decision: "approve" | "reject"
   ) => {
-    setSubmittingApprovalIds((approvalIds) =>
-      startApprovalSubmission(approvalIds, approvalId)
+    setApprovalSubmissions((submissions) =>
+      startApprovalSubmission(submissions, approvalId, decision)
     )
     try {
       await conversation.resolveApproval(approvalId, decision)
     } finally {
-      setSubmittingApprovalIds((approvalIds) =>
-        finishApprovalSubmission(approvalIds, approvalId)
+      setApprovalSubmissions((submissions) =>
+        finishApprovalSubmission(submissions, approvalId)
       )
     }
   }
@@ -233,22 +233,13 @@ export function ChatWorkspace({
               messages={state.messages}
               drafts={state.drafts}
               tools={state.tools}
+              approvals={state.approvals}
+              approvalSubmissions={approvalSubmissions}
+              onApprovalDecision={(approvalId, decision) => {
+                void resolveApproval(approvalId, decision)
+              }}
               error={state.error}
             />
-            {Object.values(state.approvals).map((approval) => (
-              <div
-                key={approval.approvalId}
-                className="animate-in duration-300 fade-in-0 slide-in-from-bottom-3 zoom-in-[0.96]"
-              >
-                <AgentApprovalCard
-                  approval={approval}
-                  submitting={submittingApprovalIds.has(approval.approvalId)}
-                  onDecision={(decision) => {
-                    void resolveApproval(approval.approvalId, decision)
-                  }}
-                />
-              </div>
-            ))}
           </div>
         </div>
       </div>

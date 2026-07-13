@@ -65,6 +65,37 @@
     "reject": "Reject",
     "toolKind": "Tool kind",
     "dangerLevel": "Danger level",
+    "toolTrace": {
+      "status": {
+        "streaming": "Running {{tool}}",
+        "finished": "{{tool}} completed",
+        "failed": "{{tool}} failed"
+      },
+      "input": "Input",
+      "rawResult": "Raw result",
+      "error": "Error"
+    },
+    "approval": {
+      "title": "Allow {{agent}} to use {{tool}}?",
+      "titleWithResource": "Allow {{agent}} to use {{tool}} on {{resource}}?",
+      "why": "Why this is needed",
+      "whyDescription": "This step is required to continue the current request.",
+      "impactLabel": "What will happen",
+      "impact": {
+        "read": "The tool will read information needed for this request.",
+        "readWithResource": "The tool will read information from {{resource}}.",
+        "write": "The tool may change local data or invoke an external action.",
+        "writeWithResource": "The tool may change {{resource}}."
+      },
+      "riskLabel": "Risk and reversibility",
+      "risk": {
+        "low": "The impact is limited. You can review the technical details before allowing it.",
+        "medium": "This may change data. Reversibility depends on the tool, so review the details before allowing it.",
+        "high": "This can have a significant or difficult-to-reverse effect. Review the details carefully."
+      },
+      "allowing": "Allowing…",
+      "declining": "Declining…"
+    },
     "streamStatus": "Streaming",
     "reasoningComplete": "Reasoning complete",
     "thinking": "Thinking",

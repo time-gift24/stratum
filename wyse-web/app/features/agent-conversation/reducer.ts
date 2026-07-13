@@ -129,6 +129,14 @@ function projectStableMessage(
 ): ConversationState {
   if (envelope.business_seq === undefined) return state
 
+  const event = envelope.event.data.event
+  if (event.type !== "message") return state
+
+  const { message, turn_id: turnId } = event.data
+  if (message.role === "tool") {
+    return projectPersistedToolResult(state, turnId, message)
+  }
+
   const key = `${agentId}:${envelope.business_seq}`
   if (
     state.messages.some(
@@ -138,23 +146,14 @@ function projectStableMessage(
     return state
   }
 
-  const message = envelope.event.data.event
-  if (message.type !== "message") return state
-
   const stableMessage: StableMessage = {
     agentId,
     businessSeq: envelope.business_seq,
-    role: message.data.message.role,
-    text:
-      message.data.message.content.type === "text"
-        ? message.data.message.content.data
-        : null,
-    json:
-      message.data.message.content.type === "json"
-        ? message.data.message.content.data
-        : null,
-    reasoning: message.data.message.reasoning_content ?? null,
-    toolCalls: (message.data.message.tool_calls ?? []).map((toolCall) => ({
+    role: message.role,
+    text: message.content.type === "text" ? message.content.data : null,
+    json: message.content.type === "json" ? message.content.data : null,
+    reasoning: message.reasoning_content ?? null,
+    toolCalls: (message.tool_calls ?? []).map((toolCall) => ({
       callId: toolCall.call_id,
       name: toolCall.name,
       arguments: toolCall.arguments,
@@ -162,12 +161,58 @@ function projectStableMessage(
     timestamp: envelope.timestamp,
   }
 
+  const stateWithTools = stableMessage.toolCalls.reduce(
+    (currentState, toolCall) =>
+      projectPersistedToolCall(currentState, turnId, toolCall),
+    state
+  )
+
   return {
-    ...state,
+    ...stateWithTools,
     messages: [...state.messages, stableMessage].sort(
       (left, right) => left.businessSeq - right.businessSeq
     ),
   }
+}
+
+function projectPersistedToolCall(
+  state: ConversationState,
+  turnId: string,
+  toolCall: StableMessage["toolCalls"][number]
+): ConversationState {
+  const existing = state.tools[toolCall.callId]
+  const tool: ToolProgress = {
+    callId: toolCall.callId,
+    llmCallId: existing?.llmCallId || `turn:${turnId}`,
+    name: existing?.name ?? toolCall.name,
+    argumentsText:
+      existing?.argumentsText || JSON.stringify(toolCall.arguments),
+    result: existing?.result ?? null,
+    errorText: existing?.errorText ?? null,
+    status: existing?.status ?? "streaming",
+  }
+  return { ...state, tools: { ...state.tools, [tool.callId]: tool } }
+}
+
+function projectPersistedToolResult(
+  state: ConversationState,
+  turnId: string,
+  message: Extract<AgentEvent, { type: "message" }>["data"]["message"]
+): ConversationState {
+  if (!message.tool_call_id) return state
+
+  const existing = state.tools[message.tool_call_id]
+  const result = message.content.data
+  const tool: ToolProgress = {
+    callId: message.tool_call_id,
+    llmCallId: existing?.llmCallId || `turn:${turnId}`,
+    name: existing?.name ?? null,
+    argumentsText: existing?.argumentsText ?? "",
+    result,
+    errorText: null,
+    status: "finished",
+  }
+  return { ...state, tools: { ...state.tools, [tool.callId]: tool } }
 }
 
 function projectLlmEvent(
@@ -184,23 +229,27 @@ function projectLlmEvent(
       return updateDraft(state, llmCallId, { reasoning: event.data.delta })
     case "tool_call_started":
       return updateTool(state, event.data.call_id, {
+        llmCallId,
         name: event.data.name,
         status: "streaming",
       })
     case "tool_call_delta":
       return updateTool(state, event.data.call_id, {
+        llmCallId,
         name: event.data.name,
         argumentsText: event.data.arguments_delta,
         status: "streaming",
       })
     case "tool_call_finished":
       return updateTool(state, event.data.call_id, {
+        llmCallId,
         result: event.data.result,
         errorText: null,
         status: "finished",
       })
     case "tool_call_failed":
       return updateTool(state, event.data.call_id, {
+        llmCallId,
         errorText: event.data.error_text,
         status: "failed",
       })
@@ -239,6 +288,7 @@ function updateTool(
   const existing = state.tools[callId]
   const tool: ToolProgress = {
     callId,
+    llmCallId: update.llmCallId ?? existing?.llmCallId ?? "",
     name: update.name ?? existing?.name ?? null,
     argumentsText:
       (existing?.argumentsText ?? "") + (update.argumentsText ?? ""),

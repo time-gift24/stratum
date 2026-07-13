@@ -1,36 +1,32 @@
 import type { ReactNode } from "react"
-import { useState } from "react"
 import { useTranslation } from "react-i18next"
-import { BrainIcon, ChevronDownIcon } from "lucide-react"
+import { BrainIcon } from "lucide-react"
 
 import {
   Message,
   MessageContent,
   MessageResponse,
 } from "~/components/ai-elements/message"
-import {
-  Reasoning,
-  ReasoningContent,
-} from "~/components/ai-elements/reasoning"
+import { ReasoningContent } from "~/components/ai-elements/reasoning"
 import { Shimmer } from "~/components/ai-elements/shimmer"
-import {
-  Tool,
-  ToolContent,
-  ToolHeader,
-  type ToolStatus,
-} from "~/components/ai-elements/tool"
-import { CodeBlock } from "~/components/ai-elements/code-block"
+import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
+import type { ApprovalDecision } from "~/components/stratum/agent-approval-submissions"
+import { AgentDisclosure } from "~/components/stratum/agent-disclosure"
+import { ToolTraceRow } from "~/components/stratum/agent-tool-trace"
 import type {
+  ApprovalRequest,
   StableMessage,
   ToolProgress,
 } from "~/features/agent-conversation/types"
 import type { ApiError } from "~/lib/wyse-api"
-import { cn } from "~/lib/utils"
 
 type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
+  approvals: Readonly<Record<string, ApprovalRequest>>
+  approvalSubmissions: ReadonlyMap<string, ApprovalDecision>
+  onApprovalDecision(approvalId: string, decision: ApprovalDecision): void
   error?: ApiError | null
 }
 
@@ -45,52 +41,62 @@ function ReasoningDisclosure({
   isStreaming = false,
   getThinkingMessage,
 }: ReasoningDisclosureProps) {
-  const [open, setOpen] = useState(false)
-
   return (
-    <Reasoning
-      defaultOpen={false}
-      isStreaming={isStreaming}
-      onOpenChange={setOpen}
-      open={open}
+    <AgentDisclosure
+      icon={<BrainIcon aria-hidden="true" className="size-4" />}
+      label={getThinkingMessage(isStreaming)}
     >
-      <button
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
-        onClick={() => setOpen((currentOpen) => !currentOpen)}
-        type="button"
-      >
-        <BrainIcon className="size-4" />
-        {getThinkingMessage(isStreaming)}
-        <ChevronDownIcon
-          className={cn(
-            "size-4 transition-transform",
-            open ? "rotate-180" : "rotate-0"
-          )}
-        />
-      </button>
       <ReasoningContent>{children}</ReasoningContent>
-    </Reasoning>
+    </AgentDisclosure>
   )
 }
 
-function toToolStatus(status: ToolProgress["status"]): ToolStatus {
-  switch (status) {
-    case "streaming":
-      return "running"
-    case "finished":
-      return "completed"
-    case "failed":
-      return "error"
-    default:
-      return "pending"
-  }
+type ExecutionTraceGroupProps = {
+  tools: readonly ToolProgress[]
+  approvalsByCallId: ReadonlyMap<string, ApprovalRequest>
+  approvalSubmissions: ReadonlyMap<string, ApprovalDecision>
+  onApprovalDecision(approvalId: string, decision: ApprovalDecision): void
+}
+
+function ExecutionTraceGroup({
+  tools,
+  approvalsByCallId,
+  approvalSubmissions,
+  onApprovalDecision,
+}: ExecutionTraceGroupProps) {
+  if (tools.length === 0) return null
+
+  return (
+    <div className="mt-2 flex flex-col">
+      {tools.map((tool) => {
+        const approval = approvalsByCallId.get(tool.callId)
+        return (
+          <ToolTraceRow key={tool.callId} tool={tool}>
+            {approval ? (
+              <AgentApprovalCard
+                approval={approval}
+                submittingDecision={
+                  approvalSubmissions.get(approval.approvalId) ?? null
+                }
+                onDecision={(decision) =>
+                  onApprovalDecision(approval.approvalId, decision)
+                }
+              />
+            ) : null}
+          </ToolTraceRow>
+        )
+      })}
+    </div>
+  )
 }
 
 export function AgentMessageList({
   messages,
   drafts,
   tools,
+  approvals,
+  approvalSubmissions,
+  onApprovalDecision,
   error = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
@@ -106,12 +112,38 @@ export function AgentMessageList({
     ) : (
       t("chat.reasoningComplete")
     )
+  const toolValues = Object.values(tools)
+  const approvalValues = Object.values(approvals)
+  const approvalsByCallId = new Map(
+    approvalValues.map((approval) => [approval.callId, approval])
+  )
+  const stableToolCallIds = new Set(
+    messages.flatMap((message) =>
+      message.toolCalls.map((toolCall) => toolCall.callId)
+    )
+  )
+  const draftIds = new Set(Object.keys(drafts))
+  const knownToolCallIds = new Set(toolValues.map((tool) => tool.callId))
+  const orphanTools = toolValues.filter(
+    (tool) =>
+      !stableToolCallIds.has(tool.callId) && !draftIds.has(tool.llmCallId)
+  )
+  const activeOrphanTools = orphanTools.filter(
+    (tool) => tool.status === "streaming"
+  )
+  const orphanApprovals = approvalValues.filter(
+    (approval) => !knownToolCallIds.has(approval.callId)
+  )
 
   return (
     <>
       {messages.map((message) => {
         const isUser = message.role === "user"
         const text = message.text ?? JSON.stringify(message.json)
+        const messageTools = message.toolCalls.flatMap((toolCall) => {
+          const tool = tools[toolCall.callId]
+          return tool ? [tool] : []
+        })
 
         return (
           <div
@@ -127,6 +159,12 @@ export function AgentMessageList({
               <MessageContent>
                 <MessageResponse>{text}</MessageResponse>
               </MessageContent>
+              <ExecutionTraceGroup
+                tools={messageTools}
+                approvalsByCallId={approvalsByCallId}
+                approvalSubmissions={approvalSubmissions}
+                onApprovalDecision={onApprovalDecision}
+              />
               <time
                 dateTime={message.timestamp}
                 className={
@@ -156,40 +194,49 @@ export function AgentMessageList({
                 {draft.reasoning}
               </ReasoningDisclosure>
             ) : null}
-            <MessageContent>
-              <MessageResponse>{draft.text}</MessageResponse>
-            </MessageContent>
+            {draft.text ? (
+              <MessageContent>
+                <MessageResponse>{draft.text}</MessageResponse>
+              </MessageContent>
+            ) : null}
+            <ExecutionTraceGroup
+              tools={toolValues.filter(
+                (tool) =>
+                  tool.llmCallId === callId &&
+                  !stableToolCallIds.has(tool.callId)
+              )}
+              approvalsByCallId={approvalsByCallId}
+              approvalSubmissions={approvalSubmissions}
+              onApprovalDecision={onApprovalDecision}
+            />
           </Message>
         </div>
       ))}
 
-      {Object.values(tools).length > 0 ? (
-        <div>
-          <div className="flex flex-col gap-2">
-            {Object.values(tools).map((tool) => (
-              <Tool key={tool.callId} defaultOpen={tool.status === "streaming"}>
-                <ToolHeader
-                  status={toToolStatus(tool.status)}
-                  statusLabel={t(`chat.toolStatus.${tool.status}`)}
-                  title={tool.name ?? t("chat.unknownTool")}
-                />
-                <ToolContent>
-                  {tool.argumentsText ? (
-                    <CodeBlock code={tool.argumentsText} language="json" />
-                  ) : null}
-                  {tool.result ? (
-                    <CodeBlock
-                      code={JSON.stringify(tool.result, null, 2)}
-                      language="json"
-                    />
-                  ) : null}
-                  {tool.errorText ? <p>{tool.errorText}</p> : null}
-                </ToolContent>
-              </Tool>
-            ))}
-          </div>
-        </div>
+      {activeOrphanTools.length > 0 ? (
+        <Message from="assistant">
+          <ExecutionTraceGroup
+            tools={activeOrphanTools}
+            approvalsByCallId={approvalsByCallId}
+            approvalSubmissions={approvalSubmissions}
+            onApprovalDecision={onApprovalDecision}
+          />
+        </Message>
       ) : null}
+
+      {orphanApprovals.map((approval) => (
+        <Message key={approval.approvalId} from="assistant">
+          <AgentApprovalCard
+            approval={approval}
+            submittingDecision={
+              approvalSubmissions.get(approval.approvalId) ?? null
+            }
+            onDecision={(decision) =>
+              onApprovalDecision(approval.approvalId, decision)
+            }
+          />
+        </Message>
+      ))}
 
       {error ? (
         <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
