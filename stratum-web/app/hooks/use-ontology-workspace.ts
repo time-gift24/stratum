@@ -71,7 +71,7 @@ function demoReason(error: unknown): OntologyDemoReason {
 }
 
 export function useOntologyWorkspace() {
-  const baseUrl = import.meta.env.VITE_WYSE_API_BASE_URL?.trim()
+  const baseUrl = import.meta.env.VITE_STRATUM_API_BASE_URL?.trim()
   const api = useMemo(
     () => (baseUrl ? createOntologyApi({ baseUrl }) : undefined),
     [baseUrl]

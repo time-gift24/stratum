@@ -873,9 +873,9 @@ dependencies = [
 
 [[package]]
 name = "http-body"
-version = "1.0.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
+checksum = "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
 dependencies = [
  "bytes",
  "http",
@@ -2423,6 +2423,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "stratum-ontology"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stratum-filesystem",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-ontology-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "serde",
+ "serde_json",
+ "stratum-filesystem",
+ "stratum-ontology",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-ontology-mysql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "sqlx",
+ "stratum-ontology",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "stratum-store"
 version = "0.1.0"
 dependencies = [
@@ -3306,51 +3351,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "wyse-ontology"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "sha2",
- "stratum-filesystem",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "wyse-ontology-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wyse-filesystem",
- "wyse-ontology",
-]
-
-[[package]]
-name = "wyse-ontology-mysql"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "uuid",
- "wyse-ontology",
-]
 
 [[package]]
 name = "yoke"

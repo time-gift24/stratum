@@ -5,13 +5,13 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use sqlx::{Acquire, MySql, MySqlPool, Row, Transaction, pool::PoolConnection};
-use uuid::Uuid;
-use wyse_ontology::{
+use stratum_ontology::{
     Cardinality, LinkCardinalityConstraint, LinkId, LinkRecord, NewLinkRecord, NewObjectRecord,
     ObjectId, ObjectRecord, ObjectTypeId, OntologyError, OntologyRepository, Page,
     PublishedRevision, RevisionId, TagName, canonical_schema_bytes, validate_published_revision,
     validate_schema_instances,
 };
+use uuid::Uuid;
 
 use crate::error::MySqlOntologyRepositoryError;
 
@@ -21,7 +21,7 @@ pub struct SqlxOntologyRepository {
     pool: MySqlPool,
 }
 
-const INSTANCE_WRITE_LOCK: &str = "wyse_ontology_instance_write";
+const INSTANCE_WRITE_LOCK: &str = "stratum_ontology_instance_write";
 const INSTANCE_WRITE_LOCK_TIMEOUT_SECONDS: i32 = 10;
 
 struct InstanceWriteLock {
@@ -903,11 +903,11 @@ fn map_object_delete_error(id: ObjectId, error: sqlx::Error) -> OntologyError {
 mod tests {
     use std::{future::pending, sync::Arc};
 
+    use stratum_ontology::{ObjectId, OntologyError};
     use tokio::{
         sync::Notify,
         time::{Duration, timeout},
     };
-    use wyse_ontology::{ObjectId, OntologyError};
 
     use super::{InstanceWriteLock, object_write_failure_from_exists};
 

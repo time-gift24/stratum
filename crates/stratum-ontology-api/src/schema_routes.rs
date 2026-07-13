@@ -10,7 +10,7 @@ use axum::{
     routing::{get, patch, post},
 };
 use serde::{Deserialize, Serialize};
-use wyse_ontology::{
+use stratum_ontology::{
     Cardinality, Draft, DraftName, GraphProjection, ObjectTypeId, PublishedRevision, RevisionId,
     SchemaDocument, SchemaRef, TagName, ValueType,
 };
@@ -122,7 +122,7 @@ struct GraphNodeResponse {
 }
 #[derive(Serialize)]
 struct GraphEdgeResponse {
-    id: wyse_ontology::LinkTypeId,
+    id: stratum_ontology::LinkTypeId,
     label: String,
     source: ObjectTypeId,
     target: ObjectTypeId,
@@ -185,7 +185,7 @@ async fn create_draft(
         .create_draft(parse_draft_name(request.name)?, request.schema)
         .await
         .map_err(|error| match error {
-            wyse_ontology::OntologyError::DraftConflict { .. } => ApiError::Conflict,
+            stratum_ontology::OntologyError::DraftConflict { .. } => ApiError::Conflict,
             error => ApiError::Ontology(error),
         })?;
     Ok(draft_response(StatusCode::CREATED, draft))

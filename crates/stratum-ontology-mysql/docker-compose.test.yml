@@ -1,4 +1,4 @@
-name: wyse-ontology-mysql-test
+name: stratum-ontology-mysql-test
 
 services:
   mysql:
@@ -6,7 +6,7 @@ services:
     ports:
       - "33067:3306"
     environment:
-      MYSQL_DATABASE: wyse_ontology
+      MYSQL_DATABASE: stratum_ontology
       MYSQL_USER: ontology
       MYSQL_PASSWORD: ontology
       MYSQL_ROOT_PASSWORD: root

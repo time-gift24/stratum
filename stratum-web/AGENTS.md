@@ -34,7 +34,7 @@
 ## Ontology modeling canvas
 
 - The read-only ontology explorer lives at `/ontology`. Its navbar label is “建模” in Chinese and “Modeling” in English; internal domain types and component names continue to use `Ontology`.
-- This frontend task must not compose `wyse-ontology-api` into the Rust API host. Read the configured `VITE_WYSE_API_BASE_URL` when available and keep host integration as a separate task.
+- This frontend task must not compose `stratum-ontology-api` into the Rust API host. Read the configured `VITE_STRATUM_API_BASE_URL` when available and keep host integration as a separate task.
 - Use `@xyflow/react` for the canvas and `@dagrejs/dagre` for a deterministic left-to-right layout. The canvas supports selection, pan, zoom, and fit-to-view; nodes are not draggable and no edit action is exposed.
 - Keep responsibilities separated across `OntologyWorkspace`, `OntologySourcePanel`, `OntologyGraphCanvas`, `OntologyInspector`, and a typed `app/lib/ontology-api.ts` client. Example graph data belongs in a separate fixture and must carry an explicit demo marker.
 - The desktop layout is a structural three-column workspace: source/type index, graph canvas, and selection inspector. At widths below `1024px`, the canvas occupies the page and the source and inspector panels become accessible drawers with focus return.

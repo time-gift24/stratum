@@ -21,7 +21,7 @@ import type { OntologySelection } from "~/lib/ontology-graph"
 function LoadingCanvas({ label }: { label: string }) {
   return (
     <div
-      className="relative h-full overflow-hidden bg-wyse-canvas"
+      className="relative h-full overflow-hidden bg-stratum-canvas"
       role="status"
       aria-live="polite"
       aria-busy="true"
@@ -99,8 +99,8 @@ export function OntologyWorkspace() {
 
   return (
     <section className="mx-auto h-[100dvh] min-h-[36rem] max-w-[100rem] px-4 pt-24 pb-4 md:px-8 md:pt-28 md:pb-6">
-      <div className="grid h-full min-h-0 overflow-hidden border-y border-wyse-line bg-wyse-paper lg:grid-cols-[15rem_minmax(0,1fr)_19rem] lg:border-x">
-        <div className="hidden min-h-0 border-r border-wyse-line lg:block">
+      <div className="grid h-full min-h-0 overflow-hidden border-y border-stratum-line bg-stratum-paper lg:grid-cols-[15rem_minmax(0,1fr)_19rem] lg:border-x">
+        <div className="hidden min-h-0 border-r border-stratum-line lg:block">
           {sourcePanel}
         </div>
 
@@ -109,10 +109,10 @@ export function OntologyWorkspace() {
             {state.phase === "demo" ? (
               <div
                 role="status"
-                className="pointer-events-auto flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-wyse-line bg-wyse-paper-soft px-3 py-1.5 text-sm"
+                className="pointer-events-auto flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-stratum-line bg-stratum-paper-soft px-3 py-1.5 text-sm"
               >
                 <InfoIcon
-                  className="size-4 shrink-0 text-wyse-action"
+                  className="size-4 shrink-0 text-stratum-action"
                   aria-hidden="true"
                 />
                 <div className="min-w-40 flex-1">
@@ -171,7 +171,7 @@ export function OntologyWorkspace() {
           ) : null}
           {state.phase === "empty" ? (
             <div
-              className="grid h-full place-items-center bg-wyse-canvas px-6 text-center"
+              className="grid h-full place-items-center bg-stratum-canvas px-6 text-center"
               role="status"
               aria-live="polite"
             >
@@ -187,7 +187,7 @@ export function OntologyWorkspace() {
           ) : null}
           {state.phase === "error" ? (
             <div
-              className="grid h-full place-items-center bg-wyse-canvas px-6 text-center"
+              className="grid h-full place-items-center bg-stratum-canvas px-6 text-center"
               role="alert"
             >
               <div className="max-w-md">
@@ -211,7 +211,7 @@ export function OntologyWorkspace() {
           ) : null}
         </div>
 
-        <div className="hidden min-h-0 border-l border-wyse-line lg:block">
+        <div className="hidden min-h-0 border-l border-stratum-line lg:block">
           {inspector}
         </div>
       </div>

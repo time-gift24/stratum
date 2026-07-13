@@ -16,7 +16,7 @@ export function OntologyInspector({
 }: OntologyInspectorProps) {
   const { t } = useTranslation()
   const emptyInspector = (
-    <aside className="h-full bg-wyse-paper p-4">
+    <aside className="h-full bg-stratum-paper p-4">
       <h2 className="text-sm font-semibold">{t("ontology.inspector.title")}</h2>
       <p className="mt-3 text-sm text-muted-foreground">
         {t("ontology.inspector.empty")}
@@ -34,7 +34,7 @@ export function OntologyInspector({
       (edge) => edge.source === selection.id || edge.target === selection.id
     ).length
     return (
-      <aside className="h-full overflow-y-auto bg-wyse-paper p-4">
+      <aside className="h-full overflow-y-auto bg-stratum-paper p-4">
         <span className="text-sm text-muted-foreground">
           {t("ontology.inspector.objectType")}
         </span>
@@ -44,7 +44,7 @@ export function OntologyInspector({
             {objectType.description}
           </p>
         ) : null}
-        <dl className="my-4 flex gap-6 border-y border-wyse-line py-3 text-sm">
+        <dl className="my-4 flex gap-6 border-y border-stratum-line py-3 text-sm">
           <div>
             <dt className="text-muted-foreground">
               {t("ontology.inspector.properties")}
@@ -65,7 +65,7 @@ export function OntologyInspector({
           {objectType.properties.map((property) => (
             <div
               key={property.id}
-              className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 border-t border-wyse-line py-2 text-sm"
+              className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 border-t border-stratum-line py-2 text-sm"
             >
               <span className="truncate font-medium">{property.name}</span>
               <span className="text-muted-foreground">
@@ -74,7 +74,7 @@ export function OntologyInspector({
               <span
                 className={
                   property.required
-                    ? "text-wyse-action"
+                    ? "text-stratum-action"
                     : "text-muted-foreground"
                 }
               >
@@ -98,7 +98,7 @@ export function OntologyInspector({
   const target = schema.object_types.find((item) => item.id === edge.target)
 
   return (
-    <aside className="h-full overflow-y-auto bg-wyse-paper p-4">
+    <aside className="h-full overflow-y-auto bg-stratum-paper p-4">
       <span className="text-sm text-muted-foreground">
         {t("ontology.inspector.linkType")}
       </span>
@@ -108,7 +108,7 @@ export function OntologyInspector({
           {linkType.description}
         </p>
       ) : null}
-      <dl className="mt-4 space-y-3 border-t border-wyse-line pt-3 text-sm">
+      <dl className="mt-4 space-y-3 border-t border-stratum-line pt-3 text-sm">
         <div>
           <dt className="text-muted-foreground">
             {t("ontology.inspector.source")}

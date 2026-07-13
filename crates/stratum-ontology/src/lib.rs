@@ -1,4 +1,4 @@
-//! Domain types and validation for the Wyse ontology service.
+//! Domain types and validation for the Stratum ontology service.
 
 pub mod draft;
 pub mod error;

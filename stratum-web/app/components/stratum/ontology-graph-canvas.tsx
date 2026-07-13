@@ -30,10 +30,10 @@ import { cn } from "~/lib/utils"
 
 const nodeTypes = { ontology: OntologyNode }
 const flowStyle = {
-  "--xy-edge-stroke": "var(--wyse-ink-muted)",
-  "--xy-edge-stroke-selected": "var(--wyse-action)",
-  "--xy-edge-label-color": "var(--wyse-ink)",
-  "--xy-edge-label-background-color": "var(--wyse-canvas)",
+  "--xy-edge-stroke": "var(--stratum-ink-muted)",
+  "--xy-edge-stroke-selected": "var(--stratum-action)",
+  "--xy-edge-label-color": "var(--stratum-ink)",
+  "--xy-edge-label-background-color": "var(--stratum-canvas)",
 } as CSSProperties
 
 type OntologyGraphCanvasProps = {
@@ -67,8 +67,8 @@ function CanvasInner({
       flow.edges.map((edge) => {
         const selected = selection?.kind === "edge" && selection.id === edge.id
         const markerColor = selected
-          ? "var(--wyse-action)"
-          : "var(--wyse-ink-muted)"
+          ? "var(--stratum-action)"
+          : "var(--stratum-ink-muted)"
 
         return {
           ...edge,
@@ -139,7 +139,7 @@ function CanvasInner({
 
   return (
     <div
-      className="relative h-full min-h-0 w-full bg-wyse-canvas"
+      className="relative h-full min-h-0 w-full bg-stratum-canvas"
       role="region"
       aria-label={t("ontology.canvas.label")}
     >
@@ -160,7 +160,7 @@ function CanvasInner({
         elementsSelectable
         nodesFocusable
         edgesFocusable
-        defaultMarkerColor="var(--wyse-ink-muted)"
+        defaultMarkerColor="var(--stratum-ink-muted)"
         onKeyDownCapture={handleElementKeyDown}
         onNodeClick={(_, node) =>
           onSelectionChange({ kind: "node", id: node.id })
@@ -174,10 +174,10 @@ function CanvasInner({
           variant={BackgroundVariant.Dots}
           gap={18}
           size={1}
-          color="var(--wyse-line-strong)"
+          color="var(--stratum-line-strong)"
         />
       </ReactFlow>
-      <div className="absolute bottom-3 left-3 z-10 flex rounded-md border border-wyse-line bg-wyse-paper p-0.5">
+      <div className="absolute bottom-3 left-3 z-10 flex rounded-md border border-stratum-line bg-stratum-paper p-0.5">
         <button
           type="button"
           className="grid size-11 place-items-center rounded-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"

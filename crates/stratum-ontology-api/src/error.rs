@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use wyse_ontology::OntologyError;
+use stratum_ontology::OntologyError;
 
 /// JSON error returned by schema routes.
 #[derive(Debug)]
@@ -253,10 +253,10 @@ mod tests {
     };
 
     use axum::{http::StatusCode, response::IntoResponse};
+    use stratum_ontology::{ObjectId, OntologyError};
     use tracing::{Event, Subscriber, field::Visit};
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
     use uuid::Uuid;
-    use wyse_ontology::{ObjectId, OntologyError};
 
     use super::{ApiError, operational_context};
 

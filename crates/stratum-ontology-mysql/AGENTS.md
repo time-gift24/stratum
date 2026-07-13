@@ -1,8 +1,8 @@
-# wyse-ontology-mysql
+# stratum-ontology-mysql
 
 ## 范围
 
-- 本 crate 仅实现 `wyse-ontology::OntologyRepository` 的 MySQL 8/SQLx 后端。
+- 本 crate 仅实现 `stratum-ontology::OntologyRepository` 的 MySQL 8/SQLx 后端。
 - `SqlxOntologyRepository` 只接收由外部构造的 `MySqlPool`；不拥有应用启动、连接池配置或服务组合。
 
 ## 持久化约定

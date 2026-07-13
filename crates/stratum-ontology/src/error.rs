@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{
     DraftName, LinkId, LinkTypeId, ObjectId, ObjectTypeId, PropertyTypeId, RevisionId, TagName,
 };
-use wyse_filesystem::FilesystemError;
+use stratum_filesystem::FilesystemError;
 
 /// Error returned by ontology domain operations.
 #[derive(Debug, Error)]

@@ -9,18 +9,18 @@ use axum::{
     http::{HeaderValue, Request, StatusCode, header},
 };
 use serde::de::DeserializeOwned;
-use tower::ServiceExt;
-use wyse_filesystem::{
+use stratum_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, RecordVersion,
     VersionedEntry, VirtualPath,
 };
-use wyse_ontology::{
+use stratum_ontology::{
     Cardinality, DraftName, FilesystemDraftStore, LinkCardinalityConstraint, LinkId, LinkRecord,
     LinkType, LinkTypeId, NewLinkRecord, NewObjectRecord, ObjectId, ObjectRecord, ObjectType,
     ObjectTypeId, OntologyError, OntologyRepository, Page, PropertyType, PropertyTypeId,
     PublishedRevision, RevisionId, SchemaDocument, TagName, ValueType,
 };
-use wyse_ontology_api::router;
+use stratum_ontology_api::router;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn graph_route_returns_schema_nodes_and_edges() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,7 +184,12 @@ async fn object_and_link_routes_enforce_versions_values_cardinality_and_force_de
 -> Result<(), Box<dyn std::error::Error>> {
     let app = router(test_service_with_online_schema().await?);
     let person = create_object(&app, test_person_type_id(), "Ada").await?;
-    let company = create_object(&app, ObjectTypeId::from(uuid::Uuid::from_u128(2)), "Wyse").await?;
+    let company = create_object(
+        &app,
+        ObjectTypeId::from(uuid::Uuid::from_u128(2)),
+        "Stratum",
+    )
+    .await?;
 
     let created_link = app
         .clone()
@@ -620,7 +625,7 @@ async fn decode_json<T: DeserializeOwned>(
 }
 
 async fn test_service_with_online_schema()
--> Result<Arc<wyse_ontology::OntologyService>, Box<dyn std::error::Error>> {
+-> Result<Arc<stratum_ontology::OntologyService>, Box<dyn std::error::Error>> {
     let person = test_person_type_id();
     let company = ObjectTypeId::from(uuid::Uuid::from_u128(2));
     let schema = SchemaDocument {
@@ -643,7 +648,7 @@ async fn test_service_with_online_schema()
         .create(DraftName::try_from("main".to_owned())?, schema.clone())
         .await?;
     let repository = Arc::new(MemoryRepository::default());
-    let service = Arc::new(wyse_ontology::OntologyService::new(
+    let service = Arc::new(stratum_ontology::OntologyService::new(
         drafts,
         repository.clone(),
     ));
@@ -667,8 +672,8 @@ async fn test_service_with_online_schema()
     Ok(service)
 }
 
-fn test_service_without_schema() -> Arc<wyse_ontology::OntologyService> {
-    Arc::new(wyse_ontology::OntologyService::new(
+fn test_service_without_schema() -> Arc<stratum_ontology::OntologyService> {
+    Arc::new(stratum_ontology::OntologyService::new(
         FilesystemDraftStore::new(Arc::new(MemoryFilesystem::default())),
         Arc::new(MemoryRepository::default()),
     ))
@@ -797,12 +802,12 @@ struct MemoryInstances {
 #[async_trait]
 impl OntologyRepository for MemoryRepository {
     async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
-        wyse_ontology::validate_published_revision(&revision)?;
+        stratum_ontology::validate_published_revision(&revision)?;
         let instances = self.instances.lock().map_err(|_| repository_error())?;
         let objects = instances.objects.values().cloned().collect::<Vec<_>>();
         let links = instances.links.values().cloned().collect::<Vec<_>>();
         drop(instances);
-        wyse_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
+        stratum_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
         self.revisions
             .lock()
             .map_err(|_| repository_error())?
@@ -850,7 +855,7 @@ impl OntologyRepository for MemoryRepository {
         let objects = instances.objects.values().cloned().collect::<Vec<_>>();
         let links = instances.links.values().cloned().collect::<Vec<_>>();
         drop(instances);
-        wyse_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
+        stratum_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
         self.tags
             .lock()
             .map_err(|_| repository_error())?

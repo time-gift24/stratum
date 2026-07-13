@@ -7,7 +7,7 @@ mod schema_routes;
 use std::sync::Arc;
 
 use axum::Router;
-use wyse_ontology::OntologyService;
+use stratum_ontology::OntologyService;
 
 use crate::instance_routes::instance_routes;
 use crate::schema_routes::schema_routes;

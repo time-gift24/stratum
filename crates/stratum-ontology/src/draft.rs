@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
+use stratum_filesystem::{
+    CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath,
+};
 
 use crate::{DraftName, OntologyError, RevisionId, SchemaDocument};
 
@@ -284,11 +286,11 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use uuid::Uuid;
-    use wyse_filesystem::{
+    use stratum_filesystem::{
         CasExpectation, DirEntry, Entry, FileMetadata, FileType, Filesystem, FilesystemError,
         RecordVersion, VersionedEntry, VirtualPath,
     };
+    use uuid::Uuid;
 
     use super::*;
     use crate::{

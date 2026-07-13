@@ -174,8 +174,8 @@ jobs:
         run: cargo install sqlx-cli --version 0.8.6 --no-default-features --features rustls,mysql --locked
 
       - name: Run ontology MySQL integration tests
-        run: make -C crates/wyse-ontology-mysql test-integration COMPOSE="docker compose"
+        run: make -C crates/stratum-ontology-mysql test-integration COMPOSE="docker compose"
 
       - name: Stop ontology MySQL test stack
         if: always()
-        run: docker compose -f crates/wyse-ontology-mysql/docker-compose.test.yml down -v
+        run: docker compose -f crates/stratum-ontology-mysql/docker-compose.test.yml down -v

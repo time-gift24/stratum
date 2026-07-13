@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Error source retained by [`wyse_ontology::OntologyError::Repository`].
+/// Error source retained by [`stratum_ontology::OntologyError::Repository`].
 #[derive(Debug, Error)]
 pub(crate) enum MySqlOntologyRepositoryError {
     /// A persisted JSON document could not be decoded.

@@ -1,4 +1,4 @@
-# wyse-ontology-api
+# stratum-ontology-api
 
 ## HTTP 错误边界
 

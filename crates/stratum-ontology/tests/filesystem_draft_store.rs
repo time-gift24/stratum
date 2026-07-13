@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use wyse_filesystem::{LocalFilesystem, LocalFilesystemConfig};
-use wyse_ontology::{DraftName, FilesystemDraftStore, SchemaDocument};
+use stratum_filesystem::{LocalFilesystem, LocalFilesystemConfig};
+use stratum_ontology::{DraftName, FilesystemDraftStore, SchemaDocument};
 
 #[tokio::test]
 async fn fresh_local_filesystem_is_a_usable_empty_draft_store()
@@ -10,7 +10,7 @@ async fn fresh_local_filesystem_is_a_usable_empty_draft_store()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "wyse-ontology-drafts-{}-{unique}",
+        "stratum-ontology-drafts-{}-{unique}",
         std::process::id()
     ));
     tokio::fs::create_dir_all(&root).await?;

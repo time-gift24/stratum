@@ -108,7 +108,7 @@ export function OntologySourcePanel({
   }
 
   return (
-    <aside className="flex h-full min-h-0 flex-col bg-wyse-paper p-4">
+    <aside className="flex h-full min-h-0 flex-col bg-stratum-paper p-4">
       <h2 className="text-sm font-semibold">{t("ontology.source.title")}</h2>
       <div className="mt-3 grid grid-cols-3 rounded-md bg-muted p-1">
         {(["tag", "draft", "revision"] as const).map((value) => (
@@ -118,7 +118,7 @@ export function OntologySourcePanel({
             className={cn(
               "h-11 rounded-sm border border-transparent px-2 text-sm focus-visible:outline-2 focus-visible:outline-ring",
               kind === value
-                ? "border-input bg-wyse-paper text-foreground"
+                ? "border-input bg-stratum-paper text-foreground"
                 : "text-muted-foreground hover:text-foreground"
             )}
             aria-pressed={kind === value}
@@ -156,7 +156,7 @@ export function OntologySourcePanel({
         </form>
       ) : (
         <select
-          className="mt-2 h-11 w-full rounded-md border border-input bg-wyse-paper px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+          className="mt-2 h-11 w-full rounded-md border border-input bg-stratum-paper px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
           value={
             source.kind === kind
               ? source.kind === "revision"
@@ -206,7 +206,7 @@ export function OntologySourcePanel({
         className="mt-3 min-h-0 flex-1 overflow-y-auto"
         aria-label={t("ontology.source.index")}
       >
-        <div className="flex items-center justify-between border-b border-wyse-line py-2 text-sm font-semibold">
+        <div className="flex items-center justify-between border-b border-stratum-line py-2 text-sm font-semibold">
           <span>{t("ontology.source.objectTypes")}</span>
           <span className="text-muted-foreground">{nodes.length}</span>
         </div>
@@ -228,21 +228,21 @@ export function OntologySourcePanel({
                 tabIndex={node.id === nodeTabStopId ? 0 : -1}
                 className={cn(
                   "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
-                  selected && "bg-wyse-action/10 font-semibold"
+                  selected && "bg-stratum-action/10 font-semibold"
                 )}
                 onClick={() => {
                   setNodeFocusId(node.id)
                   onSelectionChange({ kind: "node", id: node.id })
                 }}
               >
-                <span className="size-2 rounded-sm border border-wyse-action" />
+                <span className="size-2 rounded-sm border border-stratum-action" />
                 <span className="truncate">{node.label}</span>
               </button>
             )
           })}
         </div>
 
-        <div className="mt-3 flex items-center justify-between border-b border-wyse-line py-2 text-sm font-semibold">
+        <div className="mt-3 flex items-center justify-between border-b border-stratum-line py-2 text-sm font-semibold">
           <span>{t("ontology.source.linkTypes")}</span>
           <span className="text-muted-foreground">{edges.length}</span>
         </div>
@@ -264,14 +264,14 @@ export function OntologySourcePanel({
                 tabIndex={edge.id === edgeTabStopId ? 0 : -1}
                 className={cn(
                   "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
-                  selected && "bg-wyse-action/10 font-semibold"
+                  selected && "bg-stratum-action/10 font-semibold"
                 )}
                 onClick={() => {
                   setEdgeFocusId(edge.id)
                   onSelectionChange({ kind: "edge", id: edge.id })
                 }}
               >
-                <span className="h-px w-3 bg-wyse-action" />
+                <span className="h-px w-3 bg-stratum-action" />
                 <span className="min-w-0 flex-1 truncate">{edge.label}</span>
                 <span className="text-muted-foreground">
                   {cardinalityLabel(edge.cardinality)}

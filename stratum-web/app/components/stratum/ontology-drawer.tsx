@@ -39,7 +39,7 @@ export function OntologyDrawer({
       ref={dialogRef}
       aria-label={label}
       className={cn(
-        "fixed inset-y-0 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-2rem))] max-w-none border-0 bg-wyse-paper p-0 text-foreground backdrop:bg-foreground/25 lg:hidden",
+        "fixed inset-y-0 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-2rem))] max-w-none border-0 bg-stratum-paper p-0 text-foreground backdrop:bg-foreground/25 lg:hidden",
         side === "left" ? "mr-auto" : "ml-auto"
       )}
       onClose={() => {
@@ -55,7 +55,7 @@ export function OntologyDrawer({
       }}
     >
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex items-center justify-between border-b border-wyse-line px-4 py-3">
+        <div className="flex items-center justify-between border-b border-stratum-line px-4 py-3">
           <h2 className="text-sm font-semibold">{label}</h2>
           <Button
             type="button"

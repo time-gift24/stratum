@@ -917,11 +917,11 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::{Map, Value, json};
-    use uuid::Uuid;
-    use wyse_filesystem::{
+    use stratum_filesystem::{
         CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, RecordVersion,
         VersionedEntry, VirtualPath,
     };
+    use uuid::Uuid;
 
     use super::{CreateLink, CreateObject, OntologyService, ReplaceLink, ReplaceObject};
     use crate::{

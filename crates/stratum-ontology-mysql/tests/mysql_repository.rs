@@ -2,19 +2,19 @@ use std::sync::Arc;
 
 use serde_json::Map;
 use sqlx::{MySql, MySqlPool, mysql::MySqlPoolOptions, pool::PoolConnection};
-use tokio::{
-    sync::Barrier,
-    time::{Duration, timeout},
-};
-use wyse_ontology::{
+use stratum_ontology::{
     Cardinality, LinkCardinalityConstraint, LinkId, LinkRecord, LinkType, LinkTypeId,
     NewLinkRecord, NewObjectRecord, ObjectId, ObjectType, ObjectTypeId, OntologyError,
     OntologyRepository, PublishedRevision, RevisionId, SchemaDocument, TagName,
     canonical_schema_bytes, revision_id,
 };
-use wyse_ontology_mysql::SqlxOntologyRepository;
+use stratum_ontology_mysql::SqlxOntologyRepository;
+use tokio::{
+    sync::Barrier,
+    time::{Duration, timeout},
+};
 
-const TEST_SUITE_LOCK: &str = "wyse_ontology_mysql_test_suite";
+const TEST_SUITE_LOCK: &str = "stratum_ontology_mysql_test_suite";
 
 struct TestDatabase {
     database_url: String,
@@ -158,7 +158,7 @@ async fn seed_permissive_links(
 #[tokio::test]
 #[ignore = "requires MySQL 8 started by the crate Makefile"]
 async fn repository_persists_revision_and_online_tag() -> Result<(), Box<dyn std::error::Error>> {
-    use wyse_ontology::OntologyRepository;
+    use stratum_ontology::OntologyRepository;
 
     let database = TestDatabase::new().await?;
     let pool = database.pool(5).await?;
@@ -530,7 +530,7 @@ async fn replace_object_version_conflict_completes_with_one_connection()
     let result = timeout(
         Duration::from_secs(2),
         repository.replace_object(
-            wyse_ontology::ObjectRecord {
+            stratum_ontology::ObjectRecord {
                 version: 0,
                 ..object
             },

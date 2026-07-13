@@ -1,5 +1,5 @@
 COMPOSE ?= podman compose
-DATABASE_URL := mysql://ontology:ontology@127.0.0.1:33067/wyse_ontology
+DATABASE_URL := mysql://ontology:ontology@127.0.0.1:33067/stratum_ontology
 
 .PHONY: test-integration
 test-integration:
@@ -13,4 +13,4 @@ test-integration:
 		if [ $$attempt -ge 10 ]; then exit 1; fi; \
 		sleep 2; \
 	done; \
-	DATABASE_URL=$(DATABASE_URL) cargo test -p wyse-ontology-mysql -- --ignored
+	DATABASE_URL=$(DATABASE_URL) cargo test -p stratum-ontology-mysql -- --ignored

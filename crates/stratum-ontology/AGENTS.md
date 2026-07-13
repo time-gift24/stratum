@@ -1,4 +1,4 @@
-# wyse-ontology 约定
+# stratum-ontology 约定
 
 - Draft 存在固定虚拟目录 `/ontology/drafts/{name}.json`，只接受逻辑名称，不接受主机路径。
 - 发布 revision 使用通过校验的 schema 固定字段顺序 JSON 的 SHA-256 摘要；revision 永远不可变。

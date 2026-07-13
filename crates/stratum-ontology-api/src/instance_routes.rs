@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use wyse_ontology::{
+use stratum_ontology::{
     CreateLink, CreateObject, LinkId, LinkRecord, LinkTypeId, ObjectId, ObjectRecord, ObjectTypeId,
     Page, ReplaceLink, ReplaceObject, SchemaRef,
 };
