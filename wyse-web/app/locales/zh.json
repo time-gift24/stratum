@@ -78,21 +78,6 @@
     "approval": {
       "title": "允许 {{agent}} 使用 {{tool}}？",
       "titleWithResource": "允许 {{agent}} 对 {{resource}} 使用 {{tool}}？",
-      "why": "为什么需要",
-      "whyDescription": "完成当前请求需要执行这一步。",
-      "impactLabel": "将发生什么",
-      "impact": {
-        "read": "工具将读取完成当前请求所需的信息。",
-        "readWithResource": "工具将从 {{resource}} 读取信息。",
-        "write": "工具可能修改本地数据或触发外部操作。",
-        "writeWithResource": "工具可能修改 {{resource}}。"
-      },
-      "riskLabel": "风险与可逆性",
-      "risk": {
-        "low": "影响范围有限；允许前可以确认操作范围。",
-        "medium": "这可能修改数据，能否撤销取决于工具；允许前请查看详情。",
-        "high": "这可能产生重大或难以撤销的影响；请仔细查看详情。"
-      },
       "allowing": "正在允许……",
       "declining": "正在拒绝……"
     },

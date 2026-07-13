@@ -19,6 +19,8 @@
   conversation selects the first template by default; switching Agent starts a new uncreated
   conversation and resets the model to that template default. A pre-session model selection is sent
   with the creation request, while an existing-session selection applies to the next message.
+- Approval UI may describe only facts carried by the approval event. Do not generate generic reasons,
+  effects, risk claims, or reversibility guidance when the backend did not provide them.
 
 ## Frontend test policy
 

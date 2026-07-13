@@ -31,9 +31,6 @@ export function AgentApprovalCard({
         resource,
       })
     : t("chat.approval.title", { agent: agentName, tool: toolName })
-  const impact = resource
-    ? t(`chat.approval.impact.${approval.toolKind}WithResource`, { resource })
-    : t(`chat.approval.impact.${approval.toolKind}`)
   const submitting = submittingDecision !== null
   const titleId = `approval-${approval.approvalId}-title`
 
@@ -51,31 +48,6 @@ export function AgentApprovalCard({
           <h3 id={titleId} className="text-sm font-semibold text-foreground">
             {title}
           </h3>
-
-          <dl className="mt-4 grid gap-3 text-sm">
-            <div>
-              <dt className="text-xs font-medium text-muted-foreground">
-                {t("chat.approval.why")}
-              </dt>
-              <dd className="mt-1 text-foreground/85">
-                {t("chat.approval.whyDescription")}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs font-medium text-muted-foreground">
-                {t("chat.approval.impactLabel")}
-              </dt>
-              <dd className="mt-1 text-foreground/85">{impact}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-medium text-muted-foreground">
-                {t("chat.approval.riskLabel")}
-              </dt>
-              <dd className="mt-1 text-foreground/85">
-                {t(`chat.approval.risk.${approval.dangerLevel}`)}
-              </dd>
-            </div>
-          </dl>
         </div>
       </div>
 
