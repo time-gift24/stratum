@@ -94,6 +94,8 @@ pub struct RunAccepted {
 struct CreateAgentRequest {
     agent_name: String,
     text: String,
+    #[serde(default)]
+    model_config: Option<MessageModelConfig>,
 }
 
 #[derive(Deserialize)]
@@ -228,7 +230,13 @@ async fn create_agent(
     let request = json_request(request)?;
     let agent_name: AgentName = request.agent_name.parse()?;
     Span::current().record("agent_name", agent_name.as_str());
-    let created = state.create_agent(agent_name, request.text).await?;
+    let created = state
+        .create_agent_with_model_config(
+            agent_name,
+            request.text,
+            request.model_config.map(ModelConfig::from),
+        )
+        .await?;
     Span::current().record("agent_id", field::display(created.agent_id));
     Span::current().record("run_id", field::display(created.run_id));
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))

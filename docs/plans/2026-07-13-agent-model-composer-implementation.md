@@ -2,13 +2,24 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Make the composer select a default Agent template automatically, show its default Provider and model on the left, and make Agent changes start a new conversation configuration.
+**Goal:** Make the composer select a default Agent template automatically, show separate Agent and Provider-plus-model controls on the left, and make Agent changes start a new conversation configuration.
 
-**Architecture:** Keep Agent and model configuration state in `useAgentConversation`. The hook selects the first template once metadata is available and exposes an Agent-change action that resets the active session before applying the new template. `ModelConfigMenu` becomes a flat configuration menu and moves into the left composer tools area, where its trigger renders a parsed Provider and model label.
+**Architecture:** Keep Agent and model configuration state in `useAgentConversation`. The hook selects the first template once metadata is available and exposes an Agent-change action that resets the active session before applying the new template. Separate Agent and model controls move into the left composer tools area. An optional creation-request model configuration makes the model control effective before the first message.
 
 **Tech Stack:** React 19, TypeScript, React Router, Base UI dropdown primitives, Tailwind CSS, existing i18next translations.
 
 ---
+
+## Approved revision
+
+The UI has two adjacent dropdowns, not one combined configuration dropdown.
+`AgentConfigMenu` selects an Agent and resets an existing session into a new
+uncreated conversation. `ModelConfigMenu` selects a configured Provider and
+model. Agent changes clear the selected model override and render the target
+template default. A pre-session model override is submitted in an optional
+`model_config` field to `POST /v1/agents`; the API validates and persists it.
+This revision supersedes the combined-menu and existing-session-only model
+selection instructions below.
 
 ### Task 1: Add model-label helpers
 

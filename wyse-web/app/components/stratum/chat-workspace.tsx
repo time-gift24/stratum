@@ -10,7 +10,10 @@ import { cn } from "~/lib/utils"
 
 import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import { ChatHistory } from "~/components/stratum/chat-history"
-import { ModelConfigMenu } from "~/components/stratum/model-config-menu"
+import {
+  AgentConfigMenu,
+  ModelConfigMenu,
+} from "~/components/stratum/model-config-menu"
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
@@ -288,6 +291,14 @@ export function ChatWorkspace({
               </PromptInputBody>
               <PromptInputFooter>
                 <PromptInputTools>
+                  <AgentConfigMenu
+                    configuration={conversation.composerConfiguration}
+                    commandPending={isSubmitting}
+                  />
+                  <ModelConfigMenu
+                    configuration={conversation.composerConfiguration}
+                    commandPending={isSubmitting}
+                  />
                   {state.phase === "connection_error" ? (
                     <PromptInputButton
                       variant="outline"
@@ -308,10 +319,6 @@ export function ChatWorkspace({
                   ref={submitButtonRef}
                   className="inline-flex items-center gap-1"
                 >
-                  <ModelConfigMenu
-                    configuration={conversation.composerConfiguration}
-                    commandPending={isSubmitting}
-                  />
                   <PromptInputSubmit
                     aria-label={t("chat.composer.send")}
                     className={

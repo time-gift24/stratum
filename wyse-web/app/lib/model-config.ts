@@ -3,6 +3,11 @@ export type ModelConfig = {
   parameters: Record<string, unknown>
 }
 
+export type ModelDisplayName = {
+  provider: string | null
+  model: string
+}
+
 export type ModelDescriptor = {
   model: string
   parameters_schema: unknown
@@ -39,6 +44,18 @@ export function configForModel(descriptor: ModelDescriptor): ModelConfig {
   return {
     model: descriptor.model,
     parameters: schemaDefault(descriptor.parameters_schema),
+  }
+}
+
+export function modelDisplayName(modelId: string): ModelDisplayName {
+  const separator = modelId.indexOf(":")
+  if (separator <= 0 || separator === modelId.length - 1)
+    return { provider: null, model: modelId }
+
+  const provider = modelId.slice(0, separator)
+  return {
+    provider: provider.charAt(0).toUpperCase() + provider.slice(1),
+    model: modelId.slice(separator + 1),
   }
 }
 

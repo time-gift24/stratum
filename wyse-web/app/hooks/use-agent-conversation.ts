@@ -125,6 +125,13 @@ export function useAgentConversation(): AgentConversation {
   }, [])
 
   useEffect(() => {
+    if (state.agentId !== null || selectedTemplate !== null) return
+
+    const defaultTemplate = agentTemplates[0]
+    if (defaultTemplate !== undefined) setSelectedTemplate(defaultTemplate)
+  }, [agentTemplates, selectedTemplate, state.agentId])
+
+  useEffect(() => {
     setRequestedModelConfig(null)
     setAcceptedModelConfig(null)
   }, [state.agentId])
@@ -216,7 +223,11 @@ export function useAgentConversation(): AgentConversation {
       try {
         const created = await createWyseApi({
           baseUrl: configuration.baseUrl,
-        }).createAgent({ agentName: selectedTemplate.agent_name, text: prompt })
+        }).createAgent({
+          agentName: selectedTemplate.agent_name,
+          text: prompt,
+          modelConfig: requestedModelConfig ?? undefined,
+        })
         if (generation !== selectionGeneration.current) return false
 
         const recentAgent: RecentAgent = {
@@ -242,7 +253,7 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
     },
-    [reportError, selectAgent, selectedTemplate]
+    [reportError, requestedModelConfig, selectAgent, selectedTemplate]
   )
 
   const selectedClient = useCallback(() => {
@@ -371,9 +382,15 @@ export function useAgentConversation(): AgentConversation {
     )
   }, [])
 
-  const selectTemplate = useCallback((template: AgentTemplateView) => {
-    setSelectedTemplate(template)
-  }, [])
+  const selectTemplate = useCallback(
+    (template: AgentTemplateView) => {
+      if (selectedAgentRef.current !== null) selectAgent(null)
+      setRequestedModelConfig(null)
+      setAcceptedModelConfig(null)
+      setSelectedTemplate(template)
+    },
+    [selectAgent]
+  )
 
   const persistedModelConfig = state.view?.model_config ?? null
   const currentModelConfig =
@@ -385,7 +402,6 @@ export function useAgentConversation(): AgentConversation {
   const selectedModelConfig = requestedModelConfig ?? currentModelConfig
 
   const selectModel = useCallback((descriptor: ModelDescriptor) => {
-    if (selectedAgentRef.current === null) return
     setRequestedModelConfig(configForModel(descriptor))
   }, [])
 

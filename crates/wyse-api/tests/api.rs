@@ -2367,6 +2367,53 @@ async fn message_model_config_is_persisted_and_returned_by_agent_view() {
 }
 
 #[tokio::test]
+async fn create_agent_persists_requested_model_config() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let host = fixture.restore_host().await.expect("host restores");
+    let model_config = fixture.deepseek_model_config();
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post("/v1/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "agent_name": "coding-agent",
+                        "text": "first",
+                        "model_config": model_config,
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("body is json");
+    let agent_id = body["agent_id"]
+        .as_str()
+        .expect("agent id is present")
+        .parse()
+        .expect("agent id parses");
+    let state = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+
+    assert_eq!(state.model_config, Some(fixture.deepseek_model_config()));
+}
+
+#[tokio::test]
 async fn invalid_model_parameters_return_422_without_mutating_state() {
     let fixture = Fixture::new().await;
     let agent_id = fixture

@@ -520,6 +520,23 @@ impl HostState {
         agent_name: AgentName,
         text: String,
     ) -> Result<crate::AgentCreated, HostError> {
+        self.create_agent_with_model_config(agent_name, text, None)
+            .await
+    }
+
+    /// Creates an agent using an optional caller-selected model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when the text is blank, the template or selected model cannot be
+    /// resolved, persistence or agent composition fails, or the required turn preamble cannot
+    /// be committed.
+    pub(crate) async fn create_agent_with_model_config(
+        &self,
+        agent_name: AgentName,
+        text: String,
+        requested_model_config: Option<ModelConfig>,
+    ) -> Result<crate::AgentCreated, HostError> {
         let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::EmptyText);
@@ -540,7 +557,10 @@ impl HostState {
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = self.config.resolve_template(agent_name.clone(), template)?;
             let encoded_definition = definition.encode()?.into_bytes();
-            let model_config = self.providers.default_model_config(&definition.model)?;
+            let model_config = match requested_model_config {
+                Some(model_config) => model_config,
+                None => self.providers.default_model_config(&definition.model)?,
+            };
             let _ = self.providers.configure(&model_config)?;
             let _ = tool_registry(&definition)?;
             Ok::<_, HostError>((definition, encoded_definition, model_config))

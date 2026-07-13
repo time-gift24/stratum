@@ -12,6 +12,10 @@
 - Do not embed `ChatHistory` into the main layout flow as a permanent left or right rail. It must stay a togglable overlay / drawer.
 - `SiteNavbar` and the bottom `PromptInput` are fixed, but their top/bottom offsets from the viewport must be expressed as the outermost `margin` on their fixed containers, not as internal padding or positioned offsets.
 - On wide screens (`2xl`+), the history trigger is rendered as a detached pill to the left of the navbar shell; the drawer opens down-left from that trigger with a safe margin from the left edge.
+- The Longzhong composer renders adjacent Agent and model dropdowns in its left tool area. A new
+  conversation selects the first template by default; switching Agent starts a new uncreated
+  conversation and resets the model to that template default. A pre-session model selection is sent
+  with the creation request, while an existing-session selection applies to the next message.
 
 ## Frontend test policy
 

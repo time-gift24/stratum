@@ -14,3 +14,5 @@
 - HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 agent/run/cursor 等 ID，不得记录 message、prompt、tool args、secret 或 host path。
 - Recovery derives an agent's provider configuration solely from its persisted `ModelConfig`; the API
   exposes schemas only for configured models and never a second default-parameter representation.
+- `POST /v1/agents` accepts an optional `model_config`. When present, creation preflights,
+  persists, and composes with that configuration; when absent, it uses the resolved template default.

@@ -98,6 +98,7 @@ export type WyseApi = {
   createAgent(input: {
     agentName: string
     text: string
+    modelConfig?: ModelConfig
   }): Promise<{ agent_id: string; agent_name: string; run_id: string }>
   getAgentTemplates(): Promise<readonly AgentTemplateView[]>
   getModels(): Promise<readonly ModelDescriptor[]>
@@ -171,7 +172,13 @@ export function createWyseApi(options: {
       request("/v1/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agent_name: input.agentName, text: input.text }),
+        body: JSON.stringify({
+          agent_name: input.agentName,
+          text: input.text,
+          ...(input.modelConfig === undefined
+            ? {}
+            : { model_config: input.modelConfig }),
+        }),
       }),
     getAgentTemplates: async () => {
       const response = await request<{ agents: readonly AgentTemplateView[] }>(

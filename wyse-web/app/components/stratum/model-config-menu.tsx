@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuGroup,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -17,70 +17,39 @@ import {
 import type { ComposerConfiguration } from "~/hooks/use-agent-conversation"
 import {
   isModelConfigMenuDisabled,
+  modelDisplayName,
   supportsThinkingControls,
 } from "~/lib/model-config"
 
-type ModelConfigMenuProps = {
+type ConfigurationMenuProps = {
   configuration: ComposerConfiguration
   commandPending: boolean
 }
 
-type ModelConfigMenuContentProps = Pick<ModelConfigMenuProps, "configuration">
-
-export function ModelConfigMenu({
+export function AgentConfigMenu({
   configuration,
   commandPending,
-}: ModelConfigMenuProps) {
+}: ConfigurationMenuProps) {
   const { t } = useTranslation()
-  const current = configuration.currentModelConfig
-  const disabled = isModelConfigMenuDisabled({
-    metadataLoading: configuration.metadataLoading,
-    metadataError: configuration.metadataError !== null,
-    turnRunning: configuration.turnRunning,
-    existingAgent: configuration.existingAgent,
-    currentModelConfig: current,
-    commandPending,
-  })
   const triggerText = configuration.metadataLoading
     ? t("chat.composer.loadingConfiguration")
-    : configuration.agentName === null || current === null
-      ? t("chat.composer.selectAgent")
-      : `${configuration.agentName} · ${current.model}`
+    : (configuration.agentName ?? t("chat.composer.selectAgent"))
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-8 max-w-56 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-        disabled={disabled}
+        className="inline-flex h-8 max-w-40 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        disabled={menuDisabled(configuration, commandPending)}
       >
         <span className="truncate">{triggerText}</span>
         <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        {configuration.existingAgent ? (
-          <ExistingAgentMenu configuration={configuration} />
-        ) : (
-          <NewAgentMenu configuration={configuration} />
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-function NewAgentMenu({ configuration }: ModelConfigMenuContentProps) {
-  const { t } = useTranslation()
-  const current = configuration.currentModelConfig
-
-  return (
-    <>
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          {t("chat.composer.agent")}
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>{t("chat.composer.agent")}</DropdownMenuLabel>
           <DropdownMenuRadioGroup
-            value={configuration.selectedTemplate?.agent_name}
+            value={configuration.agentName ?? undefined}
             onValueChange={(agentName) => {
               const template = configuration.agentTemplates.find(
                 (candidate) => candidate.agent_name === agentName
@@ -97,36 +66,43 @@ function NewAgentMenu({ configuration }: ModelConfigMenuContentProps) {
               </DropdownMenuRadioItem>
             ))}
           </DropdownMenuRadioGroup>
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
-      {current !== null && (
-        <>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>{t("chat.composer.model")}</DropdownMenuLabel>
-          <DropdownMenuItem disabled>{current.model}</DropdownMenuItem>
-          <DropdownMenuItem disabled>
-            {JSON.stringify(current.parameters)}
-          </DropdownMenuItem>
-        </>
-      )}
-    </>
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
-function ExistingAgentMenu({ configuration }: ModelConfigMenuContentProps) {
+export function ModelConfigMenu({
+  configuration,
+  commandPending,
+}: ConfigurationMenuProps) {
   const { t } = useTranslation()
   const selected = configuration.selectedModelConfig
   const selectedDescriptor = configuration.models.find(
     (descriptor) => descriptor.model === selected?.model
   )
+  const triggerText = configuration.metadataLoading
+    ? t("chat.composer.loadingConfiguration")
+    : selected === null
+      ? t("chat.composer.selectAgent")
+      : formatModelLabel(selected.model)
 
   return (
-    <>
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          {t("chat.composer.model")}
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent>
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label={triggerText}
+        className="inline-flex h-8 max-w-56 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        disabled={
+          configuration.currentModelConfig === null ||
+          menuDisabled(configuration, commandPending)
+        }
+      >
+        <span className="truncate">{triggerText}</span>
+        <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>{t("chat.composer.model")}</DropdownMenuLabel>
           <DropdownMenuRadioGroup
             value={selected?.model}
             onValueChange={(model) => {
@@ -141,46 +117,64 @@ function ExistingAgentMenu({ configuration }: ModelConfigMenuContentProps) {
                 key={descriptor.model}
                 value={descriptor.model}
               >
-                {descriptor.model}
+                {formatModelLabel(descriptor.model)}
               </DropdownMenuRadioItem>
             ))}
           </DropdownMenuRadioGroup>
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
-      {selected !== null &&
-        selectedDescriptor !== undefined &&
-        supportsThinkingControls(selectedDescriptor.parameters_schema) && (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>
-              {t("chat.composer.thinking")}
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              <DropdownMenuRadioGroup
-                value={thinkingLevel(selected.parameters)}
-                onValueChange={(value) => {
-                  if (
-                    value === "disabled" ||
-                    value === "high" ||
-                    value === "max"
-                  )
-                    configuration.setThinkingLevel(value)
-                }}
-              >
-                <DropdownMenuRadioItem value="disabled">
-                  {t("chat.composer.disabled")}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="high">
-                  {t("chat.composer.high")}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="max">
-                  {t("chat.composer.max")}
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        )}
-    </>
+        </DropdownMenuGroup>
+        {configuration.existingAgent &&
+          selected !== null &&
+          selectedDescriptor !== undefined &&
+          supportsThinkingControls(selectedDescriptor.parameters_schema) && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  {t("chat.composer.thinking")}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  <DropdownMenuRadioGroup
+                    value={thinkingLevel(selected.parameters)}
+                    onValueChange={(value) => {
+                      if (
+                        value === "disabled" ||
+                        value === "high" ||
+                        value === "max"
+                      )
+                        configuration.setThinkingLevel(value)
+                    }}
+                  >
+                    <DropdownMenuRadioItem value="disabled">
+                      {t("chat.composer.disabled")}
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="high">
+                      {t("chat.composer.high")}
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="max">
+                      {t("chat.composer.max")}
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </>
+          )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
+}
+
+function menuDisabled(
+  configuration: ComposerConfiguration,
+  commandPending: boolean
+): boolean {
+  return isModelConfigMenuDisabled({
+    metadataLoading: configuration.metadataLoading,
+    metadataError: configuration.metadataError !== null,
+    turnRunning: configuration.turnRunning,
+    existingAgent: configuration.existingAgent,
+    currentModelConfig: configuration.currentModelConfig,
+    commandPending,
+  })
 }
 
 function thinkingLevel(
@@ -195,4 +189,11 @@ function thinkingLevel(
     : level.reasoning_effort === "high"
       ? "high"
       : "disabled"
+}
+
+function formatModelLabel(modelId: string): string {
+  const displayName = modelDisplayName(modelId)
+  return displayName.provider === null
+    ? displayName.model
+    : `${displayName.provider} · ${displayName.model}`
 }
