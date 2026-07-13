@@ -16,11 +16,9 @@ import {
   type RecentAgent,
   type StorageLike,
 } from "~/lib/recent-agents"
-import { apiConfiguration } from "~/lib/api-configuration"
 import {
   configForModel,
   configForTemplate,
-  pendingConfigAfterAcceptance,
   withThinkingLevel,
   type AgentTemplateView,
   type ModelConfig,
@@ -28,6 +26,8 @@ import {
 } from "~/lib/model-config"
 import { createWyseApi, ApiError } from "~/lib/wyse-api"
 import { subscribeToAgentEvents } from "~/lib/wyse-event-stream"
+
+const WYSE_API_BASE_URL = "http://127.0.0.1:18080"
 
 export type ComposerConfiguration = {
   agentTemplates: readonly AgentTemplateView[]
@@ -92,10 +92,8 @@ export function useAgentConversation(): AgentConversation {
   }, [])
 
   useEffect(() => {
-    const configuration = apiConfiguration()
-
     let active = true
-    const api = createWyseApi({ baseUrl: configuration.baseUrl })
+    const api = createWyseApi({ baseUrl: WYSE_API_BASE_URL })
     void Promise.all([api.getAgentTemplates(), api.getModels()]).then(
       ([templates, descriptors]) => {
         if (!active) return
@@ -141,10 +139,8 @@ export function useAgentConversation(): AgentConversation {
 
     const controller = new AbortController()
     const generation = selectionGeneration.current
-    const configuration = apiConfiguration()
-
     const storage = browserStorage()
-    const api = createWyseApi({ baseUrl: configuration.baseUrl })
+    const api = createWyseApi({ baseUrl: WYSE_API_BASE_URL })
     const dispatchIfCurrent = (action: Parameters<typeof dispatch>[0]) => {
       if (
         !controller.signal.aborted &&
@@ -159,7 +155,7 @@ export function useAgentConversation(): AgentConversation {
         subscribe: (options) =>
           subscribeToAgentEvents({
             ...options,
-            baseUrl: configuration.baseUrl,
+            baseUrl: WYSE_API_BASE_URL,
           }),
         loadCursor: (agentId) =>
           storage ? loadCursor(storage, agentId) : undefined,
@@ -206,8 +202,6 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
 
-      const configuration = apiConfiguration()
-
       if (selectedTemplate === null) {
         reportError(
           new ApiError(
@@ -222,7 +216,7 @@ export function useAgentConversation(): AgentConversation {
       const generation = selectionGeneration.current
       try {
         const created = await createWyseApi({
-          baseUrl: configuration.baseUrl,
+          baseUrl: WYSE_API_BASE_URL,
         }).createAgent({
           agentName: selectedTemplate.agent_name,
           text: prompt,
@@ -265,10 +259,8 @@ export function useAgentConversation(): AgentConversation {
       return undefined
     }
 
-    const configuration = apiConfiguration()
-
     return {
-      api: createWyseApi({ baseUrl: configuration.baseUrl }),
+      api: createWyseApi({ baseUrl: WYSE_API_BASE_URL }),
       agentId,
       generation: selectionGeneration.current,
     }
@@ -301,7 +293,7 @@ export function useAgentConversation(): AgentConversation {
         ) {
           setAcceptedModelConfig(selectedConfig)
           setRequestedModelConfig((pendingConfig) =>
-            pendingConfigAfterAcceptance(pendingConfig, selectedConfig)
+            pendingConfig === selectedConfig ? null : pendingConfig
           )
         }
         return true

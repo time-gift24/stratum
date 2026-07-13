@@ -16,7 +16,6 @@ import {
 } from "~/components/ui/dropdown-menu"
 import type { ComposerConfiguration } from "~/hooks/use-agent-conversation"
 import {
-  isModelConfigMenuDisabled,
   modelDisplayName,
   supportsThinkingControls,
 } from "~/lib/model-config"
@@ -167,14 +166,13 @@ function menuDisabled(
   configuration: ComposerConfiguration,
   commandPending: boolean
 ): boolean {
-  return isModelConfigMenuDisabled({
-    metadataLoading: configuration.metadataLoading,
-    metadataError: configuration.metadataError !== null,
-    turnRunning: configuration.turnRunning,
-    existingAgent: configuration.existingAgent,
-    currentModelConfig: configuration.currentModelConfig,
-    commandPending,
-  })
+  return (
+    configuration.metadataLoading ||
+    configuration.metadataError !== null ||
+    configuration.turnRunning ||
+    commandPending ||
+    (configuration.existingAgent && configuration.currentModelConfig === null)
+  )
 }
 
 function thinkingLevel(
