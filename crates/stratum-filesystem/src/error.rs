@@ -143,4 +143,12 @@ mod tests {
 
         assert_eq!(error.to_string(), "path not found /missing.txt");
     }
+
+    #[test]
+    fn unsupported_cas_stays_explicit_for_conditional_deletes() {
+        assert_eq!(
+            FilesystemError::UnsupportedCas.to_string(),
+            "filesystem backend does not support compare-and-swap"
+        );
+    }
 }

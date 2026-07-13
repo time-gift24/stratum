@@ -36,6 +36,21 @@ pub trait Filesystem: Send + Sync {
         Err(FilesystemError::UnsupportedCas)
     }
 
+    /// Deletes one record when its compare-and-swap expectation holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilesystemError::UnsupportedCas`] when the backend does not support
+    /// compare-and-swap operations, [`FilesystemError::VersionMismatch`] when the
+    /// expectation fails, or another backend error when the delete fails.
+    async fn delete(
+        &self,
+        _path: &VirtualPath,
+        _cas: CasExpectation,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::UnsupportedCas)
+    }
+
     /// Reads a complete file into memory.
     ///
     /// # Errors
@@ -143,6 +158,43 @@ pub enum FileType {
 mod tests {
     use super::*;
 
+    struct CasDeleteFilesystem;
+
+    #[async_trait]
+    impl Filesystem for CasDeleteFilesystem {
+        async fn read_file(&self, _path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn write_file(
+            &self,
+            _path: &VirtualPath,
+            _contents: Vec<u8>,
+        ) -> Result<(), FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn metadata(&self, _path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn create_dir(&self, _path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn remove_file(&self, _path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+
+        async fn remove_dir(&self, _path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::UnsupportedCas)
+        }
+    }
+
     #[test]
     fn backend_can_construct_a_directory_entry() {
         let path = VirtualPath::try_from("/messages/1.json").expect("valid path");
@@ -152,5 +204,16 @@ mod tests {
         assert_eq!(entry.path, path);
         assert_eq!(entry.file_name, "1.json");
         assert_eq!(entry.file_type, FileType::File);
+    }
+
+    #[tokio::test]
+    async fn delete_defaults_to_unsupported_cas() {
+        let filesystem = CasDeleteFilesystem;
+        let path = VirtualPath::try_from("/draft.json").expect("valid path");
+
+        assert!(matches!(
+            filesystem.delete(&path, CasExpectation::Absent).await,
+            Err(FilesystemError::UnsupportedCas)
+        ));
     }
 }

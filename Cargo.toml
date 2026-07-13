@@ -10,6 +10,9 @@ members = [
     "crates/stratum-infra",
     "crates/stratum-llm",
     "crates/stratum-tools",
+    "crates/stratum-ontology",
+    "crates/stratum-ontology-mysql",
+    "crates/stratum-ontology-api",
 ]
 resolver = "3"
 
@@ -32,6 +35,8 @@ http = "1.3.1"
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "mysql", "runtime-tokio-rustls", "uuid"] }
 thiserror = "2.0.17"
 toml = "0.9.8"
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -50,6 +55,7 @@ stratum-infra = { path = "crates/stratum-infra" }
 stratum-llm = { path = "crates/stratum-llm" }
 stratum-tools = { path = "crates/stratum-tools" }
 stratum-api = { path = "crates/stratum-api" }
+stratum-ontology = { path = "crates/stratum-ontology" }
 
 [workspace.lints.clippy]
 correctness = "deny"

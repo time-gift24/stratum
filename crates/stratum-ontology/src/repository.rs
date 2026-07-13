@@ -1,0 +1,474 @@
+//! Persistence contract for published schemas and shared instances.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use serde_json::{Map, Value};
+use uuid::Uuid;
+
+use crate::{
+    Cardinality, LinkId, LinkTypeId, ObjectId, ObjectTypeId, OntologyError, RevisionId,
+    SchemaDocument, TagName, revision_id, validate_object_values,
+};
+
+/// A published immutable schema revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedRevision {
+    /// Content-addressed revision identity.
+    pub id: RevisionId,
+    /// Validated schema body stored for this revision.
+    pub schema: SchemaDocument,
+}
+
+/// Validates that a revision's identity is the canonical digest of its schema.
+///
+/// # Errors
+///
+/// Returns a schema validation error when the schema is invalid, or
+/// [`OntologyError::RevisionIdentityMismatch`] when the supplied identity does
+/// not equal the canonical schema digest.
+pub fn validate_published_revision(revision: &PublishedRevision) -> Result<(), OntologyError> {
+    let expected = revision_id(&revision.schema)?;
+    if expected == revision.id {
+        Ok(())
+    } else {
+        Err(OntologyError::RevisionIdentityMismatch {
+            expected,
+            actual: revision.id.clone(),
+        })
+    }
+}
+
+/// Validates all shared instances against a schema revision candidate.
+///
+/// # Errors
+///
+/// Returns [`OntologyError::PublishInvalid`] when an object or link does not
+/// satisfy `schema`.
+pub fn validate_schema_instances(
+    schema: &SchemaDocument,
+    objects: &[ObjectRecord],
+    links: &[LinkRecord],
+) -> Result<(), OntologyError> {
+    let mut diagnostics = Vec::new();
+    let objects_by_id: HashMap<ObjectId, &ObjectRecord> =
+        objects.iter().map(|object| (object.id, object)).collect();
+    let mut source_counts = HashMap::new();
+    let mut target_counts = HashMap::new();
+    for link in links {
+        *source_counts
+            .entry((link.link_type_id, link.source_object_id))
+            .or_insert(0_usize) += 1;
+        *target_counts
+            .entry((link.link_type_id, link.target_object_id))
+            .or_insert(0_usize) += 1;
+    }
+
+    for object in objects {
+        let Some(object_type) = schema
+            .object_types
+            .iter()
+            .find(|object_type| object_type.id == object.object_type_id)
+        else {
+            diagnostics.push(format!("object {} has an unknown object type", object.id));
+            continue;
+        };
+        if let Err(OntologyError::ValueInvalid {
+            diagnostics: errors,
+        }) = validate_object_values(&object_type.properties, &object.values)
+        {
+            diagnostics.extend(
+                errors
+                    .into_iter()
+                    .map(|error| format!("object {}: {error}", object.id)),
+            );
+        }
+    }
+
+    for link in links {
+        let Some(link_type) = schema
+            .link_types
+            .iter()
+            .find(|link_type| link_type.id == link.link_type_id)
+        else {
+            diagnostics.push(format!("link {} has an unknown link type", link.id));
+            continue;
+        };
+        match objects_by_id.get(&link.source_object_id) {
+            Some(source) if source.object_type_id == link_type.source_object_type_id => {}
+            Some(_) => diagnostics.push(format!("link {} has a source of the wrong type", link.id)),
+            None => diagnostics.push(format!("link {} has a missing source object", link.id)),
+        }
+        match objects_by_id.get(&link.target_object_id) {
+            Some(target) if target.object_type_id == link_type.target_object_type_id => {}
+            Some(_) => diagnostics.push(format!("link {} has a target of the wrong type", link.id)),
+            None => diagnostics.push(format!("link {} has a missing target object", link.id)),
+        }
+        let source_count = source_counts
+            .get(&(link.link_type_id, link.source_object_id))
+            .copied()
+            .unwrap_or_default();
+        let target_count = target_counts
+            .get(&(link.link_type_id, link.target_object_id))
+            .copied()
+            .unwrap_or_default();
+        let cardinality_valid = match link_type.cardinality {
+            Cardinality::OneToOne => source_count <= 1 && target_count <= 1,
+            Cardinality::OneToMany => target_count <= 1,
+            Cardinality::ManyToOne => source_count <= 1,
+            Cardinality::ManyToMany => true,
+        };
+        if !cardinality_valid {
+            diagnostics.push(format!(
+                "link type {} cardinality is violated by existing links",
+                link.link_type_id
+            ));
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(OntologyError::PublishInvalid { diagnostics })
+    }
+}
+
+/// A stored object instance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectRecord {
+    /// Internal instance identity.
+    pub id: ObjectId,
+    /// The schema object type identity.
+    pub object_type_id: ObjectTypeId,
+    /// Complete object values document.
+    pub values: Map<String, Value>,
+    /// Optimistic concurrency version.
+    pub version: u64,
+}
+
+/// Data required to create an object instance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewObjectRecord {
+    /// Internal instance identity generated by the service.
+    pub id: ObjectId,
+    /// The schema object type identity.
+    pub object_type_id: ObjectTypeId,
+    /// Complete object values document.
+    pub values: Map<String, Value>,
+}
+
+/// A stored directed link instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRecord {
+    /// Internal instance identity.
+    pub id: LinkId,
+    /// The schema link type identity.
+    pub link_type_id: LinkTypeId,
+    /// Source object identity.
+    pub source_object_id: ObjectId,
+    /// Target object identity.
+    pub target_object_id: ObjectId,
+    /// Optimistic concurrency version.
+    pub version: u64,
+}
+
+/// Data required to create a link instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewLinkRecord {
+    /// Internal instance identity generated by the service.
+    pub id: LinkId,
+    /// The schema link type identity.
+    pub link_type_id: LinkTypeId,
+    /// Source object identity.
+    pub source_object_id: ObjectId,
+    /// Target object identity.
+    pub target_object_id: ObjectId,
+}
+
+/// One schema-derived cardinality constraint applied to a link write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkCardinalityConstraint {
+    /// Multiplicity that must hold after the write.
+    pub cardinality: Cardinality,
+}
+
+/// One cursor page of stored records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page<T> {
+    /// Records returned for the requested page.
+    pub items: Vec<T>,
+    /// Cursor to pass as `after` for the following page.
+    pub next_after: Option<Uuid>,
+}
+
+/// Storage operations required by the ontology service.
+#[async_trait]
+pub trait OntologyRepository: Send + Sync {
+    /// Validates every current instance and atomically inserts a revision.
+    ///
+    /// Implementations must linearize this operation with all object and link
+    /// writes, so an instance cannot be committed between validation and insert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::PublishInvalid`] when an existing instance does
+    /// not satisfy the revision, or an ontology error when persistence fails.
+    async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError>;
+
+    /// Loads a revision by its content identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn get_revision(
+        &self,
+        id: &RevisionId,
+    ) -> Result<Option<PublishedRevision>, OntologyError>;
+
+    /// Lists every published revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn list_revisions(&self) -> Result<Vec<PublishedRevision>, OntologyError>;
+
+    /// Creates or moves a tag to a published revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn put_tag(&self, name: &TagName, revision_id: &RevisionId) -> Result<(), OntologyError>;
+
+    /// Validates all current instances then moves the `online` tag atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::PublishInvalid`] when an existing instance does
+    /// not satisfy the target revision, or an ontology error when persistence fails.
+    async fn move_online_tag(&self, revision_id: &RevisionId) -> Result<(), OntologyError>;
+
+    /// Resolves a tag to its revision identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn get_tag(&self, name: &TagName) -> Result<Option<RevisionId>, OntologyError>;
+
+    /// Deletes a tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn delete_tag(&self, name: &TagName) -> Result<(), OntologyError>;
+
+    /// Persists a new object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn create_object(
+        &self,
+        object: NewObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError>;
+
+    /// Loads an object by identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn get_object(&self, id: ObjectId) -> Result<Option<ObjectRecord>, OntologyError>;
+
+    /// Returns one object type page after an optional object cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn page_objects(
+        &self,
+        type_id: ObjectTypeId,
+        after: Option<ObjectId>,
+        limit: u32,
+    ) -> Result<Page<ObjectRecord>, OntologyError>;
+
+    /// Replaces an object conditionally on its version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn replace_object(
+        &self,
+        object: ObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError>;
+
+    /// Deletes an object, optionally deleting its links too.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn delete_object(
+        &self,
+        id: ObjectId,
+        version: u64,
+        force: bool,
+        online_revision_id: &RevisionId,
+    ) -> Result<(), OntologyError>;
+
+    /// Atomically checks every cardinality constraint and persists a new link.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn create_link_with_cardinality(
+        &self,
+        link: NewLinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
+    ) -> Result<LinkRecord, OntologyError>;
+
+    /// Loads a link by identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn get_link(&self, id: LinkId) -> Result<Option<LinkRecord>, OntologyError>;
+
+    /// Returns one link page after an optional link cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn page_links(
+        &self,
+        after: Option<LinkId>,
+        limit: u32,
+    ) -> Result<Page<LinkRecord>, OntologyError>;
+
+    /// Atomically checks every cardinality constraint and replaces a link conditionally on its version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn replace_link_with_cardinality(
+        &self,
+        link: LinkRecord,
+        constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
+    ) -> Result<LinkRecord, OntologyError>;
+
+    /// Deletes a link conditionally on its version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ontology error when persistence fails.
+    async fn delete_link(
+        &self,
+        id: LinkId,
+        version: u64,
+        online_revision_id: &RevisionId,
+    ) -> Result<(), OntologyError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Map;
+    use uuid::Uuid;
+
+    use super::{
+        LinkRecord, ObjectRecord, PublishedRevision, validate_published_revision,
+        validate_schema_instances,
+    };
+    use crate::{
+        Cardinality, LinkId, LinkType, LinkTypeId, ObjectId, ObjectType, ObjectTypeId,
+        OntologyError, RevisionId, SchemaDocument,
+    };
+
+    #[test]
+    fn published_revision_rejects_an_id_that_does_not_match_its_schema() {
+        let revision = PublishedRevision {
+            id: RevisionId::try_from("0".repeat(64)).expect("syntactically valid revision id"),
+            schema: SchemaDocument {
+                schema_version: 1,
+                object_types: vec![ObjectType {
+                    id: ObjectTypeId::new(),
+                    name: "person".to_owned(),
+                    description: String::new(),
+                    properties: Vec::new(),
+                }],
+                link_types: Vec::new(),
+            },
+        };
+
+        assert!(validate_published_revision(&revision).is_err());
+    }
+
+    #[test]
+    fn schema_instance_validation_enforces_every_link_cardinality() {
+        let object_type_id = ObjectTypeId::from(Uuid::from_u128(1));
+        let link_type_id = LinkTypeId::from(Uuid::from_u128(2));
+        let first = ObjectId::from(Uuid::from_u128(10));
+        let second = ObjectId::from(Uuid::from_u128(11));
+        let third = ObjectId::from(Uuid::from_u128(12));
+        let objects = [first, second, third]
+            .into_iter()
+            .map(|id| ObjectRecord {
+                id,
+                object_type_id,
+                values: Map::new(),
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+        let links = [(first, second), (first, third), (second, third)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (source_object_id, target_object_id))| LinkRecord {
+                id: LinkId::from(Uuid::from_u128(20 + index as u128)),
+                link_type_id,
+                source_object_id,
+                target_object_id,
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+
+        for cardinality in [
+            Cardinality::OneToOne,
+            Cardinality::OneToMany,
+            Cardinality::ManyToOne,
+        ] {
+            let schema = schema_with_cardinality(object_type_id, link_type_id, cardinality);
+
+            assert!(matches!(
+                validate_schema_instances(&schema, &objects, &links),
+                Err(OntologyError::PublishInvalid { .. })
+            ));
+        }
+
+        let permissive =
+            schema_with_cardinality(object_type_id, link_type_id, Cardinality::ManyToMany);
+        assert!(validate_schema_instances(&permissive, &objects, &links).is_ok());
+    }
+
+    fn schema_with_cardinality(
+        object_type_id: ObjectTypeId,
+        link_type_id: LinkTypeId,
+        cardinality: Cardinality,
+    ) -> SchemaDocument {
+        SchemaDocument {
+            schema_version: 1,
+            object_types: vec![ObjectType {
+                id: object_type_id,
+                name: "person".to_owned(),
+                description: String::new(),
+                properties: Vec::new(),
+            }],
+            link_types: vec![LinkType::new(
+                link_type_id,
+                "knows".to_owned(),
+                object_type_id,
+                object_type_id,
+                cardinality,
+            )],
+        }
+    }
+}
