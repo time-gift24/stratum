@@ -18,12 +18,15 @@ import { useOntologyWorkspace } from "~/hooks/use-ontology-workspace"
 import type { SchemaSource } from "~/lib/ontology-api"
 import type { OntologySelection } from "~/lib/ontology-graph"
 
-function LoadingCanvas() {
+function LoadingCanvas({ label }: { label: string }) {
   return (
     <div
       className="relative h-full overflow-hidden bg-wyse-canvas"
+      role="status"
+      aria-live="polite"
       aria-busy="true"
     >
+      <span className="sr-only">{label}</span>
       <div className="absolute top-[24%] left-[12%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
       <div className="absolute top-[48%] left-[42%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
       <div className="absolute top-[28%] left-[70%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
@@ -73,7 +76,7 @@ export function OntologyWorkspace() {
 
   const handleSelectionChange = (next: OntologySelection) => {
     setSelection(next)
-    if (next && window.matchMedia("(max-width: 1023px)").matches) {
+    if (next && !window.matchMedia("(min-width: 1024px)").matches) {
       setSourceOpen(false)
       setInspectorOpen(true)
     }
@@ -102,59 +105,63 @@ export function OntologyWorkspace() {
         </div>
 
         <div className="relative min-h-0 overflow-hidden">
-          <div className="absolute top-3 left-3 z-20 flex gap-2 lg:hidden">
-            <Button
-              ref={sourceButtonRef}
-              type="button"
-              variant="outline"
-              className="h-11 text-sm"
-              aria-expanded={sourceOpen}
-              onClick={() => setSourceOpen(true)}
-            >
-              <ListTreeIcon aria-hidden="true" />
-              {t("ontology.source.index")}
-            </Button>
-          </div>
-          <div className="absolute top-3 right-3 z-20 lg:hidden">
-            <Button
-              ref={inspectorButtonRef}
-              type="button"
-              variant="outline"
-              className="h-11 text-sm"
-              aria-expanded={inspectorOpen}
-              onClick={() => setInspectorOpen(true)}
-            >
-              <PanelRightIcon aria-hidden="true" />
-              {t("ontology.inspector.title")}
-            </Button>
-          </div>
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-20">
+            {state.phase === "demo" ? (
+              <div
+                role="status"
+                className="pointer-events-auto flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-wyse-line bg-wyse-paper-soft px-3 py-1.5 text-sm"
+              >
+                <InfoIcon
+                  className="size-4 shrink-0 text-wyse-action"
+                  aria-hidden="true"
+                />
+                <div className="min-w-40 flex-1">
+                  <strong className="mr-2">{t("ontology.state.demo")}</strong>
+                  <span className="text-muted-foreground">
+                    {t(`ontology.state.${state.demoReason}`)}
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 shrink-0 text-sm"
+                  onClick={retry}
+                >
+                  <RefreshCwIcon aria-hidden="true" />
+                  {t("ontology.state.retry")}
+                </Button>
+              </div>
+            ) : null}
 
-          {state.phase === "demo" ? (
-            <div
-              role="status"
-              className="absolute inset-x-0 top-0 z-10 flex min-h-10 items-center gap-2 border-b border-wyse-line bg-wyse-paper-soft px-3 text-sm"
-            >
-              <InfoIcon
-                className="size-4 text-wyse-action"
-                aria-hidden="true"
-              />
-              <strong>{t("ontology.state.demo")}</strong>
-              <span className="text-muted-foreground">
-                {t(`ontology.state.${state.demoReason}`)}
-              </span>
+            <div className="flex items-start justify-between gap-2 p-3 lg:hidden">
               <Button
+                ref={sourceButtonRef}
                 type="button"
                 variant="outline"
-                className="ml-auto h-11 text-sm"
-                onClick={retry}
+                className="pointer-events-auto h-11 text-sm"
+                aria-expanded={sourceOpen}
+                onClick={() => setSourceOpen(true)}
               >
-                <RefreshCwIcon aria-hidden="true" />
-                {t("ontology.state.retry")}
+                <ListTreeIcon aria-hidden="true" />
+                {t("ontology.source.index")}
+              </Button>
+              <Button
+                ref={inspectorButtonRef}
+                type="button"
+                variant="outline"
+                className="pointer-events-auto h-11 text-sm"
+                aria-expanded={inspectorOpen}
+                onClick={() => setInspectorOpen(true)}
+              >
+                <PanelRightIcon aria-hidden="true" />
+                {t("ontology.inspector.title")}
               </Button>
             </div>
-          ) : null}
+          </div>
 
-          {state.phase === "loading" ? <LoadingCanvas /> : null}
+          {state.phase === "loading" ? (
+            <LoadingCanvas label={t("ontology.state.loading")} />
+          ) : null}
           {(state.phase === "ready" || state.phase === "demo") && graph ? (
             <OntologyGraphCanvas
               graph={graph}
@@ -163,7 +170,11 @@ export function OntologyWorkspace() {
             />
           ) : null}
           {state.phase === "empty" ? (
-            <div className="grid h-full place-items-center bg-wyse-canvas px-6 text-center">
+            <div
+              className="grid h-full place-items-center bg-wyse-canvas px-6 text-center"
+              role="status"
+              aria-live="polite"
+            >
               <div className="max-w-md">
                 <h2 className="text-lg font-semibold">
                   {t("ontology.state.emptyTitle")}
@@ -175,7 +186,10 @@ export function OntologyWorkspace() {
             </div>
           ) : null}
           {state.phase === "error" ? (
-            <div className="grid h-full place-items-center bg-wyse-canvas px-6 text-center">
+            <div
+              className="grid h-full place-items-center bg-wyse-canvas px-6 text-center"
+              role="alert"
+            >
               <div className="max-w-md">
                 <h2 className="text-lg font-semibold">
                   {t("ontology.state.errorTitle")}
