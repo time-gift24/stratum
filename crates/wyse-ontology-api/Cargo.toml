@@ -16,6 +16,7 @@ wyse-ontology.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 tower.workspace = true
+tracing-subscriber.workspace = true
 wyse-filesystem.workspace = true
 uuid.workspace = true
 

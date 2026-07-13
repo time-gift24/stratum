@@ -132,14 +132,26 @@ impl fmt::Display for ErrorChain<'_> {
 
 fn log_internal_error(error: &OntologyError, status: StatusCode) {
     let context = operational_context(error);
-    tracing::error!(
-        http.status_code = status.as_u16(),
-        error.category = context.category,
-        resource.kind = context.resource_kind.unwrap_or(""),
-        resource.id = context.resource_id.as_deref().unwrap_or(""),
-        error.chain = %ErrorChain(error),
-        "ontology HTTP request failed"
-    );
+    if matches!(error, OntologyError::Repository(_)) {
+        tracing::error!(
+            http.status_code = status.as_u16(),
+            error.category = context.category,
+            error.code = "repository_failure",
+            resource.kind = context.resource_kind.unwrap_or(""),
+            resource.id = context.resource_id.as_deref().unwrap_or(""),
+            "ontology HTTP request failed"
+        );
+    } else {
+        tracing::error!(
+            http.status_code = status.as_u16(),
+            error.category = context.category,
+            error.code = context.category,
+            resource.kind = context.resource_kind.unwrap_or(""),
+            resource.id = context.resource_id.as_deref().unwrap_or(""),
+            error.chain = %ErrorChain(error),
+            "ontology HTTP request failed"
+        );
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -235,10 +247,52 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fmt::{self, Write as _},
+        sync::{Arc, Mutex},
+    };
+
+    use axum::{http::StatusCode, response::IntoResponse};
+    use tracing::{Event, Subscriber, field::Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
     use uuid::Uuid;
     use wyse_ontology::{ObjectId, OntologyError};
 
-    use super::operational_context;
+    use super::{ApiError, operational_context};
+
+    const SENTINEL_CREDENTIAL: &str = "mysql://admin:pr20-sentinel-secret@database/ontology";
+
+    #[derive(Clone)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = String::new();
+            event.record(&mut FieldVisitor {
+                fields: &mut fields,
+            });
+            self.events
+                .lock()
+                .expect("capture mutex is not poisoned")
+                .push(fields);
+        }
+    }
+
+    struct FieldVisitor<'a> {
+        fields: &'a mut String,
+    }
+
+    impl Visit for FieldVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            write!(self.fields, "{}={value:?};", field.name())
+                .expect("writing to a String cannot fail");
+        }
+    }
 
     #[test]
     fn operational_context_uses_only_safe_structured_identifiers() {
@@ -250,5 +304,32 @@ mod tests {
         assert_eq!(context.category, "object_missing");
         assert_eq!(context.resource_kind, Some("object"));
         assert_eq!(context.resource_id.as_deref(), Some(expected_id.as_str()));
+    }
+
+    #[test]
+    fn repository_error_tracing_redacts_arbitrary_sources() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: Arc::clone(&events),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            let response =
+                ApiError::Ontology(OntologyError::Repository(SENTINEL_CREDENTIAL.into()))
+                    .into_response();
+
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        });
+
+        let events = events.lock().expect("capture mutex is not poisoned");
+        assert_eq!(events.len(), 1, "expected one boundary error event");
+        let event = &events[0];
+        assert!(
+            !event.contains(SENTINEL_CREDENTIAL),
+            "captured sensitive repository detail: {event}"
+        );
+        assert!(event.contains("http.status_code=500;"));
+        assert!(event.contains("error.category=\"repository\";"));
+        assert!(event.contains("error.code=\"repository_failure\";"));
     }
 }
