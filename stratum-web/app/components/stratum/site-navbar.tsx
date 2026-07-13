@@ -163,7 +163,8 @@ export function SiteNavbar({
       for (const [section, link] of links) {
         const active = section === activeSection
         link.dataset.active = String(active)
-        link.toggleAttribute("aria-current", active)
+        if (active) link.setAttribute("aria-current", "page")
+        else link.removeAttribute("aria-current")
       }
 
       gsap.set(indicator, {
