@@ -1,4 +1,7 @@
+import type { ReactNode } from "react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { BrainIcon, ChevronDownIcon } from "lucide-react"
 
 import {
   Message,
@@ -8,8 +11,8 @@ import {
 import {
   Reasoning,
   ReasoningContent,
-  ReasoningTrigger,
 } from "~/components/ai-elements/reasoning"
+import { Shimmer } from "~/components/ai-elements/shimmer"
 import {
   Tool,
   ToolContent,
@@ -22,12 +25,53 @@ import type {
   ToolProgress,
 } from "~/features/agent-conversation/types"
 import type { ApiError } from "~/lib/wyse-api"
+import { cn } from "~/lib/utils"
 
 type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
   error?: ApiError | null
+}
+
+type ReasoningDisclosureProps = {
+  children: string
+  isStreaming?: boolean
+  getThinkingMessage(isStreaming: boolean): ReactNode
+}
+
+function ReasoningDisclosure({
+  children,
+  isStreaming = false,
+  getThinkingMessage,
+}: ReasoningDisclosureProps) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Reasoning
+      defaultOpen={false}
+      isStreaming={isStreaming}
+      onOpenChange={setOpen}
+      open={open}
+    >
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+        onClick={() => setOpen((currentOpen) => !currentOpen)}
+        type="button"
+      >
+        <BrainIcon className="size-4" />
+        {getThinkingMessage(isStreaming)}
+        <ChevronDownIcon
+          className={cn(
+            "size-4 transition-transform",
+            open ? "rotate-180" : "rotate-0"
+          )}
+        />
+      </button>
+      <ReasoningContent>{children}</ReasoningContent>
+    </Reasoning>
+  )
 }
 
 function toToolStatus(status: ToolProgress["status"]): ToolStatus {
@@ -54,6 +98,14 @@ export function AgentMessageList({
     dateStyle: "short",
     timeStyle: "short",
   })
+  const thinkingMessage = (isStreaming: boolean) =>
+    isStreaming ? (
+      <Shimmer as="span" duration={1.4}>
+        {t("chat.thinking")}
+      </Shimmer>
+    ) : (
+      t("chat.reasoningComplete")
+    )
 
   return (
     <>
@@ -68,16 +120,9 @@ export function AgentMessageList({
           >
             <Message from={isUser ? "user" : "assistant"}>
               {message.reasoning ? (
-                <Reasoning>
-                  <ReasoningTrigger
-                    getThinkingMessage={(isStreaming) =>
-                      isStreaming
-                        ? t("chat.thinking")
-                        : t("chat.reasoningComplete")
-                    }
-                  />
-                  <ReasoningContent>{message.reasoning}</ReasoningContent>
-                </Reasoning>
+                <ReasoningDisclosure getThinkingMessage={thinkingMessage}>
+                  {message.reasoning}
+                </ReasoningDisclosure>
               ) : null}
               <MessageContent>
                 <MessageResponse>{text}</MessageResponse>
@@ -104,16 +149,12 @@ export function AgentMessageList({
         >
           <Message from="assistant">
             {draft.reasoning ? (
-              <Reasoning isStreaming>
-                <ReasoningTrigger
-                  getThinkingMessage={(isStreaming) =>
-                    isStreaming
-                      ? t("chat.thinking")
-                      : t("chat.reasoningComplete")
-                  }
-                />
-                <ReasoningContent>{draft.reasoning}</ReasoningContent>
-              </Reasoning>
+              <ReasoningDisclosure
+                isStreaming
+                getThinkingMessage={thinkingMessage}
+              >
+                {draft.reasoning}
+              </ReasoningDisclosure>
             ) : null}
             <MessageContent>
               <MessageResponse>{draft.text}</MessageResponse>
