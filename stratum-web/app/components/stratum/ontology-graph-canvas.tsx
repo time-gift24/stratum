@@ -73,10 +73,6 @@ function CanvasInner({
         return {
           ...edge,
           selected,
-          style: {
-            ...edge.style,
-            strokeWidth: selected ? 2.5 : 1.25,
-          },
           labelStyle: {
             ...edge.labelStyle,
             fontSize: 14,
@@ -148,7 +144,7 @@ function CanvasInner({
       aria-label={t("ontology.canvas.label")}
     >
       <ReactFlow<OntologyFlowNode, OntologyFlowEdge>
-        className="[&_.react-flow\_\_edge.selectable:focus-visible_.react-flow\_\_edge-path]:[stroke-width:3px]"
+        className="ontology-graph-canvas"
         style={flowStyle}
         nodes={nodes}
         edges={edges}

@@ -219,6 +219,28 @@ function sourceSearch(source: SchemaSource): string {
   return search.toString()
 }
 
+function projectSchema(
+  source: SchemaSource,
+  schema: SchemaDocument
+): OntologyGraph {
+  const name = source.kind === "revision" ? source.id : source.name
+  return {
+    schema_ref: { kind: source.kind, name },
+    nodes: schema.object_types.map((objectType) => ({
+      id: objectType.id,
+      label: objectType.name,
+      property_count: objectType.properties.length,
+    })),
+    edges: schema.link_types.map((linkType) => ({
+      id: linkType.id,
+      label: linkType.name,
+      source: linkType.source_object_type_id,
+      target: linkType.target_object_type_id,
+      cardinality: linkType.cardinality,
+    })),
+  }
+}
+
 export type OntologyApi = {
   listSources(signal?: AbortSignal): Promise<SourceOptions>
   load(
@@ -272,14 +294,14 @@ export function createOntologyApi(options: {
       signal
     )
 
-  const tagRevision = async (name: string, signal?: AbortSignal) => {
+  const tagRevisionId = async (name: string, signal?: AbortSignal) => {
     const tag = await request(
       `/v1/ontology/tags/${encodeURIComponent(name)}`,
       (value): value is { name: string; revision_id: string } =>
         isRecord(value) && isString(value.name) && isString(value.revision_id),
       signal
     )
-    return revision(tag.revision_id, signal)
+    return tag.revision_id
   }
 
   return {
@@ -301,15 +323,25 @@ export function createOntologyApi(options: {
       return { drafts, revisions }
     },
     async load(source, signal) {
-      const schemaRequest =
-        source.kind === "draft"
-          ? draft(source.name, signal)
-          : source.kind === "revision"
-            ? revision(source.id, signal)
-            : tagRevision(source.name, signal)
+      if (source.kind === "draft") {
+        const draftResult = await draft(source.name, signal)
+        return {
+          graph: projectSchema(source, draftResult.schema),
+          schema: draftResult.schema,
+        }
+      }
+
+      const revisionId =
+        source.kind === "tag"
+          ? await tagRevisionId(source.name, signal)
+          : source.id
+      const revisionSource: SchemaSource = {
+        kind: "revision",
+        id: revisionId,
+      }
       const [graphResult, schemaResult] = await Promise.all([
-        graph(source, signal),
-        schemaRequest,
+        graph(revisionSource, signal),
+        revision(revisionId, signal),
       ])
       return { graph: graphResult, schema: schemaResult.schema }
     },
