@@ -1,6 +1,10 @@
 //! Adapter from local agent-loop events to externally scoped stream envelopes.
 
-use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -12,6 +16,8 @@ use tracing::warn;
 
 use super::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use crate::EventStreamBus;
+
+const TELEMETRY_PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Adds run, agent, and turn scope before publishing agent-loop events.
 pub struct ScopedAgentEventSink {
@@ -203,24 +209,48 @@ impl DurableEventSink for ScopedAgentEventSink {
 #[async_trait]
 impl TelemetryEventSink for ScopedAgentEventSink {
     async fn emit(&self, event: AgentTelemetryEvent) {
+        let event_type = event.event_type();
         let Some(event) = self.telemetry_agent_event(event) else {
             return;
         };
-        if let Err(source) = self.event_bus.publish(self.envelope(event)).await {
-            warn!(
-                agent_id = %self.agent_id,
-                run_id = %self.run_id,
-                turn_id = %self.turn_id,
-                source = %source,
-                "failed to publish agent telemetry event"
-            );
+        match tokio::time::timeout(
+            TELEMETRY_PUBLISH_TIMEOUT,
+            self.event_bus.publish(self.envelope(event)),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(
+                    agent_id = %self.agent_id,
+                    run_id = %self.run_id,
+                    turn_id = %self.turn_id,
+                    event_type,
+                    error = %error,
+                    "failed to publish agent telemetry event"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    agent_id = %self.agent_id,
+                    run_id = %self.run_id,
+                    turn_id = %self.turn_id,
+                    event_type,
+                    error = %error,
+                    "agent telemetry publish timed out"
+                );
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        future::pending,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use futures_util::stream;
@@ -274,6 +304,23 @@ mod tests {
     #[derive(Default)]
     struct FailingEventStreamBus {
         published: Mutex<Vec<StreamEnvelope>>,
+    }
+
+    struct NeverCompletingEventStreamBus;
+
+    #[async_trait]
+    impl EventStreamBus for NeverCompletingEventStreamBus {
+        async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+            pending().await
+        }
+
+        async fn subscribe_agent(
+            &self,
+            _agent_id: AgentId,
+            _replay_start: ReplayStart,
+        ) -> Result<EventStream, EventStreamBusError> {
+            Ok(Box::pin(stream::empty()))
+        }
     }
 
     impl FailingEventStreamBus {
@@ -389,6 +436,27 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[tokio::test]
+    async fn telemetry_emit_returns_when_bus_publish_never_completes() {
+        let event_bus: Arc<dyn EventStreamBus> = Arc::new(NeverCompletingEventStreamBus);
+        let sink = ScopedAgentEventSink::new(
+            AgentId::new(),
+            "review-agent",
+            RunId::new(),
+            TurnId::new(),
+            event_bus,
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            sink.emit(AgentTelemetryEvent::LlmStarted {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+            }),
+        )
+        .await
+        .expect("best-effort telemetry should not wait indefinitely for the event bus");
     }
 
     #[tokio::test]

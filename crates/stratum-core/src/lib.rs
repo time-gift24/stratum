@@ -1288,4 +1288,78 @@ mod tests {
         assert_eq!(resolved_json["type"], "tool_approval_resolved");
         assert_eq!(resolved_json["data"]["decision"], "approve");
     }
+
+    #[test]
+    fn agent_loop_compatibility_events_have_stable_wire_shapes() -> serde_json::Result<()> {
+        let turn_id = "019f06b7-48f0-7c11-8000-000000000001"
+            .parse::<TurnId>()
+            .expect("fixed turn id should parse");
+        let usage = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+        };
+        let fixtures = [
+            (
+                AgentEvent::ToolExecutionStarted {
+                    turn_id,
+                    call_id: CallId::from("tool-call-1"),
+                    tool_name: ToolName::from("echo"),
+                },
+                "tool_execution_started",
+                json!({
+                    "type": "tool_execution_started",
+                    "data": {
+                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
+                        "call_id": "tool-call-1",
+                        "tool_name": "echo"
+                    }
+                }),
+            ),
+            (
+                AgentEvent::ToolExecutionProgress {
+                    turn_id,
+                    call_id: CallId::from("tool-call-1"),
+                    update: json!({ "percent": 50 }),
+                },
+                "tool_execution_progress",
+                json!({
+                    "type": "tool_execution_progress",
+                    "data": {
+                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
+                        "call_id": "tool-call-1",
+                        "update": { "percent": 50 }
+                    }
+                }),
+            ),
+            (
+                AgentEvent::IterationCompleted {
+                    turn_id,
+                    iteration: 4,
+                    usage,
+                },
+                "iteration_completed",
+                json!({
+                    "type": "iteration_completed",
+                    "data": {
+                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
+                        "iteration": 4,
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (event, event_type, expected) in fixtures {
+            assert_eq!(event.event_type(), event_type);
+            assert_eq!(serde_json::to_value(&event)?, expected);
+            assert_eq!(serde_json::from_value::<AgentEvent>(expected)?, event);
+        }
+
+        Ok(())
+    }
 }
