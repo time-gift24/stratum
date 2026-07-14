@@ -10,7 +10,7 @@ use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ToolExecutor, ToolExecutorError};
+use crate::{ToolApprovalError, ToolExecutor, ToolExecutorError};
 
 use super::{
     AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimit, LoopLimits, LoopOutcome,
@@ -192,6 +192,9 @@ impl AgentLoop {
                             Err(ToolExecutorError::Durability { source }) => {
                                 return Err(AgentLoopError::Durability { source });
                             }
+                            Err(ToolExecutorError::Approval {
+                                source: ToolApprovalError::Cancelled,
+                            }) => return Err(AgentLoopError::Cancelled),
                             Err(source) => return Err(AgentLoopError::ToolExecution { source }),
                         }
                     };

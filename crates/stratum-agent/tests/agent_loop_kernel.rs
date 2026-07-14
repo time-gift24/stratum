@@ -60,6 +60,43 @@ struct RecordingDurableSink {
     attempts: AtomicUsize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CancellationTrigger {
+    FirstToolResult,
+    Iteration(u64),
+}
+
+struct TriggeredCancellationSink {
+    operations: Arc<Mutex<Vec<Operation>>>,
+    cancellation: CancellationToken,
+    trigger: CancellationTrigger,
+}
+
+#[async_trait]
+impl DurableEventSink for TriggeredCancellationSink {
+    async fn append(&self, event: DurableAgentEvent) -> Result<(), DurableEventSinkError> {
+        let should_cancel = match (&self.trigger, &event) {
+            (
+                CancellationTrigger::FirstToolResult,
+                DurableAgentEvent::MessageAppended { message },
+            ) => message.role == ChatRole::Tool,
+            (
+                CancellationTrigger::Iteration(expected),
+                DurableAgentEvent::IterationCompleted { iteration, .. },
+            ) => iteration == expected,
+            _ => false,
+        };
+        self.operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .push(Operation::Durable(event));
+        if should_cancel {
+            self.cancellation.cancel();
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl DurableEventSink for RecordingDurableSink {
     async fn append(&self, event: DurableAgentEvent) -> Result<(), DurableEventSinkError> {
@@ -140,6 +177,7 @@ impl LlmProvider for ScriptedProvider {
 enum RecordingToolBehavior {
     Echo,
     Fail,
+    WaitForCancellation,
 }
 
 struct RecordingTool {
@@ -175,7 +213,7 @@ impl Tool for RecordingTool {
     async fn call(
         &self,
         input: ToolInput,
-        _cancellation: &CancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
         self.operations
             .lock()
@@ -189,6 +227,10 @@ impl Tool for RecordingTool {
             RecordingToolBehavior::Fail => Err(ToolError::InvalidOperation {
                 operation: "scripted failure".to_owned(),
             }),
+            RecordingToolBehavior::WaitForCancellation => {
+                cancellation.cancelled().await;
+                Err(ToolError::Cancelled)
+            }
         }
     }
 }
@@ -206,6 +248,21 @@ impl ToolApproval for FailingToolApproval {
         Err(ToolApprovalError::interaction(std::io::Error::other(
             "scripted approval failure",
         )))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CancellationAwareApproval;
+
+#[async_trait]
+impl ToolApproval for CancellationAwareApproval {
+    async fn request(
+        &self,
+        _request: ToolApprovalRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<ApprovalDecision, ToolApprovalError> {
+        cancellation.cancelled().await;
+        Err(ToolApprovalError::Cancelled)
     }
 }
 
@@ -258,6 +315,25 @@ fn build_agent_loop(
         fail_at,
         attempts: AtomicUsize::new(0),
     });
+    let agent_loop = assemble_agent_loop(
+        behaviors,
+        limits,
+        registry,
+        approval,
+        durable,
+        Arc::clone(&operations),
+    );
+    (agent_loop, operations)
+}
+
+fn assemble_agent_loop(
+    behaviors: VecDeque<ProviderBehavior>,
+    limits: LoopLimits,
+    registry: Arc<dyn ToolRegistry>,
+    approval: Arc<dyn ToolApproval>,
+    durable: Arc<dyn DurableEventSink>,
+    operations: Arc<Mutex<Vec<Operation>>>,
+) -> AgentLoop {
     let telemetry: Arc<dyn TelemetryEventSink> = Arc::new(RecordingTelemetrySink {
         operations: Arc::clone(&operations),
     });
@@ -269,15 +345,14 @@ fn build_agent_loop(
             .expect("static model id should parse"),
     });
     let tool_executor = ToolExecutor::new(registry, approval, Arc::clone(&durable));
-    let agent_loop = AgentLoop::builder()
+    AgentLoop::builder()
         .llm_provider(provider)
         .tool_executor(tool_executor)
         .durable_events(durable)
         .telemetry(telemetry)
         .limits(limits)
         .build()
-        .expect("all agent loop fields should be present");
-    (agent_loop, operations)
+        .expect("all agent loop fields should be present")
 }
 
 #[tokio::test]
@@ -960,8 +1035,11 @@ async fn stream_protocol_error_commits_one_failed_terminal() {
 
 #[tokio::test]
 async fn failed_terminal_append_preserves_llm_error_and_durability_source() {
-    let (agent_loop, operations) =
-        test_agent_loop_with(ProviderBehavior::SetupError, LoopLimits::new(1, 1), Some(2));
+    let (agent_loop, operations) = test_agent_loop_with(
+        ProviderBehavior::Items(vec![Err(LlmError::MockExhausted)]),
+        LoopLimits::new(1, 1),
+        Some(2),
+    );
 
     let error = agent_loop
         .run(
@@ -2184,5 +2262,536 @@ async fn call_id_from_initial_context_cannot_be_reused_by_a_new_assistant() {
             ))
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
+    let boundaries = [
+        "loop_started",
+        "message_appended",
+        "message_appended",
+        "tool_approval_requested",
+        "tool_approval_resolved",
+        "tool_execution_started",
+        "message_appended",
+        "iteration_completed",
+    ];
+
+    for fail_at in 0..boundaries.len() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let registry = recording_registry(
+            &operations,
+            &[("echo", RecordingToolBehavior::Echo)],
+            ToolPermissionMode::RequireApproval,
+        );
+        let (agent_loop, recorded) = build_agent_loop(
+            VecDeque::from([tool_call_turn(
+                &[("call-ordinal", "echo", json!({"value": 1}))],
+                FinishReason::ToolCalls,
+                None,
+            )]),
+            LoopLimits::new(2, 1),
+            Some(fail_at),
+            registry,
+            Arc::new(AllowAllToolApproval),
+            Arc::clone(&operations),
+        );
+
+        let error = agent_loop
+            .run(
+                LoopContext::new("be precise"),
+                vec![ChatMessage::user("exercise durable boundaries")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err(boundaries[fail_at]);
+
+        assert!(
+            matches!(error, AgentLoopError::Durability { .. }),
+            "unexpected error at {}",
+            boundaries[fail_at]
+        );
+        let recorded = recorded
+            .lock()
+            .expect("operation lock should not be poisoned");
+        assert_eq!(
+            recorded
+                .iter()
+                .filter_map(|operation| match operation {
+                    Operation::Durable(event) => Some(event.event_type()),
+                    Operation::Telemetry(_)
+                    | Operation::ChatStream(_)
+                    | Operation::ToolCall { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+            boundaries[..=fail_at],
+            "durable attempts continued after {} failed",
+            boundaries[fail_at]
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+                .count(),
+            usize::from(fail_at >= 2),
+            "model activity crossed {}",
+            boundaries[fail_at]
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
+                .count(),
+            usize::from(fail_at >= 6),
+            "tool activity crossed {}",
+            boundaries[fail_at]
+        );
+        assert!(!recorded.iter().any(|operation| matches!(
+            operation,
+            Operation::Durable(
+                DurableAgentEvent::LoopFailed { .. }
+                    | DurableAgentEvent::LoopCancelled { .. }
+                    | DurableAgentEvent::LoopFinished { .. }
+            )
+        )));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_before_first_model_call_records_one_cancelled_terminal() {
+    let (agent_loop, operations) = test_agent_loop_with(
+        provider_events(successful_no_tool_events()),
+        LoopLimits::new(1, 1),
+        None,
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("do not call the model")],
+            cancellation,
+        )
+        .await
+        .expect_err("pre-cancelled loop should stop");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Durable(event) => Some(event.event_type()),
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
+                    None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["loop_started", "loop_cancelled"]
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::ChatStream(_)))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_approval_maps_to_loop_cancellation_without_execution() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::RequireApproval,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-approval", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(CancellationAwareApproval),
+        Arc::clone(&operations),
+    );
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        agent_loop
+            .run(
+                LoopContext::new("be precise"),
+                vec![ChatMessage::user("request approval")],
+                task_cancellation,
+            )
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if recorded
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .iter()
+                .any(|operation| {
+                    matches!(
+                        operation,
+                        Operation::Durable(DurableAgentEvent::ToolApprovalRequested { .. })
+                    )
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval request should be committed");
+
+    cancellation.cancel();
+    let error = timeout(Duration::from_secs(1), task)
+        .await
+        .expect("approval cancellation should stop")
+        .expect("loop task should not panic")
+        .expect_err("approval cancellation should return an error");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
+            ))
+            .count(),
+        1
+    );
+    assert!(!recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(
+            DurableAgentEvent::ToolApprovalResolved { .. }
+                | DurableAgentEvent::ToolExecutionStarted { .. }
+                | DurableAgentEvent::LoopFailed { .. }
+        ) | Operation::ToolCall { .. }
+    )));
+}
+
+#[tokio::test]
+async fn cancellation_after_tool_start_awaits_result_and_completes_iteration() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let usage = TokenUsage {
+        input_tokens: 7,
+        output_tokens: 3,
+        total_tokens: 10,
+    };
+    let registry = recording_registry(
+        &operations,
+        &[("cooperative", RecordingToolBehavior::WaitForCancellation)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-cooperative", "cooperative", json!({}))],
+            FinishReason::ToolCalls,
+            Some(usage),
+        )]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        agent_loop
+            .run(
+                LoopContext::new("be precise"),
+                vec![ChatMessage::user("run cooperative tool")],
+                task_cancellation,
+            )
+            .await
+    });
+    wait_for_tool_calls(&recorded, 1).await;
+
+    cancellation.cancel();
+    let error = timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cooperative tool should finish after cancellation")
+        .expect("loop task should not panic")
+        .expect_err("cancelled loop should return an error");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    let durable = recorded
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Durable(event) => Some(event),
+            Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let result_position = durable
+        .iter()
+        .position(|event| {
+            matches!(event, DurableAgentEvent::MessageAppended { message }
+            if message.role == ChatRole::Tool)
+        })
+        .expect("tool result must be committed");
+    let iteration_position = durable
+        .iter()
+        .position(|event| matches!(event, DurableAgentEvent::IterationCompleted { .. }))
+        .expect("completed tool set must close its iteration");
+    let cancelled_position = durable
+        .iter()
+        .position(|event| {
+            matches!(event, DurableAgentEvent::LoopCancelled { usage: event_usage }
+            if *event_usage == usage)
+        })
+        .expect("cancellation terminal must retain completed stream usage");
+    assert!(result_position < iteration_position && iteration_position < cancelled_position);
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancellation_committed_after_first_result_prevents_second_tool_start() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let cancellation = CancellationToken::new();
+    let durable: Arc<dyn DurableEventSink> = Arc::new(TriggeredCancellationSink {
+        operations: Arc::clone(&operations),
+        cancellation: cancellation.clone(),
+        trigger: CancellationTrigger::FirstToolResult,
+    });
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let agent_loop = assemble_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[
+                ("call-first", "echo", json!({"order": 1})),
+                ("call-second", "echo", json!({"order": 2})),
+            ],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(2, 2),
+        registry,
+        Arc::new(AllowAllToolApproval),
+        durable,
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("cancel after first result")],
+            cancellation,
+        )
+        .await
+        .expect_err("durably triggered cancellation should stop the tool sequence");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
+            .count(),
+        1
+    );
+    assert!(operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::MessageAppended { message })
+            if message.role == ChatRole::Tool
+                && message.tool_call_id.as_ref() == Some(&CallId::from("call-first"))
+    )));
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::ToolExecutionStarted { call_id, .. })
+            if call_id == &CallId::from("call-second")
+    )));
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::IterationCompleted { .. })
+    )));
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+async fn wait_for_tool_calls(operations: &Arc<Mutex<Vec<Operation>>>, expected: usize) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if operations
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .iter()
+                .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
+                .count()
+                >= expected
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("tool call should start");
+}
+
+#[tokio::test]
+async fn failed_terminal_usage_saturates_completed_frames_and_excludes_failed_stream() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-usage-a", "echo", json!({}))],
+                FinishReason::ToolCalls,
+                Some(TokenUsage {
+                    input_tokens: u64::MAX - 1,
+                    output_tokens: 2,
+                    total_tokens: u64::MAX - 2,
+                }),
+            ),
+            tool_call_turn(
+                &[("call-usage-b", "echo", json!({}))],
+                FinishReason::ToolCalls,
+                Some(TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: u64::MAX,
+                    total_tokens: 8,
+                }),
+            ),
+            ProviderBehavior::Items(vec![Err(LlmError::MockExhausted)]),
+        ]),
+        LoopLimits::new(3, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("accumulate usage")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("third stream should fail");
+
+    assert!(matches!(error, AgentLoopError::Llm { .. }));
+    assert!(
+        recorded
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { usage, .. })
+                    if *usage == TokenUsage {
+                        input_tokens: u64::MAX,
+                        output_tokens: u64::MAX,
+                        total_tokens: u64::MAX,
+                    }
+            ))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let cancellation = CancellationToken::new();
+    let durable: Arc<dyn DurableEventSink> = Arc::new(TriggeredCancellationSink {
+        operations: Arc::clone(&operations),
+        cancellation: cancellation.clone(),
+        trigger: CancellationTrigger::Iteration(1),
+    });
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let agent_loop = assemble_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-cancel-usage-a", "echo", json!({}))],
+                FinishReason::ToolCalls,
+                Some(TokenUsage {
+                    input_tokens: u64::MAX - 1,
+                    output_tokens: 2,
+                    total_tokens: u64::MAX - 2,
+                }),
+            ),
+            tool_call_turn(
+                &[("call-cancel-usage-b", "echo", json!({}))],
+                FinishReason::ToolCalls,
+                Some(TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: u64::MAX,
+                    total_tokens: 8,
+                }),
+            ),
+        ]),
+        LoopLimits::new(3, 1),
+        registry,
+        Arc::new(AllowAllToolApproval),
+        durable,
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("cancel with accumulated usage")],
+            cancellation,
+        )
+        .await
+        .expect_err("cancellation after the second iteration should stop the loop");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    assert!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopCancelled { usage })
+                    if *usage == TokenUsage {
+                        input_tokens: u64::MAX,
+                        output_tokens: u64::MAX,
+                        total_tokens: u64::MAX,
+                    }
+            ))
     );
 }
