@@ -7,6 +7,8 @@ use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
 
+use crate::ToolExecutorError;
+
 /// Required dependency accepted by [`AgentLoopBuilder`](super::AgentLoopBuilder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -160,6 +162,13 @@ pub enum AgentLoopError {
         /// Model provider failure.
         #[source]
         source: LlmError,
+    },
+    /// Approval or execution orchestration failed before producing a model-visible tool result.
+    #[error("tool execution orchestration failed")]
+    ToolExecution {
+        /// Tool executor failure.
+        #[source]
+        source: ToolExecutorError,
     },
     /// A provider response violated the loop protocol.
     #[error("invalid agent loop protocol: {reason}")]

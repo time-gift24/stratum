@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     error::Error as _,
     future::pending,
     sync::{
@@ -13,17 +14,21 @@ use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
     AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimit,
-    LoopLimits, ProtocolError, RequiredAgentLoopField, ToolExecutor,
+    LoopLimits, ProtocolError, RequiredAgentLoopField, ToolApproval, ToolApprovalError,
+    ToolApprovalRequest, ToolExecutor,
 };
 use stratum_core::{
-    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DangerLevel, DurableAgentEvent, ModelId,
-    TokenUsage, ToolCallDelta, ToolKind,
+    AgentTelemetryEvent, ApprovalDecision, CallId, ChatMessage, ChatRole, DangerLevel,
+    DurableAgentEvent, ModelId, TokenUsage, ToolCall, ToolCallDelta, ToolKind, ToolName, ToolSpec,
 };
 use stratum_infra::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolRegistry};
+use stratum_tools::{
+    BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
+    ToolRegistry,
+};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +37,7 @@ enum Operation {
     Durable(DurableAgentEvent),
     Telemetry(AgentTelemetryEvent),
     ChatStream(ChatRequest),
+    ToolCall { name: ToolName, input: ToolInput },
 }
 
 #[test]
@@ -87,7 +93,7 @@ impl TelemetryEventSink for RecordingTelemetrySink {
 
 struct ScriptedProvider {
     operations: Arc<Mutex<Vec<Operation>>>,
-    behavior: Mutex<Option<ProviderBehavior>>,
+    behaviors: Mutex<VecDeque<ProviderBehavior>>,
     model: ModelId,
 }
 
@@ -114,10 +120,10 @@ impl LlmProvider for ScriptedProvider {
             .expect("operation lock should not be poisoned")
             .push(Operation::ChatStream(request));
         let behavior = self
-            .behavior
+            .behaviors
             .lock()
             .expect("behavior lock should not be poisoned")
-            .take()
+            .pop_front()
             .ok_or(LlmError::MockExhausted)?;
         match behavior {
             ProviderBehavior::Items(items) => Ok(Box::pin(stream::iter(items))),
@@ -127,6 +133,79 @@ impl LlmProvider for ScriptedProvider {
             ProviderBehavior::SetupError => Err(LlmError::MockExhausted),
             ProviderBehavior::Pending => pending().await,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecordingToolBehavior {
+    Echo,
+    Fail,
+}
+
+struct RecordingTool {
+    spec: ToolSpec,
+    operations: Arc<Mutex<Vec<Operation>>>,
+    behavior: RecordingToolBehavior,
+}
+
+impl RecordingTool {
+    fn new(
+        name: &str,
+        operations: Arc<Mutex<Vec<Operation>>>,
+        behavior: RecordingToolBehavior,
+    ) -> Self {
+        Self {
+            spec: ToolSpec::builder()
+                .name(name)
+                .description("records calls")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+            operations,
+            behavior,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for RecordingTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        _cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        self.operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .push(Operation::ToolCall {
+                name: self.spec.name.clone(),
+                input: input.clone(),
+            });
+        match self.behavior {
+            RecordingToolBehavior::Echo => Ok(ToolOutput::new(input.arguments)),
+            RecordingToolBehavior::Fail => Err(ToolError::InvalidOperation {
+                operation: "scripted failure".to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FailingToolApproval;
+
+#[async_trait]
+impl ToolApproval for FailingToolApproval {
+    async fn request(
+        &self,
+        _request: ToolApprovalRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<ApprovalDecision, ToolApprovalError> {
+        Err(ToolApprovalError::interaction(std::io::Error::other(
+            "scripted approval failure",
+        )))
     }
 }
 
@@ -143,7 +222,37 @@ fn test_agent_loop_with(
     limits: LoopLimits,
     fail_at: Option<usize>,
 ) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
+    test_agent_loop_with_behaviors(VecDeque::from([behavior]), limits, fail_at)
+}
+
+fn test_agent_loop_with_behaviors(
+    behaviors: VecDeque<ProviderBehavior>,
+    limits: LoopLimits,
+    fail_at: Option<usize>,
+) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     let operations = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .expect("echo tool should register");
+    build_agent_loop(
+        behaviors,
+        limits,
+        fail_at,
+        Arc::new(registry),
+        Arc::new(AllowAllToolApproval),
+        operations,
+    )
+}
+
+fn build_agent_loop(
+    behaviors: VecDeque<ProviderBehavior>,
+    limits: LoopLimits,
+    fail_at: Option<usize>,
+    registry: Arc<dyn ToolRegistry>,
+    approval: Arc<dyn ToolApproval>,
+    operations: Arc<Mutex<Vec<Operation>>>,
+) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     let durable: Arc<dyn DurableEventSink> = Arc::new(RecordingDurableSink {
         operations: Arc::clone(&operations),
         fail_at,
@@ -154,20 +263,12 @@ fn test_agent_loop_with(
     });
     let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider {
         operations: Arc::clone(&operations),
-        behavior: Mutex::new(Some(behavior)),
+        behaviors: Mutex::new(behaviors),
         model: "scripted:test-model"
             .parse()
             .expect("static model id should parse"),
     });
-    let mut registry = BuiltinToolRegistry::default();
-    registry
-        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
-        .expect("echo tool should register");
-    let tool_executor = ToolExecutor::new(
-        Arc::new(registry),
-        Arc::new(AllowAllToolApproval),
-        Arc::clone(&durable),
-    );
+    let tool_executor = ToolExecutor::new(registry, approval, Arc::clone(&durable));
     let agent_loop = AgentLoop::builder()
         .llm_provider(provider)
         .tool_executor(tool_executor)
@@ -280,7 +381,7 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
         .iter()
         .filter_map(|operation| match operation {
             Operation::Telemetry(event) => Some(event),
-            Operation::Durable(_) | Operation::ChatStream(_) => None,
+            Operation::Durable(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -311,7 +412,7 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
         .iter()
         .filter_map(|operation| match operation {
             Operation::Durable(event) => Some(event),
-            Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+            Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -489,8 +590,11 @@ async fn tool_index_at_exact_allowed_boundary_is_accepted() {
         tool_delta(0, Some("call-0"), Some("echo"), "}"),
         tool_delta(1, Some("call-1"), Some("echo"), "{}"),
     ]);
-    let (agent_loop, operations) =
-        test_agent_loop_with(provider_events(events), LoopLimits::new(1, 2), None);
+    let (agent_loop, operations) = test_agent_loop_with_behaviors(
+        VecDeque::from([provider_events(events), stop_turn("done", None)]),
+        LoopLimits::new(2, 2),
+        None,
+    );
 
     let outcome = agent_loop
         .run(
@@ -501,7 +605,7 @@ async fn tool_index_at_exact_allowed_boundary_is_accepted() {
         .await
         .expect("index limit minus one should be accepted");
 
-    assert_eq!(outcome.new_messages.len(), 2);
+    assert_eq!(outcome.new_messages.len(), 5);
     assert_eq!(outcome.new_messages[1].tool_calls.len(), 2);
     assert!(
         operations
@@ -530,10 +634,11 @@ async fn max_zero_rejects_the_first_tool_delta() {
             limit: LoopLimit::ToolCallsPerIteration { maximum: 0 },
         }
     ));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
     assert_eq!(
         operations
-            .lock()
-            .expect("operation lock should not be poisoned")
             .iter()
             .filter(|operation| matches!(
                 operation,
@@ -542,6 +647,10 @@ async fn max_zero_rejects_the_first_tool_delta() {
             .count(),
         1
     );
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::ToolExecutionStarted { .. })
+    )));
 }
 
 #[tokio::test]
@@ -968,7 +1077,8 @@ async fn prompt_append_failure_stops_before_provider_and_terminal_actions() {
             .iter()
             .filter_map(|operation| match operation {
                 Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
+                    None,
             })
             .collect::<Vec<_>>(),
         vec!["loop_started", "message_appended"]
@@ -1005,7 +1115,8 @@ async fn assistant_append_failure_stops_before_iteration_and_finish() {
             .iter()
             .filter_map(|operation| match operation {
                 Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
+                    None,
             })
             .collect::<Vec<_>>(),
         vec!["loop_started", "message_appended", "message_appended"]
@@ -1037,7 +1148,8 @@ async fn iteration_append_failure_stops_before_loop_finish() {
             .iter()
             .filter_map(|operation| match operation {
                 Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
+                    None,
             })
             .collect::<Vec<_>>(),
         vec![
@@ -1074,7 +1186,8 @@ async fn loop_finished_append_failure_does_not_attempt_another_terminal() {
             .iter()
             .filter_map(|operation| match operation {
                 Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
+                    None,
             })
             .collect::<Vec<_>>(),
         vec![
@@ -1276,8 +1389,11 @@ async fn late_tool_call_id_flushes_all_unemitted_arguments_with_name() {
         tool_delta(0, Some("call-late"), None, "late"),
         tool_delta(0, None, None, "\"}"),
     ]);
-    let (agent_loop, operations) =
-        test_agent_loop_with(provider_events(events), LoopLimits::new(1, 1), None);
+    let (agent_loop, operations) = test_agent_loop_with_behaviors(
+        VecDeque::from([provider_events(events), stop_turn("done", None)]),
+        LoopLimits::new(2, 1),
+        None,
+    );
 
     let outcome = agent_loop
         .run(
@@ -1304,7 +1420,10 @@ async fn late_tool_call_id_flushes_all_unemitted_arguments_with_name() {
                 arguments_delta,
                 ..
             }) => Some((call_id.clone(), name.clone(), arguments_delta.clone())),
-            Operation::Durable(_) | Operation::Telemetry(_) | Operation::ChatStream(_) => None,
+            Operation::Durable(_)
+            | Operation::Telemetry(_)
+            | Operation::ChatStream(_)
+            | Operation::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1321,5 +1440,603 @@ async fn late_tool_call_id_flushes_all_unemitted_arguments_with_name() {
                 "\"}".to_owned(),
             ),
         ]
+    );
+}
+
+fn tool_call_turn(
+    calls: &[(&str, &str, serde_json::Value)],
+    finish_reason: FinishReason,
+    usage: Option<TokenUsage>,
+) -> ProviderBehavior {
+    let mut events = Vec::with_capacity(calls.len() + 1);
+    for (index, (call_id, name, arguments)) in calls.iter().enumerate() {
+        events.push(tool_delta(
+            index,
+            Some(call_id),
+            Some(name),
+            &arguments.to_string(),
+        ));
+    }
+    events.push(ChatStreamEvent::Finished {
+        finish_reason,
+        usage,
+    });
+    provider_events(events)
+}
+
+fn stop_turn(text: &str, usage: Option<TokenUsage>) -> ProviderBehavior {
+    provider_events(vec![
+        ChatStreamEvent::TextDelta {
+            delta: text.to_owned(),
+        },
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage,
+        },
+    ])
+}
+
+fn recording_registry(
+    operations: &Arc<Mutex<Vec<Operation>>>,
+    tools: &[(&str, RecordingToolBehavior)],
+    permission_mode: ToolPermissionMode,
+) -> Arc<dyn ToolRegistry> {
+    let mut registry = BuiltinToolRegistry::new(permission_mode);
+    for (name, behavior) in tools {
+        registry
+            .register(
+                Arc::new(RecordingTool::new(name, Arc::clone(operations), *behavior)),
+                ToolKind::Read,
+                DangerLevel::Low,
+            )
+            .expect("recording tool should register");
+    }
+    Arc::new(registry)
+}
+
+fn without_telemetry(operations: &[Operation]) -> Vec<Operation> {
+    operations
+        .iter()
+        .filter(|operation| !matches!(operation, Operation::Telemetry(_)))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let first_usage = TokenUsage {
+        input_tokens: u64::MAX - 1,
+        output_tokens: 3,
+        total_tokens: u64::MAX - 2,
+    };
+    let second_usage = TokenUsage {
+        input_tokens: 5,
+        output_tokens: u64::MAX,
+        total_tokens: 10,
+    };
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-1", "echo", json!({"value": "one"}))],
+                FinishReason::ToolCalls,
+                Some(first_usage),
+            ),
+            stop_turn("done", Some(second_usage)),
+        ]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+    let prompt = ChatMessage::user("use echo");
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![prompt.clone()],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("tool cycle should finish");
+
+    let call = ToolCall {
+        call_id: CallId::from("call-1"),
+        name: "echo".to_owned(),
+        arguments: json!({"value": "one"}),
+    };
+    let assistant = ChatMessage::assistant("").with_tool_calls(vec![call.clone()]);
+    let result = ChatMessage::tool(call.call_id.clone(), call.arguments.clone());
+    let final_assistant = ChatMessage::assistant("done");
+    let usage = TokenUsage {
+        input_tokens: u64::MAX,
+        output_tokens: u64::MAX,
+        total_tokens: u64::MAX,
+    };
+    assert_eq!(
+        outcome.new_messages,
+        vec![
+            prompt.clone(),
+            assistant.clone(),
+            result.clone(),
+            final_assistant.clone(),
+        ]
+    );
+    assert_eq!(outcome.usage, usage);
+
+    let tool_spec = ToolSpec::builder()
+        .name("echo")
+        .description("records calls")
+        .input_schema(json!({"type": "object"}))
+        .build();
+    let first_request = ChatRequest {
+        model: "scripted:test-model"
+            .parse()
+            .expect("static model id should parse"),
+        messages: vec![ChatMessage::system("be precise"), prompt.clone()],
+        tools: vec![tool_spec.clone()],
+        structured_output: None,
+    };
+    let second_request = ChatRequest {
+        model: first_request.model.clone(),
+        messages: vec![
+            ChatMessage::system("be precise"),
+            prompt.clone(),
+            assistant.clone(),
+            result.clone(),
+        ],
+        tools: vec![tool_spec],
+        structured_output: None,
+    };
+    assert_eq!(
+        without_telemetry(
+            &recorded
+                .lock()
+                .expect("operation lock should not be poisoned")
+        ),
+        vec![
+            Operation::Durable(DurableAgentEvent::LoopStarted),
+            Operation::Durable(DurableAgentEvent::MessageAppended { message: prompt }),
+            Operation::ChatStream(first_request),
+            Operation::Durable(DurableAgentEvent::MessageAppended { message: assistant }),
+            Operation::Durable(DurableAgentEvent::ToolExecutionStarted {
+                call_id: call.call_id.clone(),
+                tool_name: ToolName::new("echo"),
+            }),
+            Operation::ToolCall {
+                name: ToolName::new("echo"),
+                input: ToolInput::new(call.call_id.clone(), call.arguments.clone()),
+            },
+            Operation::Durable(DurableAgentEvent::MessageAppended { message: result }),
+            Operation::Durable(DurableAgentEvent::IterationCompleted {
+                iteration: 0,
+                usage: first_usage,
+            }),
+            Operation::ChatStream(second_request),
+            Operation::Durable(DurableAgentEvent::MessageAppended {
+                message: final_assistant,
+            }),
+            Operation::Durable(DurableAgentEvent::IterationCompleted {
+                iteration: 1,
+                usage,
+            }),
+            Operation::Durable(DurableAgentEvent::LoopFinished {
+                finish_reason: "stop".to_owned(),
+                usage,
+            }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn multiple_tools_execute_and_commit_strictly_in_assistant_order() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[
+            ("alpha", RecordingToolBehavior::Echo),
+            ("beta", RecordingToolBehavior::Echo),
+        ],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[
+                    ("call-a", "alpha", json!({"order": 1})),
+                    ("call-b", "beta", json!({"order": 2})),
+                ],
+                FinishReason::ToolCalls,
+                None,
+            ),
+            stop_turn("done", None),
+        ]),
+        LoopLimits::new(2, 2),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("use both")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("two tools should finish");
+
+    let ordered = recorded
+        .lock()
+        .expect("operation lock should not be poisoned")
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Durable(DurableAgentEvent::ToolExecutionStarted { call_id, .. }) => {
+                Some(("started", call_id.clone()))
+            }
+            Operation::ToolCall { input, .. } => Some(("called", input.call_id.clone())),
+            Operation::Durable(DurableAgentEvent::MessageAppended { message })
+                if message.role == ChatRole::Tool =>
+            {
+                Some((
+                    "committed",
+                    message
+                        .tool_call_id
+                        .clone()
+                        .expect("tool message should identify its call"),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered,
+        vec![
+            ("started", CallId::from("call-a")),
+            ("called", CallId::from("call-a")),
+            ("committed", CallId::from("call-a")),
+            ("started", CallId::from("call-b")),
+            ("called", CallId::from("call-b")),
+            ("committed", CallId::from("call-b")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failed_and_missing_tool_results_are_committed_and_visible_to_the_model() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("broken", RecordingToolBehavior::Fail)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[
+                    ("call-fail", "broken", json!({})),
+                    ("call-missing", "missing", json!({})),
+                ],
+                FinishReason::ToolCalls,
+                None,
+            ),
+            stop_turn("recovered", None),
+        ]),
+        LoopLimits::new(2, 2),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("try tools")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("tool failures should remain model-visible results");
+
+    assert_eq!(outcome.new_messages.len(), 5);
+    assert_eq!(outcome.new_messages[2].role, ChatRole::Tool);
+    assert_eq!(outcome.new_messages[3].role, ChatRole::Tool);
+    let requests = recorded
+        .lock()
+        .expect("operation lock should not be poisoned")
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::ChatStream(request) => Some(request.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(&requests[1].messages[3..], &outcome.new_messages[2..4]);
+}
+
+#[tokio::test]
+async fn iteration_limit_fails_once_before_another_model_request() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-1", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(1, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("loop")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("iteration limit should stop before a second model call");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::LimitExceeded {
+            limit: LoopLimit::Iterations { maximum: 1 },
+        }
+    ));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn length_with_calls_commits_typed_errors_without_executing_tools() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[
+                    ("call-a", "echo", json!({"partial": 1})),
+                    ("call-b", "echo", json!({"partial": 2})),
+                ],
+                FinishReason::Length,
+                None,
+            ),
+            stop_turn("recovered", None),
+        ]),
+        LoopLimits::new(2, 2),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("try")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("truncated calls should be reported back to the model");
+
+    let expected_payload = json!({
+        "error": {
+            "code": "tool_call_truncated",
+            "message": "tool call was not executed because the model response reached its length limit"
+        }
+    });
+    assert_eq!(
+        &outcome.new_messages[2..4],
+        &[
+            ChatMessage::tool("call-a", expected_payload.clone()),
+            ChatMessage::tool("call-b", expected_payload),
+        ]
+    );
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+            .count(),
+        2
+    );
+    let second_request = recorded
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::ChatStream(request) => Some(request),
+            _ => None,
+        })
+        .nth(1)
+        .expect("truncation results should be sent to the next model request");
+    assert_eq!(&second_request.messages[3..5], &outcome.new_messages[2..4]);
+}
+
+#[tokio::test]
+async fn tool_call_presence_drives_processing_for_unexpected_finish_reason() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-1", "echo", json!({"value": 1}))],
+                FinishReason::ContentFilter,
+                None,
+            ),
+            stop_turn("done", None),
+        ]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("tool")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("calls should be processed regardless of non-length reason");
+
+    assert_eq!(
+        recorded
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn tool_executor_durability_failure_is_fail_closed_without_terminal_retry() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-1", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(2, 1),
+        Some(3),
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("tool")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("tool start acknowledgement should fail closed");
+
+    assert!(matches!(error, AgentLoopError::Durability { .. }));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert!(recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::ToolExecutionStarted { call_id, .. })
+            if call_id == &CallId::from("call-1")
+    )));
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(!recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(
+            DurableAgentEvent::LoopFailed { .. } | DurableAgentEvent::LoopCancelled { .. }
+        )
+    )));
+}
+
+#[tokio::test]
+async fn tool_executor_approval_failure_preserves_source_and_commits_loop_failed() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::RequireApproval,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-1", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(FailingToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("tool")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("approval backend failure should stop the loop");
+
+    assert!(matches!(&error, AgentLoopError::ToolExecution { .. }));
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<stratum_agent::ToolExecutorError>())
+            .is_some()
+    );
+    assert_eq!(
+        recorded
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
     );
 }

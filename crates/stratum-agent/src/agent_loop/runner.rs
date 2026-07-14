@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use stratum_core::{
-    AgentTelemetryEvent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage,
+    AgentTelemetryEvent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage, ToolCall,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
-use stratum_llm::{ChatRequest, LlmProvider};
+use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
 use tokio_util::sync::CancellationToken;
 
-use crate::ToolExecutor;
+use crate::{ToolExecutor, ToolExecutorError};
 
 use super::{
     AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimit, LoopLimits, LoopOutcome,
@@ -124,60 +124,110 @@ impl AgentLoop {
             new_messages.push(prompt);
         }
 
-        if cancellation.is_cancelled() {
-            return Err(AgentLoopError::Cancelled);
+        for iteration in 0..self.limits.max_iterations {
+            if cancellation.is_cancelled() {
+                return Err(AgentLoopError::Cancelled);
+            }
+            let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
+            self.telemetry
+                .emit(AgentTelemetryEvent::LlmStarted {
+                    llm_call_id: llm_call_id.clone(),
+                })
+                .await;
+            let request = ChatRequest {
+                model: self.llm_provider.model_id(),
+                messages: request_messages(&context.system_prompt, &context.messages),
+                tools: self.tool_executor.specs(),
+                structured_output: None,
+            };
+            let stream = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
+                stream = self.llm_provider.chat_stream(request) => stream?,
+            };
+            let assistant = consume_assistant_stream(
+                stream,
+                &llm_call_id,
+                self.telemetry.as_ref(),
+                cancellation,
+                self.limits.max_tool_calls_per_iteration,
+                usage,
+            )
+            .await?;
+            let finish_reason = assistant.finish_reason;
+            let tool_calls = assistant.message.tool_calls.clone();
+
+            self.durable_events
+                .append(DurableAgentEvent::MessageAppended {
+                    message: assistant.message.clone(),
+                })
+                .await?;
+            context.messages.push(assistant.message.clone());
+            new_messages.push(assistant.message);
+
+            if tool_calls.len() > self.limits.max_tool_calls_per_iteration {
+                return Err(AgentLoopError::LimitExceeded {
+                    limit: LoopLimit::ToolCallsPerIteration {
+                        maximum: self.limits.max_tool_calls_per_iteration,
+                    },
+                });
+            }
+
+            if !tool_calls.is_empty() {
+                context.messages.reserve(tool_calls.len());
+                new_messages.reserve(tool_calls.len());
+                for tool_call in &tool_calls {
+                    if cancellation.is_cancelled() {
+                        return Err(AgentLoopError::Cancelled);
+                    }
+                    let message = if finish_reason == FinishReason::Length {
+                        truncated_tool_result(tool_call)
+                    } else {
+                        match self.tool_executor.execute(tool_call, cancellation).await {
+                            Ok(outcome) => outcome.into_message(),
+                            Err(ToolExecutorError::Durability { source }) => {
+                                return Err(AgentLoopError::Durability { source });
+                            }
+                            Err(source) => return Err(AgentLoopError::ToolExecution { source }),
+                        }
+                    };
+                    self.durable_events
+                        .append(DurableAgentEvent::MessageAppended {
+                            message: message.clone(),
+                        })
+                        .await?;
+                    context.messages.push(message.clone());
+                    new_messages.push(message);
+                }
+            }
+
+            let iteration = u64::try_from(iteration).unwrap_or(u64::MAX);
+            self.durable_events
+                .append(DurableAgentEvent::IterationCompleted {
+                    iteration,
+                    usage: *usage,
+                })
+                .await?;
+
+            if tool_calls.is_empty() {
+                self.durable_events
+                    .append(DurableAgentEvent::LoopFinished {
+                        finish_reason: finish_reason_name(finish_reason).to_owned(),
+                        usage: *usage,
+                    })
+                    .await?;
+                return Ok(LoopOutcome {
+                    new_messages,
+                    finish_reason,
+                    usage: *usage,
+                });
+            }
         }
-        let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
-        self.telemetry
-            .emit(AgentTelemetryEvent::LlmStarted {
-                llm_call_id: llm_call_id.clone(),
-            })
-            .await;
-        let request = ChatRequest {
-            model: self.llm_provider.model_id(),
-            messages: request_messages(&context.system_prompt, &context.messages),
-            tools: self.tool_executor.specs(),
-            structured_output: None,
-        };
-        let stream = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
-            stream = self.llm_provider.chat_stream(request) => stream?,
-        };
-        let assistant = consume_assistant_stream(
-            stream,
-            &llm_call_id,
-            self.telemetry.as_ref(),
-            cancellation,
-            self.limits.max_tool_calls_per_iteration,
-            usage,
-        )
-        .await?;
 
-        self.durable_events
-            .append(DurableAgentEvent::MessageAppended {
-                message: assistant.message.clone(),
-            })
-            .await?;
-        context.messages.push(assistant.message.clone());
-        new_messages.push(assistant.message);
-        self.durable_events
-            .append(DurableAgentEvent::IterationCompleted {
-                iteration: 0,
-                usage: *usage,
-            })
-            .await?;
-        self.durable_events
-            .append(DurableAgentEvent::LoopFinished {
-                finish_reason: finish_reason_name(assistant.finish_reason).to_owned(),
-                usage: *usage,
-            })
-            .await?;
-
-        Ok(LoopOutcome {
-            new_messages,
-            finish_reason: assistant.finish_reason,
-            usage: *usage,
+        Err(AgentLoopError::LimitExceeded {
+            limit: LoopLimit::Iterations {
+                maximum: self.limits.max_iterations,
+            },
         })
     }
 }
@@ -263,4 +313,16 @@ fn request_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<ChatMes
     messages.push(ChatMessage::system(system_prompt));
     messages.extend_from_slice(history);
     messages
+}
+
+fn truncated_tool_result(tool_call: &ToolCall) -> ChatMessage {
+    ChatMessage::tool(
+        tool_call.call_id.clone(),
+        serde_json::json!({
+            "error": {
+                "code": "tool_call_truncated",
+                "message": "tool call was not executed because the model response reached its length limit",
+            }
+        }),
+    )
 }
