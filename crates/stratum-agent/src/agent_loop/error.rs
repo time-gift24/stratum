@@ -1,9 +1,39 @@
 //! Typed failures that stop the agent loop kernel.
 
+use std::fmt;
+
 use stratum_core::{CallId, ChatRole};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
+
+/// Required dependency accepted by [`AgentLoopBuilder`](super::AgentLoopBuilder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RequiredAgentLoopField {
+    /// Bound model provider.
+    LlmProvider,
+    /// Approval-aware tool executor.
+    ToolExecutor,
+    /// Required durable event sink.
+    DurableEvents,
+    /// Best-effort telemetry sink.
+    Telemetry,
+    /// Safety limits for one run.
+    Limits,
+}
+
+impl fmt::Display for RequiredAgentLoopField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LlmProvider => "llm_provider",
+            Self::ToolExecutor => "tool_executor",
+            Self::DurableEvents => "durable_events",
+            Self::Telemetry => "telemetry",
+            Self::Limits => "limits",
+        })
+    }
+}
 
 /// Failure to construct an [`AgentLoop`](super::AgentLoop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -13,12 +43,12 @@ pub enum AgentLoopBuildError {
     #[error("missing agent loop field {field}")]
     MissingField {
         /// Builder field that must be supplied.
-        field: &'static str,
+        field: RequiredAgentLoopField,
     },
 }
 
 /// Agent-loop protocol invariant that a provider response violated.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ProtocolError {
     /// A loop run did not receive any new user prompt.
@@ -33,11 +63,56 @@ pub enum ProtocolError {
     /// The provider stream ended without a terminal finish event.
     #[error("stream ended without a finish event")]
     StreamEndedWithoutFinish,
-    /// A streamed tool call did not contain every required field.
-    #[error("tool call {call_id} is incomplete")]
-    IncompleteToolCall {
-        /// Provider identity of the incomplete tool call.
+    /// Tool-call indices skipped an earlier position.
+    #[error("tool call index {actual} is sparse; expected {expected}")]
+    SparseToolCallIndex {
+        /// Next contiguous index required by the protocol.
+        expected: usize,
+        /// Provider index that skipped the expected position.
+        actual: usize,
+    },
+    /// One streamed index changed its provider call identity.
+    #[error("tool call index {index} changed call id from {existing} to {received}")]
+    ConflictingToolCallId {
+        /// Provider position of the conflicting call.
+        index: usize,
+        /// First identity received for the position.
+        existing: CallId,
+        /// Later conflicting identity.
+        received: CallId,
+    },
+    /// One streamed index changed its provider-visible tool name.
+    #[error("tool call index {index} changed name from {existing} to {received}")]
+    ConflictingToolCallName {
+        /// Provider position of the conflicting call.
+        index: usize,
+        /// First name received for the position.
+        existing: String,
+        /// Later conflicting name.
+        received: String,
+    },
+    /// Two finalized tool calls shared one provider identity.
+    #[error("duplicate tool call id {call_id}")]
+    DuplicateToolCallId {
+        /// Duplicated provider call identity.
         call_id: CallId,
+    },
+    /// A streamed tool call did not contain every required field.
+    #[error("tool call at index {index} is incomplete")]
+    IncompleteToolCall {
+        /// Provider position of the incomplete call.
+        index: usize,
+        /// Provider identity when it was received.
+        call_id: Option<CallId>,
+    },
+    /// Tool-call argument fragments did not form valid JSON.
+    #[error("tool call {call_id} arguments are invalid")]
+    MalformedToolCallArguments {
+        /// Provider identity of the malformed tool call.
+        call_id: CallId,
+        /// JSON parsing failure.
+        #[source]
+        source: serde_json::Error,
     },
 }
 

@@ -1,5 +1,7 @@
 //! Streaming assistant-response assembly.
 
+use std::collections::{BTreeMap, HashSet};
+
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use stratum_core::{AgentTelemetryEvent, CallId, ChatMessage, LlmCallId, TokenUsage, ToolCall};
@@ -7,12 +9,11 @@ use stratum_infra::TelemetryEventSink;
 use stratum_llm::{ChatStream, ChatStreamEvent, FinishReason};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentLoopError, ProtocolError};
+use super::{AgentLoopError, LoopLimit, ProtocolError};
 
 pub(super) struct AssistantStreamResult {
     pub(super) message: ChatMessage,
     pub(super) finish_reason: FinishReason,
-    pub(super) usage: TokenUsage,
 }
 
 #[derive(Debug, Default)]
@@ -27,11 +28,13 @@ pub(super) async fn consume_assistant_stream(
     llm_call_id: &LlmCallId,
     telemetry: &dyn TelemetryEventSink,
     cancellation: &CancellationToken,
+    max_tool_calls_per_iteration: usize,
+    total_usage: &mut TokenUsage,
 ) -> Result<AssistantStreamResult, AgentLoopError> {
     let mut text = String::new();
     let mut reasoning = String::new();
-    let mut pending_tool_calls = Vec::<PendingToolCall>::new();
-    let (finish_reason, usage) = loop {
+    let mut pending_tool_calls = BTreeMap::<usize, PendingToolCall>::new();
+    let finish_reason = loop {
         let event = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
@@ -60,34 +63,68 @@ pub(super) async fn consume_assistant_stream(
                     .await;
             }
             ChatStreamEvent::ToolCallDelta(delta) => {
-                if pending_tool_calls.len() <= delta.index {
-                    pending_tool_calls.resize_with(delta.index + 1, PendingToolCall::default);
+                if delta.index >= max_tool_calls_per_iteration {
+                    return Err(AgentLoopError::LimitExceeded {
+                        limit: LoopLimit::ToolCallsPerIteration {
+                            maximum: max_tool_calls_per_iteration,
+                        },
+                    });
                 }
-                let pending = &mut pending_tool_calls[delta.index];
+                let pending = pending_tool_calls.entry(delta.index).or_default();
                 if let Some(call_id) = delta.call_id {
+                    if let Some(existing) = &pending.call_id
+                        && existing != &call_id
+                    {
+                        return Err(ProtocolError::ConflictingToolCallId {
+                            index: delta.index,
+                            existing: existing.clone(),
+                            received: call_id,
+                        }
+                        .into());
+                    }
                     pending.call_id = Some(call_id);
                 }
                 if let Some(name) = delta.name {
+                    if let Some(existing) = &pending.name
+                        && existing != &name
+                    {
+                        return Err(ProtocolError::ConflictingToolCallName {
+                            index: delta.index,
+                            existing: existing.clone(),
+                            received: name,
+                        }
+                        .into());
+                    }
                     pending.name = Some(name);
                 }
                 pending.arguments.push_str(&delta.arguments_delta);
-                let call_id = pending
-                    .call_id
-                    .clone()
-                    .unwrap_or_else(|| CallId::from(format!("tool-call-{}", delta.index)));
-                telemetry
-                    .emit(AgentTelemetryEvent::ToolCallDelta {
-                        llm_call_id: llm_call_id.clone(),
-                        call_id,
-                        name: pending.name.clone(),
-                        arguments_delta: delta.arguments_delta,
-                    })
-                    .await;
+                if let Some(call_id) = &pending.call_id {
+                    telemetry
+                        .emit(AgentTelemetryEvent::ToolCallDelta {
+                            llm_call_id: llm_call_id.clone(),
+                            call_id: call_id.clone(),
+                            name: pending.name.clone(),
+                            arguments_delta: delta.arguments_delta,
+                        })
+                        .await;
+                }
             }
             ChatStreamEvent::Finished {
                 finish_reason,
                 usage,
-            } => break (finish_reason, usage),
+            } => {
+                if let Some(event_usage) = usage {
+                    add_usage(total_usage, event_usage);
+                }
+                telemetry
+                    .emit(AgentTelemetryEvent::LlmFinished {
+                        llm_call_id: llm_call_id.clone(),
+                        finish_reason: finish_reason_name(finish_reason).to_owned(),
+                        usage,
+                    })
+                    .await;
+                break finish_reason;
+            }
             _ => {}
         }
     };
@@ -100,39 +137,48 @@ pub(super) async fn consume_assistant_stream(
     if !tool_calls.is_empty() {
         message = message.with_tool_calls(tool_calls);
     }
-    let aggregate_usage = usage.unwrap_or_default();
-    telemetry
-        .emit(AgentTelemetryEvent::LlmFinished {
-            llm_call_id: llm_call_id.clone(),
-            finish_reason: finish_reason_name(finish_reason).to_owned(),
-            usage,
-        })
-        .await;
-
     Ok(AssistantStreamResult {
         message,
         finish_reason,
-        usage: aggregate_usage,
     })
 }
 
 fn finalize_tool_calls(
-    pending_tool_calls: Vec<PendingToolCall>,
+    pending_tool_calls: BTreeMap<usize, PendingToolCall>,
 ) -> Result<Vec<ToolCall>, ProtocolError> {
     let mut tool_calls = Vec::with_capacity(pending_tool_calls.len());
-    for (index, pending) in pending_tool_calls.into_iter().enumerate() {
-        let call_id = pending
-            .call_id
-            .unwrap_or_else(|| CallId::from(format!("tool-call-{index}")));
-        let Some(name) = pending.name else {
-            return Err(ProtocolError::IncompleteToolCall { call_id });
+    let mut call_ids = HashSet::with_capacity(pending_tool_calls.len());
+    let mut expected_index = 0;
+    for (index, pending) in pending_tool_calls {
+        if index != expected_index {
+            return Err(ProtocolError::SparseToolCallIndex {
+                expected: expected_index,
+                actual: index,
+            });
+        }
+        expected_index = index.saturating_add(1);
+        let Some(call_id) = pending.call_id else {
+            return Err(ProtocolError::IncompleteToolCall {
+                index,
+                call_id: None,
+            });
         };
+        let Some(name) = pending.name else {
+            return Err(ProtocolError::IncompleteToolCall {
+                index,
+                call_id: Some(call_id),
+            });
+        };
+        if !call_ids.insert(call_id.clone()) {
+            return Err(ProtocolError::DuplicateToolCallId { call_id });
+        }
         let arguments = if pending.arguments.is_empty() {
             json!({})
         } else {
-            serde_json::from_str::<Value>(&pending.arguments).map_err(|_| {
-                ProtocolError::IncompleteToolCall {
+            serde_json::from_str::<Value>(&pending.arguments).map_err(|source| {
+                ProtocolError::MalformedToolCallArguments {
                     call_id: call_id.clone(),
+                    source,
                 }
             })?
         };
@@ -143,6 +189,12 @@ fn finalize_tool_calls(
         });
     }
     Ok(tool_calls)
+}
+
+fn add_usage(total: &mut TokenUsage, usage: TokenUsage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
 }
 
 pub(super) const fn finish_reason_name(finish_reason: FinishReason) -> &'static str {

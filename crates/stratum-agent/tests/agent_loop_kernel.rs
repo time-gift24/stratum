@@ -1,21 +1,27 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    error::Error as _,
+    future::pending,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::json;
 use stratum_agent::{
-    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimits,
-    ProtocolError, ToolExecutor,
+    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimit,
+    LoopLimits, ProtocolError, RequiredAgentLoopField, ToolExecutor,
 };
 use stratum_core::{
-    AgentTelemetryEvent, ChatMessage, ChatRole, DangerLevel, DurableAgentEvent, ModelId,
-    TokenUsage, ToolKind,
+    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DangerLevel, DurableAgentEvent, ModelId,
+    TokenUsage, ToolCallDelta, ToolKind,
 };
 use stratum_infra::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolRegistry};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,23 +40,29 @@ fn builder_reports_a_typed_missing_field() {
     assert_eq!(
         error,
         AgentLoopBuildError::MissingField {
-            field: "llm_provider",
+            field: RequiredAgentLoopField::LlmProvider,
         }
     );
 }
 
 struct RecordingDurableSink {
     operations: Arc<Mutex<Vec<Operation>>>,
+    fail_on: Option<&'static str>,
 }
 
 #[async_trait]
 impl DurableEventSink for RecordingDurableSink {
     async fn append(&self, event: DurableAgentEvent) -> Result<(), DurableEventSinkError> {
+        let event_type = event.event_type();
         self.operations
             .lock()
             .expect("operation lock should not be poisoned")
             .push(Operation::Durable(event));
-        Ok(())
+        if self.fail_on == Some(event_type) {
+            Err(DurableEventSinkError::UnsupportedEvent { event_type })
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -70,8 +82,14 @@ impl TelemetryEventSink for RecordingTelemetrySink {
 
 struct ScriptedProvider {
     operations: Arc<Mutex<Vec<Operation>>>,
-    events: Mutex<Option<Vec<ChatStreamEvent>>>,
+    behavior: Mutex<Option<ProviderBehavior>>,
     model: ModelId,
+}
+
+enum ProviderBehavior {
+    Events(Vec<ChatStreamEvent>),
+    SetupError,
+    Pending,
 }
 
 #[async_trait]
@@ -89,27 +107,46 @@ impl LlmProvider for ScriptedProvider {
             .lock()
             .expect("operation lock should not be poisoned")
             .push(Operation::ChatStream(request));
-        let events = self
-            .events
+        let behavior = self
+            .behavior
             .lock()
-            .expect("event lock should not be poisoned")
+            .expect("behavior lock should not be poisoned")
             .take()
             .ok_or(LlmError::MockExhausted)?;
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        match behavior {
+            ProviderBehavior::Events(events) => {
+                Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+            }
+            ProviderBehavior::SetupError => Err(LlmError::MockExhausted),
+            ProviderBehavior::Pending => pending().await,
+        }
     }
 }
 
 fn test_agent_loop(events: Vec<ChatStreamEvent>) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
+    test_agent_loop_with(
+        ProviderBehavior::Events(events),
+        LoopLimits::default(),
+        None,
+    )
+}
+
+fn test_agent_loop_with(
+    behavior: ProviderBehavior,
+    limits: LoopLimits,
+    fail_on: Option<&'static str>,
+) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let durable: Arc<dyn DurableEventSink> = Arc::new(RecordingDurableSink {
         operations: Arc::clone(&operations),
+        fail_on,
     });
     let telemetry: Arc<dyn TelemetryEventSink> = Arc::new(RecordingTelemetrySink {
         operations: Arc::clone(&operations),
     });
     let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider {
         operations: Arc::clone(&operations),
-        events: Mutex::new(Some(events)),
+        behavior: Mutex::new(Some(behavior)),
         model: "scripted:test-model"
             .parse()
             .expect("static model id should parse"),
@@ -128,7 +165,7 @@ fn test_agent_loop(events: Vec<ChatStreamEvent>) -> (AgentLoop, Arc<Mutex<Vec<Op
         .tool_executor(tool_executor)
         .durable_events(durable)
         .telemetry(telemetry)
-        .limits(LoopLimits::default())
+        .limits(limits)
         .build()
         .expect("all agent loop fields should be present");
     (agent_loop, operations)
@@ -352,4 +389,533 @@ async fn non_user_prompts_are_rejected_before_external_actions() {
             .expect("operation lock should not be poisoned")
             .is_empty()
     );
+}
+
+fn tool_delta(
+    index: usize,
+    call_id: Option<&str>,
+    name: Option<&str>,
+    arguments_delta: &str,
+) -> ChatStreamEvent {
+    ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+        index,
+        call_id: call_id.map(CallId::from),
+        name: name.map(str::to_owned),
+        arguments_delta: arguments_delta.to_owned(),
+    })
+}
+
+fn finished_tool_call_stream(mut deltas: Vec<ChatStreamEvent>) -> Vec<ChatStreamEvent> {
+    deltas.push(ChatStreamEvent::Finished {
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    });
+    deltas
+}
+
+async fn run_error(
+    events: Vec<ChatStreamEvent>,
+    limits: LoopLimits,
+) -> (AgentLoopError, Arc<Mutex<Vec<Operation>>>) {
+    let (agent_loop, operations) =
+        test_agent_loop_with(ProviderBehavior::Events(events), limits, None);
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("use a tool")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("scripted stream should fail");
+    (error, operations)
+}
+
+#[tokio::test]
+async fn usize_max_tool_index_is_rejected_before_allocation() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![tool_delta(
+            usize::MAX,
+            Some("call-max"),
+            Some("echo"),
+            "{}",
+        )]),
+        LoopLimits::new(1, 16),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::LimitExceeded {
+            limit: LoopLimit::ToolCallsPerIteration { maximum: 16 },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn very_large_sparse_tool_index_uses_received_call_allocation_only() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![tool_delta(
+            1_000_000,
+            Some("call-sparse"),
+            Some("echo"),
+            "{}",
+        )]),
+        LoopLimits::new(1, usize::MAX),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::SparseToolCallIndex {
+                expected: 0,
+                actual: 1_000_000,
+            },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn tool_index_at_exact_allowed_boundary_is_accepted() {
+    let events = finished_tool_call_stream(vec![
+        tool_delta(0, Some("call-0"), Some("echo"), "{"),
+        tool_delta(0, Some("call-0"), Some("echo"), "}"),
+        tool_delta(1, Some("call-1"), Some("echo"), "{}"),
+    ]);
+    let (agent_loop, operations) = test_agent_loop_with(
+        ProviderBehavior::Events(events),
+        LoopLimits::new(1, 2),
+        None,
+    );
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("use tools")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("index limit minus one should be accepted");
+
+    assert_eq!(outcome.new_messages.len(), 2);
+    assert_eq!(outcome.new_messages[1].tool_calls.len(), 2);
+    assert!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::MessageAppended { message })
+                    if message.role == ChatRole::Assistant && message.tool_calls.len() == 2
+            ))
+    );
+}
+
+#[tokio::test]
+async fn max_zero_rejects_the_first_tool_delta() {
+    let (error, operations) = run_error(
+        finished_tool_call_stream(vec![tool_delta(0, Some("call-0"), Some("echo"), "{}")]),
+        LoopLimits::new(1, 0),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::LimitExceeded {
+            limit: LoopLimit::ToolCallsPerIteration { maximum: 0 },
+        }
+    ));
+    assert_eq!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sparse_tool_indices_are_rejected() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![tool_delta(1, Some("call-1"), Some("echo"), "{}")]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::SparseToolCallIndex {
+                expected: 0,
+                actual: 1,
+            },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn conflicting_repeated_tool_call_ids_are_rejected() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![
+            tool_delta(0, Some("call-a"), Some("echo"), "{"),
+            tool_delta(0, Some("call-b"), Some("echo"), "}"),
+        ]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::ConflictingToolCallId { index: 0, .. },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn conflicting_repeated_tool_call_names_are_rejected() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![
+            tool_delta(0, Some("call-a"), Some("echo"), "{"),
+            tool_delta(0, Some("call-a"), Some("other"), "}"),
+        ]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::ConflictingToolCallName { index: 0, .. },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn duplicate_finalized_tool_call_ids_are_rejected() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![
+            tool_delta(0, Some("call-shared"), Some("echo"), "{}"),
+            tool_delta(1, Some("call-shared"), Some("echo"), "{}"),
+        ]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::DuplicateToolCallId { call_id },
+        } if call_id == CallId::from("call-shared")
+    ));
+}
+
+#[tokio::test]
+async fn a_tool_call_without_provider_id_is_incomplete() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![tool_delta(0, None, Some("echo"), "{}")]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::IncompleteToolCall {
+                index: 0,
+                call_id: None,
+            },
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_tool_call_without_name_is_incomplete() {
+    let (error, _) = run_error(
+        finished_tool_call_stream(vec![tool_delta(0, Some("call-no-name"), None, "{}")]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::IncompleteToolCall {
+                index: 0,
+                call_id: Some(call_id),
+            },
+        } if call_id == CallId::from("call-no-name")
+    ));
+}
+
+#[tokio::test]
+async fn malformed_tool_json_preserves_source_and_terminal_telemetry() {
+    let (error, operations) = run_error(
+        finished_tool_call_stream(vec![tool_delta(0, Some("call-json"), Some("echo"), "{bad")]),
+        LoopLimits::new(1, 2),
+    )
+    .await;
+
+    let protocol = error
+        .source()
+        .and_then(|source| source.downcast_ref::<ProtocolError>())
+        .expect("protocol error should remain the loop error source");
+    assert!(matches!(
+        protocol,
+        ProtocolError::MalformedToolCallArguments { call_id, .. }
+            if call_id == &CallId::from("call-json")
+    ));
+    assert!(
+        protocol
+            .source()
+            .and_then(|source| source.downcast_ref::<serde_json::Error>())
+            .is_some()
+    );
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Telemetry(AgentTelemetryEvent::LlmFinished { .. })
+            ))
+            .count(),
+        1
+    );
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::MessageAppended { message })
+            if message.role == ChatRole::Assistant
+    )));
+}
+
+#[tokio::test]
+async fn zero_iteration_limit_is_rejected_before_external_actions() {
+    let (agent_loop, operations) = test_agent_loop_with(
+        ProviderBehavior::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+        LoopLimits::new(0, 1),
+        None,
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("zero iterations should reject the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::LimitExceeded {
+            limit: LoopLimit::Iterations { maximum: 0 },
+        }
+    ));
+    assert!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pending_chat_setup_cancellation_commits_one_cancelled_terminal() {
+    let (agent_loop, operations) =
+        test_agent_loop_with(ProviderBehavior::Pending, LoopLimits::new(1, 1), None);
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        agent_loop
+            .run(
+                LoopContext::new("be precise"),
+                vec![ChatMessage::user("hello")],
+                task_cancellation,
+            )
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if operations
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .iter()
+                .any(|operation| matches!(operation, Operation::ChatStream(_)))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider should enter chat setup");
+
+    cancellation.cancel();
+    let error = timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cancelled loop should stop")
+        .expect("loop task should not panic")
+        .expect_err("cancelled loop should return an error");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn llm_setup_error_commits_one_failed_terminal() {
+    let (agent_loop, operations) =
+        test_agent_loop_with(ProviderBehavior::SetupError, LoopLimits::new(1, 1), None);
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("setup failure should stop the loop");
+
+    assert!(matches!(error, AgentLoopError::Llm { .. }));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stream_protocol_error_commits_one_failed_terminal() {
+    let (error, operations) = run_error(
+        vec![ChatStreamEvent::TextDelta {
+            delta: "partial".to_owned(),
+        }],
+        LoopLimits::new(1, 1),
+    )
+    .await;
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::StreamEndedWithoutFinish,
+        }
+    ));
+    assert_eq!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn terminal_append_failure_surfaces_durability_without_retry() {
+    let (agent_loop, operations) = test_agent_loop_with(
+        ProviderBehavior::SetupError,
+        LoopLimits::new(1, 1),
+        Some("loop_failed"),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("failed terminal acknowledgement should stop the loop");
+
+    assert!(matches!(error, AgentLoopError::Durability { .. }));
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<DurableEventSinkError>())
+            .is_some()
+    );
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
+    )));
+}
+
+#[tokio::test]
+async fn non_terminal_durability_failure_does_not_attempt_a_terminal_event() {
+    let (agent_loop, operations) = test_agent_loop_with(
+        ProviderBehavior::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+        LoopLimits::new(1, 1),
+        Some("message_appended"),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("prompt durability failure should stop the loop");
+
+    assert!(matches!(error, AgentLoopError::Durability { .. }));
+    let operations = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert!(!operations.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(
+            DurableAgentEvent::LoopFailed { .. } | DurableAgentEvent::LoopCancelled { .. }
+        )
+    )));
 }

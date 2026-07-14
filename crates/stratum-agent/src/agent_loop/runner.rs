@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use stratum_core::{AgentTelemetryEvent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId};
+use stratum_core::{
+    AgentTelemetryEvent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage,
+};
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, LlmProvider};
 use tokio_util::sync::CancellationToken;
@@ -10,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::ToolExecutor;
 
 use super::{
-    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimits, LoopOutcome,
+    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimit, LoopLimits, LoopOutcome,
+    RequiredAgentLoopField,
     stream::{consume_assistant_stream, finish_reason_name},
 };
 
@@ -38,7 +41,7 @@ impl AgentLoop {
     /// durable acknowledgement prevents the loop from reaching a terminal boundary.
     pub async fn run(
         &self,
-        mut context: LoopContext,
+        context: LoopContext,
         prompts: Vec<ChatMessage>,
         cancellation: CancellationToken,
     ) -> Result<LoopOutcome, AgentLoopError> {
@@ -52,13 +55,50 @@ impl AgentLoop {
         {
             return Err(super::ProtocolError::InvalidPromptRole { role }.into());
         }
-        if cancellation.is_cancelled() {
-            return Err(AgentLoopError::Cancelled);
+        if self.limits.max_iterations == 0 {
+            return Err(AgentLoopError::LimitExceeded {
+                limit: LoopLimit::Iterations { maximum: 0 },
+            });
         }
 
         self.durable_events
             .append(DurableAgentEvent::LoopStarted)
             .await?;
+        let mut usage = TokenUsage::default();
+        let result = self
+            .run_started(context, prompts, &cancellation, &mut usage)
+            .await;
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error @ AgentLoopError::Durability { .. }) => Err(error),
+            Err(error @ AgentLoopError::Cancelled) => {
+                self.durable_events
+                    .append(DurableAgentEvent::LoopCancelled { usage })
+                    .await?;
+                Err(error)
+            }
+            Err(error) => {
+                self.durable_events
+                    .append(DurableAgentEvent::LoopFailed {
+                        error_text: error.to_string(),
+                        usage,
+                    })
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_started(
+        &self,
+        mut context: LoopContext,
+        prompts: Vec<ChatMessage>,
+        cancellation: &CancellationToken,
+        usage: &mut TokenUsage,
+    ) -> Result<LoopOutcome, AgentLoopError> {
+        if cancellation.is_cancelled() {
+            return Err(AgentLoopError::Cancelled);
+        }
         let mut new_messages = Vec::with_capacity(prompts.len() + 1);
         for prompt in prompts {
             self.durable_events
@@ -85,10 +125,20 @@ impl AgentLoop {
             tools: self.tool_executor.specs(),
             structured_output: None,
         };
-        let stream = self.llm_provider.chat_stream(request).await?;
-        let assistant =
-            consume_assistant_stream(stream, &llm_call_id, self.telemetry.as_ref(), &cancellation)
-                .await?;
+        let stream = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
+            stream = self.llm_provider.chat_stream(request) => stream?,
+        };
+        let assistant = consume_assistant_stream(
+            stream,
+            &llm_call_id,
+            self.telemetry.as_ref(),
+            cancellation,
+            self.limits.max_tool_calls_per_iteration,
+            usage,
+        )
+        .await?;
 
         self.durable_events
             .append(DurableAgentEvent::MessageAppended {
@@ -100,21 +150,20 @@ impl AgentLoop {
         self.durable_events
             .append(DurableAgentEvent::IterationCompleted {
                 iteration: 0,
-                usage: assistant.usage,
+                usage: *usage,
             })
             .await?;
         self.durable_events
             .append(DurableAgentEvent::LoopFinished {
                 finish_reason: finish_reason_name(assistant.finish_reason).to_owned(),
-                usage: assistant.usage,
+                usage: *usage,
             })
             .await?;
 
-        let _limits = self.limits;
         Ok(LoopOutcome {
             new_messages,
             finish_reason: assistant.finish_reason,
-            usage: assistant.usage,
+            usage: *usage,
         })
     }
 }
@@ -173,24 +222,24 @@ impl AgentLoopBuilder {
     pub fn build(self) -> Result<AgentLoop, AgentLoopBuildError> {
         Ok(AgentLoop {
             llm_provider: self.llm_provider.ok_or(AgentLoopBuildError::MissingField {
-                field: "llm_provider",
+                field: RequiredAgentLoopField::LlmProvider,
             })?,
             tool_executor: self
                 .tool_executor
                 .ok_or(AgentLoopBuildError::MissingField {
-                    field: "tool_executor",
+                    field: RequiredAgentLoopField::ToolExecutor,
                 })?,
             durable_events: self
                 .durable_events
                 .ok_or(AgentLoopBuildError::MissingField {
-                    field: "durable_events",
+                    field: RequiredAgentLoopField::DurableEvents,
                 })?,
-            telemetry: self
-                .telemetry
-                .ok_or(AgentLoopBuildError::MissingField { field: "telemetry" })?,
-            limits: self
-                .limits
-                .ok_or(AgentLoopBuildError::MissingField { field: "limits" })?,
+            telemetry: self.telemetry.ok_or(AgentLoopBuildError::MissingField {
+                field: RequiredAgentLoopField::Telemetry,
+            })?,
+            limits: self.limits.ok_or(AgentLoopBuildError::MissingField {
+                field: RequiredAgentLoopField::Limits,
+            })?,
         })
     }
 }

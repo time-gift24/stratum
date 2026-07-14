@@ -9,7 +9,7 @@ pub(crate) mod r#loop;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, LoopContext, LoopLimit,
-    LoopLimits, LoopOutcome, ProtocolError,
+    LoopLimits, LoopOutcome, ProtocolError, RequiredAgentLoopField,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
