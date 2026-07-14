@@ -17,7 +17,8 @@ legacy stateful `Agent` compatibility path.
 - Tool calls execute sequentially through `ToolExecutor`. Approval and
   `ToolExecutionStarted` must be durable before dispatch, and each tool result
   must be durable before the next tool or model request.
-- The run's supplied `CancellationToken` propagates through model and tool
+- The run's supplied `CancellationToken` controls model-stream acquisition and
+  polling in `AgentLoop`; the same token is passed to approval and tool
   operations. Cancellation is cooperative: after `ToolExecutionStarted`, the
   caller must keep polling the loop so it can await and record the outcome.
   A durable start without a result is an unknown outcome and is never retried
