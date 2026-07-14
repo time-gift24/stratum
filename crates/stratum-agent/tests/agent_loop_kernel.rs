@@ -2040,3 +2040,149 @@ async fn tool_executor_approval_failure_preserves_source_and_commits_loop_failed
         1
     );
 }
+
+#[tokio::test]
+async fn repeated_call_id_in_a_later_iteration_fails_before_committing_or_dispatching_it() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-reused", "echo", json!({"iteration": 1}))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+            tool_call_turn(
+                &[("call-reused", "echo", json!({"iteration": 2}))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        ]),
+        LoopLimits::new(3, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("reuse")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a later iteration must not reuse a committed call id");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::DuplicateToolCallId { call_id },
+        } if call_id == CallId::from("call-reused")
+    ));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::MessageAppended { message })
+                    if message.role == ChatRole::Assistant
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn call_id_from_initial_context_cannot_be_reused_by_a_new_assistant() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let (agent_loop, recorded) = build_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-existing", "echo", json!({"new": true}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(2, 1),
+        None,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        Arc::clone(&operations),
+    );
+    let historical_call = ToolCall {
+        call_id: CallId::from("call-existing"),
+        name: "echo".to_owned(),
+        arguments: json!({"old": true}),
+    };
+    let context = LoopContext::new("be precise").with_messages(vec![
+        ChatMessage::assistant("").with_tool_calls(vec![historical_call.clone()]),
+        ChatMessage::tool(historical_call.call_id, json!({"old": true})),
+    ]);
+
+    let error = agent_loop
+        .run(
+            context,
+            vec![ChatMessage::user("reuse history")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("new calls must not collide with committed history");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::InvalidProtocol {
+            reason: ProtocolError::DuplicateToolCallId { call_id },
+        } if call_id == CallId::from("call-existing")
+    ));
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert!(!recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::MessageAppended { message })
+            if message.role == ChatRole::Assistant
+    )));
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            ))
+            .count(),
+        1
+    );
+}

@@ -93,7 +93,7 @@ pub enum ProtocolError {
         /// Later conflicting name.
         received: String,
     },
-    /// Two finalized tool calls shared one provider identity.
+    /// A finalized tool call reused an identity from its batch or committed loop context.
     #[error("duplicate tool call id {call_id}")]
     DuplicateToolCallId {
         /// Duplicated provider call identity.

@@ -1,9 +1,10 @@
 //! Concrete agent-loop runner.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use stratum_core::{
-    AgentTelemetryEvent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage, ToolCall,
+    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage,
+    ToolCall,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
@@ -33,7 +34,7 @@ impl AgentLoop {
         AgentLoopBuilder::default()
     }
 
-    /// Runs one streamed assistant turn against committed context.
+    /// Runs streamed assistant and sequential tool iterations against committed context.
     ///
     /// # Errors
     ///
@@ -110,6 +111,7 @@ impl AgentLoop {
         cancellation: &CancellationToken,
         usage: &mut TokenUsage,
     ) -> Result<LoopOutcome, AgentLoopError> {
+        let mut seen_tool_call_ids = committed_tool_call_ids(&context.messages);
         if cancellation.is_cancelled() {
             return Err(AgentLoopError::Cancelled);
         }
@@ -156,12 +158,14 @@ impl AgentLoop {
             .await?;
             let finish_reason = assistant.finish_reason;
             let tool_calls = assistant.message.tool_calls.clone();
+            let new_tool_call_ids = validate_new_tool_call_ids(&tool_calls, &seen_tool_call_ids)?;
 
             self.durable_events
                 .append(DurableAgentEvent::MessageAppended {
                     message: assistant.message.clone(),
                 })
                 .await?;
+            seen_tool_call_ids.extend(new_tool_call_ids);
             context.messages.push(assistant.message.clone());
             new_messages.push(assistant.message);
 
@@ -325,4 +329,28 @@ fn truncated_tool_result(tool_call: &ToolCall) -> ChatMessage {
             }
         }),
     )
+}
+
+fn committed_tool_call_ids(messages: &[ChatMessage]) -> HashSet<CallId> {
+    messages
+        .iter()
+        .filter(|message| message.role == ChatRole::Assistant)
+        .flat_map(|message| message.tool_calls.iter())
+        .map(|tool_call| tool_call.call_id.clone())
+        .collect()
+}
+
+fn validate_new_tool_call_ids(
+    tool_calls: &[ToolCall],
+    seen: &HashSet<CallId>,
+) -> Result<HashSet<CallId>, super::ProtocolError> {
+    let mut new_call_ids = HashSet::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        if seen.contains(&tool_call.call_id) || !new_call_ids.insert(tool_call.call_id.clone()) {
+            return Err(super::ProtocolError::DuplicateToolCallId {
+                call_id: tool_call.call_id.clone(),
+            });
+        }
+    }
+    Ok(new_call_ids)
 }
