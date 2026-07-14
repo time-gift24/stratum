@@ -712,6 +712,33 @@ pub enum AgentEvent {
         /// User decision.
         decision: ApprovalDecision,
     },
+    /// A validated and approved tool call began executing.
+    ToolExecutionStarted {
+        /// Turn that owns the tool call.
+        turn_id: TurnId,
+        /// Tool call identity.
+        call_id: CallId,
+        /// Provider-visible tool name.
+        tool_name: ToolName,
+    },
+    /// A tool emitted a best-effort execution progress update.
+    ToolExecutionProgress {
+        /// Turn that owns the tool call.
+        turn_id: TurnId,
+        /// Tool call identity.
+        call_id: CallId,
+        /// Tool-specific progress payload.
+        update: Value,
+    },
+    /// One agent-loop iteration reached its durable boundary.
+    IterationCompleted {
+        /// Turn whose durable frontier advanced.
+        turn_id: TurnId,
+        /// Completed iteration number.
+        iteration: u64,
+        /// Token usage accumulated through the iteration.
+        usage: TokenUsage,
+    },
     /// Event emitted by one LLM call inside the agent run.
     Llm {
         /// LLM call identity.
@@ -733,6 +760,9 @@ impl AgentEvent {
             Self::Cancelled { .. } => "cancelled",
             Self::ToolApprovalRequested { .. } => "tool_approval_requested",
             Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
+            Self::ToolExecutionStarted { .. } => "tool_execution_started",
+            Self::ToolExecutionProgress { .. } => "tool_execution_progress",
+            Self::IterationCompleted { .. } => "iteration_completed",
             Self::Llm { .. } => "llm",
         }
     }
