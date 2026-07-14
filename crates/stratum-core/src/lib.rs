@@ -1,5 +1,6 @@
 //! Core protocol types shared across Stratum crates.
 
+pub mod agent_loop_event;
 pub mod error;
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
 pub use error::ModelIdParseError;
 
 /// Identity of one workflow run.
