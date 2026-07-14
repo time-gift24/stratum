@@ -182,6 +182,10 @@ impl ScopedAgentEventSink {
             "agent_name".to_owned(),
             Value::String(self.agent_name.clone()),
         );
+        metadata.insert(
+            "turn_id".to_owned(),
+            Value::String(self.turn_id.to_string()),
+        );
 
         StreamEnvelope {
             business_seq: None,
@@ -256,9 +260,9 @@ mod tests {
     use futures_util::stream;
     use serde_json::json;
     use stratum_core::{
-        AgentEvent, AgentId, AgentTelemetryEvent, CallId, ChatMessage, DurableAgentEvent,
-        EventSource, LlmCallId, LlmCallRole, LlmEvent, ReplayStart, RunId, RuntimeEvent,
-        StreamEnvelope, TokenUsage, ToolName, TurnId,
+        AgentEvent, AgentId, AgentTelemetryEvent, ApprovalDecision, ApprovalId, CallId,
+        ChatMessage, DangerLevel, DurableAgentEvent, EventSource, LlmCallId, LlmCallRole, LlmEvent,
+        ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolKind, ToolName, TurnId,
     };
 
     use crate::{
@@ -436,6 +440,91 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[tokio::test]
+    async fn every_turn_scoped_envelope_includes_stable_turn_metadata() {
+        let agent_id = AgentId::new();
+        let run_id = RunId::new();
+        let turn_id = TurnId::new();
+        let recorder = Arc::new(RecordingEventStreamBus::default());
+        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
+        let sink = ScopedAgentEventSink::new(
+            agent_id,
+            "review-agent",
+            run_id,
+            turn_id,
+            Arc::clone(&event_bus),
+        );
+        let approval_id = ApprovalId::new();
+
+        sink.append(DurableAgentEvent::LoopFinished {
+            finish_reason: "stop".to_owned(),
+            usage: TokenUsage::default(),
+        })
+        .await
+        .expect("terminal event should publish");
+        sink.append(DurableAgentEvent::ToolApprovalRequested {
+            approval_id,
+            call_id: CallId::from("tool-call-1"),
+            tool_name: ToolName::from("write_file"),
+            arguments: json!({"path": "notes.txt"}),
+            tool_kind: ToolKind::Write,
+            danger_level: DangerLevel::High,
+        })
+        .await
+        .expect("approval request should publish");
+        sink.append(DurableAgentEvent::ToolApprovalResolved {
+            approval_id,
+            decision: ApprovalDecision::Approve,
+        })
+        .await
+        .expect("approval resolution should publish");
+        sink.emit(AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+        })
+        .await;
+
+        let envelopes = recorder.take_published();
+        assert_eq!(envelopes.len(), 4);
+        for envelope in &envelopes {
+            assert_eq!(
+                envelope.metadata.get("agent_name"),
+                Some(&json!("review-agent"))
+            );
+            assert_eq!(
+                envelope.metadata.get("turn_id"),
+                Some(&json!(turn_id.to_string()))
+            );
+        }
+        assert!(matches!(
+            envelopes[0].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Finished { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            envelopes[1].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalRequested { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            envelopes[2].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalResolved { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            envelopes[3].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Llm { .. },
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
