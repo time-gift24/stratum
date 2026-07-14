@@ -33,6 +33,14 @@ pub trait ToolApproval: Send + Sync {
     /// # Errors
     ///
     /// Returns a typed error when the approval interaction cannot complete.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Implementations must cooperatively observe `cancellation` and return
+    /// [`ToolApprovalError::Cancelled`] when it is signalled. Cancellation must not be reported as
+    /// a generic interaction failure. [`ToolExecutor`](super::ToolExecutor) continues polling this
+    /// future after cancellation rather than dropping it, so implementations need cooperative
+    /// cancellation responsiveness; no additional drop-safety contract is imposed here.
     async fn request(
         &self,
         request: ToolApprovalRequest,

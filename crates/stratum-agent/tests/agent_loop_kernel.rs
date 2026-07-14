@@ -29,7 +29,7 @@ use stratum_tools::{
     BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
     ToolRegistry,
 };
-use tokio::time::timeout;
+use tokio::{sync::Notify, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -251,8 +251,10 @@ impl ToolApproval for FailingToolApproval {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CancellationAwareApproval;
+#[derive(Debug, Clone)]
+struct CancellationAwareApproval {
+    entered: Arc<Notify>,
+}
 
 #[async_trait]
 impl ToolApproval for CancellationAwareApproval {
@@ -261,6 +263,7 @@ impl ToolApproval for CancellationAwareApproval {
         _request: ToolApprovalRequest,
         cancellation: &CancellationToken,
     ) -> Result<ApprovalDecision, ToolApprovalError> {
+        self.entered.notify_one();
         cancellation.cancelled().await;
         Err(ToolApprovalError::Cancelled)
     }
@@ -2402,6 +2405,7 @@ async fn cancellation_before_first_model_call_records_one_cancelled_terminal() {
 #[tokio::test]
 async fn cancelled_approval_maps_to_loop_cancellation_without_execution() {
     let operations = Arc::new(Mutex::new(Vec::new()));
+    let approval_entered = Arc::new(Notify::new());
     let registry = recording_registry(
         &operations,
         &[("echo", RecordingToolBehavior::Echo)],
@@ -2416,7 +2420,9 @@ async fn cancelled_approval_maps_to_loop_cancellation_without_execution() {
         LoopLimits::new(2, 1),
         None,
         registry,
-        Arc::new(CancellationAwareApproval),
+        Arc::new(CancellationAwareApproval {
+            entered: Arc::clone(&approval_entered),
+        }),
         Arc::clone(&operations),
     );
     let cancellation = CancellationToken::new();
@@ -2430,26 +2436,9 @@ async fn cancelled_approval_maps_to_loop_cancellation_without_execution() {
             )
             .await
     });
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if recorded
-                .lock()
-                .expect("operation lock should not be poisoned")
-                .iter()
-                .any(|operation| {
-                    matches!(
-                        operation,
-                        Operation::Durable(DurableAgentEvent::ToolApprovalRequested { .. })
-                    )
-                })
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("approval request should be committed");
+    timeout(Duration::from_secs(1), approval_entered.notified())
+        .await
+        .expect("approval implementation should begin waiting");
 
     cancellation.cancel();
     let error = timeout(Duration::from_secs(1), task)

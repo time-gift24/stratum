@@ -40,6 +40,15 @@ impl AgentLoop {
     ///
     /// Returns an error when cancellation, model streaming, protocol validation, or a required
     /// durable acknowledgement prevents the loop from reaching a terminal boundary.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Request cancellation through the supplied [`CancellationToken`], then continue polling
+    /// this future to completion. Do not race, drop, or abort it: after
+    /// [`DurableAgentEvent::ToolExecutionStarted`] is acknowledged, an external side effect may
+    /// be in flight and the loop must finish recording the tool outcome. A durable start without
+    /// a corresponding result has an unknown outcome and must not be retried automatically unless
+    /// the tool has an explicit idempotency guarantee.
     pub async fn run(
         &self,
         context: LoopContext,
