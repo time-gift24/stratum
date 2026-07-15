@@ -1,7 +1,5 @@
 //! Typed failures that stop the agent loop kernel.
 
-use std::fmt;
-
 use stratum_core::{CallId, ChatRole};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
@@ -9,44 +7,25 @@ use thiserror::Error;
 
 use crate::ToolExecutorError;
 
-/// Required dependency accepted by [`AgentLoopBuilder`](super::AgentLoopBuilder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RequiredAgentLoopField {
-    /// Bound model provider.
-    LlmProvider,
-    /// Approval-aware tool executor.
-    ToolExecutor,
-    /// Required durable event sink.
-    DurableEvents,
-    /// Best-effort telemetry sink.
-    Telemetry,
-    /// Safety limits for one run.
-    Limits,
-}
-
-impl fmt::Display for RequiredAgentLoopField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::LlmProvider => "llm_provider",
-            Self::ToolExecutor => "tool_executor",
-            Self::DurableEvents => "durable_events",
-            Self::Telemetry => "telemetry",
-            Self::Limits => "limits",
-        })
-    }
-}
-
 /// Failure to construct an [`AgentLoop`](super::AgentLoop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum AgentLoopBuildError {
-    /// A required dependency was not supplied.
-    #[error("missing agent loop field {field}")]
-    MissingField {
-        /// Builder field that must be supplied.
-        field: RequiredAgentLoopField,
-    },
+    /// The model provider was not supplied.
+    #[error("missing agent loop field llm_provider")]
+    MissingLlmProvider,
+    /// The tool executor was not supplied.
+    #[error("missing agent loop field tool_executor")]
+    MissingToolExecutor,
+    /// The durable event sink was not supplied.
+    #[error("missing agent loop field durable_events")]
+    MissingDurableEvents,
+    /// The telemetry sink was not supplied.
+    #[error("missing agent loop field telemetry")]
+    MissingTelemetry,
+    /// The loop safety limits were not supplied.
+    #[error("missing agent loop field limits")]
+    MissingLimits,
 }
 
 /// Agent-loop protocol invariant that a provider response violated.

@@ -14,8 +14,7 @@ use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
     AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimit,
-    LoopLimits, ProtocolError, RequiredAgentLoopField, ToolApproval, ToolApprovalError,
-    ToolApprovalRequest, ToolExecutor,
+    LoopLimits, ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
 };
 use stratum_core::{
     AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -46,12 +45,7 @@ fn builder_reports_a_typed_missing_field() {
         panic!("an empty builder should fail");
     };
 
-    assert_eq!(
-        error,
-        AgentLoopBuildError::MissingField {
-            field: RequiredAgentLoopField::LlmProvider,
-        }
-    );
+    assert_eq!(error, AgentLoopBuildError::MissingLlmProvider);
 }
 
 struct RecordingDurableSink {

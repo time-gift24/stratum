@@ -155,13 +155,6 @@ impl ScopedAgentEventSink {
                     usage,
                 },
             },
-            AgentTelemetryEvent::ToolExecutionProgress { call_id, update } => {
-                AgentEvent::ToolExecutionProgress {
-                    turn_id: self.turn_id,
-                    call_id,
-                    update,
-                }
-            }
             _ => {
                 warn!(
                     agent_id = %self.agent_id,
@@ -655,48 +648,6 @@ mod tests {
                     turn_id,
                     iteration: 4,
                     usage,
-                },
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_progress_maps_to_external_progress_event() {
-        let agent_id = AgentId::new();
-        let run_id = RunId::new();
-        let turn_id = TurnId::new();
-        let recorder = Arc::new(RecordingEventStreamBus::default());
-        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
-        let sink = ScopedAgentEventSink::new(
-            agent_id,
-            "review-agent",
-            run_id,
-            turn_id,
-            Arc::clone(&event_bus),
-        );
-
-        sink.emit(AgentTelemetryEvent::ToolExecutionProgress {
-            call_id: CallId::from("tool-call-1"),
-            update: json!({"percent": 50}),
-        })
-        .await;
-
-        let [envelope] = recorder
-            .take_published()
-            .try_into()
-            .expect("exactly one envelope should be published");
-        let RuntimeEvent::Agent { event, .. } = &envelope.event else {
-            panic!("tool progress should be an agent event");
-        };
-        assert_eq!(event.event_type(), "tool_execution_progress");
-        assert_eq!(
-            envelope.event,
-            RuntimeEvent::Agent {
-                agent_id,
-                event: AgentEvent::ToolExecutionProgress {
-                    turn_id,
-                    call_id: CallId::from("tool-call-1"),
-                    update: json!({"percent": 50}),
                 },
             }
         );

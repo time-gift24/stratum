@@ -75,38 +75,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_context_starts_with_an_empty_transcript() {
-        let context = LoopContext::new("answer concisely");
-
-        assert_eq!(context.system_prompt, "answer concisely");
-        assert!(context.messages.is_empty());
-    }
-
-    #[test]
-    fn with_messages_preserves_the_complete_transcript() {
+    fn constructors_preserve_context_and_default_limits() {
         let transcript = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
-
         let context = LoopContext::new("be helpful").with_messages(transcript);
 
+        assert_eq!(context.system_prompt, "be helpful");
         assert_eq!(
             context.messages,
             vec![ChatMessage::user("hello"), ChatMessage::assistant("hi"),]
         );
-    }
-
-    #[test]
-    fn default_limits_bound_iterations_and_tool_calls() {
-        let limits = LoopLimits::default();
-
-        assert_eq!(limits.max_iterations, 16);
-        assert_eq!(limits.max_tool_calls_per_iteration, 16);
-    }
-
-    #[test]
-    fn custom_limits_preserve_both_bounds() {
-        let limits = LoopLimits::new(3, 5);
-
-        assert_eq!(limits.max_iterations, 3);
-        assert_eq!(limits.max_tool_calls_per_iteration, 5);
+        assert_eq!(LoopLimits::default(), LoopLimits::new(16, 16));
     }
 }

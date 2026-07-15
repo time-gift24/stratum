@@ -9,11 +9,11 @@ pub(crate) mod r#loop;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, LoopContext, LoopLimit,
-    LoopLimits, LoopOutcome, ProtocolError, RequiredAgentLoopField,
+    LoopLimits, LoopOutcome, ProtocolError,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
 pub use tool_executor::{
-    AllowAllToolApproval, DenyAllToolApproval, ToolApproval, ToolApprovalError,
-    ToolApprovalRequest, ToolExecutionOutcome, ToolExecutor, ToolExecutorError,
+    AllowAllToolApproval, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
+    ToolExecutorError,
 };

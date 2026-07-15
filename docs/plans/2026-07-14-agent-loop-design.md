@@ -42,24 +42,23 @@ AgentLoop -> ToolExecutor -> Policy / Approval -> ToolRegistry
 ### `stratum-agent`
 
 - 定义并实现具体的 `AgentLoop`。
-- 定义 loop 所需的 durable 与 telemetry 事件及其 sink trait。
+- 使用 `stratum-core` 中的 durable 与 telemetry 事件，以及 `stratum-infra` 中的 sink trait。
 - 实现具体的 `ToolExecutor`，封装参数校验、策略、审批和工具调用。
 - 不加载历史，不管理 session，不决定存储格式。
-- 不直接依赖 `stratum-store` 或 `EventStreamBus`。
+- 新的 `AgentLoop` 内核不直接依赖 `stratum-store` 或 `EventStreamBus`；legacy `Agent` 兼容路径暂时保留原有依赖。
 
 `ToolExecutor` 第一阶段只有一个真实生产实现，因此保持具体类型，不提前创建 trait。LLM provider、durable sink 和 telemetry sink 存在真实多实现边界，继续使用 trait。
 
 ### `stratum-store`
 
-- 实现 `DurableEventSink`。
-- 收到 durable event 后先更新 store。
+- 作为 durable event 的投影消费者，收到事件后先更新 store。
 - store 成功后返回，即代表持久化确认。
 - 可在提交成功后转发已提交事件；转发失败只记录结构化 warning，不否定已经完成的持久化。
 
 ### 组合层
 
-- 将运行范围信息绑定到 sink，包括 `AgentId`、`RunId` 和 `TurnId`。
-- 将 telemetry sink 连接到内存、NATS 或其他 event stream 实现。
+- 使用 `stratum-infra::ScopedAgentEventSink` 将 `AgentId`、`RunId` 和 `TurnId` 绑定到事件。
+- 将 sink 连接到带 store 投影消费者的 `EventStreamBus`，再由内存、NATS 或其他实现负责分发。
 - `AgentLoop` 产生的领域事件不携带 session 管理职责。
 
 ## Loop API
@@ -121,7 +120,6 @@ pub trait DurableEventSink: Send + Sync {
 telemetry event 包含：
 
 - LLM started、delta 和 finished
-- tool execution progress
 - 非关键诊断信息
 
 ```rust

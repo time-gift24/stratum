@@ -141,13 +141,6 @@ pub enum AgentTelemetryEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<TokenUsage>,
     },
-    /// A tool emitted an execution progress update.
-    ToolExecutionProgress {
-        /// Tool call identity.
-        call_id: CallId,
-        /// Tool-specific progress payload.
-        update: Value,
-    },
 }
 
 impl AgentTelemetryEvent {
@@ -160,7 +153,6 @@ impl AgentTelemetryEvent {
             Self::ReasoningDelta { .. } => "reasoning_delta",
             Self::ToolCallDelta { .. } => "tool_call_delta",
             Self::LlmFinished { .. } => "llm_finished",
-            Self::ToolExecutionProgress { .. } => "tool_execution_progress",
         }
     }
 }
@@ -174,17 +166,12 @@ mod tests {
     };
     use serde_json::json;
 
-    fn accept_durable(_: &DurableAgentEvent) {}
-
-    fn accept_telemetry(_: &AgentTelemetryEvent) {}
-
     #[test]
     fn durable_message_event_serializes_with_stable_snake_case_type() -> serde_json::Result<()> {
         let event = DurableAgentEvent::MessageAppended {
             message: ChatMessage::user("hello"),
         };
 
-        accept_durable(&event);
         assert_eq!(event.event_type(), "message_appended");
         let serialized = serde_json::to_value(&event)?;
         assert_eq!(
@@ -217,7 +204,6 @@ mod tests {
             delta: "hel".to_owned(),
         };
 
-        accept_telemetry(&event);
         assert_eq!(event.event_type(), "text_delta");
         let serialized = serde_json::to_value(&event)?;
         assert_eq!(
@@ -340,10 +326,6 @@ mod tests {
                     output_tokens: 2,
                     total_tokens: 3,
                 }),
-            },
-            AgentTelemetryEvent::ToolExecutionProgress {
-                call_id: CallId::from("tool-call-1"),
-                update: json!({ "percent": 50 }),
             },
         ];
 

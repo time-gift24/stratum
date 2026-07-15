@@ -10,34 +10,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutorError};
 
-/// Result of processing one provider tool call.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct ToolExecutionOutcome {
-    message: ChatMessage,
-    dispatch_attempted: bool,
-}
-
-impl ToolExecutionOutcome {
-    /// Borrows the model-visible tool result message.
-    #[must_use]
-    pub const fn message(&self) -> &ChatMessage {
-        &self.message
-    }
-
-    /// Returns whether [`ToolRegistry::call`] was invoked for this tool call.
-    #[must_use]
-    pub const fn dispatch_attempted(&self) -> bool {
-        self.dispatch_attempted
-    }
-
-    /// Consumes the outcome and returns its model-visible message.
-    #[must_use]
-    pub fn into_message(self) -> ChatMessage {
-        self.message
-    }
-}
-
 /// Sequential executor that durably gates external tool calls.
 pub struct ToolExecutor {
     registry: Arc<dyn ToolRegistry>,
@@ -82,29 +54,23 @@ impl ToolExecutor {
         &self,
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
-    ) -> Result<ToolExecutionOutcome, ToolExecutorError> {
+    ) -> Result<ChatMessage, ToolExecutorError> {
         let tool_name = ToolName::new(tool_call.name.clone());
         let input = ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone());
         let authorization = match self.registry.authorization(&tool_name) {
             Ok(authorization) => authorization,
             Err(error) => {
-                return Ok(ToolExecutionOutcome {
-                    message: ChatMessage::tool(
-                        tool_call.call_id.clone(),
-                        json!({"error": error.to_string()}),
-                    ),
-                    dispatch_attempted: false,
-                });
+                return Ok(ChatMessage::tool(
+                    tool_call.call_id.clone(),
+                    json!({"error": error.to_string()}),
+                ));
             }
         };
         if let Err(error) = self.registry.validate(&tool_name, &input) {
-            return Ok(ToolExecutionOutcome {
-                message: ChatMessage::tool(
-                    tool_call.call_id.clone(),
-                    json!({"error": error.to_string()}),
-                ),
-                dispatch_attempted: false,
-            });
+            return Ok(ChatMessage::tool(
+                tool_call.call_id.clone(),
+                json!({"error": error.to_string()}),
+            ));
         }
         ensure_not_cancelled(cancellation)?;
 
@@ -139,13 +105,10 @@ impl ToolExecutor {
             ensure_not_cancelled(cancellation)?;
             match decision {
                 ApprovalDecision::Reject => {
-                    return Ok(ToolExecutionOutcome {
-                        message: ChatMessage::tool(
-                            tool_call.call_id.clone(),
-                            json!({"error": "tool approval rejected"}),
-                        ),
-                        dispatch_attempted: false,
-                    });
+                    return Ok(ChatMessage::tool(
+                        tool_call.call_id.clone(),
+                        json!({"error": "tool approval rejected"}),
+                    ));
                 }
                 ApprovalDecision::Approve => {}
                 _ => return Err(ToolExecutorError::UnsupportedApprovalDecision),
@@ -164,10 +127,7 @@ impl ToolExecutor {
             Ok(output) => output.result,
             Err(error) => json!({"error": error.to_string()}),
         };
-        Ok(ToolExecutionOutcome {
-            message: ChatMessage::tool(tool_call.call_id.clone(), payload),
-            dispatch_attempted: true,
-        })
+        Ok(ChatMessage::tool(tool_call.call_id.clone(), payload))
     }
 }
 
@@ -441,13 +401,12 @@ mod tests {
             .expect("missing tools are recoverable tool results");
 
         assert_eq!(
-            outcome.message(),
-            &ChatMessage::tool(
+            outcome,
+            ChatMessage::tool(
                 call.call_id.clone(),
                 json!({"error": "tool not found: missing"}),
             )
         );
-        assert!(!outcome.dispatch_attempted());
         assert_eq!(
             *operations
                 .lock()
@@ -485,13 +444,12 @@ mod tests {
             .expect("invalid arguments should remain a recoverable tool result");
 
         assert_eq!(
-            outcome.message(),
-            &ChatMessage::tool(
+            outcome,
+            ChatMessage::tool(
                 call.call_id,
                 json!({"error": "invalid argument arguments: must be an object"}),
             )
         );
-        assert!(!outcome.dispatch_attempted());
         assert!(
             operations
                 .lock()
@@ -528,13 +486,12 @@ mod tests {
             .expect("rejection is a recoverable tool result");
 
         assert_eq!(
-            outcome.message(),
-            &ChatMessage::tool(
+            outcome,
+            ChatMessage::tool(
                 call.call_id.clone(),
                 json!({"error": "tool approval rejected"}),
             )
         );
-        assert!(!outcome.dispatch_attempted());
 
         let operations = operations
             .lock()
@@ -680,10 +637,9 @@ mod tests {
             .expect("approved tool should execute");
 
         assert_eq!(
-            outcome.message(),
-            &ChatMessage::tool(call.call_id.clone(), json!({"ok": true}))
+            outcome,
+            ChatMessage::tool(call.call_id.clone(), json!({"ok": true}))
         );
-        assert!(outcome.dispatch_attempted());
 
         let operations = operations
             .lock()
@@ -836,9 +792,8 @@ mod tests {
             .await
             .expect("tool domain failures are recoverable results");
 
-        assert!(outcome.dispatch_attempted());
         assert_eq!(
-            outcome.into_message(),
+            outcome,
             ChatMessage::tool(
                 call.call_id.clone(),
                 json!({"error": "invalid argument value: test failure"}),

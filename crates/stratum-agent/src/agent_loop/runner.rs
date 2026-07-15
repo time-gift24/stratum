@@ -14,7 +14,6 @@ use crate::{ToolApprovalError, ToolExecutor, ToolExecutorError};
 
 use super::{
     AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimit, LoopLimits, LoopOutcome,
-    RequiredAgentLoopField,
     stream::{consume_assistant_stream, finish_reason_name},
 };
 
@@ -197,7 +196,7 @@ impl AgentLoop {
                         truncated_tool_result(tool_call)
                     } else {
                         match self.tool_executor.execute(tool_call, cancellation).await {
-                            Ok(outcome) => outcome.into_message(),
+                            Ok(message) => message,
                             Err(ToolExecutorError::Durability { source }) => {
                                 return Err(AgentLoopError::Durability { source });
                             }
@@ -301,28 +300,23 @@ impl AgentLoopBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentLoopBuildError::MissingField`] for the first required field not supplied.
+    /// Returns the corresponding [`AgentLoopBuildError`] variant for the first required field not
+    /// supplied.
     pub fn build(self) -> Result<AgentLoop, AgentLoopBuildError> {
         Ok(AgentLoop {
-            llm_provider: self.llm_provider.ok_or(AgentLoopBuildError::MissingField {
-                field: RequiredAgentLoopField::LlmProvider,
-            })?,
+            llm_provider: self
+                .llm_provider
+                .ok_or(AgentLoopBuildError::MissingLlmProvider)?,
             tool_executor: self
                 .tool_executor
-                .ok_or(AgentLoopBuildError::MissingField {
-                    field: RequiredAgentLoopField::ToolExecutor,
-                })?,
+                .ok_or(AgentLoopBuildError::MissingToolExecutor)?,
             durable_events: self
                 .durable_events
-                .ok_or(AgentLoopBuildError::MissingField {
-                    field: RequiredAgentLoopField::DurableEvents,
-                })?,
-            telemetry: self.telemetry.ok_or(AgentLoopBuildError::MissingField {
-                field: RequiredAgentLoopField::Telemetry,
-            })?,
-            limits: self.limits.ok_or(AgentLoopBuildError::MissingField {
-                field: RequiredAgentLoopField::Limits,
-            })?,
+                .ok_or(AgentLoopBuildError::MissingDurableEvents)?,
+            telemetry: self
+                .telemetry
+                .ok_or(AgentLoopBuildError::MissingTelemetry)?,
+            limits: self.limits.ok_or(AgentLoopBuildError::MissingLimits)?,
         })
     }
 }

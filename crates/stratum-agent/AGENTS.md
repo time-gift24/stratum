@@ -10,8 +10,8 @@ legacy stateful `Agent` compatibility path.
 - `AgentLoop` consumes a caller-preloaded `LoopContext` plus user prompts. It
   does not own session creation, history loading, an `AgentStore`, or an
   `EventStreamBus`.
-- Required transitions use `DurableEventSink`; partial output and progress use
-  the separate best-effort `TelemetryEventSink`.
+- Required transitions use `DurableEventSink`; model deltas and non-critical
+  diagnostics use the separate best-effort `TelemetryEventSink`.
 - A durable append must be acknowledged before the kernel mutates its in-memory
   transcript or starts the next external action.
 - Tool calls execute sequentially through `ToolExecutor`. Lookup and synchronous,
