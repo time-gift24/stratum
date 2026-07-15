@@ -274,7 +274,7 @@ impl Agent {
 
             self.publish_required_agent_event(
                 AgentEvent::Finished {
-                    finish_reason: finish_reason_name(finish_reason).to_owned(),
+                    finish_reason: finish_reason.as_str().to_owned(),
                     usage: self.current_usage(),
                 },
                 None,
@@ -363,7 +363,7 @@ impl Agent {
                 }
                 self.publish_required_agent_event(
                     AgentEvent::Finished {
-                        finish_reason: finish_reason_name(FinishReason::Unknown).to_owned(),
+                        finish_reason: FinishReason::Unknown.as_str().to_owned(),
                         usage: self.current_usage(),
                     },
                     None,
@@ -648,7 +648,7 @@ impl Agent {
                                 turn_index,
                                 llm_call_id.clone(),
                                 LlmEvent::Finished {
-                                    finish_reason: finish_reason_name(finish_reason).to_owned(),
+                                    finish_reason: finish_reason.as_str().to_owned(),
                                     usage: event_usage,
                                 },
                                 None,
@@ -938,32 +938,4 @@ fn finalize_tool_calls(
         });
     }
     Ok(tool_calls)
-}
-
-const fn finish_reason_name(finish_reason: FinishReason) -> &'static str {
-    match finish_reason {
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::ToolCalls => "tool_calls",
-        FinishReason::ContentFilter => "content_filter",
-        FinishReason::Unknown => "unknown",
-        _ => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finish_reason_names_match_protocol_values() {
-        assert_eq!(finish_reason_name(FinishReason::Stop), "stop");
-        assert_eq!(finish_reason_name(FinishReason::Length), "length");
-        assert_eq!(finish_reason_name(FinishReason::ToolCalls), "tool_calls");
-        assert_eq!(
-            finish_reason_name(FinishReason::ContentFilter),
-            "content_filter"
-        );
-        assert_eq!(finish_reason_name(FinishReason::Unknown), "unknown");
-    }
 }

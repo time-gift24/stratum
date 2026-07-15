@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
-    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimit,
-    LoopLimits, ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
+    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimits,
+    ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
 };
 use stratum_core::{
     AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -639,9 +639,7 @@ async fn usize_max_tool_index_is_rejected_before_allocation() {
 
     assert!(matches!(
         error,
-        AgentLoopError::LimitExceeded {
-            limit: LoopLimit::ToolCallsPerIteration { maximum: 16 },
-        }
+        AgentLoopError::ToolCallLimitExceeded { maximum: 16 }
     ));
 }
 
@@ -716,9 +714,7 @@ async fn max_zero_rejects_the_first_tool_delta() {
 
     assert!(matches!(
         error,
-        AgentLoopError::LimitExceeded {
-            limit: LoopLimit::ToolCallsPerIteration { maximum: 0 },
-        }
+        AgentLoopError::ToolCallLimitExceeded { maximum: 0 }
     ));
     let operations = operations
         .lock()
@@ -918,9 +914,7 @@ async fn zero_iteration_limit_is_rejected_before_external_actions() {
 
     assert!(matches!(
         error,
-        AgentLoopError::LimitExceeded {
-            limit: LoopLimit::Iterations { maximum: 0 },
-        }
+        AgentLoopError::IterationLimitExceeded { maximum: 0 }
     ));
     assert!(
         operations
@@ -1141,152 +1135,75 @@ fn successful_no_tool_events() -> Vec<ChatStreamEvent> {
 }
 
 #[tokio::test]
-async fn prompt_append_failure_stops_before_provider_and_terminal_actions() {
-    let (agent_loop, operations) = test_agent_loop_with(
-        provider_events(successful_no_tool_events()),
-        LoopLimits::new(1, 1),
-        Some(1),
-    );
+async fn durable_failures_stop_at_the_failed_boundary() {
+    let cases: &[(usize, &[&str], bool)] = &[
+        (1, &["loop_started", "message_appended"], false),
+        (
+            2,
+            &["loop_started", "message_appended", "message_appended"],
+            true,
+        ),
+        (
+            3,
+            &[
+                "loop_started",
+                "message_appended",
+                "message_appended",
+                "iteration_completed",
+            ],
+            true,
+        ),
+        (
+            4,
+            &[
+                "loop_started",
+                "message_appended",
+                "message_appended",
+                "iteration_completed",
+                "loop_finished",
+            ],
+            true,
+        ),
+    ];
 
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("hello")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("prompt append should fail");
+    for &(fail_at, expected_events, provider_called) in cases {
+        let (agent_loop, operations) = test_agent_loop_with(
+            provider_events(successful_no_tool_events()),
+            LoopLimits::new(1, 1),
+            Some(fail_at),
+        );
 
-    assert!(matches!(error, AgentLoopError::Durability { .. }));
-    let operations = operations
-        .lock()
-        .expect("operation lock should not be poisoned");
-    assert_eq!(
-        operations
-            .iter()
-            .filter_map(|operation| match operation {
-                Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
-                    None,
-            })
-            .collect::<Vec<_>>(),
-        vec!["loop_started", "message_appended"]
-    );
-    assert!(
-        !operations
-            .iter()
-            .any(|operation| matches!(operation, Operation::ChatStream(_)))
-    );
-}
+        let error = agent_loop
+            .run(
+                LoopContext::new("be precise"),
+                vec![ChatMessage::user("hello")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("configured durable append should fail");
 
-#[tokio::test]
-async fn assistant_append_failure_stops_before_iteration_and_finish() {
-    let (agent_loop, operations) = test_agent_loop_with(
-        provider_events(successful_no_tool_events()),
-        LoopLimits::new(1, 1),
-        Some(2),
-    );
-
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("hello")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("assistant append should fail");
-
-    assert!(matches!(error, AgentLoopError::Durability { .. }));
-    assert_eq!(
-        operations
+        assert!(matches!(error, AgentLoopError::Durability { .. }));
+        let operations = operations
             .lock()
-            .expect("operation lock should not be poisoned")
+            .expect("operation lock should not be poisoned");
+        let durable_events = operations
             .iter()
             .filter_map(|operation| match operation {
                 Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
-                    None,
+                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } => {
+                    None
+                }
             })
-            .collect::<Vec<_>>(),
-        vec!["loop_started", "message_appended", "message_appended"]
-    );
-}
-
-#[tokio::test]
-async fn iteration_append_failure_stops_before_loop_finish() {
-    let (agent_loop, operations) = test_agent_loop_with(
-        provider_events(successful_no_tool_events()),
-        LoopLimits::new(1, 1),
-        Some(3),
-    );
-
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("hello")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("iteration append should fail");
-
-    assert!(matches!(error, AgentLoopError::Durability { .. }));
-    assert_eq!(
-        operations
-            .lock()
-            .expect("operation lock should not be poisoned")
-            .iter()
-            .filter_map(|operation| match operation {
-                Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
-                    None,
-            })
-            .collect::<Vec<_>>(),
-        vec![
-            "loop_started",
-            "message_appended",
-            "message_appended",
-            "iteration_completed",
-        ]
-    );
-}
-
-#[tokio::test]
-async fn loop_finished_append_failure_does_not_attempt_another_terminal() {
-    let (agent_loop, operations) = test_agent_loop_with(
-        provider_events(successful_no_tool_events()),
-        LoopLimits::new(1, 1),
-        Some(4),
-    );
-
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("hello")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("loop finish append should fail");
-
-    assert!(matches!(error, AgentLoopError::Durability { .. }));
-    assert_eq!(
-        operations
-            .lock()
-            .expect("operation lock should not be poisoned")
-            .iter()
-            .filter_map(|operation| match operation {
-                Operation::Durable(event) => Some(event.event_type()),
-                Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } =>
-                    None,
-            })
-            .collect::<Vec<_>>(),
-        vec![
-            "loop_started",
-            "message_appended",
-            "message_appended",
-            "iteration_completed",
-            "loop_finished",
-        ]
-    );
+            .collect::<Vec<_>>();
+        assert_eq!(durable_events, expected_events, "fail_at {fail_at}");
+        assert_eq!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::ChatStream(_))),
+            provider_called,
+            "fail_at {fail_at}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1946,9 +1863,7 @@ async fn iteration_limit_fails_once_before_another_model_request() {
 
     assert!(matches!(
         error,
-        AgentLoopError::LimitExceeded {
-            limit: LoopLimit::Iterations { maximum: 1 },
-        }
+        AgentLoopError::IterationLimitExceeded { maximum: 1 }
     ));
     let recorded = recorded
         .lock()

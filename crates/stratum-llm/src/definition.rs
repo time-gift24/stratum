@@ -162,9 +162,23 @@ pub enum FinishReason {
     Unknown,
 }
 
+impl FinishReason {
+    /// Returns the stable protocol name for this finish reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{ChatMessage, ChatRequest, StructuredOutput};
+    use crate::{ChatMessage, ChatRequest, FinishReason, StructuredOutput};
     use serde_json::json;
 
     #[test]
@@ -195,5 +209,14 @@ mod tests {
                 "data": { "delta": "thinking" }
             })
         );
+    }
+
+    #[test]
+    fn finish_reason_names_match_protocol_values() {
+        assert_eq!(FinishReason::Stop.as_str(), "stop");
+        assert_eq!(FinishReason::Length.as_str(), "length");
+        assert_eq!(FinishReason::ToolCalls.as_str(), "tool_calls");
+        assert_eq!(FinishReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(FinishReason::Unknown.as_str(), "unknown");
     }
 }

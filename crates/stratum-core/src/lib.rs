@@ -721,15 +721,6 @@ pub enum AgentEvent {
         /// Provider-visible tool name.
         tool_name: ToolName,
     },
-    /// A tool emitted a best-effort execution progress update.
-    ToolExecutionProgress {
-        /// Turn that owns the tool call.
-        turn_id: TurnId,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Tool-specific progress payload.
-        update: Value,
-    },
     /// One agent-loop iteration reached its durable boundary.
     IterationCompleted {
         /// Turn whose durable frontier advanced.
@@ -761,7 +752,6 @@ impl AgentEvent {
             Self::ToolApprovalRequested { .. } => "tool_approval_requested",
             Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
             Self::ToolExecutionStarted { .. } => "tool_execution_started",
-            Self::ToolExecutionProgress { .. } => "tool_execution_progress",
             Self::IterationCompleted { .. } => "iteration_completed",
             Self::Llm { .. } => "llm",
         }
@@ -1313,22 +1303,6 @@ mod tests {
                         "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
                         "call_id": "tool-call-1",
                         "tool_name": "echo"
-                    }
-                }),
-            ),
-            (
-                AgentEvent::ToolExecutionProgress {
-                    turn_id,
-                    call_id: CallId::from("tool-call-1"),
-                    update: json!({ "percent": 50 }),
-                },
-                "tool_execution_progress",
-                json!({
-                    "type": "tool_execution_progress",
-                    "data": {
-                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
-                        "call_id": "tool-call-1",
-                        "update": { "percent": 50 }
                     }
                 }),
             ),

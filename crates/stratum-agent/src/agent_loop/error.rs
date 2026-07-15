@@ -23,9 +23,6 @@ pub enum AgentLoopBuildError {
     /// The telemetry sink was not supplied.
     #[error("missing agent loop field telemetry")]
     MissingTelemetry,
-    /// The loop safety limits were not supplied.
-    #[error("missing agent loop field limits")]
-    MissingLimits,
 }
 
 /// Agent-loop protocol invariant that a provider response violated.
@@ -97,24 +94,6 @@ pub enum ProtocolError {
     },
 }
 
-/// Configured safety bound reached by an agent loop run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum LoopLimit {
-    /// The run reached its model-iteration bound.
-    #[error("maximum of {maximum} iterations reached")]
-    Iterations {
-        /// Configured maximum number of iterations.
-        maximum: usize,
-    },
-    /// One model response exceeded its tool-call bound.
-    #[error("maximum of {maximum} tool calls per iteration exceeded")]
-    ToolCallsPerIteration {
-        /// Configured maximum number of tool calls per iteration.
-        maximum: usize,
-    },
-}
-
 /// Failure that prevents the agent loop from preserving its invariants.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -159,12 +138,17 @@ pub enum AgentLoopError {
     /// The caller cancelled the loop before a terminal outcome was committed.
     #[error("agent loop cancelled")]
     Cancelled,
-    /// The loop reached a configured safety bound.
-    #[error("agent loop limit exceeded: {limit}")]
-    LimitExceeded {
-        /// Typed safety bound that stopped the loop.
-        #[source]
-        limit: LoopLimit,
+    /// The run reached its model-iteration bound.
+    #[error("maximum of {maximum} agent loop iterations reached")]
+    IterationLimitExceeded {
+        /// Configured maximum number of iterations.
+        maximum: usize,
+    },
+    /// One model response exceeded its tool-call bound.
+    #[error("maximum of {maximum} tool calls per iteration exceeded")]
+    ToolCallLimitExceeded {
+        /// Configured maximum number of tool calls per iteration.
+        maximum: usize,
     },
 }
 
@@ -237,20 +221,6 @@ mod tests {
                 .source()
                 .and_then(|source| source.downcast_ref::<ProtocolError>()),
             Some(ProtocolError::StreamEndedWithoutFinish)
-        ));
-    }
-
-    #[test]
-    fn limit_error_exposes_the_typed_limit_as_its_source() {
-        let error = AgentLoopError::LimitExceeded {
-            limit: LoopLimit::Iterations { maximum: 2 },
-        };
-
-        assert!(matches!(
-            error
-                .source()
-                .and_then(|source| source.downcast_ref::<LoopLimit>()),
-            Some(LoopLimit::Iterations { maximum: 2 })
         ));
     }
 }

@@ -9,7 +9,7 @@ use stratum_infra::TelemetryEventSink;
 use stratum_llm::{ChatStream, ChatStreamEvent, FinishReason};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentLoopError, LoopLimit, ProtocolError};
+use super::{AgentLoopError, ProtocolError};
 
 pub(super) struct AssistantStreamResult {
     pub(super) message: ChatMessage,
@@ -65,10 +65,8 @@ pub(super) async fn consume_assistant_stream(
             }
             ChatStreamEvent::ToolCallDelta(delta) => {
                 if delta.index >= max_tool_calls_per_iteration {
-                    return Err(AgentLoopError::LimitExceeded {
-                        limit: LoopLimit::ToolCallsPerIteration {
-                            maximum: max_tool_calls_per_iteration,
-                        },
+                    return Err(AgentLoopError::ToolCallLimitExceeded {
+                        maximum: max_tool_calls_per_iteration,
                     });
                 }
                 let pending = pending_tool_calls.entry(delta.index).or_default();
@@ -128,7 +126,7 @@ pub(super) async fn consume_assistant_stream(
                 telemetry
                     .emit(AgentTelemetryEvent::LlmFinished {
                         llm_call_id: llm_call_id.clone(),
-                        finish_reason: finish_reason_name(finish_reason).to_owned(),
+                        finish_reason: finish_reason.as_str().to_owned(),
                         usage,
                     })
                     .await;
@@ -204,15 +202,4 @@ fn add_usage(total: &mut TokenUsage, usage: TokenUsage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
     total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
-}
-
-pub(super) const fn finish_reason_name(finish_reason: FinishReason) -> &'static str {
-    match finish_reason {
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::ToolCalls => "tool_calls",
-        FinishReason::ContentFilter => "content_filter",
-        FinishReason::Unknown => "unknown",
-        _ => "unknown",
-    }
 }

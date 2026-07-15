@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{ToolApprovalError, ToolExecutor, ToolExecutorError};
 
 use super::{
-    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimit, LoopLimits, LoopOutcome,
-    stream::{consume_assistant_stream, finish_reason_name},
+    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimits, LoopOutcome,
+    stream::consume_assistant_stream,
 };
 
 /// Executes the foundational LLM and tool control flow without owning session state.
@@ -65,9 +65,7 @@ impl AgentLoop {
             return Err(super::ProtocolError::InvalidPromptRole { role }.into());
         }
         if self.limits.max_iterations == 0 {
-            return Err(AgentLoopError::LimitExceeded {
-                limit: LoopLimit::Iterations { maximum: 0 },
-            });
+            return Err(AgentLoopError::IterationLimitExceeded { maximum: 0 });
         }
 
         self.durable_events
@@ -177,14 +175,6 @@ impl AgentLoop {
             context.messages.push(assistant.message.clone());
             new_messages.push(assistant.message);
 
-            if tool_calls.len() > self.limits.max_tool_calls_per_iteration {
-                return Err(AgentLoopError::LimitExceeded {
-                    limit: LoopLimit::ToolCallsPerIteration {
-                        maximum: self.limits.max_tool_calls_per_iteration,
-                    },
-                });
-            }
-
             if !tool_calls.is_empty() {
                 context.messages.reserve(tool_calls.len());
                 new_messages.reserve(tool_calls.len());
@@ -227,7 +217,7 @@ impl AgentLoop {
             if tool_calls.is_empty() {
                 self.durable_events
                     .append(DurableAgentEvent::LoopFinished {
-                        finish_reason: finish_reason_name(finish_reason).to_owned(),
+                        finish_reason: finish_reason.as_str().to_owned(),
                         usage: *usage,
                     })
                     .await?;
@@ -242,10 +232,8 @@ impl AgentLoop {
         if cancellation.is_cancelled() {
             return Err(AgentLoopError::Cancelled);
         }
-        Err(AgentLoopError::LimitExceeded {
-            limit: LoopLimit::Iterations {
-                maximum: self.limits.max_iterations,
-            },
+        Err(AgentLoopError::IterationLimitExceeded {
+            maximum: self.limits.max_iterations,
         })
     }
 }
@@ -257,7 +245,7 @@ pub struct AgentLoopBuilder {
     tool_executor: Option<ToolExecutor>,
     durable_events: Option<Arc<dyn DurableEventSink>>,
     telemetry: Option<Arc<dyn TelemetryEventSink>>,
-    limits: Option<LoopLimits>,
+    limits: LoopLimits,
 }
 
 impl AgentLoopBuilder {
@@ -292,7 +280,7 @@ impl AgentLoopBuilder {
     /// Sets safety limits for one run.
     #[must_use]
     pub const fn limits(mut self, limits: LoopLimits) -> Self {
-        self.limits = Some(limits);
+        self.limits = limits;
         self
     }
 
@@ -316,7 +304,7 @@ impl AgentLoopBuilder {
             telemetry: self
                 .telemetry
                 .ok_or(AgentLoopBuildError::MissingTelemetry)?,
-            limits: self.limits.ok_or(AgentLoopBuildError::MissingLimits)?,
+            limits: self.limits,
         })
     }
 }
