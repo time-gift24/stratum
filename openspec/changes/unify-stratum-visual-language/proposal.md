@@ -1,30 +1,30 @@
-## Why
+## 为什么
 
-The overview and Longzhong chat currently share product structure but present different surface, color, shape, typography, and motion languages. A single Lovable-based foundation will make the frontend feel like one trustworthy product while preserving Stratum's existing workflows and leaving its multicolor palette available for later, purposeful effects.
+概览页与隆中对聊天目前共享相同的产品结构，却使用了不同的表面、配色、形状、排版和动效语言。以 Lovable 为统一基础，可以让前端呈现为一个可信的一体化产品，同时保留 Stratum 现有工作流，并将原有多色配色留给后续有明确目的的特效。
 
-## What Changes
+## 变更内容
 
-- Adopt the Lovable color system across light and dark product surfaces, controls, borders, text, and primary actions.
-- Adopt Lovable's typography sizes, weights, line heights, letter spacing, and responsive scale while retaining the existing Noto Sans and Nunito Sans font assets.
-- Normalize navigation, composer, drawer, buttons, and content surfaces around a shallow border-led depth model and explicit radius roles.
-- Reduce decorative background treatments and standardize product motion so transitions communicate state without competing for attention.
-- Separate the visual system into a Lovable product layer, accessible semantic-state colors, and a dormant Stratum effects palette reserved for later visual effects.
-- Preserve route structure, chat behavior, progressive disclosure, document scrolling, overlay history, localization, theming, and backend-driven runtime data.
-- Add the Lovable DESIGN.md as a non-authoritative reference and update the project design documentation with the adopted rules.
+- 在明暗主题的产品表面、控件、边框、文本和主要操作中全面采用 Lovable 配色系统。
+- 保留现有 Noto Sans 与 Nunito Sans 字体资源，同时采用 Lovable 的字号、字重、行高、字距和响应式缩放规则。
+- 以浅层、边框主导的纵深模型和明确的圆角职责，统一导航、输入区、抽屉、按钮和内容表面。
+- 减少装饰性背景处理，统一产品动效，使过渡只表达状态而不争夺注意力。
+- 将视觉系统拆分为 Lovable 产品层、可访问的语义状态色，以及暂不启用、留给后续特效的 Stratum 配色层。
+- 保留路由结构、聊天行为、渐进式透明、文档滚动、历史浮层、本地化、主题切换和后端驱动的运行数据。
+- 将 Lovable DESIGN.md 作为非权威参考，并把已采纳的规则更新到项目设计文档中。
 
-## Capabilities
+## 能力
 
-### New Capabilities
+### 新增能力
 
-- `frontend-visual-system`: Defines the unified Lovable-based color, typography, surface, shape, responsive, accessibility, and motion requirements for the Stratum web frontend.
+- `frontend-visual-system`：定义 Stratum Web 统一的 Lovable 风格配色、排版、表面、形状、响应式、可访问性和动效要求。
 
-### Modified Capabilities
+### 修改能力
 
-None.
+无。
 
-## Impact
+## 影响
 
-- Affects `stratum-web/DESIGN.md`, global frontend tokens and styles, the overview route, and Stratum-owned navigation, chat workspace, history, and route-transition components.
-- Third-party and reusable component internals under `app/components/ui`, `app/components/react-bits`, and `app/components/ai-elements` remain unchanged; adaptation occurs through semantic tokens, props, and usage-site wrappers or classes.
-- No backend API, event protocol, data model, route slug, or localization key contract changes are planned.
-- The getdesign CLI is used only to capture a reference document and does not become a runtime dependency.
+- 影响 `stratum-web/DESIGN.md`、全局前端 token 与样式、概览路由，以及 Stratum 自有的导航、聊天工作区、历史记录和路由过渡组件。
+- `app/components/ui`、`app/components/react-bits` 和 `app/components/ai-elements` 下的第三方或可复用组件内部实现保持不变，通过语义 token、props、使用方包装层或类名完成适配。
+- 不计划修改后端 API、事件协议、数据模型、路由路径或本地化键契约。
+- getdesign CLI 仅用于获取参考文档，不会成为运行时依赖。

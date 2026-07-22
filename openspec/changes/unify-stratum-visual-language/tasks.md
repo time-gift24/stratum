@@ -1,34 +1,34 @@
-## 1. Isolated Setup and Design Sources
+## 1. 隔离环境与设计来源
 
-- [ ] 1.1 Create a non-main `codex/unify-stratum-visual-language` branch in an isolated worktree and verify the source checkout remains unchanged.
-- [ ] 1.2 Run `npx getdesign@latest add lovable` from `stratum-web` and verify the generated Lovable DESIGN.md is stored separately without overwriting `stratum-web/DESIGN.md`.
-- [ ] 1.3 Update `stratum-web/DESIGN.md` with the accepted Lovable product palette, derived dark roles, type metrics, radius rules, motion limits, and the reserved Stratum effects layer.
+- [ ] 1.1 在独立 worktree 中创建非 main 分支 `codex/unify-stratum-visual-language`，并确认原始 checkout 保持不变。
+- [ ] 1.2 在 `stratum-web` 中运行 `npx getdesign@latest add lovable`，确认生成的 Lovable DESIGN.md 独立保存且不会覆盖 `stratum-web/DESIGN.md`。
+- [ ] 1.3 更新 `stratum-web/DESIGN.md`，记录已采纳的 Lovable 产品配色、派生暗色角色、排版参数、圆角规则、动效限制和保留的 Stratum 特效层。
 
-## 2. Global Tokens and Typography
+## 2. 全局 Token 与排版
 
-- [ ] 2.1 Refactor `app/app.css` semantic product tokens to use Lovable cream, charcoal, off-white, muted gray, passive border, interactive border, action, and focus roles in light mode.
-- [ ] 2.2 Define the dark theme by inverting the Lovable cream and charcoal roles and deriving surfaces, muted text, and borders from their opacity scale.
-- [ ] 2.3 Preserve semantic success, warning, and danger tokens separately and retain the existing multicolor Stratum values under effect-only roles.
-- [ ] 2.4 Add shared typography roles for the Lovable 60/48/36/20/18/16/14px scale, 400/600 weights, documented line heights, letter spacing, and responsive hero sizing while retaining Noto Sans and Nunito Sans.
-- [ ] 2.5 Remove the global multicolor radial canvas treatment, fixed grain overlay, and heavy ordinary-surface shadows from the base product layer.
+- [ ] 2.1 重构 `app/app.css` 的语义产品 token，使浅色主题使用 Lovable 的奶油色、炭黑色、米白色、柔和灰色、静态边框、交互边框、操作和焦点角色。
+- [ ] 2.2 通过反转 Lovable 奶油色与炭黑色角色定义暗色主题，并从其透明度阶梯派生表面、弱化文本和边框。
+- [ ] 2.3 单独保留成功、警告和危险等语义 token，并将 Stratum 现有多色值保留为仅供特效使用的角色。
+- [ ] 2.4 保留 Noto Sans 与 Nunito Sans，同时添加 Lovable 60/48/36/20/18/16/14px 字阶、400/600 字重、既定行高、字距和响应式 Hero 字号的共享排版角色。
+- [ ] 2.5 从基础产品层移除全局多色径向画布、固定颗粒叠层和普通表面的厚重阴影。
 
-## 3. Shared Product Shell and Overview
+## 3. 共享产品壳层与概览页
 
-- [ ] 3.1 Restyle the shared navbar so overview and Longzhong use the same Lovable surface, border, typography, action, and radius language while preserving route-specific width constraints and detached history behavior.
-- [ ] 3.2 Apply the Lovable typography hierarchy and product colors to the overview route without changing its route, content hierarchy, localization contract, or primary navigation intent.
-- [ ] 3.3 Shorten Stratum-owned route and navigation feedback to the documented 150-250ms range and preserve an immediate reduced-motion result.
+- [ ] 3.1 重塑共享导航，使概览页与隆中对采用一致的 Lovable 表面、边框、排版、操作和圆角语言，同时保留各路由的宽度约束与分离式历史入口行为。
+- [ ] 3.2 将 Lovable 排版层级与产品配色应用到概览路由，不改变其路由、内容层级、本地化契约或主导航意图。
+- [ ] 3.3 将 Stratum 自有的路由和导航反馈缩短到规定的 150-250ms，并为减少动态效果提供立即完成的结果。
 
-## 4. Longzhong Product Surfaces
+## 4. 隆中对产品表面
 
-- [ ] 4.1 Adapt the composer through `ChatWorkspace` tokens, props, wrappers, and usage-site styles so it uses Lovable type, color, border, and 12px container rules without modifying protected AI element internals.
-- [ ] 4.2 Restyle the history trigger and overlay with the shared Lovable system, a maximum 16px overlay radius, restrained elevation, focus restoration, and brief open/close feedback.
-- [ ] 4.3 Reconcile message, reasoning, tool, approval, error, and scroll-to-bottom presentation with the Lovable product layer while keeping semantic states distinguishable and runtime facts unchanged.
-- [ ] 4.4 Verify the centered single-column layout, document scrolling, composer visibility, overlay history, touch targets, truncation, and 16px conversation body text at mobile breakpoints.
+- [ ] 4.1 通过 `ChatWorkspace` 的 token、props、包装层和使用方样式适配输入区，使其采用 Lovable 排版、配色、边框和 12px 容器规则，且不修改受保护的 AI 元素内部实现。
+- [ ] 4.2 使用共享 Lovable 系统重塑历史入口与浮层，浮层圆角最大 16px，使用克制的纵深、焦点恢复和简短的开合反馈。
+- [ ] 4.3 将消息、推理、工具、审批、错误和滚动到底部的呈现统一到 Lovable 产品层，同时保持语义状态可区分，且运行事实不变。
+- [ ] 4.4 在移动端断点验证居中单列布局、文档滚动、输入区可见性、历史浮层、触控目标、文本截断和 16px 对话正文字号。
 
-## 5. Verification and Documentation
+## 5. 验证与文档归档
 
-- [ ] 5.1 Format changed frontend files and run `pnpm typecheck` and `pnpm build` from `stratum-web` without adding frontend test files.
-- [ ] 5.2 Capture and inspect overview and Longzhong screenshots in light and dark themes at desktop and mobile widths.
-- [ ] 5.3 Verify Chinese and English layout, keyboard focus visibility, body and placeholder contrast, reduced motion, action-label wrapping, and theme persistence.
-- [ ] 5.4 Confirm protected component directories have no internal modifications and that route slugs, API behavior, event projection, approvals, history behavior, and localization keys remain compatible.
-- [ ] 5.5 Archive concise durable implementation conventions in `stratum-web/AGENTS.md` and remind maintainers to review that archive before the pull request is merged.
+- [ ] 5.1 格式化已修改的前端文件，并在 `stratum-web` 中运行 `pnpm typecheck` 与 `pnpm build`，不新增前端测试文件。
+- [ ] 5.2 分别在桌面端与移动端、浅色与暗色主题下截取并检查概览页和隆中对页面。
+- [ ] 5.3 验证中英文布局、键盘焦点可见性、正文与占位符对比度、减少动态效果、操作标签换行和主题持久化。
+- [ ] 5.4 确认受保护组件目录没有内部修改，并确认路由路径、API 行为、事件投影、审批、历史行为和本地化键保持兼容。
+- [ ] 5.5 将简洁、持久的实现约定归档到 `stratum-web/AGENTS.md`，并在 PR 合入前提醒维护者检查该归档。
