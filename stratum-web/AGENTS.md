@@ -1,32 +1,38 @@
-# Stratum Web
+# Stratum Web 开发约定
 
-## Page and chat layout
+## 设计上下文
 
-- Overview (`/`) and Longzhong (`/longzhong`) are independent routes. Do not place them in a shared scrolling track.
-- Navbar tabs navigate between routes with a left/right view transition; they do not scroll to in-page anchors.
-- Chat messages use the document scroll. Do not add an internal message scroller.
-- Auto-follow is user-controlled: scrolling upward pauses it, content resize must preserve the reading
-  position, and it resumes only after the user reaches the actual bottom or activates the scroll-to-bottom
-  control.
+- 修改界面前必须阅读仓库根目录 `PRODUCT.md` 与本目录 `DESIGN.md`。
+- `DESIGN.md` 是 Stratum 的权威视觉规则；本地 Tavily 复刻仅提供布局、密度和工作台观感参考，`lovable/DESIGN.md` 提供暖中性基础，冲突时以前者为准。
+- 产品层使用 Lovable 暖中性色，并采用 Tavily 衍生的固定侧栏、顶部状态区、紧凑排版和单一产品蓝。既有 Stratum 多色值只用于标识与后续有明确目的的特效，不得用于普通产品表面或控件。
+- 常规层级只使用 400 与 600 字重；工作台主标题按 44/36/32px 响应，正文与操作使用 16px，导航与说明使用 14px 或 13px。
+- 控件、导航项、标准容器和大型浮层使用 8–16px 圆角；普通容器依靠边框而不是厚阴影建立边界。
+- Stratum 自有反馈控制在 150–250ms，优先只动画 transform 与 opacity；`prefers-reduced-motion` 下立即完成。
 
-## Longzhong chat layout constraints (hard)
+## 页面与聊天布局
 
-- The main chat column on `/longzhong` must remain a single centered column. The only horizontal dimension that may be adjusted is the whitespace (gutter / margin) on the left and right sides of this column.
-- Do not embed `ChatHistory` into the main layout flow as a permanent left or right rail. It must stay a togglable overlay / drawer.
-- `SiteNavbar` and the bottom `PromptInput` are fixed, but their top/bottom offsets from the viewport must be expressed as the outermost `margin` on their fixed containers, not as internal padding or positioned offsets.
-- On wide screens (`2xl`+), the history trigger is rendered as a detached pill to the left of the navbar shell; the drawer opens down-left from that trigger with a safe margin from the left edge.
-- The Longzhong composer renders adjacent Agent and model dropdowns in its left tool area. A new
-  conversation selects the first template by default; switching Agent starts a new uncreated
-  conversation and resets the model to that template default. A pre-session model selection is sent
-  with the creation request, while an existing-session selection applies to the next message.
-- Approval UI may describe only facts carried by the approval event. Do not generate generic reasons,
-  effects, risk claims, or reversibility guidance when the backend did not provide them.
+- 概览页 `/` 与隆中对 `/longzhong` 是独立路由，并统一放进共享 `ProductShell`；共享壳层不创建内部滚动轨道。
+- 桌面壳层使用约 285px 固定侧栏、75px 顶部状态区和约 1024px 主画布；移动端复用同一导航与最近会话数据并切换为可访问抽屉。
+- 导航通过短过渡切换路由，不滚动到页内锚点；路由切换后将焦点转移到主内容，程序化焦点不得绘制整页容器轮廓。
+- 聊天消息使用文档滚动，不得增加内部消息滚动容器。
+- 自动跟随由用户控制：向上滚动后暂停；内容高度变化必须保持阅读位置；只有用户到达真实底部或点击滚动到底部时才恢复。
 
-## Frontend test policy
+## 隆中对硬性布局约束
 
-- Do not add, restore, or maintain frontend test files under `stratum-web`.
+- `/longzhong` 消息区保持约 800px 单个可读列；底部 `PromptInput` 最大约 896px，并相对共享壳层主内容区域固定。
+- 最近会话的桌面主入口位于共享侧栏，移动入口位于共享抽屉；不得再增加重复的桌面历史浮层入口或开发者调试列。
+- `PromptInput` 的视口 bottom 间距由最外层 fixed 容器表达，消息区必须预留完整 Composer 高度与安全区。
+- Composer 左侧相邻显示 Agent 与 Model。新会话默认选择第一个模板；切换 Agent 会进入新的未创建会话并恢复模板默认模型。创建前模型配置随创建请求提交，已有会话模型配置用于下一条消息。
+- 审批界面只能描述事件明确携带的事实。后端没有提供时，不得生成通用原因、影响、风险结论或可逆性建议。
 
-## Component ownership
+## 组件所有权
 
-- Stratum-owned components live in `app/components/stratum/`.
-- Keep third-party components in `app/components/react-bits/`, `app/components/ui/`, or `app/components/ai-elements/`.
+- Stratum 自有组件位于 `app/components/stratum/`。
+- `app/components/react-bits/`、`app/components/ui/` 与 `app/components/ai-elements/` 视为受保护的第三方或可复用组件目录，未经明确批准不得修改内部实现。
+- 主题、尺寸和行为适配必须优先通过语义 token、props、Stratum 自有包装层或使用方样式完成。
+
+## 验证与测试
+
+- 不得在 `stratum-web` 下新增、恢复或维护前端测试文件。
+- 前端变更至少运行格式化、`pnpm typecheck` 与 `pnpm build`。
+- 视觉系统变更必须检查概览页和隆中对的桌面/移动、浅色/暗色组合，并验证中英文、键盘焦点、正文与占位符对比度、减少动态效果、操作换行、主题持久化和无横向溢出。
