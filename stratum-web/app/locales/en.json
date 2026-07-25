@@ -2,10 +2,6 @@
   "brand": {
     "home": "Stratum home"
   },
-  "nav": {
-    "overview": "Overview",
-    "chat": "Chat"
-  },
   "theme": {
     "toggle": "Toggle dark theme",
     "useDark": "Use dark theme",
@@ -17,87 +13,86 @@
   },
   "productShell": {
     "skipToContent": "Skip to main content",
-    "navigation": "Product navigation",
-    "openNavigation": "Open product navigation",
-    "closeNavigation": "Close product navigation",
     "recent": "Recent conversations",
     "noRecent": "No conversations yet",
-    "newConversation": "New conversation",
-    "status": {
-      "loading": "Checking runtime",
-      "ready": "Models and agents are ready",
-      "incomplete": "Runtime configuration is incomplete",
-      "error": "Runtime status is unavailable"
-    }
+    "newConversation": "New conversation"
   },
-  "overview": {
-    "title": "Workspace",
-    "workspace": "Agent workspace",
-    "startConversation": "New conversation",
-    "useAgent": "Use this agent",
-    "continueConversation": "Continue conversation",
-    "models": "Available models",
-    "agentTemplates": "Agent templates",
-    "noneAvailable": "Unavailable",
-    "chooseAgent": "Choose an agent",
-    "recentConversations": "Recent conversations",
-    "retry": "Retry",
-    "templatesError": "Agent templates could not be loaded. You can still start a conversation or retry later.",
-    "modelsError": "Model configuration could not be loaded. Confirm that the backend is running before sending a message.",
-    "noTemplates": "No agents available",
-    "noRecent": "No recent conversations",
-    "nodeTypes": {
-      "input": "Input",
-      "agent": "Agent",
-      "model": "Model",
-      "output": "Output"
+  "globalNavigation": {
+    "label": "Stratum global navigation",
+    "chat": "Chat",
+    "development": "Development",
+    "components": "Component calibration",
+    "componentsDescription": "Review interface tokens and interactions",
+    "openMenu": "Open global navigation",
+    "closeMenu": "Close global navigation"
+  },
+  "componentGallery": {
+    "title": "Components",
+    "description": "Stratum's interface calibration surface. Color, type, navigation, controls, and interaction states are reviewed here before they enter product surfaces.",
+    "backToChat": "Back to chat",
+    "navigation": {
+      "label": "Component library navigation",
+      "foundations": "Visual foundations",
+      "navigation": "Vertical navigation",
+      "controls": "Base controls",
+      "states": "Interaction states"
     },
-    "inputNode": {
-      "title": "Task input",
-      "value": "Describe a task or ask a question",
-      "action": "Create conversation"
+    "centeredNavigation": {
+      "label": "Stratum detailed navigation",
+      "openMenu": "Open detailed navigation",
+      "closeMenu": "Close detailed navigation",
+      "groups": {
+        "system": "Interface system",
+        "components": "Components"
+      },
+      "items": {
+        "foundations": "Color, type, and signal roles",
+        "navigation": "Common component shortcuts and interaction",
+        "controls": "Buttons, input, and selection",
+        "states": "Loading, error, and feedback"
+      }
     },
-    "outputNode": {
-      "empty": "Results appear after your first conversation"
+    "palette": {
+      "label": "Interface accent colors",
+      "information": "Information",
+      "selection": "Selection",
+      "collaboration": "Collaboration",
+      "action": "Action"
     },
-    "inspector": {
-      "title": "Node settings",
-      "status": "Status",
+    "verticalNavigation": {
+      "title": "Vertical navigation",
+      "description": "The left shortcut group is the live component. Nearby items scale continuously with pointer distance; keyboard focus receives the same clear label and boundary feedback, while narrow screens keep the group centered in one column.",
+      "desktop": "Desktop size",
+      "mobile": "Mobile target",
+      "motion": "Spring values"
+    },
+    "controls": {
+      "title": "Base controls",
+      "description": "Every control consumes the standard shadcn tokens in app.css. Accent colors have fixed roles and are never hard-coded inside components.",
+      "actions": "Actions",
+      "primary": "Primary action",
+      "secondary": "Secondary action",
+      "outline": "Outline action",
+      "disabled": "Unavailable",
+      "input": "Input and choice",
+      "placeholder": "Enter a component name"
+    },
+    "states": {
+      "title": "State language",
+      "description": "Color describes component interaction or a real process. It is not decoration and never implies a resource readiness state that does not exist.",
       "action": "Action",
-      "route": "Route",
-      "templates": "Templates",
-      "models": "Models",
-      "model": "Default model",
-      "provider": "Provider",
-      "conversations": "Conversations",
-      "lastOpened": "Last opened"
-    },
-    "status": {
-      "loading": "Loading",
-      "ready": "Ready",
-      "empty": "No data",
-      "error": "Connection failed"
-    },
-    "zoom": "Canvas zoom",
-    "zoomIn": "Zoom in",
-    "zoomOut": "Zoom out",
-    "resetZoom": "Reset zoom"
+      "neutral": "Neutral",
+      "information": "Information",
+      "selection": "Selection",
+      "collaboration": "Collaboration",
+      "error": "Error"
+    }
   },
   "chat": {
     "assistant": "Assistant",
     "you": "You",
     "history": {
-      "title": "History",
-      "close": "Close history",
-      "new": "New conversation",
-      "activeNow": "Active Now",
-      "empty": "No history yet"
-    },
-    "empty": {
-      "title": "Start a new conversation"
-    },
-    "runtime": {
-      "title": "Runtime"
+      "close": "Close history"
     },
     "composer": {
       "label": "Message",
@@ -110,13 +105,12 @@
       "high": "High",
       "max": "Max",
       "loadingConfiguration": "Loading configuration…",
-      "selectAgent": "Select an Agent"
+      "selectAgent": "Select an agent"
     },
     "creating": "Creating conversation…",
     "sending": "Sending…",
     "connecting": "Connecting…",
     "connectionFailed": "Connection failed",
-    "ready": "Ready",
     "continue": "Continue",
     "cancel": "Cancel",
     "scrollToBottom": "Scroll to bottom",
@@ -155,7 +149,7 @@
     "unknownTool": "Unknown tool"
   },
   "errors": {
-    "unexpectedTitle": "Oops!",
+    "unexpectedTitle": "Something went wrong",
     "unexpectedDetails": "An unexpected error occurred.",
     "notFoundDetails": "The requested page could not be found.",
     "genericTitle": "Error"

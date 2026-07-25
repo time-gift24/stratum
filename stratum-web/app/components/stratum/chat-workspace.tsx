@@ -2,17 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useGSAP } from "@gsap/react"
-import {
-  IconArrowDown,
-  IconArrowUp,
-  IconBan,
-  IconCpu,
-  IconRobot,
-} from "@tabler/icons-react"
+import { IconArrowDown, IconArrowUp, IconBan } from "@tabler/icons-react"
 import gsap from "gsap"
 import { useReducedMotion } from "motion/react"
 import { useTranslation } from "react-i18next"
-import { cn } from "~/lib/utils"
 
 import {
   AgentConfigMenu,
@@ -35,7 +28,6 @@ import {
 } from "~/components/ai-elements/prompt-input"
 import { Button } from "~/components/ui/button"
 import type { AgentConversation } from "~/hooks/use-agent-conversation"
-import { modelDisplayName } from "~/lib/model-config"
 
 gsap.registerPlugin(useGSAP)
 
@@ -76,7 +68,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   >(() => new Map())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
-  const workspaceRef = useRef<HTMLElement>(null)
+  const chatRef = useRef<HTMLElement>(null)
   const autoFollowPausedRef = useRef(false)
   const previousScrollTopRef = useRef(0)
 
@@ -88,11 +80,8 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   const composerUnavailable = state.phase === "missing"
   const canCancel = state.agentId !== null && state.view?.status === "running"
   const configuration = conversation.composerConfiguration
-  const selectedModel = configuration.selectedModelConfig
-    ? modelDisplayName(configuration.selectedModelConfig.model)
-    : null
-  const liveStatus = isSubmitting
-    ? t("chat.sending")
+  const activityAnnouncement = isSubmitting
+    ? t(isNewConversation ? "chat.creating" : "chat.sending")
     : state.phase === "recovering"
       ? t("chat.connecting")
       : state.phase === "connection_error"
@@ -101,13 +90,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           ? t("chat.missingConversation")
           : state.view?.status === "running"
             ? t("chat.thinking")
-            : state.agentId === null &&
-                conversation.composerConfiguration.metadataLoading
-              ? t("productShell.status.loading")
-              : state.agentId === null &&
-                  conversation.composerConfiguration.metadataError
-                ? t("productShell.status.error")
-                : t("chat.ready")
+            : ""
 
   useGSAP(
     () => {
@@ -126,7 +109,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
         }
       )
     },
-    { scope: workspaceRef, dependencies: [reduceMotion, state.agentId] }
+    { scope: chatRef, dependencies: [reduceMotion, state.agentId] }
   )
 
   // 选择对话（包括新建）后聚焦输入框
@@ -235,53 +218,14 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   }
 
   return (
-    <section ref={workspaceRef} id="chat" className="stratum-workspace w-full">
+    <section
+      ref={chatRef}
+      id="chat"
+      className="stratum-chat chat-page__workspace w-full"
+      data-conversation-state={isNewConversation ? "new" : "active"}
+    >
       <div className="chat-stage px-4 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pb-[calc(14rem+env(safe-area-inset-bottom))]">
-        {isNewConversation && state.messages.length === 0 ? (
-          <>
-            <article
-              className="chat-config-node chat-entrance"
-              data-node="agent"
-              data-tone="agent"
-            >
-              <header className="flex items-center gap-2 border-b border-border px-3 py-2.5">
-                <span className="size-2 rounded-full bg-current text-chart-4 [box-shadow:0_0_10px_color-mix(in_srgb,currentColor_40%,transparent)]" />
-                <IconRobot
-                  className="size-3.5 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="truncate text-xs font-medium text-foreground">
-                  {configuration.agentName ?? t("chat.composer.selectAgent")}
-                </span>
-              </header>
-              <p className="truncate px-3 py-3 font-mono text-[0.65rem] text-muted-foreground">
-                {t("chat.composer.agent")}
-              </p>
-            </article>
-
-            <article
-              className="chat-config-node chat-entrance"
-              data-node="model"
-              data-tone="model"
-            >
-              <header className="flex items-center gap-2 border-b border-border px-3 py-2.5">
-                <span className="size-2 rounded-full bg-current text-chart-2 [box-shadow:0_0_10px_color-mix(in_srgb,currentColor_35%,transparent)]" />
-                <IconCpu
-                  className="size-3.5 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="truncate text-xs font-medium text-foreground">
-                  {selectedModel?.model ?? t("overview.noneAvailable")}
-                </span>
-              </header>
-              <p className="truncate px-3 py-3 font-mono text-[0.65rem] text-muted-foreground">
-                {selectedModel?.provider ?? t("chat.composer.model")}
-              </p>
-            </article>
-          </>
-        ) : null}
-
-        <div className="stratum-content-width relative z-10 mx-auto">
+        <div className="stratum-content-width mx-auto">
           <div data-slot="chat-main" className="flex min-w-0 flex-col">
             <div
               ref={messageListRef}
@@ -305,46 +249,6 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
             </div>
           </div>
         </div>
-
-        <aside
-          className="chat-runtime-panel chat-entrance"
-          aria-label={t("chat.runtime.title")}
-        >
-          <div className="flex h-12 items-center gap-2.5 border-b border-border px-3.5">
-            <span
-              className={cn(
-                "size-1.5 rounded-full bg-primary",
-                composerRunning && "animate-pulse motion-reduce:animate-none",
-                state.phase === "connection_error" && "bg-destructive"
-              )}
-              aria-hidden="true"
-            />
-            <h2 className="text-xs font-medium text-foreground">
-              {t("chat.runtime.title")}
-            </h2>
-            <span className="ml-auto font-mono text-[0.62rem] text-muted-foreground">
-              {liveStatus}
-            </span>
-          </div>
-          <dl>
-            <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3 border-b border-border px-3.5 py-3">
-              <dt className="text-[0.68rem] text-muted-foreground">
-                {t("chat.composer.agent")}
-              </dt>
-              <dd className="truncate text-right font-mono text-[0.65rem] text-foreground">
-                {configuration.agentName ?? t("chat.composer.selectAgent")}
-              </dd>
-            </div>
-            <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3 px-3.5 py-3">
-              <dt className="text-[0.68rem] text-muted-foreground">
-                {t("chat.composer.model")}
-              </dt>
-              <dd className="truncate text-right font-mono text-[0.65rem] text-foreground">
-                {selectedModel?.model ?? t("overview.noneAvailable")}
-              </dd>
-            </div>
-          </dl>
-        </aside>
       </div>
 
       {autoFollowPaused && (
@@ -363,29 +267,13 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
       <div
         data-slot="chat-composer-positioner"
         data-composer-position={isNewConversation ? "centered" : "docked"}
-        className="stratum-composer-positioner fixed z-30 transition-[bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
-        style={{
-          bottom: isNewConversation
-            ? "46%"
-            : "max(1rem, env(safe-area-inset-bottom))",
-        }}
+        className="stratum-composer-positioner fixed z-30"
       >
         <div
           data-slot="chat-composer-surface"
-          className={cn(
-            "transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
-            isNewConversation ? "translate-y-1/2" : "translate-y-0"
-          )}
+          className="stratum-composer-surface chat-entrance"
         >
-          {isNewConversation && state.messages.length === 0 ? (
-            <div className="chat-entrance mb-5 flex items-center gap-3 sm:mb-6">
-              <span className="size-2 rounded-full bg-current text-primary [box-shadow:0_0_12px_color-mix(in_srgb,currentColor_48%,transparent)]" />
-              <h2 className="font-heading text-2xl font-medium tracking-[-0.035em] text-foreground sm:text-3xl">
-                {t("chat.empty.title")}
-              </h2>
-            </div>
-          ) : null}
-          <div className="stratum-prompt-shell chat-entrance">
+          <div className="stratum-prompt-shell">
             <PromptInput
               aria-busy={composerRunning}
               onSubmit={(event) => {
@@ -394,28 +282,10 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
               }}
             >
               <PromptInputBody>
-                <div className="flex w-full items-center justify-between border-b border-border/80 px-4 py-2.5 md:px-5">
-                  <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                    <span
-                      className={cn(
-                        "size-1.5 shrink-0 rounded-full bg-primary",
-                        composerRunning &&
-                          "animate-pulse motion-reduce:animate-none"
-                      )}
-                    />
-                    <span className="truncate">
-                      {configuration.agentName ??
-                        t("chat.composer.selectAgent")}
-                    </span>
-                  </span>
-                  <span className="font-mono text-[0.62rem] text-muted-foreground">
-                    {liveStatus}
-                  </span>
-                </div>
                 <PromptInputTextarea
                   ref={composerRef}
                   aria-label={t("chat.composer.label")}
-                  className="max-h-48 min-h-16 px-4 pt-3 pb-2 text-[0.95rem]! leading-6! placeholder:text-muted-foreground md:px-5"
+                  className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
                   disabled={composerRunning || composerUnavailable}
                   onChange={(event) => setComposerText(event.target.value)}
                   placeholder={t("chat.composer.placeholder")}
@@ -446,7 +316,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
                   aria-label={t(
                     canCancel ? "chat.cancel" : "chat.composer.send"
                   )}
-                  className="size-11 shrink-0 rounded-[0.7rem] [box-shadow:0_0_22px_color-mix(in_srgb,var(--primary)_16%,transparent)] sm:size-10"
+                  className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
                   disabled={
                     !canCancel &&
                     (composerRunning ||
@@ -467,9 +337,11 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
               </PromptInputFooter>
             </PromptInput>
           </div>
-          <p className="sr-only" role="status" aria-live="polite">
-            {liveStatus}
-          </p>
+          {activityAnnouncement ? (
+            <p className="sr-only" role="status" aria-live="polite">
+              {activityAnnouncement}
+            </p>
+          ) : null}
         </div>
       </div>
     </section>

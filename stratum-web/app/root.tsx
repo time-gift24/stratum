@@ -7,10 +7,12 @@ import {
   Scripts,
   ScrollRestoration,
   isRouteErrorResponse,
+  useLocation,
   useRouteLoaderData,
 } from "react-router"
 
 import type { Route } from "./+types/root"
+import { GlobalNavigation } from "./components/stratum/global-navigation"
 import { ProductShell } from "./components/stratum/product-shell"
 import { createI18n } from "./lib/i18n"
 import { getRequestLanguage } from "./lib/locale"
@@ -40,6 +42,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         <I18nextProvider i18n={i18n}>
+          <GlobalNavigation />
           {children}
           <ScrollRestoration />
           <Scripts />
@@ -50,6 +53,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const location = useLocation()
+
+  const isComponentGallery =
+    location.pathname === "/component-gallery" ||
+    location.pathname.startsWith("/component-gallery/")
+
+  if (import.meta.env.DEV && isComponentGallery) return <Outlet />
+
   return (
     <ProductShell>
       <Outlet />

@@ -2,10 +2,6 @@
   "brand": {
     "home": "首页"
   },
-  "nav": {
-    "overview": "概览",
-    "chat": "对话"
-  },
   "theme": {
     "toggle": "切换深色主题",
     "useDark": "使用深色主题",
@@ -17,87 +13,86 @@
   },
   "productShell": {
     "skipToContent": "跳到主要内容",
-    "navigation": "产品导航",
-    "openNavigation": "打开产品导航",
-    "closeNavigation": "关闭产品导航",
     "recent": "最近对话",
     "noRecent": "暂无对话",
-    "newConversation": "新建对话",
-    "status": {
-      "loading": "正在检查运行环境",
-      "ready": "模型与智能体已就绪",
-      "incomplete": "运行配置尚不完整",
-      "error": "无法确认运行状态"
-    }
+    "newConversation": "新建对话"
   },
-  "overview": {
-    "title": "工作区",
-    "workspace": "Agent 工作区",
-    "startConversation": "新建对话",
-    "useAgent": "使用此智能体",
-    "continueConversation": "继续对话",
-    "models": "可用模型",
-    "agentTemplates": "智能体模板",
-    "noneAvailable": "暂不可用",
-    "chooseAgent": "选择智能体",
-    "recentConversations": "最近对话",
-    "retry": "重试",
-    "templatesError": "无法读取智能体模板。你仍可新建对话，或稍后重试。",
-    "modelsError": "无法读取模型配置。发送消息前请确认后端已经启动。",
-    "noTemplates": "暂无可用智能体",
-    "noRecent": "暂无最近对话",
-    "nodeTypes": {
-      "input": "输入",
-      "agent": "智能体",
-      "model": "模型",
-      "output": "输出"
+  "globalNavigation": {
+    "label": "Stratum 全局导航",
+    "chat": "对话",
+    "development": "开发",
+    "components": "组件校准",
+    "componentsDescription": "检查界面 Token 与交互组件",
+    "openMenu": "打开全局导航",
+    "closeMenu": "关闭全局导航"
+  },
+  "componentGallery": {
+    "title": "组件库",
+    "description": "Stratum 的界面校准面。这里集中检查色彩、排版、导航、控件和交互状态，再让这些规则进入真实产品页面。",
+    "backToChat": "返回对话",
+    "navigation": {
+      "label": "组件库导航",
+      "foundations": "视觉基础",
+      "navigation": "垂直导航",
+      "controls": "基础控件",
+      "states": "交互状态"
     },
-    "inputNode": {
-      "title": "任务输入",
-      "value": "输入任务或问题",
-      "action": "创建新对话"
+    "centeredNavigation": {
+      "label": "Stratum 详细导航",
+      "openMenu": "打开详细导航",
+      "closeMenu": "关闭详细导航",
+      "groups": {
+        "system": "界面系统",
+        "components": "组件"
+      },
+      "items": {
+        "foundations": "色彩、排版与信号角色",
+        "navigation": "常用组件捷径与交互",
+        "controls": "按钮、输入与选择",
+        "states": "加载、错误与反馈"
+      }
     },
-    "outputNode": {
-      "empty": "完成第一次对话后显示结果"
+    "palette": {
+      "label": "界面强调色",
+      "information": "信息",
+      "selection": "选择",
+      "collaboration": "协作",
+      "action": "行动"
     },
-    "inspector": {
-      "title": "节点设置",
-      "status": "状态",
-      "action": "操作",
-      "route": "路由",
-      "templates": "模板数量",
-      "models": "模型数量",
-      "model": "默认模型",
-      "provider": "提供方",
-      "conversations": "对话数量",
-      "lastOpened": "最近打开"
+    "verticalNavigation": {
+      "title": "垂直导航",
+      "description": "左侧按钮组就是组件本体。指针接近时，相邻项目按距离产生连续缩放；键盘焦点获得同样清晰的标签与边界反馈，窄屏仍保持居中单列。",
+      "desktop": "桌面尺寸",
+      "mobile": "移动触控",
+      "motion": "弹性参数"
     },
-    "status": {
-      "loading": "载入中",
-      "ready": "就绪",
-      "empty": "暂无数据",
-      "error": "连接失败"
+    "controls": {
+      "title": "基础控件",
+      "description": "所有控件只消费 app.css 中的标准 shadcn token。强调色有固定职责，不在组件内部写入独立配色。",
+      "actions": "操作",
+      "primary": "主要操作",
+      "secondary": "次要操作",
+      "outline": "边界操作",
+      "disabled": "不可用",
+      "input": "输入与选择",
+      "placeholder": "输入组件名称"
     },
-    "zoom": "画布缩放",
-    "zoomIn": "放大画布",
-    "zoomOut": "缩小画布",
-    "resetZoom": "重置画布缩放"
+    "states": {
+      "title": "状态语言",
+      "description": "颜色只描述组件交互或真实过程，不用于装饰，也不表达不存在的资源就绪状态。",
+      "action": "行动",
+      "neutral": "中性",
+      "information": "信息",
+      "selection": "选择",
+      "collaboration": "协作",
+      "error": "错误"
+    }
   },
   "chat": {
     "assistant": "助手",
     "you": "你",
     "history": {
-      "title": "历史对话",
-      "close": "关闭历史对话",
-      "new": "新建对话",
-      "activeNow": "当前对话",
-      "empty": "暂无历史对话"
-    },
-    "empty": {
-      "title": "开始新对话"
-    },
-    "runtime": {
-      "title": "运行状态"
+      "close": "关闭历史对话"
     },
     "composer": {
       "label": "输入消息",
@@ -116,7 +111,6 @@
     "sending": "正在发送……",
     "connecting": "正在连接……",
     "connectionFailed": "连接失败",
-    "ready": "就绪",
     "continue": "继续",
     "cancel": "取消",
     "scrollToBottom": "滚动到底部",

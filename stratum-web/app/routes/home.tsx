@@ -1,10 +1,9 @@
-import { OverviewWorkbench } from "~/components/stratum/overview-workbench"
-import { RouteTransition } from "~/components/stratum/route-transition"
+import { redirect } from "react-router"
+
+export function loader() {
+  return redirect("/chat")
+}
 
 export default function Home() {
-  return (
-    <RouteTransition>
-      <OverviewWorkbench />
-    </RouteTransition>
-  )
+  return null
 }
