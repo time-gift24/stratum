@@ -1,6 +1,10 @@
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
-import { CheckCircle2Icon, CircleDashedIcon, CircleXIcon } from "lucide-react"
+import {
+  IconCircleCheck,
+  IconCircleDashed,
+  IconCircleX,
+} from "@tabler/icons-react"
 
 import { Shimmer } from "~/components/ai-elements/shimmer"
 import {
@@ -29,10 +33,10 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
   })
   const StatusIcon =
     tool.status === "finished"
-      ? CheckCircle2Icon
+      ? IconCircleCheck
       : tool.status === "failed"
-        ? CircleXIcon
-        : CircleDashedIcon
+        ? IconCircleX
+        : IconCircleDashed
 
   return (
     <div>
@@ -42,8 +46,8 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
             aria-hidden="true"
             className={cn(
               "size-4 shrink-0",
-              tool.status === "finished" && "text-stratum-success",
-              tool.status === "streaming" && "text-stratum-info",
+              tool.status === "finished" && "text-accent-foreground",
+              tool.status === "streaming" && "text-ring",
               tool.status === "failed" && "text-destructive"
             )}
           />
@@ -64,7 +68,7 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
               <p className="mb-1 text-sm text-muted-foreground">
                 {t("chat.toolTrace.input")}
               </p>
-              <pre className="max-h-56 overflow-auto rounded-xl border border-stratum-line bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
+              <pre className="max-h-56 overflow-auto rounded-xl border border-border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
                 {tool.argumentsText}
               </pre>
             </div>
@@ -74,7 +78,7 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
               <p className="mb-1 text-sm text-muted-foreground">
                 {t("chat.toolTrace.rawResult")}
               </p>
-              <pre className="max-h-56 overflow-auto rounded-xl border border-stratum-line bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
+              <pre className="max-h-56 overflow-auto rounded-xl border border-border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
                 {technicalValue(tool.result)}
               </pre>
             </div>

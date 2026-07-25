@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { MoonIcon, SunIcon } from "lucide-react"
+import { IconMoon, IconSun } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "~/components/ui/button"
@@ -61,9 +61,9 @@ export function ThemeToggle() {
       }}
     >
       {isDark ? (
-        <SunIcon className="size-[18px] stroke-[1.8]" aria-hidden="true" />
+        <IconSun className="size-[18px] stroke-[1.8]" aria-hidden="true" />
       ) : (
-        <MoonIcon className="size-[18px] stroke-[1.8]" aria-hidden="true" />
+        <IconMoon className="size-[18px] stroke-[1.8]" aria-hidden="true" />
       )}
     </Button>
   )

@@ -16,17 +16,6 @@ import { createI18n } from "./lib/i18n"
 import { getRequestLanguage } from "./lib/locale"
 import "./app.css"
 
-const themeInitScript = `
-(() => {
-  const key = "stratum-theme";
-  const stored = localStorage.getItem(key);
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const theme = stored === "light" || stored === "dark" ? stored : prefersDark ? "dark" : "light";
-  document.documentElement.classList.toggle("light", theme === "light");
-  document.documentElement.classList.toggle("dark", theme === "dark");
-})();
-`
-
 export function loader({ request }: Route.LoaderArgs) {
   return { language: getRequestLanguage(request) }
 }
@@ -36,13 +25,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [i18n] = useState(() => createI18n(language))
 
   return (
-    <html lang={language} suppressHydrationWarning>
+    <html lang={language} className="dark" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Stratum</title>
+        <meta
+          name="description"
+          content="Stratum is an observable Agent OS for running agents, models, tools, and conversations."
+        />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <Meta />
         <Links />
       </head>
@@ -83,14 +75,18 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   }
 
   return (
-    <main className="container mx-auto p-4 pt-16">
-      <h1>{message}</h1>
-      <p>{details}</p>
-      {stack && (
-        <pre className="w-full overflow-x-auto p-4">
-          <code>{stack}</code>
-        </pre>
-      )}
+    <main className="grid min-h-dvh place-items-center bg-background p-6 text-foreground">
+      <div className="w-full max-w-xl rounded-xl border border-border bg-card p-6 shadow-2xl">
+        <h1 className="font-heading text-3xl font-medium tracking-tight">
+          {message}
+        </h1>
+        <p className="mt-3 text-muted-foreground">{details}</p>
+        {stack && (
+          <pre className="mt-5 w-full overflow-x-auto rounded-lg bg-muted p-4 text-xs">
+            <code>{stack}</code>
+          </pre>
+        )}
+      </div>
     </main>
   )
 }

@@ -4,16 +4,7 @@
   },
   "nav": {
     "overview": "Overview",
-    "longzhong": "Longzhong"
-  },
-  "hero": {
-    "title": "Build typed agents",
-    "description": "A Rust-first runtime for composing agents, tools, and reliable execution paths."
-  },
-  "actions": {
-    "getStarted": "Get started",
-    "learnMore": "Learn more",
-    "signUp": "Sign up"
+    "chat": "Chat"
   },
   "theme": {
     "toggle": "Toggle dark theme",
@@ -30,7 +21,7 @@
     "openNavigation": "Open product navigation",
     "closeNavigation": "Close product navigation",
     "recent": "Recent conversations",
-    "noRecent": "Your recent work will appear here after you start a conversation.",
+    "noRecent": "No conversations yet",
     "newConversation": "New conversation",
     "status": {
       "loading": "Checking runtime",
@@ -40,26 +31,60 @@
     }
   },
   "overview": {
-    "title": "Start with the problem that matters",
-    "description": "Choose an available agent, continue recent work, or open Longzhong for a task that needs careful reasoning.",
-    "startConversation": "Start conversation",
+    "title": "Workspace",
+    "workspace": "Agent workspace",
+    "startConversation": "New conversation",
+    "useAgent": "Use this agent",
+    "continueConversation": "Continue conversation",
     "models": "Available models",
     "agentTemplates": "Agent templates",
     "noneAvailable": "Unavailable",
     "chooseAgent": "Choose an agent",
-    "chooseAgentDescription": "Templates and default models come from the current runtime.",
     "recentConversations": "Recent conversations",
-    "recentDescription": "Continue work saved on this device.",
     "retry": "Retry",
-    "templatesError": "Agent templates could not be loaded. You can still open Longzhong or retry later.",
+    "templatesError": "Agent templates could not be loaded. You can still start a conversation or retry later.",
     "modelsError": "Model configuration could not be loaded. Confirm that the backend is running before sending a message.",
     "noTemplates": "No agents available",
-    "noTemplatesDescription": "Start the backend and configure an agent template to see real options here.",
     "noRecent": "No recent conversations",
-    "noRecentDescription": "After your first conversation, you can continue it here or from the sidebar."
+    "nodeTypes": {
+      "input": "Input",
+      "agent": "Agent",
+      "model": "Model",
+      "output": "Output"
+    },
+    "inputNode": {
+      "title": "Task input",
+      "value": "Describe a task or ask a question",
+      "action": "Create conversation"
+    },
+    "outputNode": {
+      "empty": "Results appear after your first conversation"
+    },
+    "inspector": {
+      "title": "Node settings",
+      "status": "Status",
+      "action": "Action",
+      "route": "Route",
+      "templates": "Templates",
+      "models": "Models",
+      "model": "Default model",
+      "provider": "Provider",
+      "conversations": "Conversations",
+      "lastOpened": "Last opened"
+    },
+    "status": {
+      "loading": "Loading",
+      "ready": "Ready",
+      "empty": "No data",
+      "error": "Connection failed"
+    },
+    "zoom": "Canvas zoom",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "resetZoom": "Reset zoom"
   },
   "chat": {
-    "assistant": "Longzhong",
+    "assistant": "Assistant",
     "you": "You",
     "history": {
       "title": "History",
@@ -68,9 +93,15 @@
       "activeNow": "Active Now",
       "empty": "No history yet"
     },
+    "empty": {
+      "title": "Start a new conversation"
+    },
+    "runtime": {
+      "title": "Runtime"
+    },
     "composer": {
       "label": "Message",
-      "placeholder": "Ask Longzhong…",
+      "placeholder": "Describe a task or ask a question…",
       "send": "Send",
       "agent": "Agent",
       "model": "Model",

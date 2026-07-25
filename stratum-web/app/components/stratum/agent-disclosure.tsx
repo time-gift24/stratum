@@ -1,6 +1,6 @@
 import type { ComponentProps, ReactNode } from "react"
 import { useState } from "react"
-import { ChevronDownIcon } from "lucide-react"
+import { IconChevronDown } from "@tabler/icons-react"
 
 import {
   Collapsible,
@@ -36,7 +36,7 @@ export function AgentDisclosure({
       >
         {icon}
         {label}
-        <ChevronDownIcon
+        <IconChevronDown
           aria-hidden="true"
           className={cn(
             "size-4 transition-transform duration-200",

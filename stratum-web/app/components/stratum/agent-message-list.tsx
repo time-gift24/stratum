@@ -1,6 +1,6 @@
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
-import { BrainIcon } from "lucide-react"
+import { IconBrain } from "@tabler/icons-react"
 
 import {
   Message,
@@ -43,7 +43,7 @@ function ReasoningDisclosure({
 }: ReasoningDisclosureProps) {
   return (
     <AgentDisclosure
-      icon={<BrainIcon aria-hidden="true" className="size-4" />}
+      icon={<IconBrain aria-hidden="true" className="size-4" />}
       label={getThinkingMessage(isStreaming)}
     >
       <ReasoningContent>{children}</ReasoningContent>

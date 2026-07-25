@@ -1,156 +1,66 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/nunito-sans";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/outfit";
 @import "@fontsource-variable/noto-sans";
 
 @custom-variant dark (&:is(.dark *));
 
-:root {
-  color-scheme: light;
-
-  /* Tavily 衍生产品层，Lovable 作为暖中性基础。 */
-  --stratum-canvas: #fefcf5;
-  --stratum-canvas-soft: rgb(31 30 30 / 3%);
-  --stratum-sidebar: #fdf8ec;
-  --stratum-paper: #fffcf6;
-  --stratum-paper-soft: #f4f0e6;
-  --stratum-paper-wash: #fffcf6;
-  --stratum-ink: #1f1e1e;
-  --stratum-ink-soft: rgb(31 30 30 / 86%);
-  --stratum-ink-muted: #625f59;
-  --stratum-line: rgb(31 30 30 / 10%);
-  --stratum-line-strong: rgb(31 30 30 / 20%);
-  --stratum-brand-blue: #2677ff;
-  --stratum-action: #1e65d9;
-  --stratum-action-hover: #1958c1;
-  --stratum-action-ink: #ffffff;
-  --stratum-accent: #edf3ff;
-  --stratum-accent-ink: #1f1e1e;
-  --stratum-focus: #2677ff;
-
-  /* 语义状态层 */
-  --stratum-success: #257a47;
-  --stratum-warning: #8a5a00;
-  --stratum-danger: #b42318;
-  --stratum-info: #2563eb;
-
-  /* Stratum 特效层：仅供标识与后续有目的的特效使用。 */
-  --stratum-cloud-dancer: oklch(0.965 0.005 95);
-  --stratum-lemon-icing: oklch(0.922 0.052 96);
-  --stratum-nimbus-cloud: oklch(0.879 0.006 255);
-  --stratum-raindrops-rose: oklch(0.902 0.026 12);
-  --stratum-ice-melt: oklch(0.887 0.031 238);
-  --stratum-peach-dust: oklch(0.882 0.043 51);
-  --stratum-almost-aqua: oklch(0.869 0.035 143);
-  --stratum-orchid-tint: oklch(0.842 0.024 307);
-  --stratum-veiled-vista: oklch(0.842 0.055 144);
-  --stratum-baltic-sea: oklch(0.704 0.082 233);
-  --stratum-golden-mist: oklch(0.823 0.068 98);
-  --stratum-quiet-violet: oklch(0.654 0.04 312);
-  --stratum-cloud-cover: oklch(0.646 0.012 43);
-  --stratum-hematite: oklch(0.488 0.013 73);
-  --stratum-blue-fusion: oklch(0.468 0.058 236);
-  --stratum-mark-core: var(--stratum-blue-fusion);
-  --stratum-mark-compact: var(--stratum-ink-muted);
-
-  --stratum-bg-canvas: var(--stratum-canvas);
-  --stratum-bg-paper: var(--stratum-paper);
-  --stratum-shadow-panel: 0 8px 16px rgb(50 43 31 / 10%);
-  --stratum-shadow-soft: 0 4px 8px rgb(50 43 31 / 8%);
-  --stratum-shadow-rail: 0 2px 8px rgb(50 43 31 / 8%);
-  --stratum-shadow-topbar: 0 2px 8px rgb(50 43 31 / 6%);
-  --stratum-shadow-drawer: 8px 0 16px rgb(50 43 31 / 12%);
-  --stratum-shadow-pressed: inset 0 1px 2px rgb(31 30 30 / 12%);
-
-  --radius: 0.5rem;
-  --radius-stratum-control: 0.5625rem;
-  --radius-stratum-panel: 0.75rem;
-  --radius-stratum-shell: 1rem;
-  --radius-stratum-field: 0.5625rem;
-  --page-gutter: clamp(0.75rem, 2vw, 2rem);
-  --content-width: 50rem;
-  --composer-width: 56rem;
-  --workbench-width: 64rem;
-  --product-shell-sidebar-offset: 0px;
-  --content-half-width: min(
-    calc(50vw - var(--page-gutter)),
-    clamp(21rem, 32vw, 28rem)
-  );
-  --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
-  --history-width: clamp(12rem, 16vw, 18rem);
-  --text-body: 1rem;
-  --stratum-composer-min-height: 7.25rem;
-
-  --background: var(--stratum-canvas);
-  --foreground: var(--stratum-ink);
-  --card: var(--stratum-paper);
-  --card-foreground: var(--stratum-ink);
-  --popover: var(--stratum-paper-wash);
-  --popover-foreground: var(--stratum-ink);
-  --primary: var(--stratum-action);
-  --primary-foreground: var(--stratum-action-ink);
-  --secondary: var(--stratum-paper-soft);
-  --secondary-foreground: var(--stratum-ink);
-  --muted: var(--stratum-paper-soft);
-  --muted-foreground: var(--stratum-ink-muted);
-  --accent: var(--stratum-accent);
-  --accent-foreground: var(--stratum-accent-ink);
-  --destructive: var(--stratum-danger);
-  --border: var(--stratum-line);
-  --input: var(--stratum-line-strong);
-  --ring: var(--stratum-focus);
-  --chart-1: var(--stratum-baltic-sea);
-  --chart-2: var(--stratum-veiled-vista);
-  --chart-3: var(--stratum-golden-mist);
-  --chart-4: var(--stratum-peach-dust);
-  --chart-5: var(--stratum-quiet-violet);
-  --sidebar: var(--stratum-sidebar);
-  --sidebar-foreground: var(--stratum-ink);
-  --sidebar-primary: var(--stratum-action);
-  --sidebar-primary-foreground: var(--stratum-action-ink);
-  --sidebar-accent: var(--stratum-paper-soft);
-  --sidebar-accent-foreground: var(--stratum-ink);
-  --sidebar-border: var(--stratum-line);
-  --sidebar-ring: var(--stratum-focus);
-}
-
+:root,
 .dark {
   color-scheme: dark;
-  --stratum-canvas: #161515;
-  --stratum-canvas-soft: rgb(255 252 246 / 3%);
-  --stratum-sidebar: #1f1e1e;
-  --stratum-paper: #242222;
-  --stratum-paper-soft: #2b2929;
-  --stratum-paper-wash: #242222;
-  --stratum-ink: #fffcf6;
-  --stratum-ink-soft: rgb(255 252 246 / 86%);
-  --stratum-ink-muted: #c0b9ae;
-  --stratum-line: rgb(255 252 246 / 12%);
-  --stratum-line-strong: rgb(255 252 246 / 22%);
-  --stratum-brand-blue: #4d8dff;
-  --stratum-action: #4d8dff;
-  --stratum-action-hover: #73a5ff;
-  --stratum-action-ink: #161515;
-  --stratum-accent: rgb(77 141 255 / 14%);
-  --stratum-accent-ink: #fffcf6;
-  --stratum-focus: #4d8dff;
-  --stratum-success: #63c489;
-  --stratum-warning: #e0ad4d;
-  --stratum-danger: #ff8a80;
-  --stratum-info: #8ab4ff;
-  --stratum-mark-compact: var(--stratum-ink-muted);
-  --stratum-shadow-panel: 0 8px 16px rgb(0 0 0 / 28%);
-  --stratum-shadow-soft: 0 4px 8px rgb(0 0 0 / 22%);
-  --stratum-shadow-rail: 0 2px 8px rgb(0 0 0 / 24%);
-  --stratum-shadow-topbar: 0 2px 8px rgb(0 0 0 / 20%);
-  --stratum-shadow-drawer: 8px 0 16px rgb(0 0 0 / 32%);
-  --stratum-shadow-pressed: inset 0 1px 2px rgb(0 0 0 / 28%);
+
+  --radius: 0.75rem;
+  --background: #090808;
+  --foreground: #f9f6f5;
+  --card: #171716;
+  --card-foreground: #f9f6f5;
+  --popover: #1c1b1b;
+  --popover-foreground: #f9f6f5;
+  --primary: #78ed9d;
+  --primary-foreground: #0a130d;
+  --secondary: #292727;
+  --secondary-foreground: #f0ecea;
+  --muted: #212020;
+  --muted-foreground: #a69c98;
+  --accent: #313239;
+  --accent-foreground: #f9f6f5;
+  --destructive: #c75a50;
+  --border: #32302f;
+  --input: #3b3837;
+  --ring: #78ed9d;
+  --chart-1: #78ed9d;
+  --chart-2: #eff244;
+  --chart-3: #65c9ff;
+  --chart-4: #b48cff;
+  --chart-5: #ff7182;
+  --sidebar: #111010;
+  --sidebar-foreground: #f9f6f5;
+  --sidebar-primary: #78ed9d;
+  --sidebar-primary-foreground: #0a130d;
+  --sidebar-accent: #252424;
+  --sidebar-accent-foreground: #f9f6f5;
+  --sidebar-border: #2c2a29;
+  --sidebar-ring: #78ed9d;
+
+  --stratum-mark-core: #d2a692;
+  --stratum-mark-compact: #f9f6f5;
+
+  --topbar-height: 3.5rem;
+  --shell-gap: 0.75rem;
+  --rail-width: 3.5rem;
+  --composer-width: 43rem;
+  --content-width: 52rem;
+  --inspector-width: 20rem;
+  --ease-workspace: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @theme inline {
-  --font-sans: "Nunito Sans Variable", sans-serif;
-  --font-heading: "Noto Sans Variable", sans-serif;
+  --font-sans: "Geist Variable", "Noto Sans Variable", sans-serif;
+  --font-heading: "Outfit Variable", "Noto Sans Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -182,53 +92,13 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
-  --color-stratum-canvas: var(--stratum-canvas);
-  --color-stratum-paper: var(--stratum-paper);
-  --color-stratum-paper-soft: var(--stratum-paper-soft);
-  --color-stratum-paper-wash: var(--stratum-paper-wash);
-  --color-stratum-ink: var(--stratum-ink);
-  --color-stratum-ink-soft: var(--stratum-ink-soft);
-  --color-stratum-ink-muted: var(--stratum-ink-muted);
-  --color-stratum-line: var(--stratum-line);
-  --color-stratum-line-strong: var(--stratum-line-strong);
-  --color-stratum-action: var(--stratum-action);
-  --color-stratum-action-hover: var(--stratum-action-hover);
-  --color-stratum-brand-blue: var(--stratum-brand-blue);
-  --color-stratum-accent: var(--stratum-accent);
-  --color-stratum-success: var(--stratum-success);
-  --color-stratum-warning: var(--stratum-warning);
-  --color-stratum-info: var(--stratum-info);
-  --color-stratum-cloud-dancer: var(--stratum-cloud-dancer);
-  --color-stratum-lemon-icing: var(--stratum-lemon-icing);
-  --color-stratum-nimbus-cloud: var(--stratum-nimbus-cloud);
-  --color-stratum-raindrops-rose: var(--stratum-raindrops-rose);
-  --color-stratum-ice-melt: var(--stratum-ice-melt);
-  --color-stratum-peach-dust: var(--stratum-peach-dust);
-  --color-stratum-almost-aqua: var(--stratum-almost-aqua);
-  --color-stratum-orchid-tint: var(--stratum-orchid-tint);
-  --color-stratum-veiled-vista: var(--stratum-veiled-vista);
-  --color-stratum-baltic-sea: var(--stratum-baltic-sea);
-  --color-stratum-golden-mist: var(--stratum-golden-mist);
-  --color-stratum-quiet-violet: var(--stratum-quiet-violet);
-  --color-stratum-cloud-cover: var(--stratum-cloud-cover);
-  --color-stratum-hematite: var(--stratum-hematite);
-  --color-stratum-blue-fusion: var(--stratum-blue-fusion);
-  --radius-sm: calc(var(--radius) * 0.67);
-  --radius-md: var(--radius);
+  --radius-sm: calc(var(--radius) * 0.58);
+  --radius-md: calc(var(--radius) * 0.78);
   --radius-lg: var(--radius);
-  --radius-xl: var(--radius-stratum-panel);
-  --radius-2xl: var(--radius-stratum-shell);
-  --radius-3xl: var(--radius-stratum-shell);
-  --radius-4xl: var(--radius-stratum-shell);
-  --radius-5xl: var(--radius-stratum-panel);
-  --radius-shell: var(--radius-stratum-shell);
-  --radius-control: var(--radius-stratum-control);
-  --shadow-stratum-panel: var(--stratum-shadow-panel);
-  --shadow-stratum-soft: var(--stratum-shadow-soft);
-  --shadow-stratum-rail: var(--stratum-shadow-rail);
-  --shadow-stratum-topbar: var(--stratum-shadow-topbar);
-  --shadow-stratum-drawer: var(--stratum-shadow-drawer);
-  --shadow-stratum-pressed: var(--stratum-shadow-pressed);
+  --radius-xl: calc(var(--radius) * 1.35);
+  --radius-2xl: calc(var(--radius) * 1.75);
+  --radius-3xl: calc(var(--radius) * 2.15);
+  --radius-4xl: calc(var(--radius) * 2.55);
 }
 
 @layer base {
@@ -238,82 +108,309 @@
 
   html {
     @apply font-sans;
+    scroll-behavior: smooth;
+    background: var(--background);
   }
 
   body {
     @apply min-h-dvh bg-background text-foreground antialiased;
     overflow-x: hidden;
-    font-size: var(--text-body);
+    font-size: 0.9375rem;
     line-height: 1.5;
     text-rendering: optimizeLegibility;
   }
 
+  ::selection {
+    color: var(--primary-foreground);
+    background: var(--primary);
+  }
+
   :focus-visible {
-    outline: 2px solid var(--stratum-focus);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
   }
 }
 
 @layer components {
-  .type-hero {
-    font-family: "Noto Sans Variable", sans-serif;
-    font-size: 2rem;
-    font-weight: 600;
-    line-height: 1.08;
-    letter-spacing: -0.03em;
-    text-wrap: balance;
+  .type-body {
+    font-size: 0.9375rem;
+    line-height: 1.65;
   }
 
-  .type-section {
-    font-family: "Noto Sans Variable", sans-serif;
-    font-size: 2rem;
-    font-weight: 600;
-    line-height: 1.15;
-    letter-spacing: -0.02em;
-    text-wrap: balance;
+  .stratum-app-shell {
+    min-height: 100dvh;
+    background:
+      radial-gradient(
+        circle at 58% 12%,
+        rgb(77 106 149 / 8%),
+        transparent 26rem
+      ),
+      var(--background);
   }
 
-  .type-subheading {
-    font-family: "Noto Sans Variable", sans-serif;
-    font-size: 1.25rem;
-    font-weight: 600;
-    line-height: 1.25;
-    letter-spacing: -0.01em;
+  .stratum-shell-topbar {
+    position: fixed;
+    top: var(--shell-gap);
+    right: var(--shell-gap);
+    left: var(--shell-gap);
+    z-index: 50;
+    height: var(--topbar-height);
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background: rgb(17 16 16 / 92%);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 4%),
+      0 16px 40px rgb(0 0 0 / 24%);
+    backdrop-filter: blur(16px) saturate(1.15);
   }
 
-  .type-card-title {
-    font-size: 1rem;
-    font-weight: 600;
-    line-height: 1.4;
+  .stratum-tool-rail {
+    position: fixed;
+    top: calc(var(--topbar-height) + var(--shell-gap) * 2);
+    bottom: var(--shell-gap);
+    left: var(--shell-gap);
+    z-index: 40;
+    width: var(--rail-width);
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background: rgb(17 16 16 / 94%);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 3%);
   }
 
-  .type-body-large {
-    font-size: 1rem;
-    font-weight: 400;
-    line-height: 1.55;
+  .stratum-main {
+    min-height: 100dvh;
+    padding-top: calc(var(--topbar-height) + var(--shell-gap) * 2);
+    padding-left: calc(var(--rail-width) + var(--shell-gap) * 2);
   }
 
-  .type-body,
-  .type-action {
-    font-size: 1rem;
-    font-weight: 400;
-    line-height: 1.5;
+  .stratum-workspace {
+    position: relative;
+    min-height: calc(100dvh - var(--topbar-height) - var(--shell-gap) * 2);
+    overflow: hidden;
+    background-color: var(--background);
+    background-image: radial-gradient(
+      circle,
+      color-mix(in srgb, var(--border) 82%, transparent) 1px,
+      transparent 1px
+    );
+    background-position: -1px -1px;
+    background-size: 18px 18px;
   }
 
-  .type-caption {
-    font-size: 0.8125rem;
-    font-weight: 400;
-    line-height: 1.45;
+  .stratum-workspace::after {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background:
+      radial-gradient(
+        circle at 26% 40%,
+        rgb(210 166 146 / 4%),
+        transparent 20rem
+      ),
+      radial-gradient(
+        circle at 72% 52%,
+        rgb(77 106 149 / 7%),
+        transparent 23rem
+      );
+    content: "";
+    pointer-events: none;
   }
 
-  .stratum-page-shell {
-    @apply overflow-hidden rounded-shell border border-stratum-line;
-    background: var(--stratum-paper);
+  .stratum-shell-control {
+    display: inline-flex;
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 0.625rem;
+    color: var(--muted-foreground);
+    transition:
+      color 180ms var(--ease-workspace),
+      background-color 180ms var(--ease-workspace),
+      border-color 180ms var(--ease-workspace),
+      transform 180ms var(--ease-workspace);
   }
 
-  .stratum-paper-surface {
-    @apply rounded-5xl border border-stratum-line;
-    background: var(--stratum-paper);
+  .stratum-shell-control:hover,
+  .stratum-shell-control[aria-current="page"],
+  .stratum-shell-control[aria-expanded="true"] {
+    border-color: var(--border);
+    background: var(--secondary);
+    color: var(--foreground);
+  }
+
+  .stratum-shell-control:active {
+    transform: translateY(1px);
+  }
+
+  .stratum-shell-control[aria-current="page"]::before {
+    position: absolute;
+    left: -1px;
+    width: 2px;
+    height: 1.25rem;
+    border-radius: 0 999px 999px 0;
+    background: var(--primary);
+    content: "";
+  }
+
+  .workspace-stage {
+    position: relative;
+    z-index: 1;
+    min-height: calc(100dvh - var(--topbar-height) - var(--shell-gap) * 2);
+    margin-right: var(--inspector-width);
+  }
+
+  .workspace-wires {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    color: #5a5654;
+    pointer-events: none;
+  }
+
+  .workspace-canvas-content {
+    position: absolute;
+    inset: 0;
+    transform: scale(var(--workspace-zoom, 1));
+  }
+
+  .workspace-wire {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.15;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .workspace-wire.is-active {
+    color: var(--chart-1);
+    filter: drop-shadow(0 0 5px rgb(120 237 157 / 22%));
+  }
+
+  .workspace-node {
+    --node-tone: var(--foreground);
+    position: absolute;
+    z-index: 3;
+    width: clamp(13.5rem, 19vw, 17rem);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background:
+      linear-gradient(180deg, rgb(255 255 255 / 3%), transparent 34%),
+      var(--card);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 4%),
+      0 22px 48px rgb(0 0 0 / 30%);
+    text-align: left;
+    transition:
+      border-color 180ms var(--ease-workspace),
+      box-shadow 180ms var(--ease-workspace),
+      transform 180ms var(--ease-workspace);
+  }
+
+  .workspace-node:hover,
+  .workspace-node:focus-visible {
+    border-color: color-mix(in srgb, var(--node-tone) 48%, var(--border));
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 5%),
+      0 26px 58px rgb(0 0 0 / 38%);
+    transform: translateY(-1px);
+  }
+
+  .workspace-node[aria-pressed="true"] {
+    border-color: color-mix(in srgb, var(--node-tone) 72%, var(--border));
+    box-shadow:
+      inset 0 3px 0 var(--node-tone),
+      0 0 0 1px color-mix(in srgb, var(--node-tone) 18%, transparent),
+      0 24px 56px rgb(0 0 0 / 40%);
+  }
+
+  .workspace-node[data-tone="agent"] {
+    --node-tone: var(--chart-4);
+  }
+
+  .workspace-node[data-tone="model"] {
+    --node-tone: var(--chart-2);
+  }
+
+  .workspace-node[data-tone="positive"] {
+    --node-tone: var(--chart-1);
+  }
+
+  .workspace-node[data-tone="output"] {
+    --node-tone: var(--chart-3);
+  }
+
+  .workspace-node[data-tone="negative"] {
+    --node-tone: var(--chart-5);
+  }
+
+  .workspace-node-port {
+    width: 0.55rem;
+    height: 0.55rem;
+    flex: none;
+    border: 1px solid rgb(255 255 255 / 44%);
+    border-radius: 999px;
+    background: var(--node-tone);
+    box-shadow: 0 0 0.75rem
+      color-mix(in srgb, var(--node-tone) 38%, transparent);
+  }
+
+  .workspace-node-port[data-tone="agent"] {
+    --node-tone: var(--chart-4);
+  }
+
+  .workspace-node-port[data-tone="model"] {
+    --node-tone: var(--chart-2);
+  }
+
+  .workspace-node-port[data-tone="positive"] {
+    --node-tone: var(--chart-1);
+  }
+
+  .workspace-node-port[data-tone="output"] {
+    --node-tone: var(--chart-3);
+  }
+
+  .workspace-inspector {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: var(--inspector-width);
+    border-left: 1px solid var(--border);
+    background: rgb(17 16 16 / 94%);
+    box-shadow: -16px 0 42px rgb(0 0 0 / 14%);
+  }
+
+  .workspace-inspector-row {
+    display: grid;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: 1rem;
+    padding: 0.8rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .workspace-floating-tools {
+    position: absolute;
+    right: calc(var(--inspector-width) + 0.75rem);
+    bottom: 0.75rem;
+    z-index: 6;
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: var(--card);
+    box-shadow: 0 16px 36px rgb(0 0 0 / 26%);
   }
 
   .stratum-content-width {
@@ -321,91 +418,241 @@
     max-width: var(--content-width);
   }
 
-  .stratum-workbench-width {
-    width: 100%;
-    max-width: var(--workbench-width);
-  }
-
   .stratum-composer-positioner {
     right: max(1rem, env(safe-area-inset-right));
-    left: max(1rem, env(safe-area-inset-left));
+    left: calc(
+      var(--rail-width) + var(--shell-gap) * 2 +
+        max(1rem, env(safe-area-inset-left))
+    );
     width: auto;
     max-width: var(--composer-width);
     margin-inline: auto;
   }
 
   .stratum-floating-center {
-    left: calc((100vw + var(--product-shell-sidebar-offset)) / 2);
-  }
-
-  .stratum-composer-width {
-    width: 100%;
-    max-width: var(--composer-width);
+    left: calc((100vw + var(--rail-width) + var(--shell-gap) * 2) / 2);
   }
 
   .stratum-prompt-shell {
-    border-radius: var(--radius-stratum-panel);
+    position: relative;
+    border-radius: 1rem;
   }
 
-  .stratum-history-drawer {
+  .stratum-prompt-shell::before {
     position: absolute;
-    top: max(4.5rem, env(safe-area-inset-top));
-    left: max(var(--page-gutter), env(safe-area-inset-left));
-    width: min(calc(100vw - var(--page-gutter) * 2), 20rem);
-    transform-origin: top left;
-  }
-
-  .stratum-mark--compact path {
-    fill: var(--stratum-mark-compact);
-    stroke: var(--stratum-mark-compact);
-  }
-
-  .navbar-shell {
-    width: min(
-      calc(100vw - var(--page-gutter) * 2),
-      var(--navbar-max-width, 90rem)
+    inset: -1px;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(
+      110deg,
+      rgb(210 166 146 / 34%),
+      rgb(64 67 91 / 16%) 46%,
+      rgb(120 237 157 / 28%)
     );
-    max-width: 100%;
+    content: "";
+    opacity: 0.58;
   }
 
-  .navbar-shell--longzhong {
-    --navbar-max-width: var(--content-width);
+  .stratum-prompt-shell [data-slot="input-group"] {
+    min-height: 8.25rem;
+    border-color: var(--border);
+    border-radius: 1rem;
+    background:
+      linear-gradient(180deg, rgb(255 255 255 / 3%), transparent 44%),
+      var(--card);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 5%),
+      0 24px 64px rgb(0 0 0 / 46%);
+    backdrop-filter: blur(18px) saturate(1.1);
+  }
+
+  .stratum-prompt-shell:has([aria-busy="true"]) [data-slot="input-group"] {
+    border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 5%),
+      0 0 0 1px rgb(120 237 157 / 16%),
+      0 24px 64px rgb(0 0 0 / 48%);
+  }
+
+  .composer-tool {
+    min-width: 2.75rem;
+    border: 1px solid transparent;
+    border-radius: 0.65rem;
+    background: var(--secondary);
+    color: var(--muted-foreground);
+  }
+
+  .composer-tool:hover,
+  .composer-tool[aria-expanded="true"] {
+    border-color: var(--border);
+    background: var(--accent);
+    color: var(--foreground);
+  }
+
+  .composer-tool[data-tone="agent"] svg {
+    color: var(--chart-4);
+  }
+
+  .composer-tool[data-tone="model"] svg {
+    color: var(--chart-2);
+  }
+
+  .composer-tool[data-tone="thinking"] svg {
+    color: var(--chart-3);
+  }
+
+  .chat-stage {
+    position: relative;
+    z-index: 1;
+    min-height: calc(100dvh - var(--topbar-height) - var(--shell-gap) * 2);
+  }
+
+  .chat-runtime-panel {
+    position: fixed;
+    top: calc(var(--topbar-height) + var(--shell-gap) * 2 + 0.75rem);
+    right: 0.75rem;
+    z-index: 20;
+    width: 15.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background: rgb(23 23 22 / 90%);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 4%),
+      0 18px 46px rgb(0 0 0 / 26%);
+    backdrop-filter: blur(14px);
+  }
+
+  .chat-config-node {
+    position: absolute;
+    z-index: 2;
+    display: none;
+    width: 12rem;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: var(--card);
+    box-shadow: 0 16px 40px rgb(0 0 0 / 26%);
+  }
+
+  .chat-config-node[data-node="agent"] {
+    top: 16%;
+    left: 9%;
+  }
+
+  .chat-config-node[data-node="model"] {
+    top: 28%;
+    right: 10%;
+  }
+
+  .stratum-history-panel {
+    position: fixed;
+    top: calc(var(--topbar-height) + var(--shell-gap) * 2);
+    bottom: var(--shell-gap);
+    left: calc(var(--rail-width) + var(--shell-gap) * 2);
+    z-index: 45;
+    width: min(20rem, calc(100vw - 5.75rem));
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background: rgb(17 16 16 / 97%);
+    box-shadow: 0 24px 72px rgb(0 0 0 / 52%);
   }
 }
 
-@media (min-width: 640px) {
-  .type-hero {
-    font-size: 2.25rem;
+@media (min-width: 1180px) {
+  .chat-config-node {
+    display: block;
   }
 }
 
-@media (min-width: 1024px) {
-  .type-hero {
-    font-size: 2.75rem;
+@media (max-width: 1023px) {
+  .stratum-tool-rail {
+    display: none;
   }
-}
 
-@media (min-width: 1280px) {
-  :root {
-    --product-shell-sidebar-offset: 19.8125rem;
+  .stratum-main {
+    padding-left: 0;
   }
 
   .stratum-composer-positioner {
-    left: calc(19.8125rem + max(1rem, env(safe-area-inset-left)));
+    left: max(1rem, env(safe-area-inset-left));
+  }
+
+  .stratum-floating-center {
+    left: 50%;
+  }
+
+  .workspace-stage {
+    min-height: auto;
+    margin-right: 0;
+    padding: 4.75rem 1rem 1rem;
+  }
+
+  .workspace-canvas-content {
+    position: relative;
+    inset: auto;
+    transform: none !important;
+  }
+
+  .workspace-wires,
+  .workspace-floating-tools {
+    display: none;
+  }
+
+  .workspace-node {
+    position: relative;
+    top: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: auto !important;
+    width: min(100%, 28rem);
+    margin: 0 auto 0.75rem;
+  }
+
+  .workspace-inspector {
+    position: relative;
+    width: 100%;
+    min-height: 17rem;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .chat-runtime-panel {
+    display: none;
   }
 }
 
-@media (min-width: 1536px) {
-  .stratum-history-drawer {
-    right: calc(50% + var(--content-half-width) + 1rem);
-    left: auto;
-    width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
-    transform-origin: top right;
+@media (max-width: 640px) {
+  :root,
+  .dark {
+    --shell-gap: 0.5rem;
+  }
+
+  .stratum-shell-topbar {
+    border-radius: 0.75rem;
+  }
+
+  .stratum-shell-topbar :is(a, button),
+  .composer-tool {
+    min-height: 2.75rem;
+  }
+
+  .stratum-workspace {
+    overflow: visible;
+  }
+
+  .stratum-prompt-shell [data-slot="input-group"] {
+    min-height: 7.75rem;
+  }
+
+  .stratum-history-panel {
+    right: var(--shell-gap);
+    left: var(--shell-gap);
+    width: auto;
   }
 }
 
 :where(a, button, [role="button"], [tabindex]):focus-visible {
-  outline-color: var(--stratum-focus) !important;
+  outline-color: var(--ring) !important;
   outline-style: solid !important;
   outline-width: 2px !important;
   outline-offset: 2px !important;
@@ -423,11 +670,5 @@ main[tabindex="-1"]:focus-visible {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-  }
-
-  .animate-in,
-  .animate-out {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
   }
 }

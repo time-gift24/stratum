@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef } from "react"
-import { HistoryIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react"
+import { IconHistory, IconPlus, IconTrash, IconX } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 
@@ -121,10 +121,10 @@ export function ChatHistory({
   return (
     <AnimatePresence initial={false}>
       {open ? (
-        <div key="chat-history-drawer" className="fixed inset-0 z-[70]">
+        <div key="chat-history-drawer" className="fixed inset-0 z-50">
           <motion.div
             aria-hidden="true"
-            className="absolute inset-0 cursor-default bg-stratum-ink/20"
+            className="absolute inset-0 cursor-default bg-foreground/20"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -149,13 +149,13 @@ export function ChatHistory({
             className={cn(
               "stratum-history-drawer",
               "flex flex-col gap-2 overflow-hidden",
-              "rounded-2xl border border-stratum-line bg-popover shadow-stratum-soft",
+              "rounded-2xl border border-border bg-popover shadow-md",
               "max-h-[calc(100dvh-9rem)]"
             )}
           >
             <div className="flex items-center justify-between px-3 pt-2.5">
               <div className="flex items-center gap-2 text-muted-foreground">
-                <HistoryIcon className="size-4" aria-hidden="true" />
+                <IconHistory className="size-4" aria-hidden="true" />
                 <span className="text-sm font-normal">
                   {t("chat.history.title")}
                 </span>
@@ -168,7 +168,7 @@ export function ChatHistory({
                 aria-label={t("chat.history.close")}
                 className="size-11 text-muted-foreground hover:text-foreground"
               >
-                <XIcon className="size-4" aria-hidden="true" />
+                <IconX className="size-4" aria-hidden="true" />
               </Button>
             </div>
 
@@ -189,11 +189,11 @@ export function ChatHistory({
                 <div className="flex flex-col items-center gap-1">
                   <span
                     className={cn(
-                      "size-1.5 shrink-0 rounded-full bg-stratum-action",
+                      "size-1.5 shrink-0 rounded-full bg-ring",
                       isRunning && "animate-pulse"
                     )}
                   />
-                  <span className="w-px flex-1 bg-stratum-line/50" />
+                  <span className="w-px flex-1 bg-border/50" />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="text-sm font-semibold text-foreground">
@@ -222,7 +222,7 @@ export function ChatHistory({
                   onClose()
                 }}
               >
-                <PlusIcon className="size-4" aria-hidden="true" />
+                <IconPlus className="size-4" aria-hidden="true" />
                 {t("chat.history.new")}
               </Button>
             </div>
@@ -285,7 +285,7 @@ export function ChatHistory({
                           onClick={() => onRemoveAgent(agent.agentId)}
                           className="absolute top-1/2 right-0 size-11 shrink-0 -translate-y-1/2 text-destructive"
                         >
-                          <Trash2Icon className="size-4" aria-hidden="true" />
+                          <IconTrash className="size-4" aria-hidden="true" />
                         </Button>
                       ) : null}
                     </div>

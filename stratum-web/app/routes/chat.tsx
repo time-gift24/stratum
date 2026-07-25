@@ -7,7 +7,7 @@ import { ChatWorkspace } from "~/components/stratum/chat-workspace"
 import { RouteTransition } from "~/components/stratum/route-transition"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
-export default function Longzhong() {
+export default function Chat() {
   const location = useLocation()
   const navigate = useNavigate()
   const conversation = useAgentConversation()
@@ -29,7 +29,7 @@ export default function Longzhong() {
     if (startNew) {
       handledSearchRef.current = location.search
       selectAgent(null)
-      navigate("/longzhong", { replace: true })
+      navigate("/chat", { replace: true })
       return
     }
 

@@ -1,4 +1,9 @@
-import { ChevronDownIcon } from "lucide-react"
+import {
+  IconBrain,
+  IconChevronDown,
+  IconCpu,
+  IconRobot,
+} from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import {
@@ -31,11 +36,13 @@ export function AgentConfigMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-11 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+        data-tone="agent"
+        className="composer-tool inline-flex h-10 max-w-40 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
         disabled={menuDisabled(configuration, commandPending)}
       >
+        <IconRobot className="size-3.5 shrink-0" aria-hidden="true" />
         <span className="truncate">{triggerText}</span>
-        <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+        <IconChevronDown className="size-3.5 shrink-0" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
         <DropdownMenuGroup>
@@ -99,14 +106,16 @@ export function ModelConfigMenu({
       <DropdownMenu>
         <DropdownMenuTrigger
           aria-label={triggerText}
-          className="inline-flex h-11 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+          data-tone="model"
+          className="composer-tool inline-flex h-10 max-w-56 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
           disabled={
             configuration.currentModelConfig === null ||
             menuDisabled(configuration, commandPending)
           }
         >
+          <IconCpu className="size-3.5 shrink-0" aria-hidden="true" />
           <span className="truncate">{triggerText}</span>
-          <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          <IconChevronDown className="size-3.5 shrink-0" aria-hidden="true" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-64">
           <DropdownMenuGroup>
@@ -139,13 +148,15 @@ export function ModelConfigMenu({
         <DropdownMenu>
           <DropdownMenuTrigger
             aria-label={`${t("chat.composer.thinking")}: ${thinkingText}`}
-            className="inline-flex h-11 max-w-32 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+            data-tone="thinking"
+            className="composer-tool inline-flex h-10 max-w-36 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
             disabled={menuDisabled(configuration, commandPending)}
           >
+            <IconBrain className="size-3.5 shrink-0" aria-hidden="true" />
             <span className="truncate">
               {t("chat.composer.thinking")} · {thinkingText}
             </span>
-            <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+            <IconChevronDown className="size-3.5 shrink-0" aria-hidden="true" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-40">
             <DropdownMenuGroup>
