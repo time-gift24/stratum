@@ -19,8 +19,8 @@
   --card-foreground: #f9f6f5;
   --popover: #1c1b1b;
   --popover-foreground: #f9f6f5;
-  --primary: #78ed9d;
-  --primary-foreground: #0a130d;
+  --primary: #fefa3d;
+  --primary-foreground: #171502;
   --secondary: #292727;
   --secondary-foreground: #f0ecea;
   --muted: #212020;
@@ -30,22 +30,22 @@
   --destructive: #c75a50;
   --border: #32302f;
   --input: #3b3837;
-  --ring: #78ed9d;
-  --chart-1: #78ed9d;
-  --chart-2: #eff244;
-  --chart-3: #65c9ff;
-  --chart-4: #b48cff;
-  --chart-5: #ff7182;
+  --ring: #fefa3d;
+  --chart-1: #65c9ff;
+  --chart-2: #fefa3d;
+  --chart-3: #ff5de7;
+  --chart-4: #78ed9d;
+  --chart-5: #b48cff;
   --sidebar: #111010;
   --sidebar-foreground: #f9f6f5;
-  --sidebar-primary: #78ed9d;
-  --sidebar-primary-foreground: #0a130d;
+  --sidebar-primary: #fefa3d;
+  --sidebar-primary-foreground: #171502;
   --sidebar-accent: #252424;
   --sidebar-accent-foreground: #f9f6f5;
   --sidebar-border: #2c2a29;
-  --sidebar-ring: #78ed9d;
+  --sidebar-ring: #fefa3d;
 
-  --stratum-mark-core: #d2a692;
+  --stratum-mark-core: #fefa3d;
   --stratum-mark-compact: #f9f6f5;
 
   --global-nav-offset: 6rem;
@@ -149,7 +149,7 @@
     background:
       radial-gradient(
         ellipse 70% 34rem at 50% -12rem,
-        color-mix(in srgb, var(--chart-4) 12%, transparent),
+        color-mix(in srgb, var(--chart-5) 12%, transparent),
         transparent 70%
       ),
       radial-gradient(
@@ -241,7 +241,7 @@
         145deg,
         color-mix(in srgb, var(--foreground) 9%, transparent),
         transparent 36%,
-        color-mix(in srgb, var(--chart-4) 5%, transparent)
+        color-mix(in srgb, var(--chart-5) 5%, transparent)
       ),
       color-mix(in srgb, var(--card) 70%, transparent);
     --tw-shadow:
@@ -491,7 +491,7 @@
         145deg,
         color-mix(in srgb, var(--foreground) 8%, transparent),
         transparent 42%,
-        color-mix(in srgb, var(--chart-4) 4%, transparent)
+        color-mix(in srgb, var(--chart-5) 4%, transparent)
       ),
       color-mix(in srgb, var(--popover) 48%, transparent);
     box-shadow: 0 24px 72px
@@ -733,6 +733,8 @@
     --muted-foreground: #a7a7a7;
     --accent: #303030;
     --accent-foreground: #ffffff;
+    --primary: #fefa3d;
+    --primary-foreground: #171502;
     --border: #343434;
     --input: #3e3e3e;
     --ring: #fefa3d;
@@ -740,11 +742,11 @@
     --chart-2: #fefa3d;
     --chart-3: #ff5de7;
     --chart-4: #78ed9d;
-    --chart-5: #ff7f66;
+    --chart-5: #b48cff;
     --sidebar: #141414;
     --sidebar-foreground: #ffffff;
-    --sidebar-primary: #78ed9d;
-    --sidebar-primary-foreground: #0a130d;
+    --sidebar-primary: #fefa3d;
+    --sidebar-primary-foreground: #171502;
     --sidebar-accent: #272727;
     --sidebar-accent-foreground: #ffffff;
     --sidebar-border: #303030;
