@@ -1,6 +1,6 @@
 "use client"
 
-import { Component } from "lucide-react"
+import { useMemo } from "react"
 import { useLocation } from "react-router"
 import { useTranslation } from "react-i18next"
 
@@ -10,6 +10,7 @@ import {
   type CenteredNavigationLink,
 } from "~/components/stratum/centered-navigation"
 import { LanguageToggle } from "~/components/stratum/language-toggle"
+import { GLOBAL_DEVELOPMENT_NAVIGATION_DEFINITIONS } from "~/config/navigation"
 
 export function GlobalNavigation() {
   const { t } = useTranslation()
@@ -18,29 +19,34 @@ export function GlobalNavigation() {
     location.pathname === "/chat"
       ? `${location.pathname}${location.search}`
       : "/chat"
-  const links: readonly CenteredNavigationLink[] = [
-    {
-      label: t("globalNavigation.chat"),
-      href: chatHref,
-    },
-  ]
-  const groups: readonly CenteredNavigationGroup[] = import.meta.env.DEV
-    ? [
-        {
-          id: "development",
-          label: t("globalNavigation.development"),
-          items: [
+  const links = useMemo<readonly CenteredNavigationLink[]>(
+    () => [
+      {
+        label: t("globalNavigation.chat"),
+        href: chatHref,
+      },
+    ],
+    [chatHref, t]
+  )
+  const groups = useMemo<readonly CenteredNavigationGroup[]>(
+    () =>
+      import.meta.env.DEV
+        ? [
             {
-              icon: Component,
-              title: t("globalNavigation.components"),
-              description: t("globalNavigation.componentsDescription"),
-              href: "/component-gallery",
-              tone: "yellow",
+              id: "development",
+              label: t("globalNavigation.development"),
+              items: GLOBAL_DEVELOPMENT_NAVIGATION_DEFINITIONS.map((item) => ({
+                icon: item.icon,
+                title: t(item.titleKey),
+                description: t(item.descriptionKey),
+                href: item.href,
+                tone: item.tone,
+              })),
             },
-          ],
-        },
-      ]
-    : []
+          ]
+        : [],
+    [t]
+  )
 
   return (
     <CenteredNavigation

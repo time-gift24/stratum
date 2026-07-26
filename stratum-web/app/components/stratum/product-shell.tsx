@@ -14,6 +14,11 @@ import { useLocation, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import { HistoryPanel } from "~/components/stratum/history-panel"
+import {
+  VerticalNavigation,
+  type VerticalNavigationItem,
+} from "~/components/stratum/vertical-navigation"
+import { CHAT_NAVIGATION_DEFINITIONS } from "~/config/navigation"
 import type { AgentTemplateView, ModelDescriptor } from "~/lib/model-config"
 import {
   loadRecentAgents,
@@ -181,6 +186,21 @@ export function ProductShell({ children }: { children: ReactNode }) {
         : null
     setHistoryOpen(true)
   }, [])
+  const navigationItems = useMemo<readonly VerticalNavigationItem[]>(
+    () =>
+      CHAT_NAVIGATION_DEFINITIONS.map((item) => ({
+        id: item.id,
+        icon: item.icon,
+        label: t(item.labelKey),
+        href: "href" in item ? item.href : undefined,
+        onSelect:
+          "action" in item && item.action === "open-history"
+            ? openHistory
+            : undefined,
+        tone: item.tone,
+      })),
+    [openHistory, t]
+  )
 
   const closeHistory = useCallback(() => {
     setHistoryOpen(false)
@@ -256,6 +276,18 @@ export function ProductShell({ children }: { children: ReactNode }) {
           recentAgents={recentAgents}
           onRemoveAgent={removeRecentAgent}
         />
+
+        {location.pathname === "/chat" ? (
+          <VerticalNavigation
+            activeId={
+              activeAgentId === null
+                ? "new-conversation"
+                : "active-conversation"
+            }
+            ariaLabel={t("globalNavigation.chat")}
+            items={navigationItems}
+          />
+        ) : null}
 
         <main
           ref={mainRef}

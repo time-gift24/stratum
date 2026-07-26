@@ -1,16 +1,9 @@
 "use client"
 
-import { useEffect, useMemo, useRef } from "react"
-import { History, SquarePen } from "lucide-react"
+import { useEffect, useRef } from "react"
 import { useLocation, useNavigate } from "react-router"
-import { useTranslation } from "react-i18next"
 
-import {
-  VerticalNavigation,
-  type VerticalNavigationItem,
-} from "~/components/stratum/vertical-navigation"
 import { ChatWorkspace } from "~/components/stratum/chat-workspace"
-import { useProductWorkbench } from "~/components/stratum/product-shell"
 import { RouteTransition } from "~/components/stratum/route-transition"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
@@ -23,10 +16,8 @@ FORM: Seed ee48eb66, structure 7, overridden by the user-pinned global/page navi
 NEVER: Canvas metaphors, readiness labels, fake telemetry, duplicate create actions, or explanatory microcopy.
 */
 export default function Chat() {
-  const { t } = useTranslation()
   const location = useLocation()
   const navigate = useNavigate()
-  const { openHistory } = useProductWorkbench()
   const conversation = useAgentConversation()
   const { selectAgent, composerConfiguration } = conversation
   const handledSearchRef = useRef<string | null>(null)
@@ -76,38 +67,9 @@ export default function Chat() {
     selectAgent,
   ])
 
-  const navigationItems = useMemo<readonly VerticalNavigationItem[]>(
-    () => [
-      {
-        id: "new-conversation",
-        icon: SquarePen,
-        label: t("productShell.newConversation"),
-        href: "/chat?new=1",
-        tone: "green",
-      },
-      {
-        id: "history",
-        icon: History,
-        label: t("productShell.recent"),
-        onSelect: openHistory,
-        tone: "blue",
-      },
-    ],
-    [openHistory, t]
-  )
-
   return (
     <RouteTransition>
       <div className="relative min-h-[calc(100dvh-var(--global-nav-offset))]">
-        <VerticalNavigation
-          activeId={
-            conversation.state.agentId === null
-              ? "new-conversation"
-              : "active-conversation"
-          }
-          ariaLabel={t("globalNavigation.chat")}
-          items={navigationItems}
-        />
         <ChatWorkspace conversation={conversation} />
       </div>
     </RouteTransition>

@@ -33,6 +33,7 @@ type VerticalNavigationProps = {
   ariaLabel: string
   activeId?: string
   className?: string
+  scrollContainerId?: string
 }
 
 const ACTIVE_TONE_CLASS: Record<VerticalNavigationTone, string> = {
@@ -48,6 +49,7 @@ export function VerticalNavigation({
   ariaLabel,
   activeId,
   className,
+  scrollContainerId,
 }: VerticalNavigationProps) {
   const [selectedId, setSelectedId] = useState(activeId ?? items[0]?.id)
   const mouseY = useMotionValue(Number.POSITIVE_INFINITY)
@@ -60,11 +62,18 @@ export function VerticalNavigation({
   useEffect(() => {
     const anchorItems = items.filter((item) => item.href?.startsWith("#"))
     if (anchorItems.length === 0) return
+    const scrollContainer = scrollContainerId
+      ? document.getElementById(scrollContainerId)
+      : null
+    const scrollTarget: Window | HTMLElement = scrollContainer ?? window
     const itemIds = new Set(anchorItems.map((item) => item.id))
     let animationFrame = 0
 
     const syncFromScroll = () => {
-      const readingLine = window.innerHeight * 0.34
+      const containerBounds = scrollContainer?.getBoundingClientRect()
+      const readingLine =
+        (containerBounds?.top ?? 0) +
+        (containerBounds?.height ?? window.innerHeight) * 0.34
       let currentId = anchorItems[0]?.id
       for (const item of anchorItems) {
         const section = document.getElementById(item.id)
@@ -88,13 +97,15 @@ export function VerticalNavigation({
 
     syncFromHash()
     window.addEventListener("hashchange", syncFromHash)
-    window.addEventListener("scroll", scheduleScrollSync, { passive: true })
+    scrollTarget.addEventListener("scroll", scheduleScrollSync, {
+      passive: true,
+    })
     return () => {
       window.cancelAnimationFrame(animationFrame)
       window.removeEventListener("hashchange", syncFromHash)
-      window.removeEventListener("scroll", scheduleScrollSync)
+      scrollTarget.removeEventListener("scroll", scheduleScrollSync)
     }
-  }, [items])
+  }, [items, scrollContainerId])
 
   return (
     <motion.nav

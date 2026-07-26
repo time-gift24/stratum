@@ -5,5 +5,9 @@ export default [
   route("chat", "routes/chat.tsx"),
   ...(process.env.NODE_ENV === "production"
     ? []
-    : [route("component-gallery", "routes/components.tsx")]),
+    : [
+        route("component-gallery", "routes/component-gallery-layout.tsx", [
+          index("routes/components.tsx"),
+        ]),
+      ]),
 ] satisfies RouteConfig
