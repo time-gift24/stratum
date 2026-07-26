@@ -1,12 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useGSAP } from "@gsap/react"
 import { IconArrowDown, IconArrowUp, IconBan } from "@tabler/icons-react"
-import gsap from "gsap"
-import { useReducedMotion } from "motion/react"
 import { useTranslation } from "react-i18next"
 
+import BorderGlow from "~/components/BorderGlow"
 import {
   AgentConfigMenu,
   ModelConfigMenu,
@@ -29,8 +27,6 @@ import {
 import { Button } from "~/components/ui/button"
 import type { AgentConversation } from "~/hooks/use-agent-conversation"
 import { cn } from "~/lib/utils"
-
-gsap.registerPlugin(useGSAP)
 
 type ChatWorkspaceProps = {
   conversation: AgentConversation
@@ -60,7 +56,6 @@ function resolveAutoFollowPaused({
 
 export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   const { t } = useTranslation()
-  const reduceMotion = useReducedMotion()
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [autoFollowPaused, setAutoFollowPaused] = useState(false)
@@ -92,26 +87,6 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           : state.view?.status === "running"
             ? t("chat.thinking")
             : ""
-
-  useGSAP(
-    () => {
-      if (reduceMotion) return
-      gsap.fromTo(
-        "[data-chat-entrance]",
-        { y: 14, opacity: 0, filter: "blur(7px)" },
-        {
-          y: 0,
-          opacity: 1,
-          filter: "blur(0px)",
-          duration: 0.58,
-          stagger: 0.07,
-          ease: "power3.out",
-          clearProps: "transform,opacity,filter",
-        }
-      )
-    },
-    { scope: chatRef, dependencies: [reduceMotion, state.agentId] }
-  )
 
   // 选择对话（包括新建）后聚焦输入框
   useEffect(() => {
@@ -218,31 +193,12 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     }
   }
 
-  const renderComposerInput = (inputGroupClassName: string) => (
-    <PromptInput
-      className={cn(
-        "relative z-10 border-0 bg-transparent shadow-none [&_[data-slot=input-group]]:border-0",
-        inputGroupClassName
-      )}
-      aria-busy={composerRunning}
-      onSubmit={(event) => {
-        event.preventDefault()
-        void submitMessage()
-      }}
-    >
-      <PromptInputBody>
-        <PromptInputTextarea
-          ref={composerRef}
-          aria-label={t("chat.composer.label")}
-          className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
-          disabled={composerRunning || composerUnavailable}
-          onChange={(event) => setComposerText(event.target.value)}
-          placeholder={t("chat.composer.placeholder")}
-          value={composerText}
-        />
-      </PromptInputBody>
-      <PromptInputFooter className="min-h-12 gap-2 px-2.5 pt-0 pb-[max(0.55rem,env(safe-area-inset-bottom))] sm:px-3.5">
-        <PromptInputTools className="[scrollbar-width:none] gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+  const renderComposerFooter = (
+    footerClassName: string,
+    toolsClassName: string
+  ) => (
+      <PromptInputFooter className={footerClassName}>
+        <PromptInputTools className={toolsClassName}>
           <AgentConfigMenu
             configuration={configuration}
             commandPending={isSubmitting}
@@ -280,6 +236,35 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           )}
         </PromptInputSubmit>
       </PromptInputFooter>
+  )
+
+  const renderComposerInput = (inputGroupClassName: string) => (
+    <PromptInput
+      className={cn(
+        "relative z-10 border-0 bg-transparent shadow-none [&_[data-slot=input-group]]:border-0",
+        inputGroupClassName
+      )}
+      aria-busy={composerRunning}
+      onSubmit={(event) => {
+        event.preventDefault()
+        void submitMessage()
+      }}
+    >
+      <PromptInputBody>
+        <PromptInputTextarea
+          ref={composerRef}
+          aria-label={t("chat.composer.label")}
+          className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
+          disabled={composerRunning || composerUnavailable}
+          onChange={(event) => setComposerText(event.target.value)}
+          placeholder={t("chat.composer.placeholder")}
+          value={composerText}
+        />
+      </PromptInputBody>
+      {renderComposerFooter(
+        "grid min-h-12 grid-cols-[minmax(0,1fr)_auto] [gap:calc(0.5rem*var(--p-density,1))] px-[calc(0.75rem*var(--p-density,1))] pt-0 pb-[max(0.55rem,env(safe-area-inset-bottom))]",
+        "[scrollbar-width:none] gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden [&_[data-tone]]:text-[0.8125rem] [&_[data-tone=agent]]:bg-primary/8 [&_[data-tone=agent]]:text-primary [&_[data-tone=model]]:bg-chart-1/8 [&_[data-tone=model]]:text-chart-1 [&_[data-tone=thinking]]:bg-chart-2/8 [&_[data-tone=thinking]]:text-chart-2"
+      )}
     </PromptInput>
   )
 
@@ -342,17 +327,16 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
       >
         <div
           data-slot="chat-composer-surface"
-          data-chat-entrance
           className={cn(
             "transition-transform duration-300 ease-(--ease-interface)",
             isNewConversation && "translate-y-1/2"
           )}
         >
-          <div className="contents">
+          <BorderGlow className="w-full" borderRadius="var(--radius-xl)">
             {renderComposerInput(
               "[&_[data-slot=input-group]]:bg-card/66 [&_[data-slot=input-group]]:shadow-[0_28px_78px_color-mix(in_srgb,var(--background)_76%,transparent)] [&_[data-slot=input-group]]:backdrop-blur-2xl"
             )}
-          </div>
+          </BorderGlow>
           {activityAnnouncement ? (
             <p className="sr-only" role="status" aria-live="polite">
               {activityAnnouncement}

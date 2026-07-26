@@ -102,97 +102,22 @@ export function CenteredNavigation({
       )}
       aria-label={ariaLabel}
     >
-      <motion.div
-        className="mx-auto hidden w-full lg:block"
-        initial={reduceMotion ? false : { opacity: 0, y: -12 }}
-        animate={{ opacity: 1, y: 0 }}
+      <DesktopNavigation
+        variant="precision"
+        activeGroup={activeGroup}
+        activeGroupId={activeGroupId}
+        actionHref={actionHref}
+        actionLabel={actionLabel}
+        brandHref={brandHref}
+        brandLabel={brandLabel}
+        groups={groups}
+        links={links}
+        navId={`${navId}-precision`}
+        reduceMotion={Boolean(reduceMotion)}
+        setActiveGroupId={setActiveGroupId}
         transition={transition}
-        onMouseLeave={() => setActiveGroupId(null)}
-      >
-        <div
-          className={cn(NAV_SURFACE, "flex h-16 items-center rounded-xl px-3")}
-        >
-          <BrandLink href={brandHref} label={brandLabel} />
-          <div className="flex min-w-0 flex-1 items-center justify-center gap-1 px-3">
-            {groups.map((group) => {
-              const expanded = activeGroupId === group.id
-              const panelId = `${navId}-${group.id}`
-              return (
-                <button
-                  key={group.id}
-                  type="button"
-                  className="inline-flex min-h-11 min-w-28 items-center justify-center gap-1.5 rounded-lg px-4 text-[0.9375rem] font-semibold text-foreground/78 transition-colors duration-200 hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none aria-expanded:bg-foreground/7 aria-expanded:text-foreground"
-                  aria-expanded={expanded}
-                  aria-controls={panelId}
-                  onMouseEnter={() => setActiveGroupId(group.id)}
-                  onFocus={() => setActiveGroupId(group.id)}
-                  onClick={() => setActiveGroupId(group.id)}
-                >
-                  {group.label}
-                  <ChevronDown
-                    className={cn(
-                      "size-4 transition-transform duration-200",
-                      expanded && "rotate-180"
-                    )}
-                    aria-hidden="true"
-                  />
-                </button>
-              )
-            })}
-            {links.map((link) => (
-              <a
-                key={link.href}
-                className="inline-flex min-h-11 min-w-24 items-center justify-center rounded-lg px-4 text-[0.9375rem] font-semibold text-foreground/78 transition-colors duration-200 hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                href={link.href}
-                onMouseEnter={() => setActiveGroupId(null)}
-                onFocus={() => setActiveGroupId(null)}
-              >
-                {link.label}
-              </a>
-            ))}
-          </div>
-          <div className="flex min-w-24 items-center justify-end gap-1.5">
-            {utility}
-            {actionHref && actionLabel ? (
-              <a
-                className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition-transform duration-200 hover:-translate-y-0.5"
-                href={actionHref}
-              >
-                {actionLabel}
-              </a>
-            ) : null}
-          </div>
-        </div>
-
-        <AnimatePresence initial={false}>
-          {activeGroup ? (
-            <motion.div
-              key={activeGroup.id}
-              id={`${navId}-${activeGroup.id}`}
-              className={cn(NAV_SURFACE, "mt-2 overflow-hidden rounded-xl")}
-              initial={
-                reduceMotion
-                  ? false
-                  : { height: 0, opacity: 0, filter: "blur(4px)" }
-              }
-              animate={{ height: "auto", opacity: 1, filter: "blur(0px)" }}
-              exit={{ height: 0, opacity: 0, filter: "blur(4px)" }}
-              transition={transition}
-            >
-              <div className="grid grid-cols-2 gap-2 p-3">
-                {activeGroup.items.map((item, index) => (
-                  <NavigationCard
-                    key={item.href}
-                    item={item}
-                    index={index}
-                    reduceMotion={Boolean(reduceMotion)}
-                  />
-                ))}
-              </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-      </motion.div>
+        utility={utility}
+      />
 
       <motion.div
         className="mx-auto max-w-md lg:hidden"
@@ -278,6 +203,181 @@ export function CenteredNavigation({
   )
 }
 
+type DesktopVariant = "original" | "continuous" | "warm" | "precision"
+
+function DesktopNavigation({
+  variant,
+  activeGroup,
+  activeGroupId,
+  actionHref,
+  actionLabel,
+  brandHref,
+  brandLabel,
+  groups,
+  links,
+  navId,
+  reduceMotion,
+  setActiveGroupId,
+  transition,
+  utility,
+}: {
+  variant: DesktopVariant
+  activeGroup: CenteredNavigationGroup | undefined
+  activeGroupId: string | null
+  actionHref?: string
+  actionLabel?: string
+  brandHref: string
+  brandLabel: string
+  groups: readonly CenteredNavigationGroup[]
+  links: readonly CenteredNavigationLink[]
+  navId: string
+  reduceMotion: boolean
+  setActiveGroupId: (groupId: string | null) => void
+  transition: { duration: number; ease?: readonly [number, number, number, number] }
+  utility?: ReactNode
+}) {
+  const continuous = variant !== "original"
+  return (
+    <motion.div
+      className={cn(
+        "mx-auto hidden w-full lg:block",
+        continuous && NAV_SURFACE,
+        variant === "continuous" && "overflow-hidden rounded-xl",
+        variant === "warm" &&
+          "overflow-hidden rounded-2xl bg-popover/72 shadow-[0_28px_70px_color-mix(in_srgb,var(--background)_62%,transparent),inset_0_1px_0_color-mix(in_srgb,var(--foreground)_13%,transparent)]",
+        variant === "precision" &&
+          "max-w-[31rem] overflow-hidden rounded-xl bg-popover/54 shadow-[0_28px_72px_-28px_color-mix(in_srgb,var(--background)_78%,transparent)]"
+      )}
+      initial={reduceMotion ? false : { opacity: 0, y: -12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={transition}
+      onMouseLeave={() => setActiveGroupId(null)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setActiveGroupId(null)
+        }
+      }}
+    >
+      <div
+        className={cn(
+          "flex items-center px-3",
+          variant === "original" && NAV_SURFACE,
+          variant === "original" && "h-16 rounded-xl",
+          variant === "continuous" && "h-16",
+          variant === "warm" && "h-[4.25rem] px-3.5",
+          variant === "precision" && "h-15 px-2.5"
+        )}
+      >
+        <BrandLink href={brandHref} label={brandLabel} />
+        <div className="flex min-w-0 flex-1 items-center justify-center gap-1 px-3">
+          {groups.map((group) => {
+            const expanded = activeGroupId === group.id
+            const panelId = `${navId}-${group.id}`
+            return (
+              <button
+                key={group.id}
+                type="button"
+                className={cn(
+                  "inline-flex min-h-11 min-w-28 items-center justify-center gap-1.5 rounded-lg px-4 text-[0.9375rem] font-semibold text-foreground/78 transition-[background-color,box-shadow,color] duration-200 hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                  expanded &&
+                    variant === "continuous" &&
+                    "bg-foreground/7 text-foreground shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_9%,transparent)]",
+                  expanded &&
+                    variant === "warm" &&
+                    "bg-primary/9 text-foreground shadow-[inset_0_1px_0_color-mix(in_srgb,var(--primary)_22%,transparent)]",
+                  expanded &&
+                    variant === "precision" &&
+                    "bg-primary/10 text-primary ring-1 ring-primary/18"
+                )}
+                aria-expanded={expanded}
+                aria-controls={panelId}
+                onMouseEnter={() => setActiveGroupId(group.id)}
+                onFocus={() => setActiveGroupId(group.id)}
+                onClick={() => setActiveGroupId(expanded ? null : group.id)}
+              >
+                {group.label}
+                <ChevronDown
+                  className={cn(
+                    "size-4 transition-transform duration-200",
+                    expanded && "rotate-180"
+                  )}
+                  aria-hidden="true"
+                />
+              </button>
+            )
+          })}
+          {links.map((link) => (
+            <a
+              key={link.href}
+              className="inline-flex min-h-11 min-w-24 items-center justify-center rounded-lg px-4 text-[0.9375rem] font-semibold text-foreground/78 transition-colors duration-200 hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              href={link.href}
+              onMouseEnter={() => setActiveGroupId(null)}
+              onFocus={() => setActiveGroupId(null)}
+            >
+              {link.label}
+            </a>
+          ))}
+        </div>
+        <div className="flex min-w-24 items-center justify-end gap-1.5">
+          {utility}
+          {actionHref && actionLabel ? (
+            <a
+              className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition-transform duration-200 hover:-translate-y-0.5"
+              href={actionHref}
+            >
+              {actionLabel}
+            </a>
+          ) : null}
+        </div>
+      </div>
+
+      <AnimatePresence initial={false}>
+        {activeGroup ? (
+          <motion.div
+            key={activeGroup.id}
+            id={`${navId}-${activeGroup.id}`}
+            className={cn(
+              "overflow-hidden",
+              variant === "original" && NAV_SURFACE,
+              variant === "original" && "mt-2 rounded-xl",
+              variant === "continuous" && "bg-foreground/[0.025]",
+              variant === "warm" && "bg-background/18",
+              variant === "precision" && "bg-transparent"
+            )}
+            initial={
+              reduceMotion
+                ? false
+                : { height: 0, opacity: 0, filter: "blur(4px)" }
+            }
+            animate={{ height: "auto", opacity: 1, filter: "blur(0px)" }}
+            exit={{ height: 0, opacity: 0, filter: "blur(4px)" }}
+            transition={transition}
+          >
+            <div
+              className={cn(
+                "grid grid-cols-2 gap-2 p-3",
+                continuous && "pt-1",
+                variant === "warm" && "gap-2.5 p-3.5 pt-1.5",
+                variant === "precision" && "gap-1.5 p-2.5 pt-2"
+              )}
+            >
+              {activeGroup.items.map((item, index) => (
+                <NavigationCard
+                  key={item.href}
+                  item={item}
+                  index={index}
+                  reduceMotion={reduceMotion}
+                  variant={variant}
+                />
+              ))}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </motion.div>
+  )
+}
+
 function BrandLink({
   compact = false,
   href,
@@ -313,21 +413,35 @@ function NavigationCard({
   item,
   index = 0,
   reduceMotion,
+  variant = "original",
 }: {
   item: CenteredNavigationItem
   index?: number
   reduceMotion: boolean
+  variant?: DesktopVariant
 }) {
   const Icon = item.icon
   return (
     <motion.a
-      className="group/card flex min-h-18 items-center gap-3 rounded-lg bg-foreground/4 p-3 transition-[background-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:bg-foreground/7 hover:shadow-xl focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      className={cn(
+        "group/card flex min-h-18 items-center gap-3 rounded-lg bg-foreground/4 p-3 transition-[background-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:bg-foreground/7 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+        variant === "original" && "hover:shadow-xl",
+        variant === "continuous" &&
+          "shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_6%,transparent)] hover:shadow-[0_10px_24px_color-mix(in_srgb,var(--background)_34%,transparent),inset_0_1px_0_color-mix(in_srgb,var(--foreground)_10%,transparent)]",
+        variant === "warm" &&
+          "rounded-xl bg-foreground/5 hover:bg-foreground/8 hover:shadow-[0_12px_28px_color-mix(in_srgb,var(--background)_40%,transparent)]",
+        variant === "precision" &&
+          "min-h-16 bg-foreground/[0.035] p-2.5 ring-1 ring-foreground/6 hover:translate-y-0 hover:ring-foreground/12"
+      )}
       href={item.href}
-      initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+      initial={
+        reduceMotion || variant === "precision" ? false : { opacity: 0, y: 8 }
+      }
       animate={{ opacity: 1, y: 0 }}
       transition={{
-        duration: reduceMotion ? 0.01 : 0.2,
-        delay: reduceMotion ? 0 : index * 0.045,
+        duration: reduceMotion || variant === "precision" ? 0.01 : 0.2,
+        delay:
+          reduceMotion || variant === "precision" ? 0 : index * 0.045,
         ease: [0.22, 1, 0.36, 1],
       }}
     >
