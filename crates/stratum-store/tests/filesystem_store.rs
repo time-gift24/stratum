@@ -1,11 +1,11 @@
 mod support;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
-use chrono::Utc;
 use stratum_core::{
-    AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, ModelConfig, ModelId,
-    RunId, RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
+    AgentEvent, AgentId, AgentRuntimeContext, AgentVersionId, ChatMessage, ChatRole, HistoryQuery,
+    ModelConfig, ModelId, NewAgentMessage, NodeId, RuntimeEvent, SessionId, StreamEnvelope,
+    TokenUsage, ToolSetFingerprint, TurnId, TurnRuntimeSnapshot, WorkflowVersionId,
 };
 use stratum_filesystem::{Entry, FILESYSTEM_CAS_RETRIES, VirtualPath};
 use stratum_store::{
@@ -32,32 +32,35 @@ fn legacy_agent_state_without_model_config(agent_id: AgentId) -> serde_json::Val
     serde_json::Value::Object(state.clone())
 }
 
-fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId) -> StreamEnvelope {
-    StreamEnvelope {
-        business_seq: None,
-        run_id,
-        timestamp: Utc::now(),
-        source: EventSource::Run,
-        event: RuntimeEvent::Agent {
-            agent_id,
-            event: AgentEvent::Message {
-                turn_id,
-                message: ChatMessage::user("message"),
-            },
-        },
-        metadata: BTreeMap::new(),
-    }
+fn message_envelope(agent_id: AgentId, session_id: SessionId, turn_id: TurnId) -> NewAgentMessage {
+    NewAgentMessage::new(
+        &AgentRuntimeContext::direct(session_id),
+        agent_id,
+        turn_id,
+        ChatMessage::user("message"),
+    )
 }
 
 fn sequenced_message_envelope(
     agent_id: AgentId,
-    run_id: RunId,
+    session_id: SessionId,
     turn_id: TurnId,
     seq: u64,
 ) -> StreamEnvelope {
-    let mut envelope = message_envelope(agent_id, run_id, turn_id);
-    envelope.business_seq = Some(seq);
-    envelope
+    message_envelope(agent_id, session_id, turn_id).into_envelope(seq)
+}
+
+fn test_runtime_snapshot(state: &AgentState) -> TurnRuntimeSnapshot {
+    TurnRuntimeSnapshot::new(
+        state.agent_version_id,
+        test_model_config(),
+        "0000000000000000000000000000000000000000000000000000000000000000"
+            .parse::<ToolSetFingerprint>()
+            .expect("test fingerprint parses"),
+        state.skill_set_version_id,
+        state.extension_set_version_id,
+        state.hook_handler_versions.clone(),
+    )
 }
 
 fn json_entry<T: serde::Serialize>(value: &T) -> Entry {
@@ -67,23 +70,23 @@ fn json_entry<T: serde::Serialize>(value: &T) -> Entry {
 fn event_sequences(events: &[StreamEnvelope]) -> Vec<u64> {
     events
         .iter()
-        .map(|event| event.business_seq().expect("message sequence"))
+        .map(|event| event.message_seq().expect("message sequence"))
         .collect()
 }
 
 async fn append_messages(store: &FilesystemAgentStore, count: usize) {
     let state = store.load_agent().await.expect("load agent");
     let agent_id = state.agent_id;
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     for index in 0..count {
         let appended = store
-            .append_message(message_envelope(agent_id, run_id, turn_id))
+            .append_message(message_envelope(agent_id, session_id, turn_id))
             .await
             .expect("append message");
         let expected_seq =
             state.last_seq + u64::try_from(index).expect("message index fits u64") + 1;
-        assert_eq!(appended.business_seq(), Some(expected_seq));
+        assert_eq!(appended.message_seq(), Some(expected_seq));
     }
 }
 
@@ -99,11 +102,11 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
         .await
         .expect("initialize");
     let first = store
-        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
+        .append_message(message_envelope(agent_id, SessionId::new(), TurnId::new()))
         .await
         .expect("append");
 
-    assert_eq!(first.business_seq(), Some(1));
+    assert_eq!(first.message_seq(), Some(1));
     assert!(filesystem.exists("/agents/a/agent.json"));
     assert!(filesystem.exists("/agents/a/messages/1.json"));
     let stored: StreamEnvelope = serde_json::from_slice(
@@ -113,13 +116,13 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
             .contents(),
     )
     .expect("decode stored message");
-    assert_eq!(stored.business_seq(), Some(1));
+    assert_eq!(stored.message_seq(), Some(1));
     assert_eq!(stored, first);
     assert_eq!(store.load_agent().await.expect("state").last_seq, 1);
 }
 
 #[tokio::test]
-async fn write_model_config_if_missing_upgrades_legacy_state_once() {
+async fn unsupported_beta_state_is_rejected_without_migration() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
@@ -127,56 +130,16 @@ async fn write_model_config_if_missing_upgrades_legacy_state_once() {
     let legacy = legacy_agent_state_without_model_config(agent_id);
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&legacy));
 
-    let updated = store
-        .write_model_config_if_missing(test_model_config())
-        .await
-        .expect("migration succeeds");
-
-    assert_eq!(updated.model_config, Some(test_model_config()));
-    assert_eq!(updated.state_version, AGENT_STATE_VERSION);
-}
-
-#[tokio::test]
-async fn legacy_state_rejects_runtime_load_before_model_config_migration() {
-    let filesystem = Arc::new(MemoryCasFilesystem::default());
-    let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let store = FilesystemAgentStore::new(filesystem, root);
-
-    store
-        .initialize(AgentId::new(), "a".to_owned())
-        .await
-        .expect("initialize legacy state");
-
     let error = store
         .load_agent()
         .await
-        .expect_err("legacy runtime load requires model migration");
+        .expect_err("old beta state must be rejected");
 
-    assert!(matches!(error, StoreError::MissingModelConfig));
-}
-
-#[tokio::test]
-async fn legacy_state_rejects_runtime_updates_before_model_config_migration() {
-    let filesystem = Arc::new(MemoryCasFilesystem::default());
-    let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let store = FilesystemAgentStore::new(filesystem, root);
-
-    store
-        .initialize(AgentId::new(), "a".to_owned())
-        .await
-        .expect("initialize legacy state");
-
-    let error = store
-        .update_state(
-            AgentStatus::Running,
-            Some(RunId::new()),
-            Some(TurnId::new()),
-            TokenUsage::default(),
-        )
-        .await
-        .expect_err("legacy runtime update requires model migration");
-
-    assert!(matches!(error, StoreError::MissingModelConfig));
+    assert!(matches!(
+        error,
+        StoreError::UnsupportedStateVersion { version }
+            if version == AGENT_STATE_VERSION - 1
+    ));
 }
 
 #[tokio::test]
@@ -185,7 +148,7 @@ async fn start_turn_reconciles_previous_frontier_before_changing_identity() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let old_run_id = RunId::new();
+    let old_session_id = SessionId::new();
     let old_turn_id = TurnId::new();
     store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
@@ -194,7 +157,7 @@ async fn start_turn_reconciles_previous_frontier_before_changing_identity() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
@@ -203,24 +166,29 @@ async fn start_turn_reconciles_previous_frontier_before_changing_identity() {
     store
         .update_state(
             AgentStatus::Finished,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
         .await
         .expect("finish old identity");
-    let old_frontier = sequenced_message_envelope(agent_id, old_run_id, old_turn_id, 1);
+    let old_frontier = sequenced_message_envelope(agent_id, old_session_id, old_turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&old_frontier));
 
-    let new_run_id = RunId::new();
+    let new_session_id = SessionId::new();
     let new_turn_id = TurnId::new();
+    let current = store.load_agent().await.expect("load current state");
     let started = store
-        .start_turn(new_run_id, new_turn_id, test_model_config())
+        .start_turn(
+            &AgentRuntimeContext::direct(new_session_id),
+            new_turn_id,
+            test_runtime_snapshot(&current),
+        )
         .await
         .expect("start turn after frontier reconciliation");
 
     assert_eq!(started.last_seq, 1);
-    assert_eq!(started.run_id, Some(new_run_id));
+    assert_eq!(started.session_id, Some(new_session_id));
     assert_eq!(started.turn_id, Some(new_turn_id));
     let page = store
         .history_page(HistoryQuery {
@@ -234,12 +202,86 @@ async fn start_turn_reconciles_previous_frontier_before_changing_identity() {
 }
 
 #[tokio::test]
+async fn workflow_location_and_runtime_snapshot_survive_store_restart() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root.clone());
+    let agent_id = AgentId::new();
+    let state = store
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
+        .await
+        .expect("initialize");
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let context = AgentRuntimeContext::workflow_node(
+        session_id,
+        WorkflowVersionId::new(),
+        NodeId::from("agent-node"),
+    );
+    let snapshot = test_runtime_snapshot(&state);
+
+    store
+        .start_turn(&context, turn_id, snapshot.clone())
+        .await
+        .expect("start turn");
+    let restarted = FilesystemAgentStore::new(filesystem, root);
+    let restored = restarted.load_agent().await.expect("load after restart");
+
+    assert_eq!(restored.session_id, Some(session_id));
+    assert_eq!(restored.turn_id, Some(turn_id));
+    assert_eq!(restored.location, Some(context.location));
+    assert_eq!(restored.turn_runtime_snapshot, Some(snapshot));
+}
+
+#[tokio::test]
+async fn start_turn_fails_closed_on_unavailable_pinned_component() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let state = store
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
+        .await
+        .expect("initialize");
+    let mut snapshot = test_runtime_snapshot(&state);
+    snapshot.agent_version_id = AgentVersionId::new();
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .start_turn(
+            &AgentRuntimeContext::direct(SessionId::new()),
+            TurnId::new(),
+            snapshot,
+        )
+        .await
+        .expect_err("mismatched component must fail closed");
+
+    assert!(matches!(
+        error,
+        StoreError::RuntimeSnapshotMismatch {
+            component: "agent_version"
+        }
+    ));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn complete_iteration_advances_and_persists_usage() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let usage = TokenUsage {
         input_tokens: 2,
@@ -253,7 +295,7 @@ async fn complete_iteration_advances_and_persists_usage() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             TokenUsage::default(),
         )
@@ -261,7 +303,7 @@ async fn complete_iteration_advances_and_persists_usage() {
         .expect("start run");
 
     let completed = store
-        .complete_iteration(run_id, turn_id, 0, usage)
+        .complete_iteration(session_id, turn_id, 0, usage)
         .await
         .expect("complete iteration");
 
@@ -278,7 +320,7 @@ async fn running_state_rejects_a_different_run_without_writing() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
@@ -287,7 +329,7 @@ async fn running_state_rejects_a_different_run_without_writing() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             TokenUsage::default(),
         )
@@ -302,14 +344,14 @@ async fn running_state_rejects_a_different_run_without_writing() {
     let error = store
         .update_state(
             AgentStatus::Running,
-            Some(RunId::new()),
+            Some(SessionId::new()),
             Some(TurnId::new()),
             TokenUsage::default(),
         )
         .await
         .expect_err("a second run must not replace the persisted running turn");
 
-    assert!(matches!(error, StoreError::RunningRunConflict { .. }));
+    assert!(matches!(error, StoreError::RunningSessionConflict { .. }));
     assert_eq!(
         filesystem
             .entry("/agents/a/agent.json")
@@ -336,7 +378,7 @@ async fn complete_iteration_rejects_non_running_state_without_writing() {
         .to_vec();
 
     let error = store
-        .complete_iteration(RunId::new(), TurnId::new(), 0, TokenUsage::default())
+        .complete_iteration(SessionId::new(), TurnId::new(), 0, TokenUsage::default())
         .await
         .expect_err("idle state is not running");
 
@@ -356,13 +398,13 @@ async fn complete_iteration_rejects_non_running_state_without_writing() {
 }
 
 #[tokio::test]
-async fn complete_iteration_rejects_run_mismatch_without_writing() {
+async fn complete_iteration_rejects_session_mismatch_without_writing() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
-    let other_run_id = RunId::new();
+    let session_id = SessionId::new();
+    let other_session_id = SessionId::new();
     let turn_id = TurnId::new();
     store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
@@ -371,12 +413,12 @@ async fn complete_iteration_rejects_run_mismatch_without_writing() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             TokenUsage::default(),
         )
         .await
-        .expect("start run");
+        .expect("start operation");
     let before = filesystem
         .entry("/agents/a/agent.json")
         .expect("agent state")
@@ -384,14 +426,14 @@ async fn complete_iteration_rejects_run_mismatch_without_writing() {
         .to_vec();
 
     let error = store
-        .complete_iteration(other_run_id, turn_id, 0, TokenUsage::default())
+        .complete_iteration(other_session_id, turn_id, 0, TokenUsage::default())
         .await
-        .expect_err("run mismatch");
+        .expect_err("session mismatch");
 
     assert!(matches!(
         error,
-        StoreError::RunMismatch { expected, actual }
-            if expected == run_id && actual == other_run_id
+        StoreError::SessionMismatch { expected, actual }
+            if expected == session_id && actual == other_session_id
     ));
     assert_eq!(
         filesystem
@@ -408,7 +450,7 @@ async fn complete_iteration_rejects_turn_mismatch_without_writing() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let other_turn_id = TurnId::new();
     store
@@ -418,7 +460,7 @@ async fn complete_iteration_rejects_turn_mismatch_without_writing() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             TokenUsage::default(),
         )
@@ -431,7 +473,7 @@ async fn complete_iteration_rejects_turn_mismatch_without_writing() {
         .to_vec();
 
     let error = store
-        .complete_iteration(run_id, other_turn_id, 0, TokenUsage::default())
+        .complete_iteration(session_id, other_turn_id, 0, TokenUsage::default())
         .await
         .expect_err("turn mismatch");
 
@@ -455,7 +497,7 @@ async fn complete_iteration_rejects_iteration_mismatch_without_writing() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
@@ -464,7 +506,7 @@ async fn complete_iteration_rejects_iteration_mismatch_without_writing() {
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             TokenUsage::default(),
         )
@@ -477,7 +519,7 @@ async fn complete_iteration_rejects_iteration_mismatch_without_writing() {
         .to_vec();
 
     let error = store
-        .complete_iteration(run_id, turn_id, 1, TokenUsage::default())
+        .complete_iteration(session_id, turn_id, 1, TokenUsage::default())
         .await
         .expect_err("iteration mismatch");
 
@@ -503,14 +545,14 @@ async fn complete_iteration_rejects_iteration_overflow_without_writing() {
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let mut state = store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
     state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
+    state.session_id = Some(session_id);
     state.turn_id = Some(turn_id);
     state.next_iteration = u64::MAX;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
@@ -521,7 +563,7 @@ async fn complete_iteration_rejects_iteration_overflow_without_writing() {
         .to_vec();
 
     let error = store
-        .complete_iteration(run_id, turn_id, u64::MAX, TokenUsage::default())
+        .complete_iteration(session_id, turn_id, u64::MAX, TokenUsage::default())
         .await
         .expect_err("iteration overflow");
 
@@ -536,12 +578,12 @@ async fn complete_iteration_rejects_iteration_overflow_without_writing() {
 }
 
 #[tokio::test]
-async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration() {
+async fn start_turn_resets_iteration_and_terminal_updates_preserve_it() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem, root);
     let agent_id = AgentId::new();
-    let old_run_id = RunId::new();
+    let old_session_id = SessionId::new();
     let old_turn_id = TurnId::new();
     store
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
@@ -550,40 +592,40 @@ async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration(
     store
         .update_state(
             AgentStatus::Running,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
         .await
         .expect("start old run");
     store
-        .complete_iteration(old_run_id, old_turn_id, 0, TokenUsage::default())
+        .complete_iteration(old_session_id, old_turn_id, 0, TokenUsage::default())
         .await
         .expect("complete old iteration");
     store
         .update_state(
             AgentStatus::Finished,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
         .await
         .expect("finish old run");
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
+    let current = store.load_agent().await.expect("load current state");
 
     let started = store
-        .update_state(
-            AgentStatus::Running,
-            Some(run_id),
-            Some(turn_id),
-            TokenUsage::default(),
+        .start_turn(
+            &AgentRuntimeContext::direct(session_id),
+            turn_id,
+            test_runtime_snapshot(&current),
         )
         .await
-        .expect("start new run");
+        .expect("start new turn");
     assert_eq!(started.next_iteration, 0);
     store
-        .complete_iteration(run_id, turn_id, 0, TokenUsage::default())
+        .complete_iteration(session_id, turn_id, 0, TokenUsage::default())
         .await
         .expect("complete new iteration");
 
@@ -593,34 +635,16 @@ async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration(
         AgentStatus::Cancelled,
     ] {
         let terminal = store
-            .update_state(status, Some(run_id), Some(turn_id), TokenUsage::default())
+            .update_state(
+                status,
+                Some(session_id),
+                Some(turn_id),
+                TokenUsage::default(),
+            )
             .await
             .expect("store terminal state");
         assert_eq!(terminal.next_iteration, 1);
     }
-}
-
-#[tokio::test]
-async fn append_rejects_an_already_sequenced_message() {
-    let filesystem = Arc::new(MemoryCasFilesystem::default());
-    let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let store = FilesystemAgentStore::new(filesystem.clone(), root);
-    let agent_id = AgentId::new();
-    store
-        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
-        .await
-        .expect("initialize");
-    let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
-    envelope.business_seq = Some(7);
-
-    let error = store
-        .append_message(envelope)
-        .await
-        .expect_err("sequenced input");
-
-    assert!(matches!(error, StoreError::MessageAlreadySequenced));
-    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
-    assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
 #[tokio::test]
@@ -633,15 +657,8 @@ async fn append_rejects_a_system_message_before_writing() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
-    let RuntimeEvent::Agent {
-        event: AgentEvent::Message { message, .. },
-        ..
-    } = &mut envelope.event
-    else {
-        panic!("message fixture");
-    };
-    *message = ChatMessage::system("system prompt");
+    let mut envelope = message_envelope(agent_id, SessionId::new(), TurnId::new());
+    envelope.message = ChatMessage::system("system prompt");
 
     let error = store
         .append_message(envelope)
@@ -670,7 +687,7 @@ async fn load_rejects_a_committed_system_message() {
         .expect("initialize");
     state.last_seq = 1;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
-    let mut envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let mut envelope = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     let RuntimeEvent::Agent {
         event: AgentEvent::Message { message, .. },
         ..
@@ -704,7 +721,7 @@ async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let mut envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let mut envelope = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     let RuntimeEvent::Agent {
         event: AgentEvent::Message { message, .. },
         ..
@@ -751,7 +768,7 @@ async fn append_rejects_a_message_for_a_different_agent() {
     let error = store
         .append_message(message_envelope(
             other_agent_id,
-            RunId::new(),
+            SessionId::new(),
             TurnId::new(),
         ))
         .await
@@ -767,33 +784,6 @@ async fn append_rejects_a_message_for_a_different_agent() {
 }
 
 #[tokio::test]
-async fn append_rejects_a_non_message_agent_event() {
-    let filesystem = Arc::new(MemoryCasFilesystem::default());
-    let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let store = FilesystemAgentStore::new(filesystem.clone(), root);
-    let agent_id = AgentId::new();
-    store
-        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
-        .await
-        .expect("initialize");
-    let turn_id = TurnId::new();
-    let mut envelope = message_envelope(agent_id, RunId::new(), turn_id);
-    envelope.event = RuntimeEvent::Agent {
-        agent_id,
-        event: AgentEvent::Started { turn_id },
-    };
-
-    let error = store
-        .append_message(envelope)
-        .await
-        .expect_err("non-message event");
-
-    assert!(matches!(error, StoreError::UnexpectedMessageEvent));
-    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
-    assert!(!filesystem.exists("/agents/a/messages/1.json"));
-}
-
-#[tokio::test]
 async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -804,7 +794,7 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
         .await
         .expect("initialize");
     assert_eq!(state.last_seq, 0);
-    let envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let envelope = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
     let message_version = filesystem
         .entry_version("/agents/a/messages/1.json")
@@ -829,7 +819,7 @@ async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    let second = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
     let error = store
@@ -856,8 +846,8 @@ async fn load_rejects_a_third_message_beyond_the_single_frontier() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
-    let third = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
+    let first = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
+    let third = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 3);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/3.json", json_entry(&third));
 
@@ -885,7 +875,7 @@ async fn load_rejects_noncanonical_message_filenames() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/01.json", json_entry(&first));
 
     let error = store.load_agent().await.expect_err("noncanonical filename");
@@ -906,11 +896,10 @@ async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplicat
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let requested = message_envelope(agent_id, run_id, turn_id);
-    let mut envelope = requested.clone();
-    envelope.business_seq = Some(1);
+    let requested = message_envelope(agent_id, session_id, turn_id);
+    let envelope = requested.clone().into_envelope(1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
     let message_version = filesystem
         .entry_version("/agents/a/messages/1.json")
@@ -937,14 +926,14 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let frontier = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, session_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
     let frontier_version = filesystem
         .entry_version("/agents/a/messages/1.json")
         .expect("frontier version");
-    let mut requested = message_envelope(agent_id, run_id, turn_id);
+    let mut requested = message_envelope(agent_id, session_id, turn_id);
     requested
         .metadata
         .insert("request".to_owned(), serde_json::json!(true));
@@ -954,7 +943,7 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
         .await
         .expect("append after frontier");
 
-    assert_eq!(appended.business_seq(), Some(2));
+    assert_eq!(appended.message_seq(), Some(2));
     assert_eq!(store.load_agent().await.expect("state").last_seq, 2);
     assert!(filesystem.exists("/agents/a/messages/2.json"));
     assert_eq!(
@@ -964,7 +953,7 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
 }
 
 #[tokio::test]
-async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
+async fn append_rejects_an_uncommitted_frontier_from_a_different_session() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
@@ -973,21 +962,21 @@ async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let frontier_run_id = RunId::new();
+    let frontier_session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let frontier = sequenced_message_envelope(agent_id, frontier_run_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, frontier_session_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
-    let requested_run_id = RunId::new();
+    let requested_session_id = SessionId::new();
 
     let error = store
-        .append_message(message_envelope(agent_id, requested_run_id, turn_id))
+        .append_message(message_envelope(agent_id, requested_session_id, turn_id))
         .await
-        .expect_err("run mismatch");
+        .expect_err("session mismatch");
 
     assert!(matches!(
         error,
-        StoreError::RunMismatch { expected, actual }
-            if expected == requested_run_id && actual == frontier_run_id
+        StoreError::SessionMismatch { expected, actual }
+            if expected == requested_session_id && actual == frontier_session_id
     ));
     assert_eq!(store.load_agent().await.expect("reconcile").last_seq, 1);
 }
@@ -1002,11 +991,11 @@ async fn append_rejects_discontiguous_message_before_advancing_frontier() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    let second = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
     let error = store
-        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
+        .append_message(message_envelope(agent_id, SessionId::new(), TurnId::new()))
         .await
         .expect_err("discontiguous message");
 
@@ -1040,7 +1029,7 @@ async fn load_rejects_missing_committed_message() {
         .expect("initialize");
     state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
-    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.remove_entry("/agents/a/messages/2.json");
 
@@ -1064,8 +1053,8 @@ async fn load_rejects_message_filename_body_sequence_mismatch() {
         .expect("initialize");
     state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
-    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
-    let mismatched = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
+    let first = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
+    let mismatched = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 3);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&mismatched));
 
@@ -1091,7 +1080,7 @@ async fn load_rejects_message_for_a_different_agent() {
         .await
         .expect("initialize");
     let other_agent_id = AgentId::new();
-    let frontier = sequenced_message_envelope(other_agent_id, RunId::new(), TurnId::new(), 1);
+    let frontier = sequenced_message_envelope(other_agent_id, SessionId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
 
     let error = store.load_agent().await.expect_err("agent mismatch");
@@ -1113,7 +1102,7 @@ async fn load_rejects_unknown_message_json_fields() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let envelope = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     let mut value = serde_json::to_value(envelope).expect("serialize envelope");
     value
         .as_object_mut()
@@ -1122,6 +1111,27 @@ async fn load_rejects_unknown_message_json_fields() {
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&value));
 
     let error = store.load_agent().await.expect_err("unknown field");
+
+    assert!(matches!(error, StoreError::DecodeMessage(_)));
+}
+
+#[tokio::test]
+async fn load_rejects_legacy_run_and_source_message_shape() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    store
+        .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
+        .await
+        .expect("initialize");
+    let envelope = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
+    let mut value = serde_json::to_value(envelope).expect("serialize envelope");
+    value["run_id"] = serde_json::json!(SessionId::new());
+    value["source"] = serde_json::json!({"type": "run"});
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&value));
+
+    let error = store.load_agent().await.expect_err("legacy envelope");
 
     assert!(matches!(error, StoreError::DecodeMessage(_)));
 }
@@ -1137,7 +1147,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
         .await
         .expect("initialize");
     advanced_state.last_seq = 1;
-    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, SessionId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.fail_next_version_write();
 
@@ -1147,7 +1157,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
             store
                 .update_state(
                     AgentStatus::Finished,
-                    Some(RunId::new()),
+                    Some(SessionId::new()),
                     Some(TurnId::new()),
                     TokenUsage::default(),
                 )
@@ -1177,35 +1187,35 @@ async fn terminal_update_reconciles_the_previous_run_frontier_before_a_new_ident
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let old_run_id = RunId::new();
+    let old_session_id = SessionId::new();
     let old_turn_id = TurnId::new();
     store
         .update_state(
             AgentStatus::Running,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
         .await
         .expect("store old identity");
-    let old_frontier = sequenced_message_envelope(agent_id, old_run_id, old_turn_id, 1);
+    let old_frontier = sequenced_message_envelope(agent_id, old_session_id, old_turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&old_frontier));
     store
         .update_state(
             AgentStatus::Finished,
-            Some(old_run_id),
+            Some(old_session_id),
             Some(old_turn_id),
             TokenUsage::default(),
         )
         .await
         .expect("finish old identity after reconciliation");
-    let new_run_id = RunId::new();
+    let new_session_id = SessionId::new();
     let new_turn_id = TurnId::new();
 
     let updated = store
         .update_state(
             AgentStatus::Running,
-            Some(new_run_id),
+            Some(new_session_id),
             Some(new_turn_id),
             TokenUsage::default(),
         )
@@ -1213,7 +1223,7 @@ async fn terminal_update_reconciles_the_previous_run_frontier_before_a_new_ident
         .expect("store new identity after reconciliation");
 
     assert_eq!(updated.last_seq, 1);
-    assert_eq!(updated.run_id, Some(new_run_id));
+    assert_eq!(updated.session_id, Some(new_session_id));
     assert_eq!(updated.turn_id, Some(new_turn_id));
     let page = store
         .history_page(HistoryQuery {
@@ -1225,10 +1235,10 @@ async fn terminal_update_reconciles_the_previous_run_frontier_before_a_new_ident
         .expect("old frontier is committed and loadable");
     assert_eq!(page.events, [old_frontier]);
     let appended = store
-        .append_message(message_envelope(agent_id, new_run_id, new_turn_id))
+        .append_message(message_envelope(agent_id, new_session_id, new_turn_id))
         .await
         .expect("append new-run message");
-    assert_eq!(appended.business_seq(), Some(2));
+    assert_eq!(appended.message_seq(), Some(2));
 }
 
 #[tokio::test]
@@ -1241,9 +1251,9 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let first = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
+    let first = sequenced_message_envelope(agent_id, session_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.pause_next_version_write();
 
@@ -1252,7 +1262,7 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
         async move { store.load_agent().await }
     });
     filesystem.wait_for_version_write_pause().await;
-    let second = sequenced_message_envelope(agent_id, run_id, turn_id, 2);
+    let second = sequenced_message_envelope(agent_id, session_id, turn_id, 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
     latest_state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&latest_state));
@@ -1494,7 +1504,7 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
     filesystem.reset_read_counts();
 
     store
-        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
+        .append_message(message_envelope(agent_id, SessionId::new(), TurnId::new()))
         .await
         .expect("append after long history");
 
@@ -1523,7 +1533,7 @@ async fn append_stops_after_the_filesystem_cas_retry_limit() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        store.append_message(message_envelope(agent_id, RunId::new(), TurnId::new())),
+        store.append_message(message_envelope(agent_id, SessionId::new(), TurnId::new())),
     )
     .await
     .expect("append terminates")
@@ -1543,9 +1553,9 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         .initialize_with_model_config(agent_id, "a".to_owned(), test_model_config())
         .await
         .expect("initialize");
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let requested = message_envelope(agent_id, run_id, turn_id);
+    let requested = message_envelope(agent_id, session_id, turn_id);
     filesystem.pause_next_read("/agents/a/messages/2.json");
 
     let append = tokio::spawn({
@@ -1553,8 +1563,8 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         async move { store.append_message(requested).await }
     });
     filesystem.wait_for_read_pause().await;
-    let committed = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
-    let frontier = sequenced_message_envelope(agent_id, run_id, turn_id, 2);
+    let committed = sequenced_message_envelope(agent_id, session_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, session_id, turn_id, 2);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&committed));
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&frontier));
     advanced_state.last_seq = 1;
@@ -1566,7 +1576,7 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         .expect("append task")
         .expect("stale append retries");
 
-    assert_eq!(appended.business_seq(), Some(3));
+    assert_eq!(appended.message_seq(), Some(3));
     assert_eq!(store.load_agent().await.expect("state").last_seq, 3);
     assert!(filesystem.exists("/agents/a/messages/3.json"));
 }

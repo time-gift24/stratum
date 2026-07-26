@@ -1,12 +1,5 @@
 # stratum-store invariants
 
-## Legacy Model Configuration
-
-- The store commits an agent's `ModelConfig` only as part of the durable start transition that
-  accepts the turn; a failed candidate must leave the previous snapshot intact.
-- Legacy state without a model configuration is accepted solely to migrate it to the current
-  persisted shape, never as a normal runtime state.
-
 ## Agent Loop Event Projection
 
 - Persistence is a durable-event consumer; it is not an `AgentLoop` dependency.
@@ -19,3 +12,13 @@
   forwarding error or timeout cannot undo the store commit.
 - Durable events without a store projection retain the downstream bus's
   acknowledgement requirement.
+
+## Session Runtime State
+
+- Starting a Turn atomically commits Session, Turn, Agent location, and the exact runtime snapshot;
+  a failed candidate must leave the prior durable state intact.
+- `append_message` accepts only `NewAgentMessage`, allocates the next Agent-scoped `message_seq`,
+  and returns the committed envelope. Retained-bus failure never rolls back this commit.
+- Agent history is isolated by Agent even when multiple Agents share one Session.
+- The Store accepts only the current strict beta state and message shapes. Unsupported legacy data
+  is rejected; do not add migration, rollback, downgrade, or dual-read code.

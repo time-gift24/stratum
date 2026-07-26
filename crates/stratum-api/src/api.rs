@@ -22,8 +22,9 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use stratum_agent::AgentError;
 use stratum_config::{AgentName, ConfigError};
 use stratum_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, EventCursor, EventRecord, HistoryPage,
-    HistoryQuery, ModelConfig, ModelId, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    AgentEvent, AgentId, AgentLocation, ApprovalDecision, ApprovalId, EventCursor, EventRecord,
+    HistoryPage, HistoryQuery, ModelConfig, ModelId, ReplayStart, RuntimeEvent, SessionId,
+    TokenUsage, TurnId,
 };
 use stratum_infra::EventStreamBusError;
 use stratum_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -35,7 +36,7 @@ use tracing::{Span, field, info_span};
 
 use crate::{HostError, HostState};
 
-/// Response returned after an agent and its initial run are durably accepted.
+/// Response returned after an agent and its initial Turn are durably accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AgentCreated {
@@ -43,8 +44,10 @@ pub struct AgentCreated {
     pub agent_id: AgentId,
     /// Resolved template name.
     pub agent_name: String,
-    /// Initial run identity.
-    pub run_id: RunId,
+    /// Long-lived session containing the initial Turn.
+    pub session_id: SessionId,
+    /// Initial Turn identity.
+    pub turn_id: TurnId,
 }
 
 /// Public projection of one persisted agent state.
@@ -59,10 +62,12 @@ pub struct AgentView {
     pub status: AgentStatus,
     /// Persisted model and provider-specific parameters for future turns.
     pub model_config: ModelConfig,
-    /// Current run identity, when present.
-    pub run_id: Option<RunId>,
+    /// Current or most recent Session identity, when present.
+    pub session_id: Option<SessionId>,
     /// Current turn identity, when present.
     pub turn_id: Option<TurnId>,
+    /// Current or most recent Agent execution location.
+    pub location: Option<AgentLocation>,
     /// Cumulative model token usage.
     pub usage: TokenUsage,
     /// Last committed complete-message sequence.
@@ -81,12 +86,16 @@ pub struct AgentTemplateView {
     pub model_config: ModelConfig,
 }
 
-/// Response returned after a run is durably accepted.
+/// Response returned after a Turn is durably accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct RunAccepted {
-    /// Accepted run identity.
-    pub run_id: RunId,
+pub struct TurnAccepted {
+    /// Session containing the accepted Turn.
+    pub session_id: SessionId,
+    /// Agent processing the accepted Turn.
+    pub agent_id: AgentId,
+    /// Accepted Turn identity.
+    pub turn_id: TurnId,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +103,8 @@ pub struct RunAccepted {
 struct CreateAgentRequest {
     agent_name: String,
     text: String,
+    #[serde(default)]
+    session_id: Option<SessionId>,
     #[serde(default)]
     model_config: Option<MessageModelConfig>,
 }
@@ -173,6 +184,7 @@ pub fn router(state: Arc<HostState>) -> Router {
             post(resolve_approval),
         )
         .route("/v1/agents/{agent_id}/events", get(get_events))
+        .route("/v1/sessions/{session_id}/events", get(get_session_events))
         .with_state(state)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(
@@ -188,7 +200,8 @@ pub fn router(state: Arc<HostState>) -> Router {
                         method = %request.method(),
                         agent_id = field::Empty,
                         agent_name = field::Empty,
-                        run_id = field::Empty,
+                        session_id = field::Empty,
+                        turn_id = field::Empty,
                         cursor = field::Empty,
                         status = field::Empty,
                         latency = field::Empty,
@@ -231,14 +244,16 @@ async fn create_agent(
     let agent_name: AgentName = request.agent_name.parse()?;
     Span::current().record("agent_name", agent_name.as_str());
     let created = state
-        .create_agent_with_model_config(
+        .create_agent_in_session_with_model_config(
             agent_name,
             request.text,
+            request.session_id,
             request.model_config.map(ModelConfig::from),
         )
         .await?;
     Span::current().record("agent_id", field::display(created.agent_id));
-    Span::current().record("run_id", field::display(created.run_id));
+    Span::current().record("session_id", field::display(created.session_id));
+    Span::current().record("turn_id", field::display(created.turn_id));
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))
         .expect("agent id always produces a valid location header");
     let mut response = (StatusCode::CREATED, Json(created)).into_response();
@@ -296,17 +311,43 @@ async fn get_events(
     path: Result<Path<AgentId>, PathRejection>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-) -> Result<impl IntoResponse, HostError> {
+) -> Result<Response, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
-    find_agent(&state, agent_id)?;
+    let hosted = find_agent(&state, agent_id)?;
+    let session_id = hosted
+        .store
+        .load_agent()
+        .await?
+        .session_id
+        .ok_or(AgentError::ResumeSessionMissing)?;
+    session_events_response(state, session_id, headers, uri).await
+}
+
+async fn get_session_events(
+    State(state): State<Arc<HostState>>,
+    path: Result<Path<SessionId>, PathRejection>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Response, HostError> {
+    let Path(session_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    session_events_response(state, session_id, headers, uri).await
+}
+
+async fn session_events_response(
+    state: Arc<HostState>,
+    session_id: SessionId,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Result<Response, HostError> {
+    Span::current().record("session_id", field::display(session_id));
     let replay_start = replay_start(&headers, &uri)?;
     if let ReplayStart::After(cursor) = &replay_start {
         Span::current().record("cursor", cursor.transport_sequence());
     }
     let events = state
         .event_bus()
-        .subscribe_agent(agent_id, replay_start)
+        .subscribe_session(session_id, replay_start)
         .await?;
     let shutdown = state.shutdown_token();
     let events = stream::unfold(Some((events, shutdown)), |state| async move {
@@ -324,7 +365,9 @@ async fn get_events(
             }
         }
     });
-    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response())
 }
 
 fn replay_start(headers: &HeaderMap, uri: &axum::http::Uri) -> Result<ReplayStart, HostError> {
@@ -385,25 +428,33 @@ async fn post_message(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
     request: Result<Json<MessageRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
+) -> Result<(StatusCode, Json<TurnAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let request = json_request(request)?;
-    let run_id = state
+    let (session_id, turn_id) = state
         .start_message(
             agent_id,
             request.text,
             request.model_config.map(ModelConfig::from),
         )
         .await?;
-    Span::current().record("run_id", field::display(run_id));
-    Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
+    Span::current().record("session_id", field::display(session_id));
+    Span::current().record("turn_id", field::display(turn_id));
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(TurnAccepted {
+            session_id,
+            agent_id,
+            turn_id,
+        }),
+    ))
 }
 
 async fn resume_agent(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
-) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
+) -> Result<(StatusCode, Json<TurnAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let _admission = state.admit()?;
@@ -430,10 +481,13 @@ async fn resume_agent(
         }
         result = operation => result,
     };
-    let run_id = match result {
-        Ok(run_id) => run_id,
+    let turn_id = match result {
+        Ok(turn_id) => turn_id,
         Err(error @ HostError::Agent(AgentError::ResumeNotRunning { .. })) => {
             hosted.clear_needs_resume();
+            if let Some(session_id) = hosted.store.load_agent().await?.session_id {
+                state.release_session(session_id);
+            }
             return Err(error);
         }
         Err(error) => return Err(error),
@@ -443,15 +497,30 @@ async fn resume_agent(
         return Err(HostError::HostShuttingDown);
     }
     hosted.clear_needs_resume();
-    Span::current().record("run_id", field::display(run_id));
-    Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
+    let session_id = hosted
+        .store
+        .load_agent()
+        .await?
+        .session_id
+        .ok_or(AgentError::ResumeSessionMissing)?;
+    state.release_session_when_terminal(session_id, Arc::clone(&hosted.store));
+    Span::current().record("session_id", field::display(session_id));
+    Span::current().record("turn_id", field::display(turn_id));
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(TurnAccepted {
+            session_id,
+            agent_id,
+            turn_id,
+        }),
+    ))
 }
 
 async fn reconcile_started_only(
     hosted: &crate::HostedAgent,
     persisted: &AgentState,
 ) -> Result<(), HostError> {
-    let (Some(_), Some(current_turn_id)) = (persisted.run_id, persisted.turn_id) else {
+    let (Some(_), Some(current_turn_id)) = (persisted.session_id, persisted.turn_id) else {
         return Ok(());
     };
     let mut after_seq = 0;
@@ -476,7 +545,8 @@ async fn reconcile_started_only(
             if matches!(
                 envelope.event,
                 RuntimeEvent::Agent {
-                    event: AgentEvent::Message { turn_id, .. },
+                    turn_id,
+                    event: AgentEvent::Message { .. },
                     ..
                 } if turn_id == current_turn_id
             ) {
@@ -490,7 +560,7 @@ async fn reconcile_started_only(
         .store
         .update_state(
             AgentStatus::Failed,
-            persisted.run_id,
+            persisted.session_id,
             persisted.turn_id,
             persisted.usage,
         )
@@ -553,8 +623,9 @@ impl TryFrom<AgentState> for AgentView {
             agent_name: state.name,
             status: state.status,
             model_config,
-            run_id: state.run_id,
+            session_id: state.session_id,
             turn_id: state.turn_id,
+            location: state.location,
             usage: state.usage,
             last_seq: state.last_seq,
             updated_at: state.updated_at,
@@ -670,12 +741,12 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "invalid_agent_template",
             "agent template is invalid",
         ),
-        HostError::Agent(AgentError::RunAlreadyActive) => (
+        HostError::Agent(AgentError::OperationAlreadyActive) => (
             StatusCode::CONFLICT,
             "agent_busy",
-            "agent already has an active run",
+            "session already has an active operation",
         ),
-        HostError::Agent(AgentError::PersistedRunRequiresResume { .. }) => (
+        HostError::Agent(AgentError::PersistedTurnRequiresResume { .. }) => (
             StatusCode::CONFLICT,
             "resume_required",
             "agent has an unfinished persisted turn",

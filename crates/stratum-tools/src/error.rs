@@ -25,6 +25,13 @@ pub enum ToolError {
         /// Missing tool name.
         name: ToolName,
     },
+    /// Tool-set fingerprint input could not be encoded canonically.
+    #[error("failed to encode tool-set fingerprint input")]
+    FingerprintEncoding {
+        /// JSON encoding failure source.
+        #[source]
+        source: serde_json::Error,
+    },
     /// Tool input could not be decoded.
     #[error("invalid tool input")]
     InvalidInput {

@@ -1848,6 +1848,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sha2",
  "stratum-core",
  "stratum-filesystem",
  "thiserror",

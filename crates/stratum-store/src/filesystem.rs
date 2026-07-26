@@ -13,15 +13,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use stratum_core::{
-    AgentEvent, AgentId, ChatRole, EventSource, HistoryPage, HistoryQuery, ModelConfig, RunId,
-    RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
+    AgentEvent, AgentId, AgentLocation, AgentRuntimeContext, ChatRole, HistoryPage, HistoryQuery,
+    ModelConfig, NewAgentMessage, RuntimeEvent, SessionId, StreamEnvelope, TokenUsage, TurnId,
+    TurnRuntimeSnapshot,
 };
 use stratum_filesystem::{
     CasExpectation, CasUpdateError, Entry, FILESYSTEM_CAS_RETRIES, FileType, Filesystem,
     FilesystemError, VirtualPath, cas_update,
 };
 
-use crate::state::LEGACY_AGENT_STATE_VERSION;
 use crate::{
     AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE, StoreError,
 };
@@ -34,16 +34,8 @@ pub struct FilesystemAgentStore {
 }
 
 enum CommitSequenceOutcome {
-    Committed(AgentState),
+    Committed(Box<AgentState>),
     Advanced,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ModelConfigMigrationError {
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error("model configuration is already persisted")]
-    AlreadyPersisted,
 }
 
 impl FilesystemAgentStore {
@@ -100,54 +92,6 @@ impl FilesystemAgentStore {
         Ok(state)
     }
 
-    /// Persists a model configuration for a legacy state that lacks one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the state is invalid or the compare-and-swap update cannot be
-    /// committed.
-    pub async fn write_model_config_if_missing(
-        &self,
-        model_config: ModelConfig,
-    ) -> Result<AgentState, StoreError> {
-        let current = self.read_state_for_model_config().await?;
-        if current.model_config.is_some() {
-            return Ok(current);
-        }
-
-        let attempts = AtomicUsize::new(0);
-        let result = cas_update(
-            self.filesystem.as_ref(),
-            &self.agent_path()?,
-            decode_agent_state_for_model_config_migration,
-            encode_agent_state_for_model_config_migration,
-            |current| {
-                attempts.fetch_add(1, Ordering::Relaxed);
-                validate_persisted_state(current)?;
-                if current.model_config.is_some() {
-                    return Err(ModelConfigMigrationError::AlreadyPersisted);
-                }
-                let mut next = current.clone();
-                next.state_version = AGENT_STATE_VERSION;
-                next.model_config = Some(model_config.clone());
-                Ok(next)
-            },
-        )
-        .await;
-        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
-        match result {
-            Ok(state) => Ok(state),
-            Err(CasUpdateError::Apply(ModelConfigMigrationError::AlreadyPersisted)) => {
-                self.read_state_for_model_config().await
-            }
-            Err(CasUpdateError::Apply(ModelConfigMigrationError::Store(error))) => Err(error),
-            Err(CasUpdateError::CasUnsupported) => Err(StoreError::CasUnsupported),
-            Err(CasUpdateError::Timeout) => Err(StoreError::CasTimeout),
-            Err(CasUpdateError::RetriesExhausted) => Err(StoreError::CasRetriesExhausted),
-            Err(CasUpdateError::Filesystem(error)) => Err(StoreError::Filesystem(error)),
-        }
-    }
-
     fn agent_path(&self) -> Result<VirtualPath, StoreError> {
         self.child_path("agent.json")
     }
@@ -172,12 +116,6 @@ impl FilesystemAgentStore {
     }
 
     async fn read_state(&self) -> Result<AgentState, StoreError> {
-        let state = self.read_state_for_model_config().await?;
-        validate_runtime_state(&state)?;
-        Ok(state)
-    }
-
-    async fn read_state_for_model_config(&self) -> Result<AgentState, StoreError> {
         let path = self.agent_path()?;
         let Some(record) = self.filesystem.get(&path).await? else {
             return Err(StoreError::AgentMissing);
@@ -198,7 +136,7 @@ impl FilesystemAgentStore {
         let envelope = decode_message(&record.entry).inspect_err(|_| {
             trace_store_corruption(state, seq);
         })?;
-        validate_message(&envelope, state.agent_id, seq, None, None).inspect_err(|_| {
+        validate_message(&envelope, state.agent_id, seq, None, None, None).inspect_err(|_| {
             trace_store_corruption(state, seq);
         })?;
         Ok(Some(envelope))
@@ -234,7 +172,7 @@ impl FilesystemAgentStore {
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), Some(seq));
         match result {
-            Ok(state) => Ok(CommitSequenceOutcome::Committed(state)),
+            Ok(state) => Ok(CommitSequenceOutcome::Committed(Box::new(state))),
             Err(CasUpdateError::Apply(StoreError::MessageBeyondFrontier {
                 seq: attempted,
                 frontier,
@@ -262,21 +200,22 @@ impl FilesystemAgentStore {
             &frontier_message,
             state.agent_id,
             frontier,
-            state.run_id,
-            state.turn_id,
+            None,
+            None,
+            None,
         )
         .inspect_err(|_| trace_store_corruption(&state, frontier))?;
 
         tracing::info!(
             agent_id = %state.agent_id,
-            run_id = ?state.run_id,
+            session_id = ?state.session_id,
             turn_id = ?state.turn_id,
             seq = frontier,
             reconciliation_count = 1_u64,
             "store frontier reconciliation"
         );
         match self.commit_sequence(state.last_seq, frontier).await? {
-            CommitSequenceOutcome::Committed(state) => Ok(Some(state)),
+            CommitSequenceOutcome::Committed(state) => Ok(Some(*state)),
             CommitSequenceOutcome::Advanced => Ok(None),
         }
     }
@@ -296,22 +235,11 @@ impl FilesystemAgentStore {
         Ok(sequences)
     }
 
-    async fn read_integrity_snapshot(
-        &self,
-        allow_legacy: bool,
-    ) -> Result<(AgentState, BTreeSet<u64>), StoreError> {
+    async fn read_integrity_snapshot(&self) -> Result<(AgentState, BTreeSet<u64>), StoreError> {
         loop {
-            let state = if allow_legacy {
-                self.read_state_for_model_config().await?
-            } else {
-                self.read_state().await?
-            };
+            let state = self.read_state().await?;
             let message_sequences = self.list_message_sequences().await?;
-            let refreshed = if allow_legacy {
-                self.read_state_for_model_config().await?
-            } else {
-                self.read_state().await?
-            };
+            let refreshed = self.read_state().await?;
             if refreshed.last_seq == state.last_seq {
                 return Ok((refreshed, message_sequences));
             }
@@ -350,22 +278,13 @@ impl FilesystemAgentStore {
         }
         Ok(())
     }
-
-    async fn load_agent_for_model_config(&self) -> Result<AgentState, StoreError> {
-        loop {
-            let (state, message_sequences) = self.read_integrity_snapshot(true).await?;
-            if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
-                return Ok(state);
-            }
-        }
-    }
 }
 
 #[async_trait]
 impl AgentStore for FilesystemAgentStore {
     async fn load_agent(&self) -> Result<AgentState, StoreError> {
         loop {
-            let (state, message_sequences) = self.read_integrity_snapshot(false).await?;
+            let (state, message_sequences) = self.read_integrity_snapshot().await?;
             if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
                 return Ok(state);
             }
@@ -375,7 +294,7 @@ impl AgentStore for FilesystemAgentStore {
     async fn update_state(
         &self,
         status: AgentStatus,
-        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError> {
@@ -392,19 +311,16 @@ impl AgentStore for FilesystemAgentStore {
                 validate_runtime_state(current)?;
                 if status == AgentStatus::Running
                     && current.status == AgentStatus::Running
-                    && current.run_id != run_id
+                    && (current.session_id != session_id || current.turn_id != turn_id)
                 {
-                    return Err(StoreError::RunningRunConflict {
-                        current: current.run_id,
-                        attempted: run_id,
+                    return Err(StoreError::RunningSessionConflict {
+                        current: current.session_id,
+                        attempted: session_id,
                     });
                 }
                 let mut next = current.clone();
-                if status == AgentStatus::Running && current.run_id != run_id {
-                    next.next_iteration = 0;
-                }
                 next.status = status;
-                next.run_id = run_id;
+                next.session_id = session_id;
                 next.turn_id = turn_id;
                 next.usage = usage;
                 next.updated_at = updated_at;
@@ -418,11 +334,11 @@ impl AgentStore for FilesystemAgentStore {
 
     async fn start_turn(
         &self,
-        run_id: RunId,
+        context: &AgentRuntimeContext,
         turn_id: TurnId,
-        model_config: ModelConfig,
+        runtime_snapshot: TurnRuntimeSnapshot,
     ) -> Result<AgentState, StoreError> {
-        self.load_agent_for_model_config().await?;
+        self.load_agent().await?;
         let updated_at = Utc::now();
         let attempts = AtomicUsize::new(0);
         let result = cas_update(
@@ -433,20 +349,25 @@ impl AgentStore for FilesystemAgentStore {
             |current| {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 validate_persisted_state(current)?;
-                if current.status == AgentStatus::Running && current.run_id != Some(run_id) {
-                    return Err(StoreError::RunningRunConflict {
-                        current: current.run_id,
-                        attempted: Some(run_id),
+                if current.status == AgentStatus::Running
+                    && (current.session_id != Some(context.session_id)
+                        || current.turn_id != Some(turn_id))
+                {
+                    return Err(StoreError::RunningSessionConflict {
+                        current: current.session_id,
+                        attempted: Some(context.session_id),
                     });
                 }
+                validate_runtime_snapshot(current, &runtime_snapshot)?;
                 let mut next = current.clone();
-                next.state_version = AGENT_STATE_VERSION;
                 next.status = AgentStatus::Running;
-                next.run_id = Some(run_id);
+                next.session_id = Some(context.session_id);
                 next.turn_id = Some(turn_id);
+                next.location = Some(context.location.clone());
+                next.turn_runtime_snapshot = Some(runtime_snapshot.clone());
                 next.next_iteration = 0;
                 next.usage = TokenUsage::default();
-                next.model_config = Some(model_config.clone());
+                next.model_config = Some(runtime_snapshot.model.clone());
                 next.updated_at = updated_at;
                 Ok(next)
             },
@@ -458,7 +379,7 @@ impl AgentStore for FilesystemAgentStore {
 
     async fn complete_iteration(
         &self,
-        run_id: RunId,
+        session_id: SessionId,
         turn_id: TurnId,
         iteration: u64,
         usage: TokenUsage,
@@ -478,10 +399,10 @@ impl AgentStore for FilesystemAgentStore {
                         actual: current.status,
                     });
                 }
-                if current.run_id != Some(run_id) {
-                    return Err(StoreError::RunMismatch {
-                        expected: current.run_id.unwrap_or(run_id),
-                        actual: run_id,
+                if current.session_id != Some(session_id) {
+                    return Err(StoreError::SessionMismatch {
+                        expected: current.session_id.unwrap_or(session_id),
+                        actual: session_id,
                     });
                 }
                 if current.turn_id != Some(turn_id) {
@@ -510,21 +431,12 @@ impl AgentStore for FilesystemAgentStore {
         result.map_err(StoreError::from)
     }
 
-    async fn append_message(&self, envelope: StreamEnvelope) -> Result<StreamEnvelope, StoreError> {
-        if envelope.business_seq.is_some() {
-            return Err(StoreError::MessageAlreadySequenced);
-        }
-        let RuntimeEvent::Agent {
-            agent_id,
-            event: AgentEvent::Message { turn_id, message },
-        } = &envelope.event
-        else {
-            return Err(StoreError::UnexpectedMessageEvent);
-        };
-        validate_message_role(message.role)?;
-        let input_agent_id = *agent_id;
-        let run_id = envelope.run_id;
-        let turn_id = *turn_id;
+    async fn append_message(&self, message: NewAgentMessage) -> Result<StreamEnvelope, StoreError> {
+        validate_message_role(message.message.role)?;
+        let input_agent_id = message.agent_id;
+        let session_id = message.session_id;
+        let turn_id = message.turn_id;
+        let location = message.location.clone();
         for append_attempt in 1..=FILESYSTEM_CAS_RETRIES {
             let state = self.read_state().await?;
             if input_agent_id != state.agent_id {
@@ -538,9 +450,15 @@ impl AgentStore for FilesystemAgentStore {
                 .checked_add(1)
                 .ok_or(StoreError::SequenceOverflow)?;
             let beyond = seq.checked_add(1).ok_or(StoreError::SequenceOverflow)?;
-            let mut committed = envelope.clone();
-            committed.business_seq = Some(seq);
-            validate_message(&committed, state.agent_id, seq, Some(run_id), Some(turn_id))?;
+            let committed = message.clone().into_envelope(seq);
+            validate_message(
+                &committed,
+                state.agent_id,
+                seq,
+                Some(session_id),
+                Some(turn_id),
+                Some(&location),
+            )?;
 
             let existing = self.read_message(&state, seq).await?;
             if self.read_message(&state, beyond).await?.is_some() {
@@ -555,15 +473,22 @@ impl AgentStore for FilesystemAgentStore {
                 });
             }
             if let Some(existing) = existing {
-                validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
-                    .inspect_err(|_| trace_store_corruption(&state, seq))?;
+                validate_message(
+                    &existing,
+                    state.agent_id,
+                    seq,
+                    Some(session_id),
+                    Some(turn_id),
+                    Some(&location),
+                )
+                .inspect_err(|_| trace_store_corruption(&state, seq))?;
                 self.commit_sequence(state.last_seq, seq).await?;
                 if existing == committed {
                     return Ok(existing);
                 }
                 tracing::info!(
                     agent_id = %state.agent_id,
-                    run_id = %run_id,
+                    session_id = %session_id,
                     turn_id = %turn_id,
                     seq,
                     retry_count = append_attempt,
@@ -633,7 +558,7 @@ impl AgentStore for FilesystemAgentStore {
         }
         let next_front_seq = events
             .last()
-            .and_then(StreamEnvelope::business_seq)
+            .and_then(StreamEnvelope::message_seq)
             .unwrap_or(query.after_seq);
         let page = HistoryPage {
             through_seq,
@@ -643,7 +568,7 @@ impl AgentStore for FilesystemAgentStore {
         };
         tracing::info!(
             agent_id = %state.agent_id,
-            run_id = ?state.run_id,
+            session_id = ?state.session_id,
             turn_id = ?state.turn_id,
             seq = page.next_front_seq,
             event_count = page.events.len(),
@@ -658,22 +583,10 @@ fn decode_agent_state(entry: &Entry) -> Result<AgentState, StoreError> {
     serde_json::from_slice(entry.contents()).map_err(StoreError::DecodeState)
 }
 
-fn decode_agent_state_for_model_config_migration(
-    entry: &Entry,
-) -> Result<AgentState, ModelConfigMigrationError> {
-    decode_agent_state(entry).map_err(ModelConfigMigrationError::from)
-}
-
 fn encode_agent_state(state: &AgentState) -> Result<Entry, StoreError> {
     serde_json::to_vec(state)
         .map(Entry::new)
         .map_err(StoreError::Encode)
-}
-
-fn encode_agent_state_for_model_config_migration(
-    state: &AgentState,
-) -> Result<Entry, ModelConfigMigrationError> {
-    encode_agent_state(state).map_err(ModelConfigMigrationError::from)
 }
 
 fn decode_message(entry: &Entry) -> Result<StreamEnvelope, StoreError> {
@@ -690,11 +603,16 @@ fn encode_message(envelope: &StreamEnvelope) -> Result<Entry, StoreError> {
 }
 
 fn validate_persisted_state(state: &AgentState) -> Result<(), StoreError> {
-    match (state.state_version, &state.model_config) {
-        (AGENT_STATE_VERSION, Some(_)) | (LEGACY_AGENT_STATE_VERSION, None) => Ok(()),
-        (AGENT_STATE_VERSION, None) => Err(StoreError::MissingModelConfig),
-        (version, _) => Err(StoreError::UnsupportedStateVersion { version }),
+    if state.state_version != AGENT_STATE_VERSION {
+        return Err(StoreError::UnsupportedStateVersion {
+            version: state.state_version,
+        });
     }
+    state
+        .model_config
+        .as_ref()
+        .ok_or(StoreError::MissingModelConfig)?;
+    Ok(())
 }
 
 fn validate_runtime_state(state: &AgentState) -> Result<(), StoreError> {
@@ -703,6 +621,26 @@ fn validate_runtime_state(state: &AgentState) -> Result<(), StoreError> {
         return Err(StoreError::MissingModelConfig);
     }
     Ok(())
+}
+
+fn validate_runtime_snapshot(
+    state: &AgentState,
+    snapshot: &TurnRuntimeSnapshot,
+) -> Result<(), StoreError> {
+    let mismatch = if state.agent_version_id != snapshot.agent_version_id {
+        Some("agent_version")
+    } else if state.skill_set_version_id != snapshot.skill_set_version_id {
+        Some("skill_set_version")
+    } else if state.extension_set_version_id != snapshot.extension_set_version_id {
+        Some("extension_set_version")
+    } else if state.hook_handler_versions != snapshot.hook_handler_versions {
+        Some("hook_handler_order")
+    } else {
+        None
+    };
+    mismatch.map_or(Ok(()), |component| {
+        Err(StoreError::RuntimeSnapshotMismatch { component })
+    })
 }
 
 fn parse_message_filename(file_name: &str) -> Result<u64, StoreError> {
@@ -725,26 +663,25 @@ fn validate_message(
     envelope: &StreamEnvelope,
     expected_agent_id: AgentId,
     path_seq: u64,
-    expected_run_id: Option<RunId>,
+    expected_session_id: Option<SessionId>,
     expected_turn_id: Option<TurnId>,
+    expected_location: Option<&AgentLocation>,
 ) -> Result<(), StoreError> {
-    if let Some(expected) = expected_run_id
-        && envelope.run_id != expected
+    if let Some(expected) = expected_session_id
+        && envelope.session_id != expected
     {
-        return Err(StoreError::RunMismatch {
+        return Err(StoreError::SessionMismatch {
             expected,
-            actual: envelope.run_id,
+            actual: envelope.session_id,
         });
     }
-    if let EventSource::Agent { agent_id, .. } = &envelope.source
-        && *agent_id != expected_agent_id
-    {
-        return Err(StoreError::AgentMismatch {
-            expected: expected_agent_id,
-            actual: *agent_id,
-        });
-    }
-    let RuntimeEvent::Agent { agent_id, event } = &envelope.event else {
+    let RuntimeEvent::Agent {
+        agent_id,
+        turn_id,
+        location,
+        event,
+    } = &envelope.event
+    else {
         return Err(StoreError::UnexpectedMessageEvent);
     };
     if *agent_id != expected_agent_id {
@@ -753,14 +690,18 @@ fn validate_message(
             actual: *agent_id,
         });
     }
-    let AgentEvent::Message { turn_id, message } = event else {
+    let AgentEvent::Message {
+        message_seq,
+        message,
+    } = event
+    else {
         return Err(StoreError::UnexpectedMessageEvent);
     };
     validate_message_role(message.role)?;
-    if envelope.business_seq != Some(path_seq) {
+    if *message_seq != path_seq {
         return Err(StoreError::MessageSequenceMismatch {
             path_seq,
-            event_seq: envelope.business_seq.unwrap_or_default(),
+            event_seq: *message_seq,
         });
     }
     if let Some(expected) = expected_turn_id
@@ -769,6 +710,14 @@ fn validate_message(
         return Err(StoreError::TurnMismatch {
             expected,
             actual: *turn_id,
+        });
+    }
+    if let Some(expected) = expected_location
+        && location != expected
+    {
+        return Err(StoreError::LocationMismatch {
+            expected: expected.clone(),
+            actual: location.clone(),
         });
     }
     Ok(())
@@ -785,17 +734,9 @@ fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> 
     let envelope = strict_object(value)?;
     strict_keys(
         envelope,
-        &["business_seq", "run_id", "timestamp", "source", "event"],
-        &[
-            "business_seq",
-            "run_id",
-            "timestamp",
-            "source",
-            "event",
-            "metadata",
-        ],
+        &["session_id", "timestamp", "event"],
+        &["session_id", "timestamp", "event", "metadata"],
     )?;
-    validate_strict_source(&envelope["source"])?;
 
     let runtime_event = strict_object(&envelope["event"])?;
     strict_keys(runtime_event, &["type", "data"], &["type", "data"])?;
@@ -803,7 +744,12 @@ fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> 
         return Err(strict_json_error());
     }
     let runtime_data = strict_object(&runtime_event["data"])?;
-    strict_keys(runtime_data, &["agent_id", "event"], &["agent_id", "event"])?;
+    strict_keys(
+        runtime_data,
+        &["agent_id", "turn_id", "location", "event"],
+        &["agent_id", "turn_id", "location", "event"],
+    )?;
+    validate_strict_location(&runtime_data["location"])?;
 
     let agent_event = strict_object(&runtime_data["event"])?;
     strict_keys(agent_event, &["type", "data"], &["type", "data"])?;
@@ -813,25 +759,27 @@ fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> 
     let message_data = strict_object(&agent_event["data"])?;
     strict_keys(
         message_data,
-        &["turn_id", "message"],
-        &["turn_id", "message"],
+        &["message_seq", "message"],
+        &["message_seq", "message"],
     )?;
     validate_strict_chat_message(&message_data["message"])
 }
 
-fn validate_strict_source(value: &Value) -> Result<(), serde_json::Error> {
-    let source = strict_object(value)?;
-    let Some(source_type) = source.get("type").and_then(Value::as_str) else {
+fn validate_strict_location(value: &Value) -> Result<(), serde_json::Error> {
+    let location = strict_object(value)?;
+    let Some(location_type) = location.get("type").and_then(Value::as_str) else {
         return Err(strict_json_error());
     };
-    match source_type {
-        "run" => strict_keys(source, &["type"], &["type"]),
-        "node" => strict_keys(source, &["type", "node_id"], &["type", "node_id"]),
-        "agent" => strict_keys(
-            source,
-            &["type", "node_id", "agent_id"],
-            &["type", "node_id", "agent_id"],
-        ),
+    match location_type {
+        "direct" => strict_keys(location, &["type"], &["type"]),
+        "workflow_node" => {
+            strict_keys(location, &["type", "data"], &["type", "data"])?;
+            strict_keys(
+                strict_object(&location["data"])?,
+                &["workflow_version_id", "node_id"],
+                &["workflow_version_id", "node_id"],
+            )
+        }
         _ => Err(strict_json_error()),
     }
 }
@@ -902,12 +850,12 @@ fn trace_cas_outcome<E>(
 {
     let state = result.as_ref().ok();
     let agent_id = state.map(|state| state.agent_id);
-    let run_id = state.and_then(|state| state.run_id);
+    let session_id = state.and_then(|state| state.session_id);
     let turn_id = state.and_then(|state| state.turn_id);
     if attempt_count > 1 {
         tracing::warn!(
             agent_id = ?agent_id,
-            run_id = ?run_id,
+            session_id = ?session_id,
             turn_id = ?turn_id,
             seq = ?seq,
             retry_count = attempt_count - 1,
@@ -917,7 +865,7 @@ fn trace_cas_outcome<E>(
     if matches!(result, Err(CasUpdateError::RetriesExhausted)) {
         tracing::error!(
             agent_id = ?agent_id,
-            run_id = ?run_id,
+            session_id = ?session_id,
             turn_id = ?turn_id,
             seq = ?seq,
             attempt_count,
@@ -930,7 +878,7 @@ fn trace_cas_outcome<E>(
 fn trace_store_corruption(state: &AgentState, seq: u64) {
     tracing::error!(
         agent_id = %state.agent_id,
-        run_id = ?state.run_id,
+        session_id = ?state.session_id,
         turn_id = ?state.turn_id,
         seq,
         corruption_count = 1_u64,

@@ -678,6 +678,24 @@ async fn missing_tool_returns_typed_error() {
     ));
 }
 
+#[test]
+fn tool_set_fingerprint_is_stable_and_includes_authorization_policy() {
+    let mut allowed = BuiltinToolRegistry::new(ToolPermissionMode::Allow);
+    allowed
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .expect("echo registers");
+    let first = allowed.fingerprint().expect("fingerprint computes");
+    let second = allowed.fingerprint().expect("fingerprint recomputes");
+
+    let mut approval = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+    approval
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .expect("echo registers");
+
+    assert_eq!(first, second);
+    assert_ne!(first, approval.fingerprint().expect("fingerprint computes"));
+}
+
 #[tokio::test]
 async fn cancelled_apply_patch_preserves_existing_content_and_version() {
     let (filesystem, root) = apply_patch_test_filesystem("cancelled-update").await;

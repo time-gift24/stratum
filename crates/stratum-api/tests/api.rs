@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs, io,
     path::PathBuf,
     sync::{
@@ -21,16 +20,18 @@ use axum::{
     },
     response::IntoResponse,
 };
-use chrono::Utc;
 use futures_util::{StreamExt, stream};
 use serde_json::{Map, Value, json};
 use stratum_agent::AgentError;
-use stratum_api::{AgentCleanupError, AgentCreated, HostError, HostState, router, run_from_path};
+use stratum_api::{
+    AgentCleanupError, AgentCreated, HostError, HostState, TurnAccepted, router, run_from_path,
+};
 use stratum_config::{AgentName, Config, ResolvedAgentDefinition};
 use stratum_core::{
-    AgentEvent, AgentId, ApprovalId, CallId, ChatMessage, EventCursor, EventRecord, EventSource,
-    HistoryPage, ModelConfig, ModelId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
-    ToolCallDelta, TurnId,
+    AgentEvent, AgentId, AgentLocation, AgentRuntimeContext, ApprovalId, CallId, ChatMessage,
+    DangerLevel, EventCursor, EventRecord, HistoryPage, ModelConfig, ModelId, NewAgentMessage,
+    ReplayStart, RuntimeEvent, SessionId, StreamEnvelope, ToolCallDelta, ToolKind, TurnId,
+    TurnRuntimeSnapshot,
 };
 use stratum_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, Filesystem, FilesystemError, LocalFilesystem,
@@ -44,6 +45,7 @@ use stratum_llm::{
     LlmError, LlmProvider, LlmProviderManager,
 };
 use stratum_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
+use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 use tokio::time::timeout;
 use tower::ServiceExt;
 
@@ -124,34 +126,45 @@ prompt = "be helpful"
                 .parse()
                 .expect("agent root is valid"),
         );
-        store
-            .initialize_with_model_config(agent_id, name.to_owned(), self.default_model_config())
+        let model_config = self.default_model_config();
+        let initial = store
+            .initialize_with_model_config(agent_id, name.to_owned(), model_config.clone())
             .await
             .expect("store initializes");
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         if status != AgentStatus::Idle {
+            let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+            registry
+                .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+                .expect("echo tool registers");
+            let snapshot = TurnRuntimeSnapshot::new(
+                initial.agent_version_id,
+                model_config,
+                registry.fingerprint().expect("tool registry fingerprints"),
+                initial.skill_set_version_id,
+                initial.extension_set_version_id,
+                initial.hook_handler_versions,
+            );
             store
-                .append_message(StreamEnvelope {
-                    business_seq: None,
-                    run_id,
-                    timestamp: Utc::now(),
-                    source: EventSource::Run,
-                    event: RuntimeEvent::Agent {
-                        agent_id,
-                        event: AgentEvent::Message {
-                            turn_id,
-                            message: ChatMessage::user("persisted message"),
-                        },
-                    },
-                    metadata: BTreeMap::new(),
-                })
+                .start_turn(&AgentRuntimeContext::direct(session_id), turn_id, snapshot)
+                .await
+                .expect("turn snapshot is persisted");
+            store
+                .append_message(NewAgentMessage::new(
+                    &AgentRuntimeContext::direct(session_id),
+                    agent_id,
+                    turn_id,
+                    ChatMessage::user("persisted message"),
+                ))
                 .await
                 .expect("message is persisted");
-            store
-                .update_state(status, Some(run_id), Some(turn_id), Default::default())
-                .await
-                .expect("state updates");
+            if status != AgentStatus::Running {
+                store
+                    .update_state(status, Some(session_id), Some(turn_id), Default::default())
+                    .await
+                    .expect("state updates");
+            }
         }
         agent_id
     }
@@ -193,6 +206,30 @@ prompt = "be helpful"
     async fn restore_host(&self) -> Result<Arc<HostState>, HostError> {
         self.restore_host_with_bus(Arc::new(InMemoryEventStreamBus::default()))
             .await
+    }
+
+    async fn ensure_session(&self, agent_id: AgentId) -> SessionId {
+        let store = FilesystemAgentStore::new(
+            Arc::clone(&self.filesystem),
+            format!("/history/{agent_id}")
+                .parse()
+                .expect("agent root is valid"),
+        );
+        let state = store.load_agent().await.expect("state loads");
+        if let Some(session_id) = state.session_id {
+            return session_id;
+        }
+        let session_id = SessionId::new();
+        store
+            .update_state(
+                AgentStatus::Finished,
+                Some(session_id),
+                Some(TurnId::new()),
+                state.usage,
+            )
+            .await
+            .expect("session identity persists");
+        session_id
     }
 
     async fn restore_host_with_bus(
@@ -506,9 +543,9 @@ impl EventStreamBus for PendingPublishBus {
         Ok(())
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        _agent_id: AgentId,
+        _session_id: SessionId,
         _replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
         Ok(Box::pin(stream::pending()))
@@ -525,9 +562,9 @@ impl EventStreamBus for PendingSecondPublishBus {
         Ok(())
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        _agent_id: AgentId,
+        _session_id: SessionId,
         _replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
         Ok(Box::pin(stream::pending()))
@@ -570,9 +607,9 @@ impl EventStreamBus for TestEventStreamBus {
         Ok(())
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        _agent_id: AgentId,
+        _session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
         self.replay_starts
@@ -1379,22 +1416,27 @@ async fn restore_loads_complete_history_directories() {
 }
 
 #[tokio::test]
-async fn restore_migrates_missing_model_config_from_definition_default() {
+async fn restore_rejects_unsupported_beta_state_without_migration() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
         .persist_legacy_agent("coding-agent", AgentStatus::Finished)
         .await;
 
-    let host = fixture.restore_host().await.expect("host restores");
-    let state = host
-        .agent(agent_id)
-        .expect("agent exists")
-        .store
-        .load_agent()
-        .await
-        .expect("state loads");
-
-    assert_eq!(state.model_config, Some(fixture.default_model_config()));
+    let error = match fixture.restore_host().await {
+        Ok(_) => panic!("unsupported beta state must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        HostError::Store(StoreError::UnsupportedStateVersion { version: 1 })
+    ));
+    assert!(
+        fixture
+            .root
+            .join("history")
+            .join(agent_id.to_string())
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -1510,7 +1552,7 @@ async fn configured_start_while_current_agent_is_active_returns_busy_and_remains
 
     assert!(matches!(
         error,
-        HostError::Agent(AgentError::RunAlreadyActive)
+        HostError::Agent(AgentError::OperationAlreadyActive)
     ));
     assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
     let response = router(Arc::clone(&host))
@@ -1826,7 +1868,11 @@ async fn restore_accepts_the_definition_and_directory_format_written_by_the_repl
         Arc::clone(&fixture.filesystem),
         format!("/history/{agent_id}").parse().expect("root parses"),
     )
-    .initialize(agent_id, "default-agent".to_owned())
+    .initialize_with_model_config(
+        agent_id,
+        "default-agent".to_owned(),
+        fixture.default_model_config(),
+    )
     .await
     .expect("REPL store initializes");
 
@@ -2003,7 +2049,8 @@ async fn create_agent_commits_first_message_before_returning() {
     let created: AgentCreated = serde_json::from_slice(&body).expect("response decodes");
     assert_eq!(created.agent_name, "coding-agent");
     assert_eq!(location, format!("/v1/agents/{}", created.agent_id));
-    assert_eq!(created.run_id.as_uuid().get_version_num(), 7);
+    assert_eq!(created.session_id.as_uuid().get_version_num(), 7);
+    assert_eq!(created.turn_id.as_uuid().get_version_num(), 7);
     let hosted = host.agent(created.agent_id).expect("agent is registered");
     assert_eq!(
         hosted
@@ -2190,8 +2237,9 @@ async fn get_agent_projects_only_public_view_fields() {
             "agent_id",
             "agent_name",
             "last_seq",
+            "location",
             "model_config",
-            "run_id",
+            "session_id",
             "status",
             "turn_id",
             "updated_at",
@@ -2644,7 +2692,9 @@ async fn post_message_returns_accepted_after_durable_append() {
         .await
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("accepted body is json");
-    assert!(body["run_id"].is_string());
+    assert!(body["session_id"].is_string());
+    assert!(body["agent_id"].is_string());
+    assert!(body["turn_id"].is_string());
     assert_eq!(
         host.agent(agent_id)
             .expect("agent exists")
@@ -2765,7 +2815,7 @@ async fn approval_without_active_turn_is_a_conflict() {
 }
 
 #[tokio::test]
-async fn post_message_maps_an_active_run_to_agent_busy() {
+async fn post_message_maps_an_active_session_operation_to_agent_busy() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Idle)
@@ -2921,7 +2971,7 @@ async fn resume_preserves_switched_model_after_message_write_failure() {
         .await
         .expect("state loads");
     assert_eq!(terminal.status, AgentStatus::Failed);
-    assert_eq!(terminal.run_id, started_only.run_id);
+    assert_eq!(terminal.session_id, started_only.session_id);
     assert_eq!(terminal.turn_id, started_only.turn_id);
     assert_eq!(terminal.last_seq, started_only.last_seq);
     assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
@@ -2969,29 +3019,21 @@ async fn resume_does_not_reconcile_a_current_turn_with_any_durable_invalid_messa
         Arc::clone(&fixture.filesystem),
         format!("/history/{agent_id}").parse().expect("root parses"),
     );
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     store
-        .append_message(StreamEnvelope {
-            business_seq: None,
-            run_id,
-            timestamp: Utc::now(),
-            source: EventSource::Run,
-            event: RuntimeEvent::Agent {
-                agent_id,
-                event: AgentEvent::Message {
-                    turn_id,
-                    message: ChatMessage::assistant("invalid without user"),
-                },
-            },
-            metadata: BTreeMap::new(),
-        })
+        .append_message(NewAgentMessage::new(
+            &AgentRuntimeContext::direct(session_id),
+            agent_id,
+            turn_id,
+            ChatMessage::assistant("invalid without user"),
+        ))
         .await
         .expect("invalid resume fixture message persists");
     store
         .update_state(
             AgentStatus::Running,
-            Some(run_id),
+            Some(session_id),
             Some(turn_id),
             Default::default(),
         )
@@ -3022,7 +3064,7 @@ async fn resume_does_not_reconcile_a_current_turn_with_any_durable_invalid_messa
 }
 
 #[tokio::test]
-async fn resume_does_not_reconcile_started_only_state_without_a_run_id() {
+async fn resume_does_not_reconcile_started_only_state_without_a_session_id() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Idle)
@@ -3041,27 +3083,17 @@ async fn resume_does_not_reconcile_started_only_state_without_a_run_id() {
         )
         .await
         .expect("incomplete running state persists");
-    let host = fixture.restore_host().await.expect("host restores");
-
-    let response = router(Arc::clone(&host))
-        .oneshot(
-            Request::post(format!("/v1/agents/{agent_id}/resume"))
-                .body(Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("request completes");
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let persisted = host
-        .agent(agent_id)
-        .expect("agent exists")
-        .store
-        .load_agent()
-        .await
-        .expect("state loads");
+    let error = match fixture.restore_host().await {
+        Ok(_) => panic!("running state without a Session must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        HostError::Agent(AgentError::ResumeSessionMissing)
+    ));
+    let persisted = store.load_agent().await.expect("state remains readable");
     assert_eq!(persisted.status, AgentStatus::Running);
-    assert_eq!(persisted.run_id, None);
+    assert_eq!(persisted.session_id, None);
     assert_eq!(persisted.turn_id, Some(turn_id));
 }
 
@@ -3186,7 +3218,7 @@ async fn terminal_persistence_failure_cannot_be_overwritten_by_a_new_message() {
         .load_agent()
         .await
         .expect("state loads");
-    assert_eq!(after.run_id, persisted.run_id);
+    assert_eq!(after.session_id, persisted.session_id);
     assert_eq!(after.turn_id, persisted.turn_id);
     assert_eq!(after.last_seq, persisted.last_seq);
 }
@@ -3469,8 +3501,14 @@ async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
         .await
         .expect("request completes");
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let accepted: TurnAccepted = serde_json::from_slice(
+        &to_bytes(accepted.into_body(), usize::MAX)
+            .await
+            .expect("accepted body is readable"),
+    )
+    .expect("accepted body decodes");
     let mut events = bus
-        .subscribe_agent(agent_id, ReplayStart::All)
+        .subscribe_session(accepted.session_id, ReplayStart::All)
         .await
         .expect("subscription opens");
     let approval_id = timeout(Duration::from_secs(1), async {
@@ -3521,15 +3559,19 @@ async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
 }
 
 fn event_record(agent_id: AgentId, cursor: u64, event: AgentEvent) -> EventRecord {
+    let turn_id = TurnId::new();
     EventRecord {
         cursor: EventCursor::from_transport_sequence(cursor),
         envelope: StreamEnvelope {
-            business_seq: None,
-            run_id: RunId::new(),
-            timestamp: Utc::now(),
-            source: EventSource::Run,
-            event: RuntimeEvent::Agent { agent_id, event },
-            metadata: BTreeMap::new(),
+            session_id: SessionId::new(),
+            timestamp: chrono::Utc::now(),
+            event: RuntimeEvent::Agent {
+                agent_id,
+                turn_id,
+                location: AgentLocation::Direct,
+                event,
+            },
+            metadata: Default::default(),
         },
     }
 }
@@ -3540,6 +3582,14 @@ async fn get_events(
     uri: String,
     last_event_id: Option<&str>,
 ) -> axum::response::Response {
+    let agent_id = uri
+        .split('/')
+        .nth(3)
+        .and_then(|value| value.split('?').next())
+        .expect("event URI contains an agent id")
+        .parse()
+        .expect("event URI agent id is valid");
+    fixture.ensure_session(agent_id).await;
     let host = fixture
         .restore_host_with_bus(bus)
         .await
@@ -3560,13 +3610,7 @@ async fn event_stream_defaults_to_all_and_uses_sse_wire_fields() {
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Idle)
         .await;
-    let record = event_record(
-        agent_id,
-        7,
-        AgentEvent::Started {
-            turn_id: TurnId::new(),
-        },
-    );
+    let record = event_record(agent_id, 7, AgentEvent::Started);
     let expected_envelope = record.envelope.clone();
     let bus = Arc::new(TestEventStreamBus::with_events(vec![Ok(record)]));
 
@@ -3793,14 +3837,8 @@ async fn event_stream_emits_one_safe_stream_error_then_closes() {
         .persist_agent("coding-agent", AgentStatus::Idle)
         .await;
     let events = vec![
-        Ok(event_record(
-            agent_id,
-            1,
-            AgentEvent::Started {
-                turn_id: TurnId::new(),
-            },
-        )),
-        Err(EventStreamBusError::MissingAgentScope),
+        Ok(event_record(agent_id, 1, AgentEvent::Started)),
+        Err(EventStreamBusError::CursorOverflow),
         Ok(event_record(
             agent_id,
             2,
@@ -3830,6 +3868,7 @@ async fn shutdown_closes_a_pending_sse_stream() {
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Idle)
         .await;
+    fixture.ensure_session(agent_id).await;
     let host = fixture
         .restore_host_with_bus(Arc::new(TestEventStreamBus::pending()))
         .await
@@ -4259,7 +4298,7 @@ fn request_spans_and_final_error_log_use_only_safe_structured_fields() {
     let source = include_str!("../src/api.rs");
     for field in [
         "agent_id = field::Empty",
-        "run_id = field::Empty",
+        "session_id = field::Empty",
         "cursor = field::Empty",
     ] {
         assert!(

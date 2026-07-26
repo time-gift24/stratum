@@ -11,16 +11,16 @@
 
 ## EventStreamBus
 
-- `EventStreamBus` publishes complete `StreamEnvelope` values and subscribes by `AgentId` plus
+- `EventStreamBus` publishes complete `StreamEnvelope` values and subscribes by `SessionId` plus
   `ReplayStart`. It is a retained delivery boundary, not the durable source of complete Agent
   history.
 - `EventCursor` is an opaque transport position. JetStream uses its stream sequence internally;
-  callers may serialize/replay it but must not compare it with `business_seq` or loop `iteration`.
+  callers may serialize/replay it but must not compare it with `message_seq` or loop `iteration`.
 - `ReplayStart::After(cursor)` means strictly after that cursor. Cursor expiry must be reported as
   `CursorExpired`, not silently changed to `All` or `New`; overflow and backend failures remain
   typed errors.
-- NATS subjects are derived from the nested `RuntimeEvent::Agent.agent_id` and agent event type.
-  An envelope without agent scope is rejected rather than published to a fallback subject.
+- NATS subjects are derived from `StreamEnvelope.session_id` and the top-level runtime event type.
+  One Session stream may contain Session, Node, and multiple Agent event families.
 - JetStream is limits-retained and independent of AgentStore. Retention loss is expected and is
   recovered through fixed-barrier AgentStore history plus a new subscription.
 - Subscription decoding/delivery failure terminates the stream after the typed error. Never skip a
@@ -38,12 +38,12 @@
   behind a telemetry backlog. On durable arrival, discard older queued telemetry. Sequence assignment
   and enqueue share one critical section, and the worker keeps a durable fence for defensive late
   arrivals, so older telemetry cannot publish after a later durable message or terminal event.
-- `ScopedAgentEventSink` is bound to exactly one `(agent_id, run_id, turn_id)` and agent name. It
+- `ScopedAgentEventSink` is bound to exactly one `(agent_id, session_id, turn_id, location)` and
+  agent name. It
   performs scope/protocol projection only; it must not own recovery, history paging, tool policy, or
   AgentStore state transitions.
-- The current host has no workflow node context. Scoped envelopes therefore use
-  `EventSource::Run` and nest identity in `RuntimeEvent::Agent { agent_id, event }`. Introducing
-  `EventSource::Agent` requires an actual `node_id` from orchestration, not a placeholder.
+- Scoped envelopes carry identity through
+  `RuntimeEvent::Agent { agent_id, turn_id, location, event }`; there is no separate `EventSource`.
 - Durable projection includes loop start, complete messages, approvals, tool execution start,
   iteration completion, and terminal events. Telemetry projection includes supported LLM start,
   text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit

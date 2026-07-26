@@ -169,7 +169,7 @@ export const AgentMessageList = memo(function AgentMessageList({
 
         return (
           <div
-            key={`${message.agentId}:${message.businessSeq}`}
+            key={`${message.agentId}:${message.messageSeq}`}
             className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2"
           >
             <Message from={isUser ? "user" : "assistant"}>

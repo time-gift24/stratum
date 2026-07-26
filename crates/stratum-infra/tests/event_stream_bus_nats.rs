@@ -5,7 +5,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use stratum_core::{
-    AgentEvent, AgentId, EventRecord, EventSource, ReplayStart, RunId, RuntimeEvent,
+    AgentEvent, AgentId, AgentLocation, EventRecord, ReplayStart, RuntimeEvent, SessionId,
     StreamEnvelope, TokenUsage, TurnId,
 };
 use stratum_infra::{
@@ -15,10 +15,10 @@ use stratum_infra::{
 use tokio::time::{Instant, sleep, timeout};
 
 const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:44227";
-const TEST_STREAM: &str = "AGENT_EVENTS_TEST";
-const TEST_SUBJECT_PREFIX: &str = "events.agent";
-const INCOMPATIBLE_STREAM: &str = "INCOMPATIBLE_AGENT_EVENTS_TEST";
-const INCOMPATIBLE_SUBJECT_PREFIX: &str = "events.incompatible.agent";
+const TEST_STREAM: &str = "SESSION_EVENTS_TEST";
+const TEST_SUBJECT_PREFIX: &str = "events.session";
+const INCOMPATIBLE_STREAM: &str = "INCOMPATIBLE_SESSION_EVENTS_TEST";
+const INCOMPATIBLE_SUBJECT_PREFIX: &str = "events.incompatible.session";
 
 #[tokio::test]
 #[ignore = "requires NATS JetStream"]
@@ -53,52 +53,60 @@ async fn nats_rejects_incompatible_existing_stream() -> Result<(), Box<dyn Error
 
 #[tokio::test]
 #[ignore = "requires NATS JetStream"]
-async fn nats_agent_replay_modes_and_isolation() -> Result<(), Box<dyn Error>> {
+async fn nats_session_replay_modes_multi_agent_stream_and_isolation() -> Result<(), Box<dyn Error>>
+{
     let nats_url = nats_url();
     let bus = wait_for_bus(&nats_url).await?;
     assert_server_retention_config(&nats_url).await?;
 
     let agent_id = AgentId::new();
     let other_agent_id = AgentId::new();
-    let first = agent_envelope(agent_id, started_event());
-    let other = agent_envelope(other_agent_id, started_event());
-    let second = agent_envelope(agent_id, cancelled_event());
-    let mut live = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
+    let session_id = SessionId::new();
+    let other_session_id = SessionId::new();
+    let first = agent_envelope(session_id, agent_id, started_event());
+    let other_agent = agent_envelope(session_id, other_agent_id, started_event());
+    let isolated_event = agent_envelope(other_session_id, other_agent_id, started_event());
+    let second = agent_envelope(session_id, agent_id, cancelled_event());
+    let mut live = bus.subscribe_session(session_id, ReplayStart::New).await?;
 
     bus.publish(first.clone()).await?;
-    bus.publish(other.clone()).await?;
+    bus.publish(other_agent.clone()).await?;
+    bus.publish(isolated_event.clone()).await?;
     bus.publish(second.clone()).await?;
 
-    let live_records = receive_records(&mut live, 2).await?;
+    let live_records = receive_records(&mut live, 3).await?;
     assert_eq!(
         live_records
             .iter()
             .map(|record| &record.envelope)
             .collect::<Vec<_>>(),
-        vec![&first, &second]
+        vec![&first, &other_agent, &second]
     );
     assert!(
         live_records[0].cursor.transport_sequence() < live_records[1].cursor.transport_sequence()
     );
 
-    let mut all = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
-    let all_records = receive_records(&mut all, 2).await?;
+    let mut all = bus.subscribe_session(session_id, ReplayStart::All).await?;
+    let all_records = receive_records(&mut all, 3).await?;
     assert_eq!(all_records, live_records);
 
     let mut after = bus
-        .subscribe_agent(agent_id, ReplayStart::After(all_records[0].cursor))
+        .subscribe_session(session_id, ReplayStart::After(all_records[0].cursor))
         .await?;
-    assert_eq!(receive_record(&mut after).await?, all_records[1]);
+    assert_eq!(receive_records(&mut after, 2).await?, all_records[1..]);
     assert_no_record(&mut after).await?;
 
     let mut isolated = bus
-        .subscribe_agent(other_agent_id, ReplayStart::All)
+        .subscribe_session(other_session_id, ReplayStart::All)
         .await?;
-    assert_eq!(receive_record(&mut isolated).await?.envelope, other);
+    assert_eq!(
+        receive_record(&mut isolated).await?.envelope,
+        isolated_event
+    );
     assert_no_record(&mut isolated).await?;
 
-    let mut new = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
-    let third = agent_envelope(agent_id, started_event());
+    let mut new = bus.subscribe_session(session_id, ReplayStart::New).await?;
+    let third = agent_envelope(session_id, agent_id, started_event());
     bus.publish(third.clone()).await?;
     assert_eq!(receive_record(&mut new).await?.envelope, third);
 
@@ -111,12 +119,13 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
     let nats_url = nats_url();
     let bus = wait_for_bus(&nats_url).await?;
     let agent_id = AgentId::new();
+    let session_id = SessionId::new();
 
-    bus.publish(agent_envelope(agent_id, started_event()))
+    bus.publish(agent_envelope(session_id, agent_id, started_event()))
         .await?;
-    bus.publish(agent_envelope(agent_id, cancelled_event()))
+    bus.publish(agent_envelope(session_id, agent_id, cancelled_event()))
         .await?;
-    let mut all = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
+    let mut all = bus.subscribe_session(session_id, ReplayStart::All).await?;
     let retained = receive_records(&mut all, 2).await?;
 
     let client = async_nats::connect(&nats_url).await?;
@@ -124,11 +133,11 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
     let stream = jetstream.get_stream(TEST_STREAM).await?;
     stream.purge().await?;
 
-    let after_purge = agent_envelope(agent_id, started_event());
+    let after_purge = agent_envelope(session_id, agent_id, started_event());
     bus.publish(after_purge.clone()).await?;
 
     let error = match bus
-        .subscribe_agent(agent_id, ReplayStart::After(retained[0].cursor))
+        .subscribe_session(session_id, ReplayStart::After(retained[0].cursor))
         .await
     {
         Ok(_) => return Err(std::io::Error::other("expired cursor was accepted").into()),
@@ -140,7 +149,7 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
     ));
 
     let mut boundary = bus
-        .subscribe_agent(agent_id, ReplayStart::After(retained[1].cursor))
+        .subscribe_session(session_id, ReplayStart::After(retained[1].cursor))
         .await?;
     assert_eq!(receive_record(&mut boundary).await?.envelope, after_purge);
 
@@ -152,8 +161,8 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
 async fn nats_malformed_payload_terminates_subscription() -> Result<(), Box<dyn Error>> {
     let nats_url = nats_url();
     let bus = wait_for_bus(&nats_url).await?;
-    let agent_id = AgentId::new();
-    let subject = format!("{TEST_SUBJECT_PREFIX}.{agent_id}.started");
+    let session_id = SessionId::new();
+    let subject = format!("{TEST_SUBJECT_PREFIX}.{session_id}.agent");
     let client = async_nats::connect(&nats_url).await?;
     let jetstream = async_nats::jetstream::new(client);
 
@@ -162,7 +171,7 @@ async fn nats_malformed_payload_terminates_subscription() -> Result<(), Box<dyn 
         .await?
         .await?;
 
-    let mut events = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
+    let mut events = bus.subscribe_session(session_id, ReplayStart::All).await?;
     let error = timeout(Duration::from_secs(5), events.next())
         .await?
         .ok_or_else(|| std::io::Error::other("missing malformed retained event"))?
@@ -193,7 +202,7 @@ async fn replay_file_backed_event_after_restart() -> Result<(), Box<dyn Error>> 
     let nats_url = nats_url();
     let bus = wait_for_bus(&nats_url).await?;
     let mut events = bus
-        .subscribe_agent(restart_fixture_agent_id(), ReplayStart::All)
+        .subscribe_session(restart_fixture_session_id(), ReplayStart::All)
         .await?;
     let next = timeout(Duration::from_secs(5), events.next())
         .await?
@@ -280,21 +289,23 @@ async fn assert_no_record(stream: &mut EventStream) -> Result<(), Box<dyn Error>
     }
 }
 
-fn agent_envelope(agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
+fn agent_envelope(session_id: SessionId, agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
+    let turn_id = TurnId::new();
     StreamEnvelope {
-        business_seq: None,
-        run_id: RunId::new(),
+        session_id,
         timestamp: Utc::now(),
-        source: EventSource::Run,
-        event: RuntimeEvent::Agent { agent_id, event },
+        event: RuntimeEvent::Agent {
+            agent_id,
+            turn_id,
+            location: AgentLocation::Direct,
+            event,
+        },
         metadata: BTreeMap::new(),
     }
 }
 
 fn started_event() -> AgentEvent {
-    AgentEvent::Started {
-        turn_id: TurnId::new(),
-    }
+    AgentEvent::Started
 }
 
 fn cancelled_event() -> AgentEvent {
@@ -309,23 +320,25 @@ fn restart_fixture_agent_id() -> AgentId {
         .expect("fixed AgentId is valid")
 }
 
+fn restart_fixture_session_id() -> SessionId {
+    "0197f4d0-0000-7000-8000-000000000002"
+        .parse()
+        .expect("fixed SessionId is valid")
+}
+
 fn restart_fixture_envelope() -> StreamEnvelope {
     StreamEnvelope {
-        business_seq: None,
-        run_id: "0197f4d0-0000-7000-8000-000000000002"
-            .parse()
-            .expect("fixed RunId is valid"),
+        session_id: restart_fixture_session_id(),
         timestamp: DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
             .expect("fixed timestamp is valid")
             .with_timezone(&Utc),
-        source: EventSource::Run,
         event: RuntimeEvent::Agent {
             agent_id: restart_fixture_agent_id(),
-            event: AgentEvent::Started {
-                turn_id: "0197f4d0-0000-7000-8000-000000000003"
-                    .parse()
-                    .expect("fixed TurnId is valid"),
-            },
+            turn_id: "0197f4d0-0000-7000-8000-000000000003"
+                .parse()
+                .expect("fixed TurnId is valid"),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Started,
         },
         metadata: BTreeMap::new(),
     }

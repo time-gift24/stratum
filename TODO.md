@@ -61,20 +61,20 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **目标：** 在新增公共 API 和持久化格式前统一运行身份与版本模型。
 
-- [ ] 确认 `RunId` 表示顶层 Workflow Run。
-- [ ] 确认直接对话使用隐式单 Agent Workflow。
-- [ ] 定义 Agent 接收外部运行上下文的接口。
-- [ ] 定义 `NodeExecutionId` 和 `HookInvocationId` 的作用域。
-- [ ] 定义 Agent、Workflow、SkillSet 和 ExtensionSet 的不可变版本身份。
-- [ ] 统一 `docs/PROTOCOL.md` 与当前 `StreamEnvelope`、`RuntimeEvent`、`AgentEvent`、`business_seq` 和 `EventCursor`。
-- [ ] 确认 Hook 执行日志与 `AgentStore` 的组合边界。
-- [ ] 完成 Skill、Script Extension、Rust Hook 和 Hook Service 的基础威胁模型。
+- [x] 确认 `SessionId` 表示长期、共享且与 Workflow 图无关的协作空间。
+- [x] 确认 Agent 可以直接在 Session 中运行，也可以作为带类型化 location 的 Workflow 节点运行；直接对话不是隐式 Workflow。
+- [x] 定义 Agent 接收 `AgentRuntimeContext`、只创建 `TurnId` 的接口。
+- [x] 定义 `HookInvocationId` 的语义地址；本阶段不引入 node execution 或 attempt 身份。
+- [x] 定义 Agent、Workflow、SkillSet、ExtensionSet 和 Hook Handler 的不可变版本身份。
+- [x] 统一 `docs/PROTOCOL.md` 与当前 `StreamEnvelope`、三类 `RuntimeEvent`、Agent `message_seq` 和不透明 `EventCursor`。
+- [x] 确认 Hook journal 属于 Session/Turn 执行状态，与 `AgentStore` 对话历史和 EventBus 观察分离。
+- [x] 完成 Skill、Script Extension、链接式 Rust Hook 和 Hook Service 的基础信任规则。
 
 **验收条件：**
 
-- [ ] 身份、版本固定、Hook 错误和 Resume 语义形成已接受的设计记录。
-- [ ] Workflow 和 Hook 不依赖旧协议中的冲突语义。
-- [ ] 现有 Agent API 与历史数据的迁移影响清晰。
+- [x] 身份、版本固定、Hook 错误和 Resume 语义形成已接受的设计记录。
+- [x] Workflow 和 Hook 不依赖旧 `RunId`、`EventSource` 或顶层可选序号语义。
+- [x] Beta 数据与载荷直接拒绝，不设计迁移、降级或回滚路径。
 
 ## 5. 工作线 A：Agent DIY
 
@@ -120,7 +120,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **依赖：** H2、P1。
 
-- [ ] 在 Run 快照中固定 ExtensionSet 与处理器版本。
+- [ ] 在 Turn runtime snapshot 中固定 ExtensionSet 与处理器版本。
 - [ ] 持久化 Hook Invocation 身份、输入摘要、结果和终态。
 - [ ] Resume 时复用匹配的既有结果。
 - [ ] 身份、版本或输入摘要不匹配时 Fail Closed。
@@ -134,7 +134,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 - [ ] 在每个 Hook 持久化边界注入进程崩溃后都能正确恢复。
 - [ ] 恢复过程不会重复应用已提交的 Hook 决策。
-- [ ] 运行中的 Extension 版本变化不会影响已固定的 Run。
+- [ ] 运行中的 Extension 版本变化不会影响已固定的 Turn。
 
 ### S1：第一档运行时 Skill
 
@@ -145,7 +145,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 定义 Skill 元数据、`SKILL.md`、可选资源和能力声明。
 - [ ] 定义 `SkillId`、不可变版本或内容摘要、SkillSet 加载顺序。
 - [ ] 发布时校验路径、大小、编码、重复 ID 和元数据。
-- [ ] 在 Agent/Run 定义中固定 SkillSet。
+- [ ] 在 Agent/Turn runtime snapshot 中固定 SkillSet。
 - [ ] 为通用 Agent 提供受信任的 Skill 上下文处理器。
 - [ ] Skill 只能使用已授权 Tool，不能自行扩权。
 - [ ] API 和 Web 支持发布 Skill 并挂载到通用 Agent。
@@ -176,7 +176,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 支持在应用组合根注册链接式受信任 Hook。
 - [ ] 提供基于同一协议的 Hook Service Server Helper。
 - [ ] 定义服务身份、版本、Endpoint、能力、作用域和健康状态。
-- [ ] 在 Run 启动时固定解析后的服务版本与 Endpoint 集合。
+- [ ] 在 Turn 启动时固定解析后的服务版本与 Endpoint 集合。
 - [ ] 使用认证传输和租户/项目级授权。
 - [ ] 提供 SDK 合同测试与参考 Hook Service。
 
@@ -189,7 +189,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 定义版本化 `WorkflowDefinition` 与不可变 `ExecutionPlan`。
 - [ ] 定义节点输入、输出、边和变量引用。
 - [ ] 校验起止节点、可达性、重复 ID、缺失引用、端口兼容和非法环。
-- [ ] 定义 Run、Node、Attempt 和 Wait 状态。
+- [ ] 定义 Workflow、Node 和 Wait 状态；并发与重试出现前不定义 Attempt 身份。
 - [ ] 定义变量池的类型与大小限制。
 - [ ] 定义原子状态转换与持久化错误格式。
 - [ ] 为图解析、校验和调度不变量添加 Property Test。
@@ -210,10 +210,10 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 从持久化依赖状态构建有界 Ready Queue。
 - [ ] 使用 `JoinSet` 管理有界并发节点。
 - [ ] 下游节点入队前原子提交节点输出和终态。
-- [ ] 由 Run Coordinator 分配确定的状态与事件顺序。
+- [ ] 由 Workflow Coordinator 分配确定的状态与事件顺序。
 - [ ] 重启后从持久化状态重建 Ready Queue。
 - [ ] 实现持久化暂停、恢复和取消命令。
-- [ ] 增加 Run/Node Deadline 与最大执行步数。
+- [ ] 增加 Workflow/Node Deadline 与最大执行步数。
 - [ ] 在幂等与 Attempt 身份明确后再加入 Retry。
 
 **验收条件：**
@@ -221,20 +221,20 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 线性图、条件分支和有界并行分支均支持重启恢复。
 - [ ] 排队中和执行中的节点均可取消。
 - [ ] 重复命令保持幂等。
-- [ ] 损坏的 Graph/Run 状态 Fail Closed。
+- [ ] 损坏的 Workflow/Graph 状态 Fail Closed。
 
 ### W3：Agent 节点、事件与运行 API
 
 **依赖：** W2、S1。
 
-- [ ] Workflow Runtime 创建并拥有 `RunId`。
-- [ ] 将 Run/Node Scope 传入 Agent Runtime。
+- [ ] Workflow Runtime 接收长期 `SessionId`，并固定其 `WorkflowVersionId`。
+- [ ] 将 `AgentLocation::WorkflowNode` 传入 Agent Runtime。
 - [ ] 将工作流变量适配为 Agent Turn 输入。
 - [ ] 将 Agent 输出投影到变量池。
-- [ ] 在 Workflow Run 下保留 Agent/LLM/Tool 事件身份。
+- [ ] 在 Session stream 中保留 Workflow version、Node、Agent、Turn、LLM 和 Tool 身份。
 - [ ] 提供 Workflow 创建、发布、运行、查询、取消和恢复 API。
-- [ ] 提供 Run 事件重放与持久化历史读取。
-- [ ] 将直接对话迁移到隐式单 Agent Workflow 路径。
+- [ ] 提供 Session 事件重放与 Workflow 持久化状态读取。
+- [ ] 保持直接 Agent 路径独立于 Workflow 图，同时复用 Session、事件和 snapshot 合同。
 
 **纵向切片：**
 
@@ -277,7 +277,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 ### P3：可观测性
 
-- [ ] 固化 Run → Node → Agent Turn → LLM/Tool/Hook 的 Span 层级。
+- [ ] 固化 Session → 可选 Workflow Node → Agent Turn → LLM/Tool/Hook 的 Span 层级。
 - [ ] 记录 Hook 延迟、错误、超时、Block 和日志命中指标。
 - [ ] 记录队列深度、就绪等待、节点耗时、恢复和 Retry 指标。
 - [ ] 记录模型用量与 Tool 结果分类，不记录敏感载荷。
@@ -308,9 +308,9 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 - Tool 参数修改 → 最终校验 → 用户审批 → Tool 执行。
 - Hook Journal 与版本固定完成后，才能接入 Script/Rust 远程执行。
-- `RunId` 作用域确定后，才能固化 Workflow 持久化协议。
+- Session 与版本身份基线确定后，才能固化 Workflow 持久化协议。
 - 节点状态可持久化后，才能实现 Queue Resume。
-- `NodeExecutionId` 和幂等语义明确后，才能加入 Loop 与 Retry。
+- 出现真实并发/重试需求并明确从属操作幂等语义后，才能加入 Loop 与 Retry 身份。
 - 隔离和能力模型通过评审后，才能执行不受信任的 Script Extension。
 
 ## 9. 延后事项

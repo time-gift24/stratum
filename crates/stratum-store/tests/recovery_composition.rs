@@ -2,17 +2,16 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
-use chrono::Utc;
 use futures_util::StreamExt;
 use stratum_core::{
-    AgentEvent, AgentId, ChatMessage, EventSource, HistoryQuery, ModelConfig, ModelId, ReplayStart,
-    RunId, RuntimeEvent, StreamEnvelope, TurnId,
+    AgentId, AgentRuntimeContext, ChatMessage, HistoryQuery, ModelConfig, ModelId, NewAgentMessage,
+    ReplayStart, RuntimeEvent, SessionId, StreamEnvelope, TurnId,
 };
 use stratum_filesystem::VirtualPath;
 use stratum_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
-use stratum_store::{AgentStore, FilesystemAgentStore, StoreEventStreamBus};
+use stratum_store::{AgentStore, FilesystemAgentStore};
 use support::MemoryCasFilesystem;
 
 fn test_model_config() -> ModelConfig {
@@ -33,24 +32,25 @@ async fn initialized_store(agent_id: AgentId) -> Arc<FilesystemAgentStore> {
     store
 }
 
-fn unsequenced_message_envelope(agent_id: AgentId, text: &str) -> StreamEnvelope {
-    StreamEnvelope {
-        business_seq: None,
-        run_id: RunId::new(),
-        timestamp: Utc::now(),
-        source: EventSource::Run,
-        event: RuntimeEvent::Agent {
-            agent_id,
-            event: AgentEvent::Message {
-                turn_id: TurnId::new(),
-                message: ChatMessage::user(text),
-            },
-        },
-        metadata: BTreeMap::new(),
-    }
+fn unsequenced_message(session_id: SessionId, agent_id: AgentId, text: &str) -> NewAgentMessage {
+    NewAgentMessage::new(
+        &AgentRuntimeContext::direct(session_id),
+        agent_id,
+        TurnId::new(),
+        ChatMessage::user(text),
+    )
 }
 
-fn visible_business_sequences(
+async fn commit_and_publish(
+    store: &FilesystemAgentStore,
+    retained: &InMemoryEventStreamBus,
+    message: NewAgentMessage,
+) {
+    let committed = store.append_message(message).await.expect("commit message");
+    retained.publish(committed).await.expect("publish message");
+}
+
+fn visible_message_sequences(
     history: &[StreamEnvelope],
     buffered: &[StreamEnvelope],
     through_seq: u64,
@@ -60,24 +60,39 @@ fn visible_business_sequences(
         .chain(
             buffered
                 .iter()
-                .filter(|envelope| envelope.business_seq().is_some_and(|seq| seq > through_seq)),
+                .filter(|envelope| envelope.message_seq().is_some_and(|seq| seq > through_seq)),
         )
-        .map(|envelope| envelope.business_seq().expect("complete message sequence"))
+        .map(|envelope| envelope.message_seq().expect("complete message sequence"))
         .collect()
+}
+
+fn agent_message_key(envelope: &StreamEnvelope) -> (AgentId, u64) {
+    let RuntimeEvent::Agent { agent_id, .. } = envelope.event else {
+        panic!("recovery fixture should contain an Agent event");
+    };
+    (
+        agent_id,
+        envelope
+            .message_seq()
+            .expect("recovery fixture should contain a committed message"),
+    )
 }
 
 #[tokio::test]
 async fn consumer_first_recovery_delivers_buffered_message_after_fixed_barrier() {
     let agent_id = AgentId::new();
+    let session_id = SessionId::new();
     let store = initialized_store(agent_id).await;
     let retained = Arc::new(InMemoryEventStreamBus::default());
-    let bus = StoreEventStreamBus::new(store.clone(), retained.clone());
-    bus.publish(unsequenced_message_envelope(agent_id, "one"))
-        .await
-        .expect("publish message");
+    commit_and_publish(
+        &store,
+        &retained,
+        unsequenced_message(session_id, agent_id, "one"),
+    )
+    .await;
 
     let mut live = retained
-        .subscribe_agent(agent_id, ReplayStart::New)
+        .subscribe_session(session_id, ReplayStart::New)
         .await
         .expect("subscribe");
     let first_page = store
@@ -90,22 +105,25 @@ async fn consumer_first_recovery_delivers_buffered_message_after_fixed_barrier()
         .expect("history page");
     let barrier = first_page.through_seq;
 
-    bus.publish(unsequenced_message_envelope(agent_id, "two"))
-        .await
-        .expect("publish message");
+    commit_and_publish(
+        &store,
+        &retained,
+        unsequenced_message(session_id, agent_id, "two"),
+    )
+    .await;
     let buffered = live.next().await.expect("buffered").expect("record");
     let buffered_seq = buffered
         .envelope
-        .business_seq()
+        .message_seq()
         .expect("complete message sequence");
-    let visible_sequences = visible_business_sequences(
+    let visible_sequences = visible_message_sequences(
         &first_page.events,
         std::slice::from_ref(&buffered.envelope),
         barrier,
     );
 
     assert_eq!(barrier, 1);
-    assert_eq!(first_page.events[0].business_seq(), Some(1));
+    assert_eq!(first_page.events[0].message_seq(), Some(1));
     assert!(buffered_seq > barrier);
     assert_eq!(visible_sequences, [1, 2]);
 }
@@ -113,20 +131,26 @@ async fn consumer_first_recovery_delivers_buffered_message_after_fixed_barrier()
 #[tokio::test]
 async fn consumer_first_recovery_classifies_buffered_message_inside_barrier_as_duplicate() {
     let agent_id = AgentId::new();
+    let session_id = SessionId::new();
     let store = initialized_store(agent_id).await;
     let retained = Arc::new(InMemoryEventStreamBus::default());
-    let bus = StoreEventStreamBus::new(store.clone(), retained.clone());
-    bus.publish(unsequenced_message_envelope(agent_id, "one"))
-        .await
-        .expect("publish message");
+    commit_and_publish(
+        &store,
+        &retained,
+        unsequenced_message(session_id, agent_id, "one"),
+    )
+    .await;
     let mut live = retained
-        .subscribe_agent(agent_id, ReplayStart::New)
+        .subscribe_session(session_id, ReplayStart::New)
         .await
         .expect("subscribe");
 
-    bus.publish(unsequenced_message_envelope(agent_id, "two"))
-        .await
-        .expect("publish message");
+    commit_and_publish(
+        &store,
+        &retained,
+        unsequenced_message(session_id, agent_id, "two"),
+    )
+    .await;
     let buffered = live.next().await.expect("buffered").expect("record");
     let page = store
         .history_page(HistoryQuery {
@@ -138,9 +162,9 @@ async fn consumer_first_recovery_classifies_buffered_message_inside_barrier_as_d
         .expect("history page");
     let buffered_seq = buffered
         .envelope
-        .business_seq()
+        .message_seq()
         .expect("complete message sequence");
-    let visible_sequences = visible_business_sequences(
+    let visible_sequences = visible_message_sequences(
         &page.events,
         std::slice::from_ref(&buffered.envelope),
         page.through_seq,
@@ -149,4 +173,101 @@ async fn consumer_first_recovery_classifies_buffered_message_inside_barrier_as_d
     assert_eq!(page.through_seq, 2);
     assert!(buffered_seq <= page.through_seq);
     assert_eq!(visible_sequences, [1, 2]);
+}
+
+#[tokio::test]
+async fn multi_agent_session_recovery_uses_agent_scoped_message_barriers() {
+    let first_agent_id = AgentId::new();
+    let second_agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let first_store = initialized_store(first_agent_id).await;
+    let second_store = initialized_store(second_agent_id).await;
+    let retained = Arc::new(InMemoryEventStreamBus::default());
+
+    commit_and_publish(
+        &first_store,
+        &retained,
+        unsequenced_message(session_id, first_agent_id, "first agent one"),
+    )
+    .await;
+    commit_and_publish(
+        &second_store,
+        &retained,
+        unsequenced_message(session_id, second_agent_id, "second agent one"),
+    )
+    .await;
+
+    let mut live = retained
+        .subscribe_session(session_id, ReplayStart::New)
+        .await
+        .expect("subscribe");
+    let first_history = first_store
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: None,
+            limit: 256,
+        })
+        .await
+        .expect("first history page");
+    let second_history = second_store
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: None,
+            limit: 256,
+        })
+        .await
+        .expect("second history page");
+
+    commit_and_publish(
+        &first_store,
+        &retained,
+        unsequenced_message(session_id, first_agent_id, "first agent two"),
+    )
+    .await;
+    commit_and_publish(
+        &second_store,
+        &retained,
+        unsequenced_message(session_id, second_agent_id, "second agent two"),
+    )
+    .await;
+    let buffered = vec![
+        live.next()
+            .await
+            .expect("first buffered")
+            .expect("record")
+            .envelope,
+        live.next()
+            .await
+            .expect("second buffered")
+            .expect("record")
+            .envelope,
+    ];
+
+    let mut visible = first_history
+        .events
+        .iter()
+        .chain(&second_history.events)
+        .map(agent_message_key)
+        .collect::<HashSet<_>>();
+    for envelope in &buffered {
+        let (agent_id, message_seq) = agent_message_key(envelope);
+        let barrier = if agent_id == first_agent_id {
+            first_history.through_seq
+        } else if agent_id == second_agent_id {
+            second_history.through_seq
+        } else {
+            panic!("unexpected Agent in Session stream");
+        };
+        if message_seq > barrier {
+            visible.insert((agent_id, message_seq));
+        }
+    }
+
+    assert_eq!(first_history.through_seq, 1);
+    assert_eq!(second_history.through_seq, 1);
+    assert_eq!(visible.len(), 4);
+    assert!(visible.contains(&(first_agent_id, 1)));
+    assert!(visible.contains(&(first_agent_id, 2)));
+    assert!(visible.contains(&(second_agent_id, 1)));
+    assert!(visible.contains(&(second_agent_id, 2)));
 }

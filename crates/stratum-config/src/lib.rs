@@ -415,8 +415,8 @@ allowed_origins = ["http://localhost:5173"]
 
 [nats]
 url = "nats://127.0.0.1:4222"
-stream_name = "AGENT_EVENTS"
-subject_prefix = "events.agent"
+stream_name = "SESSION_EVENTS"
+subject_prefix = "events.session"
 replicas = 1
 max_age_seconds = 604800
 max_bytes = 1073741824
@@ -686,7 +686,7 @@ prompt = "Use tools."
             .expect("nats converts");
 
         assert_eq!(nats.max_age.as_secs(), 604800);
-        assert_eq!(nats.subject_prefix, "events.agent");
+        assert_eq!(nats.subject_prefix, "events.session");
     }
 
     #[test]

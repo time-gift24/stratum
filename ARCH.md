@@ -52,13 +52,15 @@ flowchart TB
     Tool --> Workspace
 
     subgraph Data["数据与事件"]
+        Session["长期 Session<br/>图无关 · 多 Agent"]
         State["运行状态与执行日志"]
         History["Agent 对话历史"]
         Artifact["Skill / Extension / Workflow 制品"]
         EventBus["事件流与重放"]
     end
 
-    Workflow --> State
+    Session --> State
+    Workflow --> Session
     Agent --> History
     Hook --> State
     Definition --> Artifact
@@ -74,7 +76,7 @@ flowchart TB
 
 `stratum-web` 和 `stratum-api` 对外提供对话、工作流编辑、运行控制、审批、历史查询和 SSE 事件流。
 
-控制面管理 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。一次运行开始后，其定义、Skill 集、Extension 集、模型和工具版本保持不变。
+控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变。
 
 Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
@@ -85,11 +87,13 @@ Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 - 编译和校验工作流图；
 - 维护变量池与节点依赖；
 - 使用有界队列调度就绪节点；
-- 持久化 Run 和节点状态；
+- 持久化 Workflow 与节点状态；
 - 支持暂停、恢复、取消和人工输入；
-- 发布 Run 与节点事件。
+- 发布 Workflow 与节点事件。
 
-Agent 是工作流的一种节点。直接对话可以视为只包含一个 Agent 节点的隐式工作流，因此显式编排和对话共用 `RunId`、事件和恢复模型。
+Agent 可以作为工作流中的一种节点，也可以直接在 Session 中运行。直接对话不是隐式工作流：Session 是长期、共享且与图结构无关的核心资产，Workflow 图及其版本可以变化，Session 身份保持不变。Agent 作为节点运行时使用 `AgentLocation::WorkflowNode` 保留 Workflow version 与 node 身份；直接运行时使用 `AgentLocation::Direct`。
+
+一期只允许每个 Session 同时存在一个活跃操作。这是一阶段的简化设计，不是永久产品限制；在真正引入并发前不增加 attempt 或 node-execution 身份。
 
 ### 3. Agent ReAct Loop 与 Hook
 
@@ -111,7 +115,7 @@ Agent 内核只负责稳定的执行机制：
 - `after_tool_call`
 - `prepare_next_turn`
 
-多个 Hook Handler 按固定版本和顺序执行。会影响 Resume 的参数修改、阻断、结果变换和下一轮决策必须写入执行日志，恢复时直接复用。
+多个 Hook Handler 按固定版本和顺序执行。会影响 Resume 的参数修改、阻断、结果变换和下一轮决策必须写入独立的 Session/Turn Hook journal，恢复时按语义 invocation identity 复用。该 journal 与 Agent 对话历史、EventBus 观察流分离，存储实现推迟到 H3/P1。
 
 Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 注册能力，Event 只用于观察，Port 用于替换外部实现。
 
@@ -123,7 +127,7 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 | 第二档 | Deno 或 Python Hook | 独立 Extension Host 进程执行 |
 | 第三档 | Rust Hook | 受信任的链接式 Hook 或独立 Hook Service |
 
-三档能力共享不可变版本、权限、审计和 Run 固定机制。Skill 不执行任意代码；Deno/Python 默认与 Agent 进程隔离；Rust 动态共享库不作为通用扩展机制。
+三档能力共享不可变版本、权限、审计和 Turn runtime snapshot 固定机制。Skill 不执行任意代码；Deno/Python 默认与 Agent 进程隔离；Rust 动态共享库不作为通用扩展机制。
 
 ### 5. 文件系统与存储
 
@@ -139,15 +143,15 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 
 ### 6. 可观测性与安全
 
-统一运行层级为：
+当前统一运行层级为：
 
 ```text
-Workflow Run → Node Execution → Agent Turn → LLM / Tool / Hook
+Session → 可选 Workflow Node → Agent Turn → LLM / Tool / Hook
 ```
 
 每层使用结构化 tracing、metrics 和类型化事件。默认不记录 Prompt、Tool 参数、Tool Result、Secret 或主机路径。
 
-所有定义、制品、Run 和扩展服务带有租户与项目作用域；不受信任的 Script Hook 运行在受限进程或容器中，并限制网络、文件、时间、内存和输出。
+所有定义、制品、Session 和扩展服务带有租户与项目作用域；不受信任的 Script Hook 运行在受限进程或容器中，并限制网络、文件、时间、内存和输出。
 
 ## 代码模块映射
 

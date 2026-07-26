@@ -44,11 +44,10 @@ not the ownership model for the new `AgentLoop` kernel.
 
 - The Agent receives an injected `EventStreamBus` for event delivery and an
   injected `AgentStore` for durable resumption.
-- The loop publishes required complete-message and lifecycle events as
-  unsequenced `StreamEnvelope` values.
-- Complete-message commit and retained event delivery remain downstream bus
-  responsibilities; the Agent uses the store to restore durable state and
-  advance its resume position.
+- The host supplies `AgentRuntimeContext`; the Agent creates only `TurnId`.
+- The Agent commits complete messages through `AgentStore::append_message` before publishing the
+  returned sequenced envelope. Lifecycle and streaming events are observation-only envelopes.
+- Retained event delivery remains an EventBus responsibility; the Store is durable truth.
 
 ## Turn Control (Legacy Agent)
 
@@ -60,8 +59,11 @@ not the ownership model for the new `AgentLoop` kernel.
 
 ## Resume (Legacy Agent)
 
-- `Agent::resume()` takes no user message. It loads the injected store and
-  continues the unfinished turn with the same persisted `run_id` and `turn_id`.
+- `Agent::resume()` takes no user message. It loads the injected store and continues the unfinished
+  Turn with the same persisted Session, Turn, location, and runtime snapshot.
+- Resume validates Agent/SkillSet/ExtensionSet/Handler versions, resolved model configuration, and
+  ToolSet fingerprint before any model, Tool, or future Hook work. Missing or mismatched pinned
+  components fail closed.
 - `agent.json` records `next_iteration` as the durable iteration frontier: every
   lower iteration has committed its stable boundary, while the frontier has not.
   It is not simply the next LLM request because committed history may instead

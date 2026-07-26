@@ -39,3 +39,9 @@
   cancellation does not prove that no external effect occurred.
 - Once a caller records that tool execution started, it must keep awaiting the
   operation and record its outcome rather than dropping or racing the future.
+
+## Resumable Tool Identity
+
+- `ToolRegistry::fingerprint` is part of the resumable Turn snapshot. It must deterministically
+  cover ordered provider-visible specs, authorization outcomes, and concrete implementation
+  identities; a changed fingerprint fails resume before Tool or model work.

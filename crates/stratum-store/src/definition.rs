@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use stratum_core::{
-    HistoryPage, HistoryQuery, ModelConfig, RunId, StreamEnvelope, TokenUsage, TurnId,
+    AgentRuntimeContext, HistoryPage, HistoryQuery, NewAgentMessage, SessionId, StreamEnvelope,
+    TokenUsage, TurnId, TurnRuntimeSnapshot,
 };
 
 use crate::{AgentState, AgentStatus, StoreError};
@@ -25,31 +26,22 @@ pub trait AgentStore: Send + Sync {
     async fn update_state(
         &self,
         status: AgentStatus,
-        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError>;
 
-    /// Starts a turn with its stable model configuration.
+    /// Starts a turn and atomically pins its exact runtime snapshot.
     ///
     /// # Errors
     ///
     /// Returns an error when the state update cannot be committed.
     async fn start_turn(
         &self,
-        run_id: RunId,
+        context: &AgentRuntimeContext,
         turn_id: TurnId,
-        model_config: ModelConfig,
-    ) -> Result<AgentState, StoreError> {
-        let _ = model_config;
-        self.update_state(
-            AgentStatus::Running,
-            Some(run_id),
-            Some(turn_id),
-            TokenUsage::default(),
-        )
-        .await
-    }
+        runtime_snapshot: TurnRuntimeSnapshot,
+    ) -> Result<AgentState, StoreError>;
 
     /// Atomically advances the durable iteration frontier for the active turn.
     ///
@@ -59,7 +51,7 @@ pub trait AgentStore: Send + Sync {
     /// be committed.
     async fn complete_iteration(
         &self,
-        run_id: RunId,
+        session_id: SessionId,
         turn_id: TurnId,
         iteration: u64,
         usage: TokenUsage,
@@ -70,7 +62,7 @@ pub trait AgentStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the message is invalid or cannot be committed atomically.
-    async fn append_message(&self, envelope: StreamEnvelope) -> Result<StreamEnvelope, StoreError>;
+    async fn append_message(&self, message: NewAgentMessage) -> Result<StreamEnvelope, StoreError>;
 
     /// Loads one fixed-range page of committed complete messages.
     ///

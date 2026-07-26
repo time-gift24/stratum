@@ -1,6 +1,13 @@
 import type { ConversationAction } from "~/features/agent-conversation/types"
-import { ApiError, type StreamEnvelope, type StratumApi } from "~/lib/stratum-api"
-import { subscribeToAgentEvents, type SseEvent } from "~/lib/stratum-event-stream"
+import {
+  ApiError,
+  type StreamEnvelope,
+  type StratumApi,
+} from "~/lib/stratum-api"
+import {
+  subscribeToAgentEvents,
+  type SseEvent,
+} from "~/lib/stratum-event-stream"
 
 const HISTORY_PAGE_LIMIT = 256
 
@@ -76,7 +83,11 @@ async function recoverOnce(
     signal: input.signal,
     onEvent: (event) => {
       const envelope = parseEnvelope(event)
-      if (envelope?.event.data.agent_id !== input.agentId) return
+      if (
+        envelope?.event.type !== "agent" ||
+        envelope.event.data.agent_id !== input.agentId
+      )
+        return
 
       const received = { envelope, cursor: event.id }
       if (ready) accept(received)
@@ -132,9 +143,11 @@ async function recoverOnce(
   }
 
   for (const received of buffered) {
+    const runtimeEvent = received.envelope.event
     if (
-      received.envelope.business_seq !== undefined &&
-      received.envelope.business_seq <= view.last_seq
+      runtimeEvent.type === "agent" &&
+      runtimeEvent.data.event.type === "message" &&
+      runtimeEvent.data.event.data.message_seq <= view.last_seq
     )
       continue
     accept(received)
@@ -164,17 +177,48 @@ function isStreamEnvelope(value: unknown): value is StreamEnvelope {
 
   const envelope = value as Record<string, unknown>
   if (
-    typeof envelope.run_id !== "string" ||
+    typeof envelope.session_id !== "string" ||
     typeof envelope.timestamp !== "string"
   )
     return false
 
   const event = envelope.event
   if (typeof event !== "object" || event === null) return false
-  const data = (event as Record<string, unknown>).data
+  const runtimeEvent = event as Record<string, unknown>
+  if (
+    runtimeEvent.type !== "session" &&
+    runtimeEvent.type !== "node" &&
+    runtimeEvent.type !== "agent"
+  )
+    return false
+  const data = runtimeEvent.data
   if (typeof data !== "object" || data === null) return false
+  if (runtimeEvent.type !== "agent") return true
 
-  return typeof (data as Record<string, unknown>).agent_id === "string"
+  const agent = data as Record<string, unknown>
+  if (
+    typeof agent.agent_id !== "string" ||
+    typeof agent.turn_id !== "string" ||
+    !isAgentLocation(agent.location) ||
+    typeof agent.event !== "object" ||
+    agent.event === null
+  )
+    return false
+
+  return typeof (agent.event as Record<string, unknown>).type === "string"
+}
+
+function isAgentLocation(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false
+  const location = value as Record<string, unknown>
+  if (location.type === "direct") return true
+  if (location.type !== "workflow_node") return false
+  if (typeof location.data !== "object" || location.data === null) return false
+  const data = location.data as Record<string, unknown>
+  return (
+    typeof data.workflow_version_id === "string" &&
+    typeof data.node_id === "string"
+  )
 }
 
 function throwIfAborted(signal: AbortSignal): void {

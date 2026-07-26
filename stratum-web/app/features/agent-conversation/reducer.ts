@@ -65,21 +65,23 @@ function projectEnvelope(
   state: ConversationState,
   envelope: StreamEnvelope
 ): ConversationState {
-  const { agent_id: agentId, event } = envelope.event.data
+  if (envelope.event.type !== "agent") return state
+  const { agent_id: agentId, turn_id: turnId, event } = envelope.event.data
   if (state.agentId !== null && state.agentId !== agentId) return state
 
-  return projectAgentEvent(state, agentId, envelope, event)
+  return projectAgentEvent(state, agentId, turnId, envelope, event)
 }
 
 function projectAgentEvent(
   state: ConversationState,
   agentId: string,
+  turnId: string,
   envelope: StreamEnvelope,
   event: AgentEvent
 ): ConversationState {
   switch (event.type) {
     case "message":
-      return projectStableMessage(state, agentId, envelope)
+      return projectStableMessage(state, agentId, turnId, envelope)
     case "started":
       return { ...updateViewStatus(state, "running"), error: null }
     case "finished":
@@ -137,22 +139,22 @@ function projectAgentEvent(
 function projectStableMessage(
   state: ConversationState,
   agentId: string,
+  turnId: string,
   envelope: StreamEnvelope
 ): ConversationState {
-  if (envelope.business_seq === undefined) return state
-
+  if (envelope.event.type !== "agent") return state
   const event = envelope.event.data.event
   if (event.type !== "message") return state
 
-  const { message, turn_id: turnId } = event.data
+  const { message, message_seq: messageSeq } = event.data
   if (message.role === "tool") {
     return projectPersistedToolResult(state, turnId, message)
   }
 
-  const key = `${agentId}:${envelope.business_seq}`
+  const key = `${agentId}:${messageSeq}`
   if (
     state.messages.some(
-      (message) => `${message.agentId}:${message.businessSeq}` === key
+      (message) => `${message.agentId}:${message.messageSeq}` === key
     )
   ) {
     return state
@@ -160,7 +162,7 @@ function projectStableMessage(
 
   const stableMessage: StableMessage = {
     agentId,
-    businessSeq: envelope.business_seq,
+    messageSeq,
     role: message.role,
     text: message.content.type === "text" ? message.content.data : null,
     json: message.content.type === "json" ? message.content.data : null,
@@ -182,7 +184,7 @@ function projectStableMessage(
   return {
     ...stateWithTools,
     messages: [...state.messages, stableMessage].sort(
-      (left, right) => left.businessSeq - right.businessSeq
+      (left, right) => left.messageSeq - right.messageSeq
     ),
   }
 }

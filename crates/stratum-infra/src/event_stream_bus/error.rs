@@ -9,10 +9,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EventStreamBusError {
-    /// Published envelope does not belong to an agent.
-    #[error("stream envelope is missing agent scope")]
-    MissingAgentScope,
-    /// Requested cursor is no longer retained for the subscribed agent.
+    /// Requested cursor is no longer retained for the subscribed session.
     #[error("event cursor {cursor:?} is no longer retained")]
     CursorExpired {
         /// Cursor requested by the subscriber.

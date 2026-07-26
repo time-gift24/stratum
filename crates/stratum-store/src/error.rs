@@ -1,6 +1,6 @@
 //! Error types for agent store persistence.
 
-use stratum_core::{AgentId, ChatRole, RunId, TurnId};
+use stratum_core::{AgentId, AgentLocation, ChatRole, SessionId, TurnId};
 use stratum_filesystem::{CasUpdateError, FilesystemError};
 use thiserror::Error;
 
@@ -31,13 +31,13 @@ pub enum StoreError {
         /// Current persisted agent status.
         actual: AgentStatus,
     },
-    /// A new running transition would replace another unfinished run.
-    #[error("persisted running run conflict")]
-    RunningRunConflict {
-        /// Run currently persisted as running.
-        current: Option<RunId>,
-        /// Different run that attempted to become running.
-        attempted: Option<RunId>,
+    /// A new running transition would replace another active session operation.
+    #[error("persisted active session operation conflict")]
+    RunningSessionConflict {
+        /// Session currently persisted as running.
+        current: Option<SessionId>,
+        /// Session that attempted to become running.
+        attempted: Option<SessionId>,
     },
     /// The requested iteration differs from the durable frontier.
     #[error("iteration mismatch: expected {expected}, actual {actual}")]
@@ -53,9 +53,6 @@ pub enum StoreError {
     /// The next message sequence cannot be represented.
     #[error("message sequence overflow")]
     SequenceOverflow,
-    /// A store append input already has a business sequence.
-    #[error("store append requires an unsequenced message")]
-    MessageAlreadySequenced,
     /// A message role cannot be committed to store history.
     #[error("invalid store message role: {role:?}")]
     InvalidMessageRole {
@@ -94,13 +91,13 @@ pub enum StoreError {
         /// Agent identity found in persisted data.
         actual: AgentId,
     },
-    /// A persisted event belongs to a different run.
-    #[error("store run mismatch: expected {expected}, actual {actual}")]
-    RunMismatch {
-        /// Run identity required by the store.
-        expected: RunId,
-        /// Run identity found in persisted data.
-        actual: RunId,
+    /// A persisted event belongs to a different session.
+    #[error("store session mismatch: expected {expected}, actual {actual}")]
+    SessionMismatch {
+        /// Session identity required by the store.
+        expected: SessionId,
+        /// Session identity found in persisted data.
+        actual: SessionId,
     },
     /// A persisted event belongs to a different turn.
     #[error("store turn mismatch: expected {expected}, actual {actual}")]
@@ -109,6 +106,23 @@ pub enum StoreError {
         expected: TurnId,
         /// Turn identity found in persisted data.
         actual: TurnId,
+    },
+    /// A persisted event has a different Agent execution location.
+    #[error("store agent location mismatch")]
+    LocationMismatch {
+        /// Location required by the active turn.
+        expected: AgentLocation,
+        /// Location found in persisted data.
+        actual: AgentLocation,
+    },
+    /// The active turn is missing its pinned runtime snapshot.
+    #[error("active turn is missing runtime snapshot")]
+    MissingRuntimeSnapshot,
+    /// A pinned runtime component differs from the available runtime.
+    #[error("pinned runtime component mismatch: {component}")]
+    RuntimeSnapshotMismatch {
+        /// Component that failed closed.
+        component: &'static str,
     },
     /// A message path sequence differs from its event sequence.
     #[error("message sequence mismatch: path {path_seq}, event {event_seq}")]
