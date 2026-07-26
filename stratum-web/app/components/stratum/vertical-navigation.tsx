@@ -149,7 +149,7 @@ function NavigationItem({
   const Icon = item.icon
   const tone = item.tone ?? "neutral"
   const itemClassName = cn(
-    "grid size-full place-items-center rounded-lg bg-sidebar-accent/58 text-sidebar-foreground/65 shadow-lg shadow-background/15 transition-[background-color,color,box-shadow,transform] duration-200 outline-none hover:-translate-y-0.5 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring [&>svg]:size-5",
+    "grid size-full place-items-center rounded-lg bg-sidebar-accent/58 text-sidebar-foreground/65 shadow-lg shadow-background/15 outline-hidden transition-[background-color,color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring [&>svg]:size-5",
     selected && ACTIVE_TONE_CLASS[tone]
   )
   const distance = useTransform(mouseY, (pointerY) => {

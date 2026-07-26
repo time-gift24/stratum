@@ -177,65 +177,63 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     }
   }
 
-  const resolveApproval = async (
-    approvalId: string,
-    decision: "approve" | "reject"
-  ) => {
-    setApprovalSubmissions((submissions) =>
-      startApprovalSubmission(submissions, approvalId, decision)
-    )
-    try {
-      await conversation.resolveApproval(approvalId, decision)
-    } finally {
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject") => {
       setApprovalSubmissions((submissions) =>
-        finishApprovalSubmission(submissions, approvalId)
+        startApprovalSubmission(submissions, approvalId, decision)
       )
-    }
-  }
+      try {
+        await conversation.resolveApproval(approvalId, decision)
+      } finally {
+        setApprovalSubmissions((submissions) =>
+          finishApprovalSubmission(submissions, approvalId)
+        )
+      }
+    },
+    [conversation]
+  )
 
   const renderComposerFooter = (
     footerClassName: string,
     toolsClassName: string
   ) => (
-      <PromptInputFooter className={footerClassName}>
-        <PromptInputTools className={toolsClassName}>
-          <AgentConfigMenu
-            configuration={configuration}
-            commandPending={isSubmitting}
-          />
-          <ModelConfigMenu
-            configuration={configuration}
-            commandPending={isSubmitting}
-          />
-          {state.phase === "connection_error" ? (
-            <PromptInputButton
-              className="h-10 shrink-0 rounded-lg border-transparent bg-transparent px-3 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              variant="outline"
-              onClick={() => conversation.reconnect()}
-            >
-              {t("chat.reconnect")}
-            </PromptInputButton>
-          ) : null}
-        </PromptInputTools>
-        <PromptInputSubmit
-          aria-label={t(canCancel ? "chat.cancel" : "chat.composer.send")}
-          className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
-          disabled={
-            !canCancel &&
-            (composerRunning ||
-              composerUnavailable ||
-              composerText.trim() === "")
-          }
-          onClick={canCancel ? () => void conversation.cancel() : undefined}
-          type={canCancel ? "button" : "submit"}
-        >
-          {canCancel ? (
-            <IconBan aria-hidden="true" />
-          ) : (
-            <IconArrowUp aria-hidden="true" />
-          )}
-        </PromptInputSubmit>
-      </PromptInputFooter>
+    <PromptInputFooter className={footerClassName}>
+      <PromptInputTools className={toolsClassName}>
+        <AgentConfigMenu
+          configuration={configuration}
+          commandPending={isSubmitting}
+        />
+        <ModelConfigMenu
+          configuration={configuration}
+          commandPending={isSubmitting}
+        />
+        {state.phase === "connection_error" ? (
+          <PromptInputButton
+            className="h-10 shrink-0 rounded-lg border-transparent bg-transparent px-3 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            variant="outline"
+            onClick={() => conversation.reconnect()}
+          >
+            {t("chat.reconnect")}
+          </PromptInputButton>
+        ) : null}
+      </PromptInputTools>
+      <PromptInputSubmit
+        aria-label={t(canCancel ? "chat.cancel" : "chat.composer.send")}
+        className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
+        disabled={
+          !canCancel &&
+          (composerRunning || composerUnavailable || composerText.trim() === "")
+        }
+        onClick={canCancel ? () => void conversation.cancel() : undefined}
+        type={canCancel ? "button" : "submit"}
+      >
+        {canCancel ? (
+          <IconBan aria-hidden="true" />
+        ) : (
+          <IconArrowUp aria-hidden="true" />
+        )}
+      </PromptInputSubmit>
+    </PromptInputFooter>
   )
 
   const renderComposerInput = (inputGroupClassName: string) => (
@@ -292,9 +290,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
                 tools={state.tools}
                 approvals={state.approvals}
                 approvalSubmissions={approvalSubmissions}
-                onApprovalDecision={(approvalId, decision) => {
-                  void resolveApproval(approvalId, decision)
-                }}
+                onApprovalDecision={resolveApproval}
                 error={state.error}
               />
             </div>

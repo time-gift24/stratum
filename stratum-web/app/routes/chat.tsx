@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import { History, SquarePen } from "lucide-react"
 import { useLocation, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
@@ -76,22 +76,25 @@ export default function Chat() {
     selectAgent,
   ])
 
-  const navigationItems: readonly VerticalNavigationItem[] = [
-    {
-      id: "new-conversation",
-      icon: SquarePen,
-      label: t("productShell.newConversation"),
-      href: "/chat?new=1",
-      tone: "green",
-    },
-    {
-      id: "history",
-      icon: History,
-      label: t("productShell.recent"),
-      onSelect: openHistory,
-      tone: "blue",
-    },
-  ]
+  const navigationItems = useMemo<readonly VerticalNavigationItem[]>(
+    () => [
+      {
+        id: "new-conversation",
+        icon: SquarePen,
+        label: t("productShell.newConversation"),
+        href: "/chat?new=1",
+        tone: "green",
+      },
+      {
+        id: "history",
+        icon: History,
+        label: t("productShell.recent"),
+        onSelect: openHistory,
+        tone: "blue",
+      },
+    ],
+    [openHistory, t]
+  )
 
   return (
     <RouteTransition>

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { memo, useMemo, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { IconBrain } from "@tabler/icons-react"
 
@@ -90,7 +90,7 @@ function ExecutionTraceGroup({
   )
 }
 
-export function AgentMessageList({
+export const AgentMessageList = memo(function AgentMessageList({
   messages,
   drafts,
   tools,
@@ -100,10 +100,14 @@ export function AgentMessageList({
   error = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
-  const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
-    dateStyle: "short",
-    timeStyle: "short",
-  })
+  const dateTimeFormat = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+        dateStyle: "short",
+        timeStyle: "short",
+      }),
+    [i18n.resolvedLanguage]
+  )
   const thinkingMessage = (isStreaming: boolean) =>
     isStreaming ? (
       <Shimmer as="span" duration={1.4}>
@@ -112,27 +116,45 @@ export function AgentMessageList({
     ) : (
       t("chat.reasoningComplete")
     )
-  const toolValues = Object.values(tools)
-  const approvalValues = Object.values(approvals)
-  const approvalsByCallId = new Map(
-    approvalValues.map((approval) => [approval.callId, approval])
+  const toolValues = useMemo(() => Object.values(tools), [tools])
+  const approvalValues = useMemo(() => Object.values(approvals), [approvals])
+  const approvalsByCallId = useMemo(
+    () =>
+      new Map(approvalValues.map((approval) => [approval.callId, approval])),
+    [approvalValues]
   )
-  const stableToolCallIds = new Set(
-    messages.flatMap((message) =>
-      message.toolCalls.map((toolCall) => toolCall.callId)
-    )
+  const stableToolCallIds = useMemo(
+    () =>
+      new Set(
+        messages.flatMap((message) =>
+          message.toolCalls.map((toolCall) => toolCall.callId)
+        )
+      ),
+    [messages]
   )
-  const draftIds = new Set(Object.keys(drafts))
-  const knownToolCallIds = new Set(toolValues.map((tool) => tool.callId))
-  const orphanTools = toolValues.filter(
-    (tool) =>
-      !stableToolCallIds.has(tool.callId) && !draftIds.has(tool.llmCallId)
+  const draftIds = useMemo(() => new Set(Object.keys(drafts)), [drafts])
+  const knownToolCallIds = useMemo(
+    () => new Set(toolValues.map((tool) => tool.callId)),
+    [toolValues]
   )
-  const activeOrphanTools = orphanTools.filter(
-    (tool) => tool.status === "streaming"
+  const orphanTools = useMemo(
+    () =>
+      toolValues.filter(
+        (tool) =>
+          !stableToolCallIds.has(tool.callId) && !draftIds.has(tool.llmCallId)
+      ),
+    [draftIds, stableToolCallIds, toolValues]
   )
-  const orphanApprovals = approvalValues.filter(
-    (approval) => !knownToolCallIds.has(approval.callId)
+  const activeOrphanTools = useMemo(
+    () => orphanTools.filter((tool) => tool.status === "streaming"),
+    [orphanTools]
+  )
+  const orphanApprovals = useMemo(
+    () =>
+      approvalValues.filter(
+        (approval) => !knownToolCallIds.has(approval.callId)
+      ),
+    [approvalValues, knownToolCallIds]
   )
 
   return (
@@ -260,4 +282,4 @@ export function AgentMessageList({
       ) : null}
     </>
   )
-}
+})

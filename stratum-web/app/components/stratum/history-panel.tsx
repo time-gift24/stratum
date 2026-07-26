@@ -50,7 +50,7 @@ function ConversationCard({
         onClick={onClose}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-2.5 text-sm transition-[background-color,color,box-shadow,transform] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+          "flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-2.5 text-sm transition-[background-color,color,box-shadow,transform] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden",
           active
             ? "bg-foreground/7 text-foreground shadow-inner"
             : "bg-secondary/45 text-muted-foreground shadow-lg shadow-background/15 hover:-translate-y-0.5 hover:bg-secondary/75 hover:text-foreground",
