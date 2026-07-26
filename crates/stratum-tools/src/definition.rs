@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use stratum_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSpec};
+use sha2::{Digest, Sha256};
+use stratum_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSetFingerprint, ToolSpec};
 use tokio_util::sync::CancellationToken;
 
 use crate::ToolError;
@@ -71,6 +72,11 @@ pub trait Tool: Send + Sync {
     /// Returns a tool error when the input cannot be executed as supplied.
     fn validate(&self, input: &ToolInput) -> Result<(), ToolError>;
 
+    /// Returns the runtime implementation identity included in turn snapshots.
+    fn implementation_id(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Executes the tool.
     ///
     /// Cancellation is cooperative. Implementations should stop before starting new
@@ -120,6 +126,52 @@ pub trait ToolRegistry: Send + Sync {
 
     /// Returns provider-visible specs for all registered tools.
     fn specs(&self) -> Vec<ToolSpec>;
+
+    /// Computes the exact ordered tool-set fingerprint used by resumable turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if registry metadata is inconsistent or cannot be encoded.
+    fn fingerprint(&self) -> Result<ToolSetFingerprint, ToolError> {
+        #[derive(Serialize)]
+        struct FingerprintEntry {
+            spec: ToolSpec,
+            authorization: Option<(ToolKind, DangerLevel)>,
+            implementation_id: &'static str,
+        }
+
+        let entries = self
+            .specs()
+            .into_iter()
+            .map(|spec| {
+                let authorization = self.authorization(&spec.name)?;
+                let implementation_id = self
+                    .get(&spec.name)
+                    .ok_or_else(|| ToolError::ToolNotFound {
+                        name: spec.name.clone(),
+                    })?
+                    .implementation_id();
+                Ok(FingerprintEntry {
+                    spec,
+                    authorization,
+                    implementation_id,
+                })
+            })
+            .collect::<Result<Vec<_>, ToolError>>()?;
+        let encoded = serde_json::to_vec(&entries)
+            .map_err(|source| ToolError::FingerprintEncoding { source })?;
+        let digest = Sha256::digest(encoded);
+        let canonical = digest
+            .iter()
+            .fold(String::with_capacity(64), |mut output, byte| {
+                use std::fmt::Write as _;
+                write!(output, "{byte:02x}").expect("writing to a string cannot fail");
+                output
+            });
+        Ok(canonical
+            .parse()
+            .expect("sha-256 output is a canonical fingerprint"))
+    }
 
     /// Executes a registered tool by name.
     ///

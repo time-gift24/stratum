@@ -1,10 +1,10 @@
 //! Hosted agent registry and startup recovery.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -17,7 +17,10 @@ use tokio_util::sync::CancellationToken;
 
 use stratum_agent::{Agent, AgentError};
 use stratum_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
-use stratum_core::{AgentId, ChatMessage, DangerLevel, ModelConfig, ToolKind};
+use stratum_core::{
+    AgentId, AgentRuntimeContext, ChatMessage, DangerLevel, ModelConfig, SessionId, ToolKind,
+    TurnId,
+};
 use stratum_filesystem::{
     CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath,
 };
@@ -48,6 +51,7 @@ pub struct HostState {
     config: Arc<Config>,
     shutdown: CancellationToken,
     admission: Arc<AdmissionState>,
+    active_sessions: Arc<Mutex<HashSet<SessionId>>>,
 }
 
 struct AdmissionState {
@@ -72,6 +76,12 @@ pub struct HostedAgent {
 
 pub(crate) struct HostedAgentTransition<'a> {
     transitioning: &'a AtomicBool,
+}
+
+struct SessionReservation {
+    active_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    session_id: SessionId,
+    armed: bool,
 }
 
 enum CreationStage<T, E> {
@@ -112,7 +122,7 @@ impl HostedAgent {
 
     pub(crate) fn begin_transition(&self) -> Result<HostedAgentTransition<'_>, AgentError> {
         if self.transitioning.swap(true, Ordering::AcqRel) {
-            return Err(AgentError::RunAlreadyActive);
+            return Err(AgentError::OperationAlreadyActive);
         }
         Ok(HostedAgentTransition {
             transitioning: &self.transitioning,
@@ -137,6 +147,23 @@ impl HostedAgent {
 impl Drop for HostedAgentTransition<'_> {
     fn drop(&mut self) {
         self.transitioning.store(false, Ordering::Release);
+    }
+}
+
+impl SessionReservation {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.active_sessions
+                .lock()
+                .expect("active session lock should not be poisoned")
+                .remove(&self.session_id);
+        }
     }
 }
 
@@ -225,6 +252,7 @@ impl HostState {
         ensure_directory(filesystem.as_ref(), &template_root).await?;
         let entries = filesystem.list_dir(&history_root).await?;
         let mut agents = HashMap::with_capacity(entries.len());
+        let mut active_sessions = HashSet::new();
 
         for entry in entries {
             let agent_id = parse_history_entry(&entry)?;
@@ -235,16 +263,7 @@ impl HostState {
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = ResolvedAgentDefinition::parse(input)?;
             let filesystem_store = FilesystemAgentStore::new(Arc::clone(&filesystem), root);
-            let state = match filesystem_store.load_agent().await {
-                Ok(state) => state,
-                Err(StoreError::MissingModelConfig) => {
-                    let model_config = providers.default_model_config(&definition.model)?;
-                    filesystem_store
-                        .write_model_config_if_missing(model_config)
-                        .await?
-                }
-                Err(error) => return Err(error.into()),
-            };
+            let state = filesystem_store.load_agent().await?;
             let expected_name = definition.agent_name.as_str();
             if state.agent_id != agent_id || state.name != expected_name {
                 return Err(HostError::IdentityMismatch {
@@ -269,6 +288,9 @@ impl HostState {
                 model_config,
             )?;
             let needs_resume = state.status == AgentStatus::Running;
+            if needs_resume {
+                active_sessions.insert(state.session_id.ok_or(AgentError::ResumeSessionMissing)?);
+            }
             if !needs_resume {
                 agent.load_history().await?;
             }
@@ -286,6 +308,7 @@ impl HostState {
             config: Arc::new(config),
             shutdown: CancellationToken::new(),
             admission: Arc::new(AdmissionState::new()),
+            active_sessions: Arc::new(Mutex::new(active_sessions)),
         }))
     }
 
@@ -355,7 +378,7 @@ impl HostState {
         agent_id: AgentId,
         text: String,
         requested: Option<ModelConfig>,
-    ) -> Result<stratum_core::RunId, HostError> {
+    ) -> Result<(SessionId, TurnId), HostError> {
         let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::InvalidMessage);
@@ -368,6 +391,21 @@ impl HostState {
         }
         let _transition = hosted.begin_transition()?;
         let shutdown = self.shutdown_token();
+        let persisted = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
+            result = hosted.store.load_agent() => result?,
+        };
+        if persisted.status == AgentStatus::Running {
+            if hosted.agent().is_active() {
+                return Err(AgentError::OperationAlreadyActive.into());
+            }
+            hosted.mark_needs_resume();
+            return Err(HostError::ResumeRequired);
+        }
+        let session_id = persisted.session_id.unwrap_or_default();
+        let reservation = self.reserve_session(session_id)?;
+        let context = AgentRuntimeContext::direct(session_id);
         let candidate = tokio::select! {
             biased;
             () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
@@ -381,11 +419,11 @@ impl HostState {
                 candidate.stop();
                 return Err(HostError::HostShuttingDown);
             }
-            result = candidate.run_turn(ChatMessage::user(text)) => result,
+            result = candidate.run_turn(context, ChatMessage::user(text)) => result,
         };
-        let run_id = match result {
-            Ok(run_id) => run_id,
-            Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
+        let turn_id = match result {
+            Ok(turn_id) => turn_id,
+            Err(error @ AgentError::OperationAlreadyActive) => return Err(error.into()),
             Err(error) => {
                 let requires_resume = tokio::select! {
                     biased;
@@ -398,6 +436,8 @@ impl HostState {
                 if requires_resume {
                     hosted.replace_agent(candidate);
                     hosted.mark_needs_resume();
+                    reservation.disarm();
+                    self.release_session_when_terminal(session_id, Arc::clone(&hosted.store));
                 }
                 return Err(error.into());
             }
@@ -407,7 +447,9 @@ impl HostState {
             return Err(HostError::HostShuttingDown);
         }
         hosted.replace_agent(candidate);
-        Ok(run_id)
+        reservation.disarm();
+        self.release_session_when_terminal(session_id, Arc::clone(&hosted.store));
+        Ok((session_id, turn_id))
     }
 
     pub(crate) async fn prepare_message_agent(
@@ -417,7 +459,7 @@ impl HostState {
     ) -> Result<Agent, HostError> {
         let state = hosted.store.load_agent().await?;
         if requested.is_some() && state.status == AgentStatus::Running {
-            return Err(AgentError::RunAlreadyActive.into());
+            return Err(AgentError::OperationAlreadyActive.into());
         }
         match requested {
             None => {
@@ -437,6 +479,61 @@ impl HostState {
                 model_config,
             ),
         }
+    }
+
+    fn reserve_session(&self, session_id: SessionId) -> Result<SessionReservation, AgentError> {
+        let mut active = self
+            .active_sessions
+            .lock()
+            .expect("active session lock should not be poisoned");
+        if !active.insert(session_id) {
+            return Err(AgentError::OperationAlreadyActive);
+        }
+        drop(active);
+        Ok(SessionReservation {
+            active_sessions: Arc::clone(&self.active_sessions),
+            session_id,
+            armed: true,
+        })
+    }
+
+    pub(crate) fn release_session_when_terminal(
+        &self,
+        session_id: SessionId,
+        store: Arc<dyn AgentStore>,
+    ) {
+        let active_sessions = Arc::clone(&self.active_sessions);
+        tokio::spawn(async move {
+            loop {
+                match store.load_agent().await {
+                    Ok(state) if state.status == AgentStatus::Running => {
+                        sleep(SHUTDOWN_POLL_INTERVAL).await;
+                    }
+                    Ok(_) => {
+                        active_sessions
+                            .lock()
+                            .expect("active session lock should not be poisoned")
+                            .remove(&session_id);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to observe terminal session operation"
+                        );
+                        sleep(SHUTDOWN_POLL_INTERVAL).await;
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn release_session(&self, session_id: SessionId) {
+        self.active_sessions
+            .lock()
+            .expect("active session lock should not be poisoned")
+            .remove(&session_id);
     }
 
     pub(crate) fn event_bus(&self) -> Arc<dyn EventStreamBus> {
@@ -541,10 +638,28 @@ impl HostState {
         text: String,
         requested_model_config: Option<ModelConfig>,
     ) -> Result<crate::AgentCreated, HostError> {
+        self.create_agent_in_session_with_model_config(
+            agent_name,
+            text,
+            None,
+            requested_model_config,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_agent_in_session_with_model_config(
+        &self,
+        agent_name: AgentName,
+        text: String,
+        requested_session_id: Option<SessionId>,
+        requested_model_config: Option<ModelConfig>,
+    ) -> Result<crate::AgentCreated, HostError> {
         let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::EmptyText);
         }
+        let session_id = requested_session_id.unwrap_or_default();
+        let reservation = self.reserve_session(session_id)?;
 
         let template_path = template_path(&agent_name)?;
         let preflight = async {
@@ -657,10 +772,16 @@ impl HostState {
                 .await);
             }
         };
-        let run_id = match creation_stage(&self.shutdown, agent.run_turn(ChatMessage::user(text)))
-            .await
+        let turn_id = match creation_stage(
+            &self.shutdown,
+            agent.run_turn(
+                AgentRuntimeContext::direct(session_id),
+                ChatMessage::user(text),
+            ),
+        )
+        .await
         {
-            CreationStage::Completed(Ok(run_id)) => run_id,
+            CreationStage::Completed(Ok(turn_id)) => turn_id,
             CreationStage::Completed(Err(error)) => {
                 agent.stop();
                 let creation = HostError::from(error);
@@ -695,10 +816,21 @@ impl HostState {
             return Err(HostError::HostShuttingDown);
         }
         agents.insert(agent_id, hosted);
+        reservation.disarm();
+        self.release_session_when_terminal(
+            session_id,
+            Arc::clone(
+                &agents
+                    .get(&agent_id)
+                    .expect("inserted agent should be present")
+                    .store,
+            ),
+        );
         Ok(crate::AgentCreated {
             agent_id,
             agent_name: agent_name.into(),
-            run_id,
+            session_id,
+            turn_id,
         })
     }
 }
@@ -860,16 +992,16 @@ fn compose_agent(
 ) -> Result<Agent, HostError> {
     let provider = providers.configure(&model_config)?;
     let registry = tool_registry(definition)?;
-    let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::with_model_config(
+    let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
         Arc::clone(&store),
         Arc::clone(event_bus),
-        model_config,
     ));
     Ok(Agent::builder()
         .id(agent_id)
         .name(definition.agent_name.as_str())
         .system_prompt(definition.prompt.clone())
         .llm_provider(provider)
+        .model_config(model_config)
         .tool_registry(registry)
         .event_bus(agent_bus)
         .store(store)

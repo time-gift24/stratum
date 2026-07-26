@@ -8,8 +8,9 @@ use futures_util::StreamExt;
 use stratum_agent::{Agent, AgentError};
 use stratum_config::{Config, ConfigError, ResolvedAgentDefinition};
 use stratum_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatContent, ChatMessage, ChatRole,
-    DangerLevel, ModelConfig, ModelId, ReplayStart, RuntimeEvent, ToolKind, ToolName,
+    AgentEvent, AgentId, AgentRuntimeContext, ApprovalDecision, ApprovalId, ChatContent,
+    ChatMessage, ChatRole, DangerLevel, ModelConfig, ModelId, ReplayStart, RuntimeEvent, SessionId,
+    ToolKind, ToolName,
 };
 use stratum_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
@@ -44,6 +45,7 @@ struct Args {
 }
 
 struct Session {
+    session_id: SessionId,
     agent_id: AgentId,
     agent: Agent,
     store: Arc<dyn AgentStore>,
@@ -162,13 +164,18 @@ async fn compose_session(
     };
 
     let (provider, model_config) = select_provider(config, &definition.model)?;
-    if initialize {
+    let state = if initialize {
         store
-            .initialize_with_model_config(agent_id, DEFAULT_AGENT_NAME.to_owned(), model_config)
-            .await?;
+            .initialize_with_model_config(
+                agent_id,
+                DEFAULT_AGENT_NAME.to_owned(),
+                model_config.clone(),
+            )
+            .await?
     } else {
-        store.load_agent().await?;
-    }
+        store.load_agent().await?
+    };
+    let session_id = state.session_id.unwrap_or_default();
 
     let store: Arc<dyn AgentStore> = store;
     let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
@@ -180,12 +187,14 @@ async fn compose_session(
         .name(definition.agent_name.as_str())
         .system_prompt(definition.prompt)
         .llm_provider(provider)
+        .model_config(model_config)
         .tool_registry(definition_registry(&definition.tools)?)
         .event_bus(bus.clone())
         .store(store.clone())
         .build()?;
 
     Ok(Session {
+        session_id,
         agent_id,
         agent,
         store,
@@ -204,7 +213,7 @@ async fn restore_session<R: BufRead, W: Write>(
     if state.status == AgentStatus::Running {
         let mut events = session
             .bus
-            .subscribe_agent(session.agent_id, ReplayStart::New)
+            .subscribe_session(session.session_id, ReplayStart::New)
             .await?;
         session.agent.resume().await?;
         consume_turn_events(session, &mut events, input, debug, output).await
@@ -223,11 +232,14 @@ async fn drive_turn<R: BufRead, W: Write>(
 ) -> Result<(), ReplError> {
     let mut events = session
         .bus
-        .subscribe_agent(session.agent_id, ReplayStart::New)
+        .subscribe_session(session.session_id, ReplayStart::New)
         .await?;
     session
         .agent
-        .run_turn(ChatMessage::user(turn_input))
+        .run_turn(
+            AgentRuntimeContext::direct(session.session_id),
+            ChatMessage::user(turn_input),
+        )
         .await?;
     consume_turn_events(session, &mut events, input, debug, output).await
 }
@@ -443,6 +455,8 @@ mod tests {
                 )
                 .await?;
         }
+        let state = store.load_agent().await?;
+        let session_id = state.session_id.unwrap_or_default();
         let store: Arc<dyn AgentStore> = store;
         let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
             store.clone(),
@@ -457,6 +471,7 @@ mod tests {
         )?;
 
         Ok(Session {
+            session_id,
             agent_id,
             agent,
             store,
@@ -591,6 +606,7 @@ mod tests {
             RuntimeEvent::Agent {
                 agent_id: persisted_agent_id,
                 event: AgentEvent::Message { message, .. },
+                ..
             } if *persisted_agent_id == agent_id
                 && message.role == ChatRole::Tool
                 && message.content == ChatContent::Json(serde_json::json!({ "message": "hello" }))
@@ -618,6 +634,7 @@ mod tests {
             RuntimeEvent::Agent {
                 agent_id: persisted_agent_id,
                 event: AgentEvent::Message { message, .. },
+                ..
             } if *persisted_agent_id == agent_id
                 && message.role == ChatRole::Tool
                 && message.content == ChatContent::Json(serde_json::json!({
@@ -657,6 +674,7 @@ mod tests {
             RuntimeEvent::Agent {
                 agent_id: persisted_agent_id,
                 event: AgentEvent::Message { message, .. },
+                ..
             } if *persisted_agent_id == agent_id
                 && message.role == ChatRole::Tool
                 && message.content == ChatContent::Json(serde_json::json!({
@@ -734,7 +752,7 @@ mod tests {
         assert_eq!(
             persisted
                 .iter()
-                .map(StreamEnvelope::business_seq)
+                .map(StreamEnvelope::message_seq)
                 .collect::<Vec<_>>(),
             vec![Some(1), Some(2), Some(3), Some(4)]
         );
@@ -846,7 +864,7 @@ mod tests {
             .store
             .update_state(
                 AgentStatus::Running,
-                state.run_id,
+                state.session_id,
                 state.turn_id,
                 state.usage,
             )

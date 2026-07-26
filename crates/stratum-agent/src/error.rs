@@ -1,6 +1,6 @@
 //! Error types for agent runtime operations.
 
-use stratum_core::{AgentId, CallId, ChatRole, RunId, TurnId};
+use stratum_core::{AgentId, CallId, ChatRole, SessionId, TurnId};
 use stratum_infra::event_stream_bus::EventStreamBusError;
 use stratum_llm::LlmError;
 use stratum_store::{AgentStatus, StoreError};
@@ -16,14 +16,14 @@ pub enum AgentError {
         /// Rejected role.
         role: ChatRole,
     },
-    /// Another run is already active for this stateful agent.
-    #[error("agent run is already active")]
-    RunAlreadyActive,
-    /// Durable state contains an unfinished run that must be resumed.
-    #[error("persisted agent run requires resume")]
-    PersistedRunRequiresResume {
-        /// Persisted run identity.
-        run_id: RunId,
+    /// Another operation is already active for this stateful agent.
+    #[error("agent operation is already active")]
+    OperationAlreadyActive,
+    /// Durable state contains an unfinished turn that must be resumed.
+    #[error("persisted agent turn requires resume")]
+    PersistedTurnRequiresResume {
+        /// Persisted session identity.
+        session_id: SessionId,
         /// Persisted turn identity.
         turn_id: TurnId,
     },
@@ -60,6 +60,13 @@ pub enum AgentError {
         #[source]
         source: StoreError,
     },
+    /// Tool runtime metadata could not be resolved for a turn snapshot.
+    #[error("tool runtime resolution failed")]
+    ToolRuntime {
+        /// Underlying Tool registry error.
+        #[source]
+        source: stratum_tools::ToolError,
+    },
     /// Persisted state cannot be resumed because it is not running.
     #[error("persisted agent is not running: {actual:?}")]
     ResumeNotRunning {
@@ -69,12 +76,24 @@ pub enum AgentError {
     /// Persisted state has a resumable turn that must use `Agent::resume`.
     #[error("cannot load history from a persisted running agent")]
     LoadHistoryRunning,
-    /// Persisted running state has no run identity.
-    #[error("persisted running agent has no run id")]
-    ResumeRunMissing,
+    /// Persisted running state has no session identity.
+    #[error("persisted running agent has no session id")]
+    ResumeSessionMissing,
     /// Persisted running state has no turn identity.
     #[error("persisted running agent has no turn id")]
     ResumeTurnMissing,
+    /// Persisted running state has no Agent execution location.
+    #[error("persisted running agent has no location")]
+    ResumeLocationMissing,
+    /// Persisted running state has no exact runtime snapshot.
+    #[error("persisted running agent has no runtime snapshot")]
+    ResumeSnapshotMissing,
+    /// Persisted runtime snapshot differs from the available runtime.
+    #[error("persisted runtime snapshot mismatch: {component}")]
+    ResumeSnapshotMismatch {
+        /// Component that could not be resolved exactly.
+        component: &'static str,
+    },
     /// Persisted state belongs to another agent.
     #[error("resume agent mismatch: expected {expected}, actual {actual}")]
     ResumeAgentMismatch {
@@ -136,5 +155,11 @@ impl From<EventStreamBusError> for AgentError {
 impl From<StoreError> for AgentError {
     fn from(source: StoreError) -> Self {
         Self::Store { source }
+    }
+}
+
+impl From<stratum_tools::ToolError> for AgentError {
+    fn from(source: stratum_tools::ToolError) -> Self {
+        Self::ToolRuntime { source }
     }
 }

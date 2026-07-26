@@ -15,10 +15,11 @@ use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{Agent, AgentConfig, AgentError};
 use stratum_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, CallId, ChatContent, ChatMessage, ChatRole,
-    DangerLevel, EventSource, HistoryPage, HistoryQuery, LlmCallRole, LlmEvent, ModelId,
-    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolCallDelta,
-    ToolKind, ToolName, ToolSpec, TurnId,
+    AgentEvent, AgentId, AgentLocation, AgentRuntimeContext, ApprovalDecision, ApprovalId, CallId,
+    ChatContent, ChatMessage, ChatRole, DangerLevel, HistoryPage, HistoryQuery, LlmCallRole,
+    LlmEvent, ModelConfig, ModelId, NewAgentMessage, ReplayStart, RuntimeEvent, SessionId,
+    StreamEnvelope, TokenUsage, ToolCall, ToolCallDelta, ToolKind, ToolName, ToolSetFingerprint,
+    ToolSpec, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -129,7 +130,7 @@ impl LlmProvider for PendingChatProvider {
 struct TestStore {
     state: Mutex<AgentState>,
     history: Mutex<Vec<StreamEnvelope>>,
-    completed: Mutex<Vec<(RunId, TurnId, u64, TokenUsage)>>,
+    completed: Mutex<Vec<(SessionId, TurnId, u64, TokenUsage)>>,
     load_entered: Option<Arc<tokio::sync::Notify>>,
     block_load_once: AtomicBool,
     order: Option<Arc<Mutex<Vec<&'static str>>>>,
@@ -197,21 +198,39 @@ impl AgentStore for TestStore {
     async fn update_state(
         &self,
         status: AgentStatus,
-        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError> {
         let mut state = self.state.lock().expect("state mutex");
         state.status = status;
-        state.run_id = run_id;
+        state.session_id = session_id;
         state.turn_id = turn_id;
         state.usage = usage;
         Ok(state.clone())
     }
 
+    async fn start_turn(
+        &self,
+        context: &AgentRuntimeContext,
+        turn_id: TurnId,
+        runtime_snapshot: TurnRuntimeSnapshot,
+    ) -> Result<AgentState, StoreError> {
+        let mut state = self.state.lock().expect("state mutex");
+        state.status = AgentStatus::Running;
+        state.session_id = Some(context.session_id);
+        state.turn_id = Some(turn_id);
+        state.location = Some(context.location.clone());
+        state.model_config = Some(runtime_snapshot.model.clone());
+        state.turn_runtime_snapshot = Some(runtime_snapshot);
+        state.next_iteration = 0;
+        state.usage = TokenUsage::default();
+        Ok(state.clone())
+    }
+
     async fn complete_iteration(
         &self,
-        run_id: RunId,
+        session_id: SessionId,
         turn_id: TurnId,
         iteration: u64,
         usage: TokenUsage,
@@ -219,7 +238,7 @@ impl AgentStore for TestStore {
         self.completed
             .lock()
             .expect("completed mutex")
-            .push((run_id, turn_id, iteration, usage));
+            .push((session_id, turn_id, iteration, usage));
         let mut state = self.state.lock().expect("state mutex");
         state.next_iteration = iteration
             .checked_add(1)
@@ -233,16 +252,13 @@ impl AgentStore for TestStore {
         Ok(updated)
     }
 
-    async fn append_message(
-        &self,
-        mut envelope: StreamEnvelope,
-    ) -> Result<StreamEnvelope, StoreError> {
+    async fn append_message(&self, message: NewAgentMessage) -> Result<StreamEnvelope, StoreError> {
         let mut history = self.history.lock().expect("history mutex");
         let seq = u64::try_from(history.len())
             .expect("test history length fits u64")
             .checked_add(1)
             .ok_or(StoreError::SequenceOverflow)?;
-        envelope.business_seq = Some(seq);
+        let envelope = message.into_envelope(seq);
         history.push(envelope.clone());
         drop(history);
         self.state.lock().expect("state mutex").last_seq = seq;
@@ -257,14 +273,14 @@ impl AgentStore for TestStore {
         let through_seq = query.through_seq.unwrap_or_else(|| {
             history
                 .last()
-                .and_then(StreamEnvelope::business_seq)
+                .and_then(StreamEnvelope::message_seq)
                 .unwrap_or_default()
         });
         let events = history
             .iter()
             .filter(|event| {
                 event
-                    .business_seq()
+                    .message_seq()
                     .is_some_and(|seq| seq > query.after_seq && seq <= through_seq)
             })
             .take(query.limit)
@@ -272,7 +288,7 @@ impl AgentStore for TestStore {
             .collect::<Vec<_>>();
         let next_front_seq = events
             .last()
-            .and_then(StreamEnvelope::business_seq)
+            .and_then(StreamEnvelope::message_seq)
             .unwrap_or(query.after_seq);
         Ok(HistoryPage {
             through_seq,
@@ -289,21 +305,57 @@ fn test_store() -> Arc<dyn AgentStore> {
 
 fn persisted_message(
     seq: u64,
-    run_id: RunId,
+    session_id: SessionId,
     turn_id: TurnId,
     message: ChatMessage,
 ) -> StreamEnvelope {
     StreamEnvelope {
-        business_seq: Some(seq),
-        run_id,
+        session_id,
         timestamp: Utc::now(),
-        source: EventSource::Run,
         event: RuntimeEvent::Agent {
             agent_id: test_agent_id(),
-            event: AgentEvent::Message { turn_id, message },
+            turn_id,
+            location: AgentLocation::Direct,
+            event: AgentEvent::Message {
+                message_seq: seq,
+                message,
+            },
         },
         metadata: BTreeMap::new(),
     }
+}
+
+fn running_state(session_id: SessionId, turn_id: TurnId) -> AgentState {
+    running_state_with_registry(session_id, turn_id, &BuiltinToolRegistry::default())
+}
+
+fn running_state_with_registry(
+    session_id: SessionId,
+    turn_id: TurnId,
+    registry: &dyn ToolRegistry,
+) -> AgentState {
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    let model = ModelConfig::new(
+        "recording:mock-model".parse().expect("model id parses"),
+        serde_json::Map::new(),
+    );
+    let tool_set_fingerprint = registry
+        .fingerprint()
+        .expect("test tool registry fingerprints");
+    state.status = AgentStatus::Running;
+    state.session_id = Some(session_id);
+    state.turn_id = Some(turn_id);
+    state.location = Some(AgentLocation::Direct);
+    state.model_config = Some(model.clone());
+    state.turn_runtime_snapshot = Some(TurnRuntimeSnapshot::new(
+        state.agent_version_id,
+        model,
+        tool_set_fingerprint,
+        state.skill_set_version_id,
+        state.extension_set_version_id,
+        state.hook_handler_versions.clone(),
+    ));
+    state
 }
 
 fn assistant_tool_call(call_id: &str, arguments: serde_json::Value) -> ChatMessage {
@@ -332,13 +384,10 @@ async fn assert_invalid_active_turn_history(
     messages: Vec<ChatMessage>,
     next_iteration: u64,
 ) {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let last_seq = u64::try_from(messages.len()).expect("test history length fits u64");
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.next_iteration = next_iteration;
     state.last_seq = last_seq;
     let history = messages
@@ -349,7 +398,7 @@ async fn assert_invalid_active_turn_history(
                 .expect("test history index fits u64")
                 .checked_add(1)
                 .expect("test history sequence does not overflow");
-            persisted_message(seq, run_id, turn_id, message)
+            persisted_message(seq, session_id, turn_id, message)
         })
         .collect();
     let store = Arc::new(TestStore::with_state(state, history));
@@ -387,18 +436,15 @@ fn agent_with_store(
 
 #[tokio::test]
 async fn resume_rejects_second_active_operation() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.last_seq = 1;
     let store = Arc::new(TestStore::with_state(
         state,
         vec![persisted_message(
             1,
-            run_id,
+            session_id,
             turn_id,
             ChatMessage::user("continue"),
         )],
@@ -406,10 +452,10 @@ async fn resume_rejects_second_active_operation() {
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
     let agent = agent_with_store(provider, Arc::new(InMemoryEventStreamBus::default()), store);
 
-    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert_eq!(agent.resume().await.expect("resume starts"), turn_id);
     assert!(matches!(
         agent.resume().await,
-        Err(AgentError::RunAlreadyActive)
+        Err(AgentError::OperationAlreadyActive)
     ));
     agent.stop();
 }
@@ -437,9 +483,14 @@ async fn dropping_resume_while_store_load_is_pending_releases_active_guard() {
             .is_cancelled()
     );
 
-    let next = agent.run_turn(ChatMessage::user("new operation")).await;
+    let next = agent
+        .run_turn(
+            AgentRuntimeContext::direct(SessionId::new()),
+            ChatMessage::user("new operation"),
+        )
+        .await;
     assert!(
-        !matches!(next, Err(AgentError::RunAlreadyActive)),
+        !matches!(next, Err(AgentError::OperationAlreadyActive)),
         "dropped resume must release the active guard"
     );
     agent.stop();
@@ -464,7 +515,7 @@ async fn resume_rejects_non_running_state() {
 }
 
 #[tokio::test]
-async fn resume_rejects_missing_run_identity() {
+async fn resume_rejects_missing_session_identity() {
     let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
     state.status = AgentStatus::Running;
     state.turn_id = Some(TurnId::new());
@@ -477,7 +528,7 @@ async fn resume_rejects_missing_run_identity() {
 
     assert!(matches!(
         agent.resume().await,
-        Err(AgentError::ResumeRunMissing)
+        Err(AgentError::ResumeSessionMissing)
     ));
 }
 
@@ -485,7 +536,7 @@ async fn resume_rejects_missing_run_identity() {
 async fn resume_rejects_missing_turn_identity() {
     let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
     state.status = AgentStatus::Running;
-    state.run_id = Some(RunId::new());
+    state.session_id = Some(SessionId::new());
     let store = Arc::new(TestStore::with_state(state, Vec::new()));
     let agent = agent_with_store(
         Arc::new(RecordingProvider::new(Vec::new())),
@@ -504,7 +555,7 @@ async fn resume_rejects_persisted_agent_mismatch() {
     let actual = AgentId::new();
     let mut state = AgentState::new(actual, "other-agent".to_owned());
     state.status = AgentStatus::Running;
-    state.run_id = Some(RunId::new());
+    state.session_id = Some(SessionId::new());
     state.turn_id = Some(TurnId::new());
     let store = Arc::new(TestStore::with_state(state, Vec::new()));
     let agent = agent_with_store(
@@ -522,21 +573,18 @@ async fn resume_rejects_persisted_agent_mismatch() {
 
 #[tokio::test]
 async fn resume_rejects_non_message_history_and_releases_active_guard() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.last_seq = 1;
     let history = vec![StreamEnvelope {
-        business_seq: Some(1),
-        run_id,
+        session_id,
         timestamp: Utc::now(),
-        source: EventSource::Run,
         event: RuntimeEvent::Agent {
             agent_id: test_agent_id(),
-            event: AgentEvent::Started { turn_id },
+            turn_id,
+            location: AgentLocation::Direct,
+            event: AgentEvent::Started,
         },
         metadata: BTreeMap::new(),
     }];
@@ -559,40 +607,37 @@ async fn resume_rejects_non_message_history_and_releases_active_guard() {
 
 #[tokio::test]
 async fn resume_advances_committed_terminal_assistant_and_finishes_without_llm_request() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let previous_turn_id = TurnId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.last_seq = 4;
     let store = Arc::new(TestStore::with_state(
         state,
         vec![
             persisted_message(
                 1,
-                run_id,
+                session_id,
                 previous_turn_id,
                 ChatMessage::user("previous turn"),
             ),
             persisted_message(
                 2,
-                run_id,
+                session_id,
                 previous_turn_id,
                 ChatMessage::assistant("previous answer"),
             ),
-            persisted_message(3, run_id, turn_id, ChatMessage::user("active turn")),
-            persisted_message(4, run_id, turn_id, ChatMessage::assistant("done")),
+            persisted_message(3, session_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(4, session_id, turn_id, ChatMessage::assistant("done")),
         ],
     ));
     let provider = Arc::new(RecordingProvider::new(Vec::new()));
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
 
-    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert_eq!(agent.resume().await.expect("resume starts"), turn_id);
     let mut events = bus
-        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .subscribe_session(session_id, ReplayStart::All)
         .await
         .expect("subscribe succeeds");
     timeout(Duration::from_secs(1), async {
@@ -614,34 +659,31 @@ async fn resume_advances_committed_terminal_assistant_and_finishes_without_llm_r
     assert!(provider.requests().is_empty());
     assert_eq!(
         *store.completed.lock().expect("completed mutex"),
-        vec![(run_id, turn_id, 0, TokenUsage::default())]
+        vec![(session_id, turn_id, 0, TokenUsage::default())]
     );
 }
 
 #[tokio::test]
 async fn resume_finishes_advanced_terminal_assistant_without_another_advance_or_llm_request() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.next_iteration = 1;
     state.last_seq = 2;
     let store = Arc::new(TestStore::with_state(
         state,
         vec![
-            persisted_message(1, run_id, turn_id, ChatMessage::user("active turn")),
-            persisted_message(2, run_id, turn_id, ChatMessage::assistant("done")),
+            persisted_message(1, session_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(2, session_id, turn_id, ChatMessage::assistant("done")),
         ],
     ));
     let provider = Arc::new(RecordingProvider::new(Vec::new()));
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
 
-    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert_eq!(agent.resume().await.expect("resume starts"), turn_id);
     let mut events = bus
-        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .subscribe_session(session_id, ReplayStart::All)
         .await
         .expect("subscribe succeeds");
     wait_for_agent_finish(&mut events).await;
@@ -652,7 +694,7 @@ async fn resume_finishes_advanced_terminal_assistant_without_another_advance_or_
 
 #[tokio::test]
 async fn load_history_restores_finished_conversation_for_next_turn() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
     state.status = AgentStatus::Finished;
@@ -660,8 +702,13 @@ async fn load_history_restores_finished_conversation_for_next_turn() {
     let store = Arc::new(TestStore::with_state(
         state,
         vec![
-            persisted_message(1, run_id, turn_id, ChatMessage::user("first question")),
-            persisted_message(2, run_id, turn_id, ChatMessage::assistant("first answer")),
+            persisted_message(1, session_id, turn_id, ChatMessage::user("first question")),
+            persisted_message(
+                2,
+                session_id,
+                turn_id,
+                ChatMessage::assistant("first answer"),
+            ),
         ],
     ));
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
@@ -679,7 +726,7 @@ async fn load_history_restores_finished_conversation_for_next_turn() {
     let agent = agent_with_store(provider.clone(), bus.clone(), store);
 
     agent.load_history().await.expect("history should load");
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("second question")).await;
     wait_for_agent_finish(&mut events).await;
 
@@ -715,12 +762,9 @@ async fn load_history_rejects_running_store_before_request() {
 
 #[tokio::test]
 async fn run_turn_rejects_persisted_running_state_before_publishing() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let state = running_state(session_id, turn_id);
     let store = Arc::new(TestStore::with_state(state, Vec::new()));
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
     let agent = agent_with_store(
@@ -730,16 +774,19 @@ async fn run_turn_rejects_persisted_running_state_before_publishing() {
     );
 
     let error = agent
-        .run_turn(ChatMessage::user("must resume"))
+        .run_turn(
+            AgentRuntimeContext::direct(SessionId::new()),
+            ChatMessage::user("must resume"),
+        )
         .await
         .expect_err("persisted running state must reject a new turn");
 
     assert!(matches!(
         error,
-        AgentError::PersistedRunRequiresResume {
-            run_id: actual_run_id,
+        AgentError::PersistedTurnRequiresResume {
+            session_id: actual_session_id,
             turn_id: actual_turn_id,
-        } if actual_run_id == run_id && actual_turn_id == turn_id
+        } if actual_session_id == session_id && actual_turn_id == turn_id
     ));
     assert!(provider.requests().is_empty());
 }
@@ -747,17 +794,23 @@ async fn run_turn_rejects_persisted_running_state_before_publishing() {
 #[tokio::test]
 async fn load_history_rejects_persisted_agent_mismatch_before_request() {
     let actual = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
     state.status = AgentStatus::Finished;
     state.last_seq = 1;
-    let mut persisted =
-        persisted_message(1, run_id, turn_id, ChatMessage::user("persisted question"));
+    let mut persisted = persisted_message(
+        1,
+        session_id,
+        turn_id,
+        ChatMessage::user("persisted question"),
+    );
     persisted.event = RuntimeEvent::Agent {
         agent_id: actual,
+        turn_id,
+        location: AgentLocation::Direct,
         event: AgentEvent::Message {
-            turn_id,
+            message_seq: 1,
             message: ChatMessage::user("persisted question"),
         },
     };
@@ -779,14 +832,25 @@ async fn load_history_rejects_persisted_agent_mismatch_before_request() {
 
 #[tokio::test]
 async fn load_history_rejects_invalid_history_without_committing_partial_history() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
     state.status = AgentStatus::Finished;
     state.last_seq = 1;
-    let mut malformed =
-        persisted_message(1, run_id, turn_id, ChatMessage::user("persisted question"));
-    malformed.business_seq = Some(2);
+    let mut malformed = persisted_message(
+        1,
+        session_id,
+        turn_id,
+        ChatMessage::user("persisted question"),
+    );
+    let RuntimeEvent::Agent {
+        event: AgentEvent::Message { message_seq, .. },
+        ..
+    } = &mut malformed.event
+    else {
+        panic!("persisted fixture should be an agent message");
+    };
+    *message_seq = 2;
     let store = Arc::new(TestStore::with_state(state, vec![malformed]));
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![ChatStreamEvent::Finished {
@@ -802,7 +866,12 @@ async fn load_history_rejects_invalid_history_without_committing_partial_history
         Err(AgentError::InvalidResumeHistory)
     ));
     assert!(matches!(
-        agent.run_turn(ChatMessage::user("new input")).await,
+        agent
+            .run_turn(
+                AgentRuntimeContext::direct(SessionId::new()),
+                ChatMessage::user("new input"),
+            )
+            .await,
         Err(AgentError::InvalidResumeHistory)
     ));
     assert!(provider.requests().is_empty());
@@ -909,13 +978,8 @@ async fn resume_rejects_invalid_active_turn_role_grammar() {
 
 #[tokio::test]
 async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continues() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
-    state.last_seq = 3;
     let assistant = ChatMessage::assistant("").with_tool_calls(vec![
         ToolCall {
             call_id: CallId::from("call-1"),
@@ -928,21 +992,6 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
             arguments: json!({"value": 2}),
         },
     ]);
-    let order = Arc::new(Mutex::new(Vec::new()));
-    let store = Arc::new(TestStore::with_state_and_order(
-        state,
-        vec![
-            persisted_message(1, run_id, turn_id, ChatMessage::user("use tools")),
-            persisted_message(2, run_id, turn_id, assistant),
-            persisted_message(
-                3,
-                run_id,
-                turn_id,
-                ChatMessage::tool(CallId::from("call-1"), json!({"value": 1})),
-            ),
-        ],
-        Arc::clone(&order),
-    ));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::Allow);
     registry
@@ -952,6 +1001,23 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
             DangerLevel::Low,
         )
         .expect("tool registers");
+    let mut state = running_state_with_registry(session_id, turn_id, &registry);
+    state.last_seq = 3;
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(TestStore::with_state_and_order(
+        state,
+        vec![
+            persisted_message(1, session_id, turn_id, ChatMessage::user("use tools")),
+            persisted_message(2, session_id, turn_id, assistant),
+            persisted_message(
+                3,
+                session_id,
+                turn_id,
+                ChatMessage::tool(CallId::from("call-1"), json!({"value": 1})),
+            ),
+        ],
+        Arc::clone(&order),
+    ));
     let provider = Arc::new(RecordingProvider::with_order(
         vec![ProviderResponse::Pending],
         Arc::clone(&order),
@@ -971,7 +1037,7 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
         .build()
         .expect("agent should build");
 
-    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert_eq!(agent.resume().await.expect("resume starts"), turn_id);
     let requests = wait_for_request_count(&provider, 1).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -983,7 +1049,7 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
     }));
     assert_eq!(
         *store.completed.lock().expect("completed mutex"),
-        vec![(run_id, turn_id, 0, TokenUsage::default())]
+        vec![(session_id, turn_id, 0, TokenUsage::default())]
     );
     assert_eq!(
         *order.lock().expect("order mutex"),
@@ -994,19 +1060,16 @@ async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continue
 
 #[tokio::test]
 async fn resume_rejects_active_turn_assistant_count_more_than_one_past_frontier() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.last_seq = 3;
     let store = Arc::new(TestStore::with_state(
         state,
         vec![
-            persisted_message(1, run_id, turn_id, ChatMessage::user("active turn")),
-            persisted_message(2, run_id, turn_id, ChatMessage::assistant("first")),
-            persisted_message(3, run_id, turn_id, ChatMessage::assistant("second")),
+            persisted_message(1, session_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(2, session_id, turn_id, ChatMessage::assistant("first")),
+            persisted_message(3, session_id, turn_id, ChatMessage::assistant("second")),
         ],
     ));
     let provider = Arc::new(RecordingProvider::new(Vec::new()));
@@ -1026,7 +1089,7 @@ async fn resume_rejects_active_turn_assistant_count_more_than_one_past_frontier(
 
 #[tokio::test]
 async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_input_events() {
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let prior_usage = TokenUsage {
         input_tokens: 10,
@@ -1039,50 +1102,47 @@ async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_
         total_tokens: 5,
     };
     let input = ChatMessage::user("persisted input");
-    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
-    state.status = AgentStatus::Running;
-    state.run_id = Some(run_id);
-    state.turn_id = Some(turn_id);
+    let mut state = running_state(session_id, turn_id);
     state.next_iteration = 3;
     state.usage = prior_usage;
     state.last_seq = 7;
     let store = Arc::new(TestStore::with_state(
         state,
         vec![
-            persisted_message(1, run_id, turn_id, input.clone()),
+            persisted_message(1, session_id, turn_id, input.clone()),
             persisted_message(
                 2,
-                run_id,
+                session_id,
                 turn_id,
                 assistant_tool_call("prior-call-1", json!({"iteration": 0})),
             ),
             persisted_message(
                 3,
-                run_id,
+                session_id,
                 turn_id,
                 ChatMessage::tool("prior-call-1", json!({"iteration": 0})),
             ),
             persisted_message(
                 4,
-                run_id,
+                session_id,
                 turn_id,
                 assistant_tool_call("prior-call-2", json!({"iteration": 1})),
             ),
             persisted_message(
                 5,
-                run_id,
+                session_id,
                 turn_id,
                 ChatMessage::tool("prior-call-2", json!({"iteration": 1})),
             ),
             persisted_message(
                 6,
-                run_id,
+                session_id,
                 turn_id,
                 assistant_tool_call("prior-call-3", json!({"iteration": 2})),
             ),
             persisted_message(
                 7,
-                run_id,
+                session_id,
                 turn_id,
                 ChatMessage::tool("prior-call-3", json!({"iteration": 2})),
             ),
@@ -1102,14 +1162,14 @@ async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
 
-    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
-    assert_eq!(agent.current_run(), Some(run_id));
+    assert_eq!(agent.resume().await.expect("resume starts"), turn_id);
+    assert_eq!(agent.current_session(), Some(session_id));
     assert_eq!(agent.current_turn(), Some(turn_id));
     let requests = wait_for_request_count(&provider, 1).await;
     assert!(requests[0].messages.iter().any(|message| message == &input));
 
     let mut events = bus
-        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .subscribe_session(session_id, ReplayStart::All)
         .await
         .expect("subscribe succeeds");
     let mut saw_iteration = false;
@@ -1121,7 +1181,7 @@ async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_
             }
             match envelope.event {
                 RuntimeEvent::Agent {
-                    event: AgentEvent::Started { .. },
+                    event: AgentEvent::Started,
                     ..
                 } => panic!("resume must not publish another started event"),
                 RuntimeEvent::Agent {
@@ -1162,7 +1222,7 @@ async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_
     assert_eq!(
         *store.completed.lock().expect("completed mutex"),
         vec![(
-            run_id,
+            session_id,
             turn_id,
             3,
             TokenUsage {
@@ -1223,6 +1283,14 @@ impl ToolRegistry for BlockingToolRegistry {
 
     fn specs(&self) -> Vec<ToolSpec> {
         vec![self.spec.clone()]
+    }
+
+    fn fingerprint(&self) -> Result<ToolSetFingerprint, ToolError> {
+        Ok(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .expect("test fingerprint is valid"),
+        )
     }
 
     async fn call(
@@ -1347,12 +1415,12 @@ impl EventStreamBus for FailingApprovalBus {
         self.inner.publish(envelope).await
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        agent_id: AgentId,
+        session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
-        self.inner.subscribe_agent(agent_id, replay_start).await
+        self.inner.subscribe_session(session_id, replay_start).await
     }
 }
 
@@ -1378,12 +1446,12 @@ impl EventStreamBus for BlockingCancelledBus {
         self.inner.publish(envelope).await
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        agent_id: AgentId,
+        session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
-        self.inner.subscribe_agent(agent_id, replay_start).await
+        self.inner.subscribe_session(session_id, replay_start).await
     }
 }
 
@@ -1407,14 +1475,18 @@ async fn wait_for_request_count(provider: &RecordingProvider, count: usize) -> V
     .expect("timed out waiting for provider requests")
 }
 
-async fn run_turn_and_subscribe(agent: &Agent, message: ChatMessage) -> (RunId, EventStream) {
-    let run_id = agent.run_turn(message).await.expect("run should start");
+async fn run_turn_and_subscribe(agent: &Agent, message: ChatMessage) -> (SessionId, EventStream) {
+    let session_id = SessionId::new();
+    agent
+        .run_turn(AgentRuntimeContext::direct(session_id), message)
+        .await
+        .expect("run should start");
     let events = agent
         .event_bus()
-        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .subscribe_session(session_id, ReplayStart::All)
         .await
         .expect("subscribe should succeed");
-    (run_id, events)
+    (session_id, events)
 }
 
 async fn wait_for_approval_request(events: &mut EventStream) -> ApprovalId {
@@ -1542,7 +1614,8 @@ async fn approval_allows_exactly_one_tool_execution() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
 
-    let (run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let (session_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
@@ -1553,7 +1626,7 @@ async fn approval_allows_exactly_one_tool_execution() {
     wait_for_agent_finish(&mut events).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(agent.current_run(), Some(run_id));
+    assert_eq!(agent.current_session(), Some(session_id));
 }
 
 #[tokio::test]
@@ -1566,7 +1639,7 @@ async fn approval_rejection_skips_tool_and_returns_structured_result() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
 
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     agent
@@ -1616,7 +1689,10 @@ async fn approval_before_any_request_returns_not_found_without_waiting() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
     agent
-        .run_turn(ChatMessage::user("wait for provider"))
+        .run_turn(
+            AgentRuntimeContext::direct(SessionId::new()),
+            ChatMessage::user("wait for provider"),
+        )
         .await
         .expect("run starts");
     let approval_id = ApprovalId::new();
@@ -1643,7 +1719,7 @@ async fn approval_wrong_id_does_not_interrupt_active_request() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
 
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     let different_id = ApprovalId::new();
@@ -1671,7 +1747,7 @@ async fn approval_cancellation_wins_before_tool_execution() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
 
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     let resolution = agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve);
@@ -1712,7 +1788,7 @@ async fn cancellation_clears_active_approval_before_publishing() {
     let calls = Arc::new(AtomicUsize::new(0));
     let bus = Arc::new(BlockingCancelledBus::default());
     let agent = approval_agent(&calls, approval_provider(), bus.clone());
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     let cancelled_entered = bus.cancelled_entered.notified();
@@ -1739,12 +1815,16 @@ async fn approval_request_publish_failure_prevents_tool_execution() {
     let bus = Arc::new(FailingApprovalBus::default());
     let agent = approval_agent(&calls, approval_provider(), bus.clone());
 
-    let _run_id = agent
-        .run_turn(ChatMessage::user("change it"))
+    let _session_id = agent
+        .run_turn(
+            AgentRuntimeContext::direct(SessionId::new()),
+            ChatMessage::user("change it"),
+        )
         .await
         .expect("run starts");
+    let session_id = agent.current_session().expect("session is active");
     let mut events = bus
-        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .subscribe_session(session_id, ReplayStart::All)
         .await
         .expect("subscribe succeeds");
 
@@ -1781,7 +1861,7 @@ async fn duplicate_approval_decisions_execute_tool_once() {
         Arc::new(InMemoryEventStreamBus::default()),
     );
 
-    let (_run_id, mut events) =
+    let (_session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
     let approval_id = wait_for_approval_request(&mut events).await;
     let (first, second) = tokio::join!(
@@ -1840,7 +1920,8 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
         .build()
         .expect("agent should build");
 
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    let (_session_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut saw_text_delta = false;
     let mut saw_tool_finished = false;
     let mut saw_tool_message = false;
@@ -1913,7 +1994,7 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
 }
 
 #[tokio::test]
-async fn stream_publishes_complete_turn_messages_in_order_without_business_sequences() {
+async fn stream_publishes_complete_turn_messages_in_order_with_agent_message_sequences() {
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![
             ChatStreamEvent::TextDelta {
@@ -1937,22 +2018,29 @@ async fn stream_publishes_complete_turn_messages_in_order_without_business_seque
         .expect("agent should build");
     let input = ChatMessage::user("hello");
 
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, input.clone()).await;
+    let (session_id, mut events) = run_turn_and_subscribe(&agent, input.clone()).await;
     let turn_id = agent.current_turn().expect("turn id should be set");
     let mut state_events = Vec::new();
 
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered").envelope;
-            assert_eq!(envelope.business_seq, None);
-            let RuntimeEvent::Agent { event, .. } = envelope.event else {
+            let RuntimeEvent::Agent {
+                agent_id,
+                turn_id: actual_turn_id,
+                location,
+                event,
+            } = envelope.event
+            else {
                 continue;
             };
+            assert_eq!(envelope.session_id, session_id);
+            assert_eq!(agent_id, test_agent_id());
+            assert_eq!(actual_turn_id, turn_id);
+            assert_eq!(location, AgentLocation::Direct);
             if matches!(
                 event,
-                AgentEvent::Started { .. }
-                    | AgentEvent::Message { .. }
-                    | AgentEvent::Finished { .. }
+                AgentEvent::Started | AgentEvent::Message { .. } | AgentEvent::Finished { .. }
             ) {
                 let finished = matches!(event, AgentEvent::Finished { .. });
                 state_events.push(event);
@@ -1969,13 +2057,13 @@ async fn stream_publishes_complete_turn_messages_in_order_without_business_seque
     assert_eq!(
         state_events,
         vec![
-            AgentEvent::Started { turn_id },
+            AgentEvent::Started,
             AgentEvent::Message {
-                turn_id,
+                message_seq: 1,
                 message: input,
             },
             AgentEvent::Message {
-                turn_id,
+                message_seq: 2,
                 message: ChatMessage::assistant("done"),
             },
             AgentEvent::Finished {
@@ -2015,7 +2103,7 @@ async fn failed_turn_commits_complete_persisted_history_for_next_run() {
         .build()
         .expect("agent should build");
 
-    let (_run_id, mut events) =
+    let (session_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("failed input")).await;
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = events.next().await {
@@ -2037,9 +2125,15 @@ async fn failed_turn_commits_complete_persisted_history_for_next_run() {
 
     timeout(Duration::from_secs(1), async {
         loop {
-            match agent.run_turn(ChatMessage::user("fresh input")).await {
-                Ok(run_id) => return run_id,
-                Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
+            match agent
+                .run_turn(
+                    AgentRuntimeContext::direct(session_id),
+                    ChatMessage::user("fresh input"),
+                )
+                .await
+            {
+                Ok(turn_id) => return turn_id,
+                Err(AgentError::OperationAlreadyActive) => sleep(Duration::from_millis(10)).await,
                 Err(error) => panic!("unexpected run error: {error}"),
             }
         }
@@ -2086,8 +2180,12 @@ async fn cancelled_turn_context_matches_same_process_and_restart_requests() {
         .store(same_store_trait)
         .build()
         .expect("agent should build");
+    let session_id = SessionId::new();
     same_agent
-        .run_turn(ChatMessage::user("cancelled input"))
+        .run_turn(
+            AgentRuntimeContext::direct(session_id),
+            ChatMessage::user("cancelled input"),
+        )
         .await
         .expect("turn starts");
     wait_for_request_count(&same_provider, 1).await;
@@ -2133,11 +2231,17 @@ async fn cancelled_turn_context_matches_same_process_and_restart_requests() {
         .expect("restart loads history");
 
     same_agent
-        .run_turn(ChatMessage::user("next input"))
+        .run_turn(
+            AgentRuntimeContext::direct(session_id),
+            ChatMessage::user("next input"),
+        )
         .await
         .expect("same-process turn starts");
     restart_agent
-        .run_turn(ChatMessage::user("next input"))
+        .run_turn(
+            AgentRuntimeContext::direct(session_id),
+            ChatMessage::user("next input"),
+        )
         .await
         .expect("restart turn starts");
     let same_requests = wait_for_request_count(&same_provider, 2).await;
@@ -2174,7 +2278,8 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         .build()
         .expect("agent should build");
 
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    let (_session_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = events.next().await {
@@ -2229,7 +2334,8 @@ async fn stream_waits_for_cooperative_tool_outcome_before_cancelled() {
         .build()
         .expect("agent should build");
 
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    let (_session_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     entered.notified().await;
     agent.stop();
 
@@ -2372,7 +2478,8 @@ async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
         .build()
         .expect("agent should build");
 
-    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    let (_session_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut failure_text = None;
 
     timeout(Duration::from_secs(1), async {

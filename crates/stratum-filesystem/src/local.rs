@@ -303,37 +303,54 @@ impl Filesystem for LocalFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        let host = self.ensure_existing_inside_root(path).await?;
-        let metadata = fs::metadata(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
-        if !metadata.is_dir() {
-            return Err(FilesystemError::NotADirectory { path: path.clone() });
-        }
+        let root = self.root.clone();
+        let path = path.clone();
+        let error_path = path.clone();
+        let records = Arc::clone(&self.records);
 
-        let mut read_dir = fs::read_dir(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("read_dir", path.clone(), source))?;
-        let mut entries = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|source| FilesystemError::local_io("read_dir_entry", path.clone(), source))?
-        {
-            let file_name = file_name_to_string(entry.file_name())?;
-            let child_path = child_virtual_path(path, &file_name)?;
-            let entry_file_type = entry.file_type().await.map_err(|source| {
-                FilesystemError::local_io("entry_file_type", child_path.clone(), source)
+        tokio::task::spawn_blocking(move || {
+            let _records = records
+                .lock()
+                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
+            let host = host_path(&root, &path);
+            let canonical = std::fs::canonicalize(&host).map_err(|source| {
+                FilesystemError::local_io("canonicalize", path.clone(), source)
             })?;
-            let file_type = file_type_from_file_type(&entry_file_type);
-            entries.push(DirEntry {
-                path: child_path,
-                file_name,
-                file_type,
-            });
-        }
-        entries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(entries)
+            if !canonical.starts_with(&root) {
+                return Err(FilesystemError::PathEscapesSandbox { path });
+            }
+            let metadata = std::fs::metadata(&canonical)
+                .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
+            if !metadata.is_dir() {
+                return Err(FilesystemError::NotADirectory { path });
+            }
+
+            let read_dir = std::fs::read_dir(&canonical)
+                .map_err(|source| FilesystemError::local_io("read_dir", path.clone(), source))?;
+            let mut entries = Vec::new();
+            for entry in read_dir {
+                let entry = entry.map_err(|source| {
+                    FilesystemError::local_io("read_dir_entry", path.clone(), source)
+                })?;
+                let file_name = file_name_to_string(entry.file_name())?;
+                let child_path = child_virtual_path(&path, &file_name)?;
+                let entry_file_type = entry.file_type().map_err(|source| {
+                    FilesystemError::local_io("entry_file_type", child_path.clone(), source)
+                })?;
+                let file_type = file_type_from_file_type(&entry_file_type);
+                entries.push(DirEntry {
+                    path: child_path,
+                    file_name,
+                    file_type,
+                });
+            }
+            entries.sort_by(|left, right| left.path.cmp(&right.path));
+            Ok(entries)
+        })
+        .await
+        .map_err(|error| {
+            FilesystemError::local_io("list_dir", error_path, std::io::Error::other(error))
+        })?
     }
 
     async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
@@ -489,6 +506,52 @@ mod tests {
 
         fs.remove_file(&file).await.expect("remove file");
         fs.remove_dir(&dir).await.expect("remove empty dir");
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn list_dir_does_not_observe_temporary_files_during_cas_write() {
+        let temp =
+            std::env::temp_dir().join(format!("stratum-fs-list-during-cas-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(temp.join("messages"))
+            .await
+            .expect("create messages directory");
+        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let directory = VirtualPath::try_from("/messages").expect("path is valid");
+        let temporary = temp.join("messages/1.stratum-1.tmp");
+        let records = Arc::clone(&filesystem.records);
+        let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let writer = tokio::task::spawn_blocking(move || {
+            let _records = records.lock().expect("record lock is available");
+            std::fs::write(&temporary, b"pending").expect("temporary file is written");
+            ready_sender.send(()).expect("reader receives readiness");
+            let _ = release_receiver.recv();
+            std::fs::remove_file(temporary).expect("temporary file is removed");
+        });
+        ready_receiver.await.expect("writer becomes ready");
+
+        let listing_filesystem = filesystem.clone();
+        let listing = tokio::spawn(async move { listing_filesystem.list_dir(&directory).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !listing.is_finished(),
+            "directory listing must wait for the CAS write to become visible atomically"
+        );
+
+        release_sender.send(()).expect("writer is released");
+        writer.await.expect("writer task completes");
+        let entries = listing
+            .await
+            .expect("listing task completes")
+            .expect("directory listing succeeds");
+        assert!(entries.is_empty());
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }

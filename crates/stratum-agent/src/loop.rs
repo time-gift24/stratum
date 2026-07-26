@@ -9,8 +9,8 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use stratum_core::{
-    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, ChatRole, EventSource,
-    LlmCallId, LlmEvent, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
+    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, ChatRole, LlmCallId, LlmEvent,
+    NewAgentMessage, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
 };
 use stratum_llm::{ChatRequest, ChatStream, ChatStreamEvent, FinishReason};
 use stratum_tools::ToolInput;
@@ -143,7 +143,6 @@ impl Agent {
         mut history: Vec<ChatMessage>,
         mut iteration: u64,
     ) -> Result<(), AgentError> {
-        let turn_id = self.current_turn().expect("turn id should be set");
         loop {
             let turn_index = usize::try_from(iteration)
                 .map_err(|_| AgentError::IterationOutOfRange { iteration })?;
@@ -217,14 +216,7 @@ impl Agent {
             let finish_reason = assistant.finish_reason;
             let message = assistant.message;
             let tool_calls = message.tool_calls.clone();
-            self.publish_required_agent_event(
-                AgentEvent::Message {
-                    turn_id,
-                    message: message.clone(),
-                },
-                None,
-            )
-            .await?;
+            self.commit_message(message.clone()).await?;
             history.push(message);
 
             if finish_reason == FinishReason::ToolCalls && !tool_calls.is_empty() {
@@ -253,14 +245,7 @@ impl Agent {
                             return Err(error);
                         }
                     };
-                    self.publish_required_agent_event(
-                        AgentEvent::Message {
-                            turn_id,
-                            message: tool_message.clone(),
-                        },
-                        None,
-                    )
-                    .await?;
+                    self.commit_message(tool_message.clone()).await?;
                     history.push(tool_message);
                 }
                 self.complete_iteration(iteration).await?;
@@ -394,7 +379,6 @@ impl Agent {
                         iteration: continuation.iteration,
                     }
                 })?;
-                let turn_id = self.current_turn().expect("turn id should be set");
                 let missing_tool_calls = tool_calls
                     .get(next_tool_index..)
                     .ok_or(AgentError::InvalidResumeHistory)?;
@@ -415,14 +399,7 @@ impl Agent {
                             return Err(error);
                         }
                     };
-                    self.publish_required_agent_event(
-                        AgentEvent::Message {
-                            turn_id,
-                            message: tool_message.clone(),
-                        },
-                        None,
-                    )
-                    .await?;
+                    self.commit_message(tool_message.clone()).await?;
                     continuation.history.push(tool_message);
                 }
                 self.complete_iteration(continuation.iteration).await?;
@@ -440,7 +417,7 @@ impl Agent {
     async fn complete_iteration(&self, iteration: u64) -> Result<(), AgentError> {
         self.store
             .complete_iteration(
-                self.current_run().expect("run id should be set"),
+                self.current_session().expect("session id should be set"),
                 self.current_turn().expect("turn id should be set"),
                 iteration,
                 self.current_usage(),
@@ -494,6 +471,22 @@ impl Agent {
         .await
     }
 
+    pub(crate) async fn commit_message(&self, message: ChatMessage) -> Result<(), AgentError> {
+        let context = self
+            .current_context()
+            .expect("runtime context should be set");
+        let mut pending = NewAgentMessage::new(
+            &context,
+            self.id,
+            self.current_turn().expect("turn id should be set"),
+            message,
+        );
+        pending.metadata = self.event_metadata(None);
+        let committed = self.store.append_message(pending).await?;
+        self.event_bus.publish(committed).await?;
+        Ok(())
+    }
+
     async fn publish_agent_event(
         &self,
         event: AgentEvent,
@@ -518,6 +511,38 @@ impl Agent {
         extra_metadata: Option<BTreeMap<String, Value>>,
         fail_on_publish_error: bool,
     ) -> Result<(), AgentError> {
+        let metadata = self.event_metadata(extra_metadata);
+        let context = self
+            .current_context()
+            .expect("runtime context should be set");
+        let envelope = StreamEnvelope {
+            session_id: context.session_id,
+            timestamp: Utc::now(),
+            event: RuntimeEvent::Agent {
+                agent_id: self.id,
+                turn_id: self.current_turn().expect("turn id should be set"),
+                location: context.location,
+                event,
+            },
+            metadata,
+        };
+        if let Err(error) = self.event_bus.publish(envelope).await {
+            if fail_on_publish_error {
+                return Err(AgentError::from(error));
+            }
+            warn!(
+                session_id = %self.current_session().expect("session id should be set"),
+                source = %error,
+                "failed to publish live agent event"
+            );
+        }
+        Ok(())
+    }
+
+    fn event_metadata(
+        &self,
+        extra_metadata: Option<BTreeMap<String, Value>>,
+    ) -> BTreeMap<String, Value> {
         let mut metadata = BTreeMap::new();
         metadata.insert("agent_name".to_owned(), Value::String(self.name.clone()));
         let model = self.llm_provider.model_id();
@@ -533,29 +558,7 @@ impl Agent {
         if let Some(extra_metadata) = extra_metadata {
             metadata.extend(extra_metadata);
         }
-
-        let envelope = StreamEnvelope {
-            business_seq: None,
-            run_id: self.current_run().expect("run id should be set"),
-            timestamp: Utc::now(),
-            source: EventSource::Run,
-            event: RuntimeEvent::Agent {
-                agent_id: self.id,
-                event,
-            },
-            metadata,
-        };
-        if let Err(error) = self.event_bus.publish(envelope).await {
-            if fail_on_publish_error {
-                return Err(AgentError::from(error));
-            }
-            warn!(
-                run_id = %self.current_run().expect("run id should be set"),
-                source = %error,
-                "failed to publish live agent event"
-            );
-        }
-        Ok(())
+        metadata
     }
 
     async fn consume_assistant_stream(

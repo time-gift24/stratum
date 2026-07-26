@@ -8,7 +8,7 @@ use async_nats::jetstream::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{StreamExt, future, stream};
-use stratum_core::{AgentId, EventCursor, EventRecord, ReplayStart, RuntimeEvent, StreamEnvelope};
+use stratum_core::{EventCursor, EventRecord, ReplayStart, SessionId, StreamEnvelope};
 
 use super::{EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig};
 
@@ -22,7 +22,7 @@ impl NatsEventStreamBus {
     pub(crate) async fn new(config: NatsEventStreamBusConfig) -> Result<Self, EventStreamBusError> {
         validate_config(&config)?;
         let client = async_nats::ConnectOptions::new()
-            .custom_inbox_prefix("_INBOX.agent_events")
+            .custom_inbox_prefix("_INBOX.session_events")
             .connect(&config.url)
             .await
             .map_err(EventStreamBusError::nats)?;
@@ -40,8 +40,8 @@ impl NatsEventStreamBus {
         subject_for(&self.config.subject_prefix, envelope)
     }
 
-    fn subscribe_subject(&self, agent_id: AgentId) -> String {
-        subscribe_subject(&self.config.subject_prefix, agent_id)
+    fn subscribe_subject(&self, session_id: SessionId) -> String {
+        subscribe_subject(&self.config.subject_prefix, session_id)
     }
 
     async fn validate_cursor(&self, cursor: EventCursor) -> Result<(), EventStreamBusError> {
@@ -63,22 +63,37 @@ impl NatsEventStreamBus {
 #[async_trait]
 impl EventStreamBus for NatsEventStreamBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
-        let subject = self.subject_for(&envelope)?;
-        let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
+        let session_id = envelope.session_id;
+        let event_type = envelope.event.event_type();
+        let result = async {
+            let subject = self.subject_for(&envelope)?;
+            let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
 
-        self.jetstream
-            .publish(subject, Bytes::from(payload))
-            .await
-            .map_err(EventStreamBusError::nats)?
-            .await
-            .map_err(EventStreamBusError::nats)?;
+            self.jetstream
+                .publish(subject, Bytes::from(payload))
+                .await
+                .map_err(EventStreamBusError::nats)?
+                .await
+                .map_err(EventStreamBusError::nats)?;
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            tracing::warn!(
+                session_id = %session_id,
+                event_type,
+                "session event publish failed"
+            );
+        }
+
+        result
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        agent_id: AgentId,
+        session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
         let result = async {
@@ -91,7 +106,7 @@ impl EventStreamBus for NatsEventStreamBus {
                 .create_consumer_on_stream(
                     OrderedConfig {
                         deliver_subject,
-                        filter_subject: self.subscribe_subject(agent_id),
+                        filter_subject: self.subscribe_subject(session_id),
                         deliver_policy: deliver_policy(replay_start)?,
                         ..Default::default()
                     },
@@ -136,14 +151,14 @@ impl EventStreamBus for NatsEventStreamBus {
                         *terminated = true;
                         if let Some(transport_cursor) = transport_cursor {
                             tracing::warn!(
-                                agent_id = %agent_id,
+                                session_id = %session_id,
                                 transport_cursor,
-                                "agent event delivery or decode failed"
+                                "session event delivery or decode failed"
                             );
                         } else {
                             tracing::warn!(
-                                agent_id = %agent_id,
-                                "agent event delivery failed before cursor extraction"
+                                session_id = %session_id,
+                                "session event delivery failed before cursor extraction"
                             );
                         }
                     }
@@ -159,18 +174,18 @@ impl EventStreamBus for NatsEventStreamBus {
         if let Err(error) = &result {
             if let EventStreamBusError::CursorExpired { cursor } = error {
                 tracing::warn!(
-                    agent_id = %agent_id,
+                    session_id = %session_id,
                     transport_cursor = cursor.transport_sequence(),
-                    "agent event cursor reset required"
+                    "session event cursor reset required"
                 );
             } else if let ReplayStart::After(cursor) = replay_start {
                 tracing::warn!(
-                    agent_id = %agent_id,
+                    session_id = %session_id,
                     transport_cursor = cursor.transport_sequence(),
-                    "agent event subscription failed"
+                    "session event subscription failed"
                 );
             } else {
-                tracing::warn!(agent_id = %agent_id, "agent event subscription failed");
+                tracing::warn!(session_id = %session_id, "session event subscription failed");
             }
         }
 
@@ -179,14 +194,15 @@ impl EventStreamBus for NatsEventStreamBus {
 }
 
 fn subject_for(prefix: &str, envelope: &StreamEnvelope) -> Result<String, EventStreamBusError> {
-    let RuntimeEvent::Agent { agent_id, event } = &envelope.event else {
-        return Err(EventStreamBusError::MissingAgentScope);
-    };
-    Ok(format!("{prefix}.{agent_id}.{}", event.event_type()))
+    Ok(format!(
+        "{prefix}.{}.{}",
+        envelope.session_id,
+        envelope.event.event_type()
+    ))
 }
 
-fn subscribe_subject(prefix: &str, agent_id: AgentId) -> String {
-    format!("{prefix}.{agent_id}.>")
+fn subscribe_subject(prefix: &str, session_id: SessionId) -> String {
+    format!("{prefix}.{session_id}.>")
 }
 
 fn validate_config(config: &NatsEventStreamBusConfig) -> Result<(), EventStreamBusError> {
@@ -241,44 +257,48 @@ mod tests {
     use async_nats::jetstream::stream::{DiscardPolicy, RetentionPolicy, StorageType};
     use chrono::Utc;
     use stratum_core::{
-        AgentEvent, AgentId, EventCursor, EventSource, ReplayStart, RunId, RuntimeEvent, TurnId,
+        AgentEvent, AgentId, AgentLocation, EventCursor, ReplayStart, RuntimeEvent, SessionId,
+        TurnId,
     };
 
     use super::*;
 
-    fn agent_envelope(agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
+    fn agent_envelope(
+        session_id: SessionId,
+        agent_id: AgentId,
+        event: AgentEvent,
+    ) -> StreamEnvelope {
         StreamEnvelope {
-            business_seq: None,
-            run_id: RunId::new(),
+            session_id,
             timestamp: Utc::now(),
-            source: EventSource::Run,
-            event: RuntimeEvent::Agent { agent_id, event },
+            event: RuntimeEvent::Agent {
+                agent_id,
+                turn_id: TurnId::new(),
+                location: AgentLocation::Direct,
+                event,
+            },
             metadata: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn agent_subject_has_no_product_prefix() {
+    fn runtime_subject_is_partitioned_by_session() {
+        let session_id = SessionId::new();
         let agent_id = AgentId::new();
-        let envelope = agent_envelope(
-            agent_id,
-            AgentEvent::Started {
-                turn_id: TurnId::new(),
-            },
-        );
+        let envelope = agent_envelope(session_id, agent_id, AgentEvent::Started);
 
         assert_eq!(
-            subject_for("events.agent", &envelope).expect("agent subject"),
-            format!("events.agent.{agent_id}.started")
+            subject_for("events.session", &envelope).expect("session subject"),
+            format!("events.session.{session_id}.agent")
         );
     }
 
     #[test]
-    fn subscribe_subject_uses_agent_wildcard() {
-        let agent_id = AgentId::new();
-        let subject = subscribe_subject("events.agent", agent_id);
+    fn subscribe_subject_uses_session_wildcard() {
+        let session_id = SessionId::new();
+        let subject = subscribe_subject("events.session", session_id);
 
-        assert_eq!(subject, format!("events.agent.{agent_id}.>"));
+        assert_eq!(subject, format!("events.session.{session_id}.>"));
     }
 
     #[test]
@@ -318,8 +338,8 @@ mod tests {
         let config = NatsEventStreamBusConfig::default();
 
         assert_eq!(config.url, "nats://localhost:4222");
-        assert_eq!(config.stream_name, "AGENT_EVENTS");
-        assert_eq!(config.subject_prefix, "events.agent");
+        assert_eq!(config.stream_name, "SESSION_EVENTS");
+        assert_eq!(config.subject_prefix, "events.session");
         assert_eq!(config.replicas, 1);
         assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 60 * 60));
         assert_eq!(config.max_bytes, 1_073_741_824);

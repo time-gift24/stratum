@@ -9,214 +9,42 @@ use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
+use stratum_macros::{sha256_fingerprint, string_id, uuid_identity};
 
 pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
-pub use error::ModelIdParseError;
+pub use error::{FingerprintParseError, HookFailure, ModelIdParseError};
 
-/// Identity of one workflow run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RunId(Uuid);
-
-impl RunId {
-    /// Creates a new UUIDv7 run id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for RunId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for RunId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for RunId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<RunId> for Uuid {
-    fn from(value: RunId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for RunId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Identity of one resumable turn inside a workflow run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TurnId(Uuid);
-
-impl TurnId {
-    /// Creates a new UUIDv7 turn id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for TurnId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for TurnId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for TurnId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<TurnId> for Uuid {
-    fn from(value: TurnId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for TurnId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Identity of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AgentId(Uuid);
-
-impl AgentId {
-    /// Creates a new UUIDv7 agent id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for AgentId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for AgentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for AgentId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<AgentId> for Uuid {
-    fn from(value: AgentId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for AgentId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Identity of one tool approval request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ApprovalId(Uuid);
-
-impl ApprovalId {
-    /// Creates a new UUIDv7 approval id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for ApprovalId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for ApprovalId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for ApprovalId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<ApprovalId> for Uuid {
-    fn from(value: ApprovalId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for ApprovalId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
+uuid_identity!(SessionId, "Identity of one long-lived runtime session.");
+uuid_identity!(
+    TurnId,
+    "Identity of one resumable turn inside a workflow run."
+);
+uuid_identity!(AgentId, "Identity of an agent.");
+uuid_identity!(
+    AgentVersionId,
+    "Identity of one immutable published agent version."
+);
+uuid_identity!(
+    WorkflowVersionId,
+    "Identity of one immutable published workflow version."
+);
+uuid_identity!(
+    SkillSetVersionId,
+    "Identity of one immutable ordered skill set version."
+);
+uuid_identity!(
+    ExtensionSetVersionId,
+    "Identity of one immutable ordered extension set version."
+);
+uuid_identity!(
+    HookHandlerVersionId,
+    "Identity of one immutable hook handler version."
+);
+uuid_identity!(
+    HookInvocationId,
+    "Identity of one hook handler invocation at one hook point."
+);
+uuid_identity!(ApprovalId, "Identity of one tool approval request.");
 
 /// Whether a tool observes or mutates state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -253,52 +81,22 @@ pub enum ApprovalDecision {
     Reject,
 }
 
-macro_rules! string_id {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            /// Creates a new id from a string-like value.
-            #[must_use]
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
-            /// Returns the id as a string slice.
-            #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
-            }
-        }
-    };
-}
-
 string_id!(NodeId, "Identity of a workflow node.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
+
+sha256_fingerprint!(
+    ToolSetFingerprint,
+    "SHA-256 fingerprint of an exact ordered runtime tool set.",
+    FingerprintParseError
+);
+sha256_fingerprint!(
+    HookInputDigest,
+    "SHA-256 digest of the canonical input to one hook handler invocation.",
+    FingerprintParseError
+);
 
 /// Canonical identity of a provider model.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -402,25 +200,374 @@ impl ModelConfig {
     }
 }
 
-/// Source that owns a runtime stream event.
+/// Location where an agent is executing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
-pub enum EventSource {
-    /// Event belongs to the whole run.
-    Run,
-    /// Event belongs to a workflow node.
-    Node {
-        /// Node that owns the event.
+pub enum AgentLocation {
+    /// Agent is executing directly in a session.
+    Direct,
+    /// Agent is embedded as one workflow node.
+    WorkflowNode {
+        /// Immutable workflow version containing the node.
+        workflow_version_id: WorkflowVersionId,
+        /// Node containing the agent.
         node_id: NodeId,
     },
-    /// Event belongs to an agent running inside a workflow node.
-    Agent {
-        /// Node that owns the agent.
+}
+
+/// Immutable host-supplied context for one agent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AgentRuntimeContext {
+    /// Long-lived session containing the turn.
+    pub session_id: SessionId,
+    /// Location where the agent is executing.
+    pub location: AgentLocation,
+}
+
+impl AgentRuntimeContext {
+    /// Creates an Agent runtime context from a validated session and location.
+    #[must_use]
+    pub const fn new(session_id: SessionId, location: AgentLocation) -> Self {
+        Self {
+            session_id,
+            location,
+        }
+    }
+
+    /// Creates direct agent runtime context for a session.
+    #[must_use]
+    pub const fn direct(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            location: AgentLocation::Direct,
+        }
+    }
+
+    /// Creates workflow-node runtime context for a session.
+    #[must_use]
+    pub const fn workflow_node(
+        session_id: SessionId,
+        workflow_version_id: WorkflowVersionId,
         node_id: NodeId,
-        /// Agent that produced the event.
-        agent_id: AgentId,
+    ) -> Self {
+        Self {
+            session_id,
+            location: AgentLocation::WorkflowNode {
+                workflow_version_id,
+                node_id,
+            },
+        }
+    }
+}
+
+/// Exact runtime components pinned for one resumable turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TurnRuntimeSnapshot {
+    /// Immutable agent definition used by the turn.
+    pub agent_version_id: AgentVersionId,
+    /// Fully resolved model configuration used by the turn.
+    pub model: ModelConfig,
+    /// Exact ordered set of tools visible to the model.
+    pub tool_set_fingerprint: ToolSetFingerprint,
+    /// Immutable ordered skill set used by the turn.
+    pub skill_set_version_id: SkillSetVersionId,
+    /// Immutable ordered extension set used by the turn.
+    pub extension_set_version_id: ExtensionSetVersionId,
+    /// Exact hook handler order resolved for the turn.
+    pub hook_handler_versions: Vec<HookHandlerVersionId>,
+}
+
+impl TurnRuntimeSnapshot {
+    /// Creates an exact runtime snapshot for one resumable Turn.
+    #[must_use]
+    pub fn new(
+        agent_version_id: AgentVersionId,
+        model: ModelConfig,
+        tool_set_fingerprint: ToolSetFingerprint,
+        skill_set_version_id: SkillSetVersionId,
+        extension_set_version_id: ExtensionSetVersionId,
+        hook_handler_versions: Vec<HookHandlerVersionId>,
+    ) -> Self {
+        Self {
+            agent_version_id,
+            model,
+            tool_set_fingerprint,
+            skill_set_version_id,
+            extension_set_version_id,
+            hook_handler_versions,
+        }
+    }
+}
+
+/// Decision-affecting point in the agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookPoint {
+    /// Transform model context before a model call.
+    TransformContext,
+    /// Decide what to do immediately before a tool call.
+    BeforeToolCall,
+    /// Process a completed tool call before the loop continues.
+    AfterToolCall,
+    /// Prepare state for the next model iteration.
+    PrepareNextTurn,
+}
+
+/// Operation inside a turn to which a hook invocation belongs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[non_exhaustive]
+pub enum HookOperationIdentity {
+    /// Operation applies to the turn as a whole.
+    Turn,
+    /// Operation applies to one model-loop iteration.
+    Iteration {
+        /// Zero-based iteration index.
+        index: u32,
     },
+    /// Operation applies to one tool call.
+    ToolCall {
+        /// Provider tool-call identity.
+        call_id: CallId,
+    },
+}
+
+/// Stable semantic address of one handler invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct HookInvocationAddress {
+    /// Long-lived session containing the invocation.
+    pub session_id: SessionId,
+    /// Agent whose loop invokes the handler.
+    pub agent_id: AgentId,
+    /// Resumable turn containing the invocation.
+    pub turn_id: TurnId,
+    /// Hook point being handled.
+    pub hook_point: HookPoint,
+    /// Zero-based position in the pinned handler chain.
+    pub handler_position: u32,
+    /// Immutable handler version at this position.
+    pub handler_version_id: HookHandlerVersionId,
+    /// Operation affected by the handler decision.
+    pub operation: HookOperationIdentity,
+}
+
+impl HookInvocationAddress {
+    fn has_same_semantics_except_version(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.agent_id == other.agent_id
+            && self.turn_id == other.turn_id
+            && self.hook_point == other.hook_point
+            && self.handler_position == other.handler_position
+            && self.operation == other.operation
+    }
+}
+
+/// Persisted lifecycle of one decision-affecting hook invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookInvocationState<T> {
+    /// Invocation identity and input were committed before calling the handler.
+    Pending,
+    /// A validated decision was committed before applying it.
+    Completed {
+        /// Typed handler decision.
+        decision: T,
+    },
+    /// Handler invocation reached a typed terminal failure.
+    Failed {
+        /// Safe failure classification without sensitive handler payloads.
+        failure: HookFailure,
+    },
+    /// Handler invocation reached its deadline.
+    TimedOut,
+    /// Handler invocation was cancelled.
+    Cancelled,
+}
+
+/// Journal-independent record required to resume one hook invocation safely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct HookInvocationRecord<T> {
+    /// Stable remote idempotency key for this handler call.
+    pub invocation_id: HookInvocationId,
+    /// Semantic address that prevents duplicate logical invocations.
+    pub address: HookInvocationAddress,
+    /// Digest of the canonical handler input.
+    pub input_digest: HookInputDigest,
+    /// Persisted invocation lifecycle.
+    pub state: HookInvocationState<T>,
+}
+
+impl<T> HookInvocationRecord<T> {
+    /// Creates a pending record that must be committed before invoking a handler.
+    #[must_use]
+    pub fn pending(address: HookInvocationAddress, input_digest: HookInputDigest) -> Self {
+        Self {
+            invocation_id: HookInvocationId::new(),
+            address,
+            input_digest,
+            state: HookInvocationState::Pending,
+        }
+    }
+
+    /// Validates a resumed invocation and chooses retry, reuse, or terminal failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed, fail-closed [`HookFailure`] for any address, version, input,
+    /// or persisted terminal-state mismatch.
+    pub fn resume<'a>(
+        &'a self,
+        address: &HookInvocationAddress,
+        input_digest: &HookInputDigest,
+    ) -> Result<HookResume<'a, T>, HookFailure> {
+        if !self.address.has_same_semantics_except_version(address) {
+            return Err(HookFailure::AddressMismatch);
+        }
+        if self.address.handler_version_id != address.handler_version_id {
+            return Err(HookFailure::VersionMismatch);
+        }
+        if &self.input_digest != input_digest {
+            return Err(HookFailure::InputMismatch);
+        }
+
+        match &self.state {
+            HookInvocationState::Pending => Ok(HookResume::Retry {
+                invocation_id: self.invocation_id,
+            }),
+            HookInvocationState::Completed { decision } => Ok(HookResume::Reuse {
+                invocation_id: self.invocation_id,
+                decision,
+            }),
+            HookInvocationState::Failed { failure } => Err(*failure),
+            HookInvocationState::TimedOut => Err(HookFailure::TimedOut),
+            HookInvocationState::Cancelled => Err(HookFailure::Cancelled),
+        }
+    }
+}
+
+/// Safe action selected after validating a persisted hook invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HookResume<'a, T> {
+    /// Retry a pending handler with the original idempotency key.
+    Retry {
+        /// Original invocation identity.
+        invocation_id: HookInvocationId,
+    },
+    /// Reuse a committed decision without invoking the handler again.
+    Reuse {
+        /// Original invocation identity.
+        invocation_id: HookInvocationId,
+        /// Persisted typed decision.
+        decision: &'a T,
+    },
+}
+
+/// Supported extension packaging forms and their trust boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExtensionForm {
+    /// Immutable skill content treated as untrusted data.
+    Skill,
+    /// Untrusted executable script isolated from the agent process.
+    Script,
+    /// Fully trusted hook linked into the agent process.
+    LinkedRust,
+    /// Trusted remote service reached through an untrusted transport.
+    HookService,
+}
+
+/// Executable minimum boundary associated with one extension form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExtensionBoundary {
+    /// Whether loading the extension may add Tool or secret permissions.
+    pub may_elevate_permissions: bool,
+    /// Whether code must execute outside the agent process.
+    pub requires_process_isolation: bool,
+    /// Whether time, memory, output, and concurrency limits are required.
+    pub requires_resource_limits: bool,
+    /// Whether runtime compatibility must be pinned for resume.
+    pub requires_runtime_compatibility_pin: bool,
+    /// Whether authenticated and authorized transport is required.
+    pub requires_authenticated_transport: bool,
+    /// Whether remote service identity, version, and endpoint must be pinned.
+    pub requires_service_identity_pin: bool,
+    /// Whether the invocation identity must be accepted as an idempotency key.
+    pub requires_invocation_idempotency: bool,
+    /// Whether logs and public errors must omit sensitive hook payloads.
+    pub redact_sensitive_payloads: bool,
+}
+
+impl ExtensionForm {
+    /// Returns the minimum enforceable trust boundary for this extension form.
+    #[must_use]
+    pub const fn boundary(self) -> ExtensionBoundary {
+        match self {
+            Self::Skill => ExtensionBoundary {
+                may_elevate_permissions: false,
+                requires_process_isolation: false,
+                requires_resource_limits: false,
+                requires_runtime_compatibility_pin: false,
+                requires_authenticated_transport: false,
+                requires_service_identity_pin: false,
+                requires_invocation_idempotency: false,
+                redact_sensitive_payloads: true,
+            },
+            Self::Script => ExtensionBoundary {
+                may_elevate_permissions: false,
+                requires_process_isolation: true,
+                requires_resource_limits: true,
+                requires_runtime_compatibility_pin: false,
+                requires_authenticated_transport: false,
+                requires_service_identity_pin: false,
+                requires_invocation_idempotency: false,
+                redact_sensitive_payloads: true,
+            },
+            Self::LinkedRust => ExtensionBoundary {
+                may_elevate_permissions: false,
+                requires_process_isolation: false,
+                requires_resource_limits: false,
+                requires_runtime_compatibility_pin: true,
+                requires_authenticated_transport: false,
+                requires_service_identity_pin: false,
+                requires_invocation_idempotency: false,
+                redact_sensitive_payloads: true,
+            },
+            Self::HookService => ExtensionBoundary {
+                may_elevate_permissions: false,
+                requires_process_isolation: false,
+                requires_resource_limits: false,
+                requires_runtime_compatibility_pin: false,
+                requires_authenticated_transport: true,
+                requires_service_identity_pin: true,
+                requires_invocation_idempotency: true,
+                redact_sensitive_payloads: true,
+            },
+        }
+    }
 }
 
 /// Token usage reported by a model provider.
@@ -475,7 +622,12 @@ pub enum ChatRole {
 
 /// Content carried by a chat message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
 pub enum ChatContent {
     /// Plain text content.
@@ -659,33 +811,30 @@ pub enum LlmEvent {
 pub enum AgentEvent {
     /// One complete message committed to agent history.
     Message {
-        /// Turn that produced the message.
-        turn_id: TurnId,
+        /// Monotonic sequence in this agent's committed message history.
+        message_seq: u64,
         /// Complete message payload.
         message: ChatMessage,
     },
-    /// Agent run started.
-    Started {
-        /// Turn being run.
-        turn_id: TurnId,
-    },
-    /// Agent run finished.
+    /// Agent turn started.
+    Started,
+    /// Agent turn finished.
     Finished {
-        /// Why the run finished.
+        /// Why the turn finished.
         finish_reason: String,
-        /// Token usage accumulated by the run.
+        /// Token usage accumulated by the turn.
         usage: TokenUsage,
     },
-    /// Agent run failed.
+    /// Agent turn failed.
     Failed {
         /// Error text safe to expose to callers.
         error_text: String,
-        /// Token usage accumulated by the run.
+        /// Token usage accumulated by the turn.
         usage: TokenUsage,
     },
-    /// Agent run was cancelled.
+    /// Agent turn was cancelled.
     Cancelled {
-        /// Token usage accumulated by the run.
+        /// Token usage accumulated by the turn.
         usage: TokenUsage,
     },
     /// A tool call requires user approval.
@@ -714,8 +863,6 @@ pub enum AgentEvent {
     },
     /// A validated and approved tool call began executing.
     ToolExecutionStarted {
-        /// Turn that owns the tool call.
-        turn_id: TurnId,
         /// Tool call identity.
         call_id: CallId,
         /// Provider-visible tool name.
@@ -723,8 +870,6 @@ pub enum AgentEvent {
     },
     /// One agent-loop iteration reached its durable boundary.
     IterationCompleted {
-        /// Turn whose durable frontier advanced.
-        turn_id: TurnId,
         /// Completed iteration number.
         iteration: u64,
         /// Token usage accumulated through the iteration.
@@ -737,76 +882,6 @@ pub enum AgentEvent {
         /// LLM event payload.
         event: LlmEvent,
     },
-}
-
-impl AgentEvent {
-    /// Returns the serialized event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Message { .. } => "message",
-            Self::Started { .. } => "started",
-            Self::Finished { .. } => "finished",
-            Self::Failed { .. } => "failed",
-            Self::Cancelled { .. } => "cancelled",
-            Self::ToolApprovalRequested { .. } => "tool_approval_requested",
-            Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
-            Self::ToolExecutionStarted { .. } => "tool_execution_started",
-            Self::IterationCompleted { .. } => "iteration_completed",
-            Self::Llm { .. } => "llm",
-        }
-    }
-}
-
-/// Runtime event payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum RuntimeEvent {
-    /// Run started.
-    RunStarted,
-    /// Run finished successfully.
-    RunFinished {
-        /// Why the run finished.
-        finish_reason: String,
-        /// Token usage accumulated by the run.
-        usage: TokenUsage,
-    },
-    /// Run failed.
-    RunFailed {
-        /// Error text safe to expose to callers.
-        error_text: String,
-    },
-    /// Run was cancelled.
-    RunCancelled,
-    /// Node execution started.
-    NodeStarted,
-    /// Normal node produced output.
-    NodeOutput {
-        /// Node output payload.
-        output: Value,
-    },
-    /// Node execution finished.
-    NodeFinished,
-    /// Node execution failed.
-    NodeFailed {
-        /// Error text safe to expose to callers.
-        error_text: String,
-    },
-    /// Event emitted by one LLM call.
-    Llm {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// LLM event payload.
-        event: LlmEvent,
-    },
-    /// Event emitted by one agent.
-    Agent {
-        /// Agent identity.
-        agent_id: AgentId,
-        /// Agent event payload.
-        event: AgentEvent,
-    },
     /// Agent-visible plan changed.
     PlanUpdated {
         /// Plan identity.
@@ -816,22 +891,134 @@ pub enum RuntimeEvent {
     },
 }
 
+impl AgentEvent {
+    /// Returns the serialized event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Message { .. } => "message",
+            Self::Started => "started",
+            Self::Finished { .. } => "finished",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled { .. } => "cancelled",
+            Self::ToolApprovalRequested { .. } => "tool_approval_requested",
+            Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
+            Self::ToolExecutionStarted { .. } => "tool_execution_started",
+            Self::IterationCompleted { .. } => "iteration_completed",
+            Self::Llm { .. } => "llm",
+            Self::PlanUpdated { .. } => "plan_updated",
+        }
+    }
+}
+
+/// Event emitted for the long-lived session asset itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[non_exhaustive]
+pub enum SessionEvent {
+    /// Session was created.
+    Created,
+}
+
+impl SessionEvent {
+    /// Returns the serialized event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+        }
+    }
+}
+
+/// Event emitted by one ordinary workflow node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[non_exhaustive]
+pub enum NodeEvent {
+    /// Node started.
+    Started,
+    /// Node produced output.
+    Output {
+        /// Node output payload.
+        output: Value,
+    },
+    /// Node finished.
+    Finished,
+    /// Node failed.
+    Failed {
+        /// Error text safe to expose to callers.
+        error_text: String,
+    },
+}
+
+impl NodeEvent {
+    /// Returns the serialized event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Output { .. } => "output",
+            Self::Finished => "finished",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// Runtime event payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[non_exhaustive]
+pub enum RuntimeEvent {
+    /// Event concerning the session asset itself.
+    Session {
+        /// Session event payload.
+        event: SessionEvent,
+    },
+    /// Event emitted by one ordinary workflow node.
+    Node {
+        /// Immutable workflow version containing the node.
+        workflow_version_id: WorkflowVersionId,
+        /// Node that emitted the event.
+        node_id: NodeId,
+        /// Node event payload.
+        event: NodeEvent,
+    },
+    /// Event emitted by one agent.
+    Agent {
+        /// Agent identity.
+        agent_id: AgentId,
+        /// Resumable turn identity.
+        turn_id: TurnId,
+        /// Agent execution location.
+        location: AgentLocation,
+        /// Agent event payload.
+        event: AgentEvent,
+    },
+}
+
 impl RuntimeEvent {
     /// Returns the serialized event type name.
     #[must_use]
     pub const fn event_type(&self) -> &'static str {
         match self {
-            Self::RunStarted => "run_started",
-            Self::RunFinished { .. } => "run_finished",
-            Self::RunFailed { .. } => "run_failed",
-            Self::RunCancelled => "run_cancelled",
-            Self::NodeStarted => "node_started",
-            Self::NodeOutput { .. } => "node_output",
-            Self::NodeFinished => "node_finished",
-            Self::NodeFailed { .. } => "node_failed",
-            Self::Llm { .. } => "llm",
+            Self::Session { .. } => "session",
+            Self::Node { .. } => "node",
             Self::Agent { .. } => "agent",
-            Self::PlanUpdated { .. } => "plan_updated",
         }
     }
 }
@@ -867,18 +1054,14 @@ pub enum ReplayStart {
     New,
 }
 
-/// One event in a workflow run stream.
+/// One event in a session-scoped runtime stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamEnvelope {
-    /// Monotonic business sequence for persisted complete messages.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub business_seq: Option<u64>,
-    /// Workflow run identity.
-    pub run_id: RunId,
+    /// Long-lived session containing the event.
+    pub session_id: SessionId,
     /// Event creation time.
     pub timestamp: DateTime<Utc>,
-    /// Event ownership.
-    pub source: EventSource,
     /// Typed runtime event payload.
     pub event: RuntimeEvent,
     /// Runtime-only metadata; not for business payloads.
@@ -887,10 +1070,78 @@ pub struct StreamEnvelope {
 }
 
 impl StreamEnvelope {
-    /// Returns the complete-message business sequence, when present.
+    /// Returns the committed agent-message sequence, when this is a message event.
     #[must_use]
-    pub const fn business_seq(&self) -> Option<u64> {
-        self.business_seq
+    pub const fn message_seq(&self) -> Option<u64> {
+        match &self.event {
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { message_seq, .. },
+                ..
+            } => Some(*message_seq),
+            _ => None,
+        }
+    }
+}
+
+/// Complete agent message awaiting durable sequence assignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct NewAgentMessage {
+    /// Long-lived session containing the message.
+    pub session_id: SessionId,
+    /// Agent that owns the message history.
+    pub agent_id: AgentId,
+    /// Turn that produced the message.
+    pub turn_id: TurnId,
+    /// Location where the agent is executing.
+    pub location: AgentLocation,
+    /// Message creation time.
+    pub timestamp: DateTime<Utc>,
+    /// Complete message payload.
+    pub message: ChatMessage,
+    /// Runtime-only metadata; not for business payloads.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, Value>,
+}
+
+impl NewAgentMessage {
+    /// Creates an uncommitted complete agent message.
+    #[must_use]
+    pub fn new(
+        context: &AgentRuntimeContext,
+        agent_id: AgentId,
+        turn_id: TurnId,
+        message: ChatMessage,
+    ) -> Self {
+        Self {
+            session_id: context.session_id,
+            agent_id,
+            turn_id,
+            location: context.location.clone(),
+            timestamp: Utc::now(),
+            message,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Converts the message into a committed runtime event.
+    #[must_use]
+    pub fn into_envelope(self, message_seq: u64) -> StreamEnvelope {
+        StreamEnvelope {
+            session_id: self.session_id,
+            timestamp: self.timestamp,
+            event: RuntimeEvent::Agent {
+                agent_id: self.agent_id,
+                turn_id: self.turn_id,
+                location: self.location,
+                event: AgentEvent::Message {
+                    message_seq,
+                    message: self.message,
+                },
+            },
+            metadata: self.metadata,
+        }
     }
 }
 
@@ -906,9 +1157,9 @@ pub struct EventRecord {
 /// Fixed-range query over complete agent messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryQuery {
-    /// Excludes messages at or before this business sequence.
+    /// Excludes messages at or before this agent-message sequence.
     pub after_seq: u64,
-    /// Optional inclusive upper business-sequence bound.
+    /// Optional inclusive upper agent-message-sequence bound.
     pub through_seq: Option<u64>,
     /// Maximum number of messages to return.
     pub limit: usize,
@@ -917,11 +1168,11 @@ pub struct HistoryQuery {
 /// One page of complete agent-message history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryPage {
-    /// Inclusive upper business-sequence bound used for this page.
+    /// Inclusive upper agent-message-sequence bound used for this page.
     pub through_seq: u64,
     /// Complete message events in the page.
     pub events: Vec<StreamEnvelope>,
-    /// Business sequence from which the next front page should continue.
+    /// Agent-message sequence from which the next front page should continue.
     pub next_front_seq: u64,
     /// Whether additional events remain in the fixed range.
     pub has_more: bool,
@@ -930,16 +1181,15 @@ pub struct HistoryPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn agent_envelope(business_seq: Option<u64>, event: AgentEvent) -> StreamEnvelope {
+    fn agent_envelope(event: AgentEvent) -> StreamEnvelope {
         StreamEnvelope {
-            business_seq,
-            run_id: RunId::new(),
+            session_id: SessionId::new(),
             timestamp: Utc::now(),
-            source: EventSource::Run,
             event: RuntimeEvent::Agent {
                 agent_id: AgentId::new(),
+                turn_id: TurnId::new(),
+                location: AgentLocation::Direct,
                 event,
             },
             metadata: BTreeMap::new(),
@@ -947,43 +1197,38 @@ mod tests {
     }
 
     #[test]
-    fn only_complete_agent_message_has_business_sequence() -> serde_json::Result<()> {
-        let message = agent_envelope(
-            Some(7),
-            AgentEvent::Message {
-                turn_id: TurnId::new(),
-                message: ChatMessage::user("hello"),
+    fn only_complete_agent_message_has_message_sequence() -> serde_json::Result<()> {
+        let message = agent_envelope(AgentEvent::Message {
+            message_seq: 7,
+            message: ChatMessage::user("hello"),
+        });
+        let delta = agent_envelope(AgentEvent::Llm {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+            event: LlmEvent::ReasoningDelta {
+                delta: "thinking".to_owned(),
             },
-        );
-        let delta = agent_envelope(
-            None,
-            AgentEvent::Llm {
-                llm_call_id: LlmCallId::from("llm-call-1"),
-                event: LlmEvent::ReasoningDelta {
-                    delta: "thinking".to_owned(),
-                },
-            },
-        );
+        });
 
-        assert_eq!(message.business_seq(), Some(7));
-        assert_eq!(delta.business_seq(), None);
-        assert_eq!(serde_json::to_value(&message)?["business_seq"], json!(7));
-        assert!(serde_json::to_value(&delta)?.get("business_seq").is_none());
+        assert_eq!(message.message_seq(), Some(7));
+        assert_eq!(delta.message_seq(), None);
+        let message_json = serde_json::to_value(&message)?;
+        assert_eq!(
+            message_json["event"]["data"]["event"]["data"]["message_seq"],
+            7
+        );
+        assert!(message_json.get("message_seq").is_none());
+        assert!(serde_json::to_value(&delta)?.get("message_seq").is_none());
 
         Ok(())
     }
 
     #[test]
     fn stream_envelope_has_no_top_level_sequence() {
-        let value = serde_json::to_value(agent_envelope(
-            None,
-            AgentEvent::Started {
-                turn_id: TurnId::new(),
-            },
-        ))
-        .expect("serialize envelope");
+        let value =
+            serde_json::to_value(agent_envelope(AgentEvent::Started)).expect("serialize envelope");
 
         assert!(value.get("seq").is_none());
+        assert!(value.get("business_seq").is_none());
     }
 
     #[test]
@@ -993,8 +1238,8 @@ mod tests {
     }
 
     #[test]
-    fn run_id_uses_uuid_v7() {
-        let version = RunId::new().as_uuid().get_version_num();
+    fn session_id_uses_uuid_v7() {
+        let version = SessionId::new().as_uuid().get_version_num();
 
         assert_eq!(version, 7);
     }
@@ -1136,23 +1381,16 @@ mod tests {
 
     #[test]
     fn event_type_matches_protocol_name() {
-        let event = RuntimeEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::TextDelta {
-                role: LlmCallRole::Assistant,
-                delta: "hello".to_owned(),
-            },
-        };
-
-        assert_eq!(event.event_type(), "llm");
-    }
-
-    #[test]
-    fn runtime_agent_event_type_is_agent() {
         let event = RuntimeEvent::Agent {
             agent_id: AgentId::new(),
-            event: AgentEvent::Started {
-                turn_id: TurnId::new(),
+            turn_id: TurnId::new(),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::TextDelta {
+                    role: LlmCallRole::Assistant,
+                    delta: "hello".to_owned(),
+                },
             },
         };
 
@@ -1160,15 +1398,33 @@ mod tests {
     }
 
     #[test]
-    fn llm_started_has_nested_event_type() {
-        let event = RuntimeEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::Started,
+    fn runtime_agent_event_type_is_agent() {
+        let event = RuntimeEvent::Agent {
+            agent_id: AgentId::new(),
+            turn_id: TurnId::new(),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Started,
         };
 
-        assert_eq!(event.event_type(), "llm");
+        assert_eq!(event.event_type(), "agent");
+    }
+
+    #[test]
+    fn llm_started_has_nested_event_type() {
+        let event = RuntimeEvent::Agent {
+            agent_id: AgentId::new(),
+            turn_id: TurnId::new(),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::Started,
+            },
+        };
+
+        assert_eq!(event.event_type(), "agent");
         let value = serde_json::to_value(event).expect("event should serialize");
-        assert_eq!(value["data"]["event"]["type"], "started");
+        assert_eq!(value["data"]["event"]["type"], "llm");
+        assert_eq!(value["data"]["event"]["data"]["event"]["type"], "started");
     }
 
     #[test]
@@ -1185,15 +1441,20 @@ mod tests {
 
     #[test]
     fn llm_runtime_event_wraps_text_delta() {
-        let event = RuntimeEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::TextDelta {
-                role: LlmCallRole::User,
-                delta: "hello".to_owned(),
+        let event = RuntimeEvent::Agent {
+            agent_id: AgentId::new(),
+            turn_id: TurnId::new(),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::TextDelta {
+                    role: LlmCallRole::User,
+                    delta: "hello".to_owned(),
+                },
             },
         };
 
-        assert_eq!(event.event_type(), "llm");
+        assert_eq!(event.event_type(), "agent");
     }
 
     #[test]
@@ -1210,15 +1471,23 @@ mod tests {
 
     #[test]
     fn reasoning_delta_uses_llm_call_id() {
-        let event = RuntimeEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::ReasoningDelta {
-                delta: "thinking".to_owned(),
+        let event = RuntimeEvent::Agent {
+            agent_id: AgentId::new(),
+            turn_id: TurnId::new(),
+            location: AgentLocation::Direct,
+            event: AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::ReasoningDelta {
+                    delta: "thinking".to_owned(),
+                },
             },
         };
 
         let value = serde_json::to_value(event).expect("event should serialize");
-        assert_eq!(value["data"]["event"]["type"], "reasoning_delta");
+        assert_eq!(
+            value["data"]["event"]["data"]["event"]["type"],
+            "reasoning_delta"
+        );
     }
 
     #[test]
@@ -1280,60 +1549,214 @@ mod tests {
     }
 
     #[test]
-    fn agent_loop_compatibility_events_have_stable_wire_shapes() -> serde_json::Result<()> {
-        let turn_id = "019f06b7-48f0-7c11-8000-000000000001"
-            .parse::<TurnId>()
-            .expect("fixed turn id should parse");
-        let usage = TokenUsage {
-            input_tokens: 1,
-            output_tokens: 2,
-            total_tokens: 3,
-        };
-        let fixtures = [
-            (
-                AgentEvent::ToolExecutionStarted {
-                    turn_id,
-                    call_id: CallId::from("tool-call-1"),
-                    tool_name: ToolName::from("echo"),
-                },
-                "tool_execution_started",
-                json!({
-                    "type": "tool_execution_started",
-                    "data": {
-                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
-                        "call_id": "tool-call-1",
-                        "tool_name": "echo"
-                    }
-                }),
-            ),
-            (
-                AgentEvent::IterationCompleted {
-                    turn_id,
-                    iteration: 4,
-                    usage,
-                },
-                "iteration_completed",
-                json!({
-                    "type": "iteration_completed",
-                    "data": {
-                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
-                        "iteration": 4,
-                        "usage": {
-                            "input_tokens": 1,
-                            "output_tokens": 2,
-                            "total_tokens": 3
-                        }
-                    }
-                }),
-            ),
-        ];
-
-        for (event, event_type, expected) in fixtures {
-            assert_eq!(event.event_type(), event_type);
-            assert_eq!(serde_json::to_value(&event)?, expected);
-            assert_eq!(serde_json::from_value::<AgentEvent>(expected)?, event);
+    fn runtime_identity_newtypes_use_uuid_v7_and_reject_invalid_input() {
+        macro_rules! assert_identity {
+            ($identity:ty) => {{
+                let id = <$identity>::new();
+                assert_eq!(id.as_uuid().get_version_num(), 7);
+                assert_eq!(
+                    id.to_string()
+                        .parse::<$identity>()
+                        .expect("identity parses"),
+                    id
+                );
+                assert!("not-a-uuid".parse::<$identity>().is_err());
+                assert!(serde_json::from_str::<$identity>(r#""not-a-uuid""#).is_err());
+            }};
         }
 
-        Ok(())
+        assert_identity!(SessionId);
+        assert_identity!(AgentVersionId);
+        assert_identity!(WorkflowVersionId);
+        assert_identity!(SkillSetVersionId);
+        assert_identity!(ExtensionSetVersionId);
+        assert_identity!(HookHandlerVersionId);
+        assert_identity!(HookInvocationId);
+    }
+
+    #[test]
+    fn agent_runtime_context_preserves_direct_and_workflow_locations() {
+        let session_id = SessionId::new();
+        let workflow_version_id = WorkflowVersionId::new();
+        let direct = AgentRuntimeContext::direct(session_id);
+        let workflow = AgentRuntimeContext::workflow_node(
+            session_id,
+            workflow_version_id,
+            NodeId::from("agent-node"),
+        );
+
+        assert_eq!(direct.location, AgentLocation::Direct);
+        assert_eq!(
+            workflow.location,
+            AgentLocation::WorkflowNode {
+                workflow_version_id,
+                node_id: NodeId::from("agent-node"),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(workflow).expect("workflow context serializes")["location"]["type"],
+            "workflow_node"
+        );
+    }
+
+    #[test]
+    fn stream_envelope_rejects_legacy_and_incomplete_wire_shapes() {
+        let envelope = agent_envelope(AgentEvent::Message {
+            message_seq: 1,
+            message: ChatMessage::user("hello"),
+        });
+        let mut legacy = serde_json::to_value(&envelope).expect("envelope serializes");
+        legacy["run_id"] = serde_json::json!(SessionId::new());
+        legacy["source"] = serde_json::json!({"type": "run"});
+        assert!(serde_json::from_value::<StreamEnvelope>(legacy).is_err());
+
+        let mut missing_turn = serde_json::to_value(&envelope).expect("envelope serializes");
+        missing_turn["event"]["data"]
+            .as_object_mut()
+            .expect("agent event data is an object")
+            .remove("turn_id");
+        assert!(serde_json::from_value::<StreamEnvelope>(missing_turn).is_err());
+
+        let mut missing_message_seq = serde_json::to_value(&envelope).expect("envelope serializes");
+        missing_message_seq["event"]["data"]["event"]["data"]
+            .as_object_mut()
+            .expect("message data is an object")
+            .remove("message_seq");
+        assert!(serde_json::from_value::<StreamEnvelope>(missing_message_seq).is_err());
+    }
+
+    fn hook_address(handler_position: u32) -> HookInvocationAddress {
+        HookInvocationAddress {
+            session_id: SessionId::new(),
+            agent_id: AgentId::new(),
+            turn_id: TurnId::new(),
+            hook_point: HookPoint::BeforeToolCall,
+            handler_position,
+            handler_version_id: HookHandlerVersionId::new(),
+            operation: HookOperationIdentity::ToolCall {
+                call_id: CallId::from("call-1"),
+            },
+        }
+    }
+
+    fn hook_digest(value: char) -> HookInputDigest {
+        value
+            .to_string()
+            .repeat(64)
+            .parse()
+            .expect("test digest is valid")
+    }
+
+    #[test]
+    fn each_handler_gets_a_distinct_hook_invocation_identity() {
+        let base = hook_address(0);
+        let first = HookInvocationRecord::<bool>::pending(base.clone(), hook_digest('a'));
+        let mut second_address = base;
+        second_address.handler_position = 1;
+        second_address.handler_version_id = HookHandlerVersionId::new();
+        let second = HookInvocationRecord::<bool>::pending(second_address, hook_digest('b'));
+
+        assert_ne!(first.invocation_id, second.invocation_id);
+    }
+
+    #[test]
+    fn pending_hook_resume_reuses_the_original_idempotency_key() {
+        let address = hook_address(0);
+        let digest = hook_digest('a');
+        let record = HookInvocationRecord::<bool>::pending(address.clone(), digest.clone());
+
+        assert_eq!(
+            record.resume(&address, &digest),
+            Ok(HookResume::Retry {
+                invocation_id: record.invocation_id,
+            })
+        );
+    }
+
+    #[test]
+    fn completed_hook_resume_reuses_the_committed_decision() {
+        let address = hook_address(0);
+        let digest = hook_digest('a');
+        let mut record = HookInvocationRecord::pending(address.clone(), digest.clone());
+        record.state = HookInvocationState::Completed { decision: true };
+
+        assert_eq!(
+            record.resume(&address, &digest),
+            Ok(HookResume::Reuse {
+                invocation_id: record.invocation_id,
+                decision: &true,
+            })
+        );
+    }
+
+    #[test]
+    fn hook_resume_preserves_terminal_failures() {
+        let address = hook_address(0);
+        let digest = hook_digest('a');
+        let mut record = HookInvocationRecord::<bool>::pending(address.clone(), digest.clone());
+
+        for (state, expected) in [
+            (
+                HookInvocationState::Failed {
+                    failure: HookFailure::InvalidOutput,
+                },
+                HookFailure::InvalidOutput,
+            ),
+            (
+                HookInvocationState::Failed {
+                    failure: HookFailure::HandlerUnavailable,
+                },
+                HookFailure::HandlerUnavailable,
+            ),
+            (HookInvocationState::TimedOut, HookFailure::TimedOut),
+            (HookInvocationState::Cancelled, HookFailure::Cancelled),
+        ] {
+            record.state = state;
+            assert_eq!(record.resume(&address, &digest), Err(expected));
+        }
+    }
+
+    #[test]
+    fn hook_resume_fails_closed_on_address_version_or_input_mismatch() {
+        let address = hook_address(0);
+        let digest = hook_digest('a');
+        let record = HookInvocationRecord::<bool>::pending(address.clone(), digest.clone());
+
+        let mut wrong_address = address.clone();
+        wrong_address.handler_position = 1;
+        assert_eq!(
+            record.resume(&wrong_address, &digest),
+            Err(HookFailure::AddressMismatch)
+        );
+
+        let mut wrong_version = address.clone();
+        wrong_version.handler_version_id = HookHandlerVersionId::new();
+        assert_eq!(
+            record.resume(&wrong_version, &digest),
+            Err(HookFailure::VersionMismatch)
+        );
+        assert_eq!(
+            record.resume(&address, &hook_digest('b')),
+            Err(HookFailure::InputMismatch)
+        );
+    }
+
+    #[test]
+    fn extension_forms_expose_their_minimum_trust_boundaries() {
+        let skill = ExtensionForm::Skill.boundary();
+        assert!(!skill.may_elevate_permissions);
+        assert!(skill.redact_sensitive_payloads);
+
+        let script = ExtensionForm::Script.boundary();
+        assert!(script.requires_process_isolation);
+        assert!(script.requires_resource_limits);
+
+        let linked = ExtensionForm::LinkedRust.boundary();
+        assert!(linked.requires_runtime_compatibility_pin);
+
+        let service = ExtensionForm::HookService.boundary();
+        assert!(service.requires_authenticated_transport);
+        assert!(service.requires_service_identity_pin);
+        assert!(service.requires_invocation_idempotency);
     }
 }

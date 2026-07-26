@@ -15,7 +15,7 @@ use stratum_llm::{
     OpenAICompatibleProvider,
 };
 
-pub use api::{AgentCreated, AgentTemplateView, AgentView, RunAccepted, router};
+pub use api::{AgentCreated, AgentTemplateView, AgentView, TurnAccepted, router};
 pub use error::{AgentCleanupError, HostError};
 pub use host::{HostState, HostedAgent};
 

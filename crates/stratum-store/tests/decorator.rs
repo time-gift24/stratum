@@ -1,88 +1,35 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::future;
 use stratum_core::{
-    AgentEvent, AgentId, CallId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
-    LlmCallId, LlmCallRole, LlmEvent, ModelConfig, ModelId, NodeId, ReplayStart, RunId,
-    RuntimeEvent, StreamEnvelope, TokenUsage, ToolName, TurnId,
+    AgentEvent, AgentId, AgentLocation, AgentRuntimeContext, ChatMessage, EventRecord, HistoryPage,
+    HistoryQuery, NewAgentMessage, ReplayStart, RuntimeEvent, SessionEvent, SessionId,
+    StreamEnvelope, TokenUsage, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_infra::{EventStream, EventStreamBus, EventStreamBusError};
 use stratum_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
-use tokio::time::{Duration, timeout};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StateUpdate {
-    status: AgentStatus,
-    run_id: Option<RunId>,
-    turn_id: Option<TurnId>,
-    usage: TokenUsage,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IterationCommit {
-    run_id: RunId,
-    turn_id: TurnId,
-    iteration: u64,
-    usage: TokenUsage,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ObservedOperation {
-    IterationCommitted(IterationCommit),
-    InnerPublished(StreamEnvelope),
-}
 
 struct RecordingStore {
     state: Mutex<AgentState>,
-    loads: Mutex<usize>,
-    appended: Mutex<Vec<StreamEnvelope>>,
-    updates: Mutex<Vec<StateUpdate>>,
-    iterations: Mutex<Vec<IterationCommit>>,
-    operation_order: Option<Arc<Mutex<Vec<ObservedOperation>>>>,
-    fail_append: bool,
-    fail_iteration: bool,
+    append_calls: AtomicUsize,
 }
 
 impl RecordingStore {
     fn new(agent_id: AgentId) -> Self {
         Self {
-            state: Mutex::new(AgentState::new(agent_id, "recording".to_owned())),
-            loads: Mutex::new(0),
-            appended: Mutex::new(Vec::new()),
-            updates: Mutex::new(Vec::new()),
-            iterations: Mutex::new(Vec::new()),
-            operation_order: None,
-            fail_append: false,
-            fail_iteration: false,
-        }
-    }
-
-    fn failing(agent_id: AgentId) -> Self {
-        Self {
-            fail_append: true,
-            ..Self::new(agent_id)
-        }
-    }
-
-    fn with_operation_order(
-        agent_id: AgentId,
-        operation_order: Arc<Mutex<Vec<ObservedOperation>>>,
-    ) -> Self {
-        Self {
-            operation_order: Some(operation_order),
-            ..Self::new(agent_id)
-        }
-    }
-
-    fn failing_iteration(agent_id: AgentId) -> Self {
-        Self {
-            fail_iteration: true,
-            ..Self::new(agent_id)
+            state: Mutex::new(AgentState::new_configured(
+                agent_id,
+                "agent".to_owned(),
+                stratum_core::ModelConfig::new(
+                    "openai:test".parse().expect("model id parses"),
+                    serde_json::Map::new(),
+                ),
+            )),
+            append_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -90,32 +37,19 @@ impl RecordingStore {
 #[async_trait]
 impl AgentStore for RecordingStore {
     async fn load_agent(&self) -> Result<AgentState, StoreError> {
-        *self.loads.lock().expect("loads lock") += 1;
         Ok(self.state.lock().expect("state lock").clone())
     }
 
     async fn update_state(
         &self,
         status: AgentStatus,
-        run_id: Option<RunId>,
+        session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError> {
-        self.updates
-            .lock()
-            .expect("updates lock")
-            .push(StateUpdate {
-                status,
-                run_id,
-                turn_id,
-                usage,
-            });
         let mut state = self.state.lock().expect("state lock");
-        if status == AgentStatus::Running && state.run_id != run_id {
-            state.next_iteration = 0;
-        }
         state.status = status;
-        state.run_id = run_id;
+        state.session_id = session_id;
         state.turn_id = turn_id;
         state.usage = usage;
         Ok(state.clone())
@@ -123,551 +57,251 @@ impl AgentStore for RecordingStore {
 
     async fn start_turn(
         &self,
-        run_id: RunId,
+        context: &AgentRuntimeContext,
         turn_id: TurnId,
-        model_config: ModelConfig,
+        runtime_snapshot: TurnRuntimeSnapshot,
     ) -> Result<AgentState, StoreError> {
         let mut state = self.state.lock().expect("state lock");
         state.status = AgentStatus::Running;
-        state.run_id = Some(run_id);
+        state.session_id = Some(context.session_id);
         state.turn_id = Some(turn_id);
-        state.model_config = Some(model_config);
+        state.location = Some(context.location.clone());
+        state.turn_runtime_snapshot = Some(runtime_snapshot);
         Ok(state.clone())
-    }
-
-    async fn append_message(
-        &self,
-        mut envelope: StreamEnvelope,
-    ) -> Result<StreamEnvelope, StoreError> {
-        self.appended
-            .lock()
-            .expect("appended lock")
-            .push(envelope.clone());
-        if self.fail_append {
-            return Err(StoreError::AgentMissing);
-        }
-        envelope.business_seq = Some(1);
-        Ok(envelope)
     }
 
     async fn complete_iteration(
         &self,
-        run_id: RunId,
-        turn_id: TurnId,
+        _session_id: SessionId,
+        _turn_id: TurnId,
         iteration: u64,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError> {
-        let commit = IterationCommit {
-            run_id,
-            turn_id,
-            iteration,
-            usage,
-        };
-        self.iterations
-            .lock()
-            .expect("iterations lock")
-            .push(commit);
-        if self.fail_iteration {
-            return Err(StoreError::AgentMissing);
-        }
-        if let Some(operation_order) = &self.operation_order {
-            operation_order
-                .lock()
-                .expect("operation order lock")
-                .push(ObservedOperation::IterationCommitted(commit));
-        }
-        Ok(self.state.lock().expect("state lock").clone())
+        let mut state = self.state.lock().expect("state lock");
+        state.next_iteration = iteration + 1;
+        state.usage = usage;
+        Ok(state.clone())
+    }
+
+    async fn append_message(&self, message: NewAgentMessage) -> Result<StreamEnvelope, StoreError> {
+        self.append_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(message.into_envelope(1))
     }
 
     async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
-        Err(StoreError::AgentMissing)
+        Ok(HistoryPage {
+            through_seq: 0,
+            events: Vec::new(),
+            next_front_seq: 0,
+            has_more: false,
+        })
     }
 }
 
+#[derive(Default)]
 struct RecordingBus {
     published: Mutex<Vec<StreamEnvelope>>,
-    subscriptions: Mutex<Vec<(AgentId, ReplayStart)>>,
-    operation_order: Option<Arc<Mutex<Vec<ObservedOperation>>>>,
+    subscriptions: Mutex<Vec<(SessionId, ReplayStart)>>,
     fail_publish: bool,
-}
-
-struct PendingBus;
-
-#[async_trait]
-impl EventStreamBus for PendingBus {
-    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
-        future::pending().await
-    }
-
-    async fn subscribe_agent(
-        &self,
-        _agent_id: AgentId,
-        _replay_start: ReplayStart,
-    ) -> Result<EventStream, EventStreamBusError> {
-        Ok(Box::pin(futures_util::stream::pending()))
-    }
-}
-
-impl RecordingBus {
-    fn new() -> Self {
-        Self {
-            published: Mutex::new(Vec::new()),
-            subscriptions: Mutex::new(Vec::new()),
-            operation_order: None,
-            fail_publish: false,
-        }
-    }
-
-    fn failing() -> Self {
-        Self {
-            fail_publish: true,
-            ..Self::new()
-        }
-    }
-
-    fn with_operation_order(operation_order: Arc<Mutex<Vec<ObservedOperation>>>) -> Self {
-        Self {
-            operation_order: Some(operation_order),
-            ..Self::new()
-        }
-    }
 }
 
 #[async_trait]
 impl EventStreamBus for RecordingBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
-        if let Some(operation_order) = &self.operation_order {
-            operation_order
-                .lock()
-                .expect("operation order lock")
-                .push(ObservedOperation::InnerPublished(envelope.clone()));
+        if self.fail_publish {
+            return Err(EventStreamBusError::CursorOverflow);
         }
         self.published
             .lock()
             .expect("published lock")
             .push(envelope);
-        if self.fail_publish {
-            Err(EventStreamBusError::MissingAgentScope)
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        agent_id: AgentId,
+        session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError> {
         self.subscriptions
             .lock()
             .expect("subscriptions lock")
-            .push((agent_id, replay_start));
-        Ok(Box::pin(futures_util::stream::empty()))
+            .push((session_id, replay_start));
+        Ok(Box::pin(futures_util::stream::empty::<
+            Result<EventRecord, EventStreamBusError>,
+        >()))
     }
 }
 
-fn envelope(agent_id: AgentId, run_id: RunId, event: AgentEvent) -> StreamEnvelope {
+fn agent_envelope(
+    session_id: SessionId,
+    agent_id: AgentId,
+    turn_id: TurnId,
+    event: AgentEvent,
+) -> StreamEnvelope {
     StreamEnvelope {
-        business_seq: None,
-        run_id,
+        session_id,
         timestamp: Utc::now(),
-        source: EventSource::Agent {
-            node_id: NodeId::new("node"),
+        event: RuntimeEvent::Agent {
             agent_id,
+            turn_id,
+            location: AgentLocation::Direct,
+            event,
         },
-        event: RuntimeEvent::Agent { agent_id, event },
-        metadata: BTreeMap::new(),
+        metadata: Default::default(),
     }
-}
-
-fn test_model_config() -> ModelConfig {
-    ModelConfig::new(
-        ModelId::new("openai", "test-model").expect("static model is valid"),
-        serde_json::Map::new(),
-    )
 }
 
 #[tokio::test]
-async fn started_event_persists_config_with_running_state() {
+async fn committed_messages_are_forwarded_without_a_second_store_append() {
     let agent_id = AgentId::new();
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
     let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::new());
-    let bus = StoreEventStreamBus::with_model_config(store.clone(), inner, test_model_config());
-
-    bus.publish(envelope(agent_id, run_id, AgentEvent::Started { turn_id }))
-        .await
-        .expect("started commits");
-
-    let state = store.load_agent().await.expect("state loads");
-    assert_eq!(state.status, AgentStatus::Running);
-    assert_eq!(state.model_config, Some(test_model_config()));
-}
-
-#[tokio::test]
-async fn message_is_stored_unsequenced_then_forwarded_with_committed_sequence() {
-    let agent_id = AgentId::new();
-    let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::new());
+    let inner = Arc::new(RecordingBus::default());
     let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
-    let requested = envelope(
+    let committed = agent_envelope(
+        session_id,
         agent_id,
-        RunId::new(),
+        turn_id,
         AgentEvent::Message {
-            turn_id: TurnId::new(),
+            message_seq: 1,
             message: ChatMessage::user("hello"),
         },
     );
 
-    bus.publish(requested).await.expect("publish message");
+    bus.publish(committed.clone()).await.expect("publish");
 
+    assert_eq!(store.append_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        store.appended.lock().expect("appended lock")[0].business_seq,
-        None
-    );
-    assert_eq!(
-        inner.published.lock().expect("published lock")[0].business_seq,
-        Some(1)
+        *inner.published.lock().expect("published lock"),
+        [committed]
     );
 }
 
 #[tokio::test]
-async fn state_events_commit_matching_status_run_turn_and_usage() {
+async fn terminal_agent_event_is_persisted_before_forwarding() {
     let agent_id = AgentId::new();
-    let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::new());
-    let bus = StoreEventStreamBus::new(store.clone(), inner);
-    let run_id = RunId::new();
+    let session_id = SessionId::new();
     let turn_id = TurnId::new();
-    let finished_usage = TokenUsage {
-        input_tokens: 1,
-        output_tokens: 2,
-        total_tokens: 3,
+    let store = Arc::new(RecordingStore::new(agent_id));
+    let inner = Arc::new(RecordingBus::default());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
+    let usage = TokenUsage {
+        input_tokens: 2,
+        output_tokens: 3,
+        total_tokens: 5,
     };
-    let failed_usage = TokenUsage {
-        input_tokens: 4,
-        output_tokens: 5,
-        total_tokens: 9,
-    };
-    let cancelled_usage = TokenUsage {
-        input_tokens: 6,
-        output_tokens: 7,
-        total_tokens: 13,
-    };
-    {
-        let mut state = store.state.lock().expect("state lock");
-        state.status = AgentStatus::Running;
-        state.run_id = Some(RunId::new());
-        state.turn_id = Some(TurnId::new());
-        state.next_iteration = 3;
-    }
 
-    bus.publish(envelope(agent_id, run_id, AgentEvent::Started { turn_id }))
-        .await
-        .expect("publish started");
-    assert_eq!(store.state.lock().expect("state lock").next_iteration, 0);
-    store.state.lock().expect("state lock").next_iteration = 4;
-    bus.publish(envelope(
+    bus.publish(agent_envelope(
+        session_id,
         agent_id,
-        run_id,
+        turn_id,
         AgentEvent::Finished {
             finish_reason: "stop".to_owned(),
-            usage: finished_usage,
+            usage,
         },
     ))
     .await
-    .expect("publish finished");
-    bus.publish(envelope(
-        agent_id,
-        run_id,
-        AgentEvent::Failed {
-            error_text: "failed".to_owned(),
-            usage: failed_usage,
-        },
-    ))
-    .await
-    .expect("publish failed");
-    bus.publish(envelope(
-        agent_id,
-        run_id,
-        AgentEvent::Cancelled {
-            usage: cancelled_usage,
-        },
-    ))
-    .await
-    .expect("publish cancelled");
+    .expect("publish");
 
-    assert_eq!(
-        *store.updates.lock().expect("updates lock"),
-        vec![
-            StateUpdate {
-                status: AgentStatus::Running,
-                run_id: Some(run_id),
-                turn_id: Some(turn_id),
-                usage: TokenUsage::default(),
-            },
-            StateUpdate {
-                status: AgentStatus::Finished,
-                run_id: Some(run_id),
-                turn_id: Some(turn_id),
-                usage: finished_usage,
-            },
-            StateUpdate {
-                status: AgentStatus::Failed,
-                run_id: Some(run_id),
-                turn_id: Some(turn_id),
-                usage: failed_usage,
-            },
-            StateUpdate {
-                status: AgentStatus::Cancelled,
-                run_id: Some(run_id),
-                turn_id: Some(turn_id),
-                usage: cancelled_usage,
-            },
-        ]
-    );
-    assert_eq!(store.state.lock().expect("state lock").next_iteration, 4);
-}
-
-#[tokio::test]
-async fn iteration_completed_persists_exact_frontier_before_forwarding() {
-    let agent_id = AgentId::new();
-    let run_id = RunId::new();
-    let turn_id = TurnId::new();
-    let usage = TokenUsage {
-        input_tokens: 13,
-        output_tokens: 21,
-        total_tokens: 34,
-    };
-    let iteration = 5;
-    let operation_order = Arc::new(Mutex::new(Vec::new()));
-    let store = Arc::new(RecordingStore::with_operation_order(
-        agent_id,
-        operation_order.clone(),
-    ));
-    let inner = Arc::new(RecordingBus::with_operation_order(operation_order.clone()));
-    let bus = StoreEventStreamBus::new(store.clone(), inner);
-    let requested = envelope(
-        agent_id,
-        run_id,
-        AgentEvent::IterationCompleted {
-            turn_id,
-            iteration,
-            usage,
-        },
-    );
-
-    bus.publish(requested.clone())
-        .await
-        .expect("iteration commits");
-
-    let commit = IterationCommit {
-        run_id,
-        turn_id,
-        iteration,
-        usage,
-    };
-    assert_eq!(
-        *store.iterations.lock().expect("iterations lock"),
-        vec![commit]
-    );
-    assert_eq!(
-        *operation_order.lock().expect("operation order lock"),
-        vec![
-            ObservedOperation::IterationCommitted(commit),
-            ObservedOperation::InnerPublished(requested),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn iteration_completed_store_failure_prevents_forwarding() {
-    let agent_id = AgentId::new();
-    let run_id = RunId::new();
-    let turn_id = TurnId::new();
-    let usage = TokenUsage {
-        input_tokens: 8,
-        output_tokens: 5,
-        total_tokens: 13,
-    };
-    let iteration = 3;
-    let store = Arc::new(RecordingStore::failing_iteration(agent_id));
-    let inner = Arc::new(RecordingBus::new());
-    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
-    let requested = envelope(
-        agent_id,
-        run_id,
-        AgentEvent::IterationCompleted {
-            turn_id,
-            iteration,
-            usage,
-        },
-    );
-
-    let error = bus
-        .publish(requested)
-        .await
-        .expect_err("iteration store failure");
-
-    assert!(matches!(error, EventStreamBusError::Persistence { .. }));
-    assert_eq!(
-        *store.iterations.lock().expect("iterations lock"),
-        vec![IterationCommit {
-            run_id,
-            turn_id,
-            iteration,
-            usage,
-        }]
-    );
-    assert!(inner.published.lock().expect("published lock").is_empty());
-}
-
-#[tokio::test]
-async fn tool_execution_started_requires_inner_publish_ack() {
-    let agent_id = AgentId::new();
-    let run_id = RunId::new();
-    let turn_id = TurnId::new();
-    let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::failing());
-    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
-    let requested = envelope(
-        agent_id,
-        run_id,
-        AgentEvent::ToolExecutionStarted {
-            turn_id,
-            call_id: CallId::from("call-1"),
-            tool_name: ToolName::from("write_file"),
-        },
-    );
-
-    let error = bus
-        .publish(requested.clone())
-        .await
-        .expect_err("inner ack is required");
-
-    assert!(matches!(error, EventStreamBusError::MissingAgentScope));
-    assert!(store.iterations.lock().expect("iterations lock").is_empty());
-    assert!(store.appended.lock().expect("appended lock").is_empty());
-    assert!(store.updates.lock().expect("updates lock").is_empty());
-    assert_eq!(*store.loads.lock().expect("loads lock"), 0);
-    assert_eq!(
-        *inner.published.lock().expect("published lock"),
-        vec![requested]
-    );
-}
-
-#[tokio::test]
-async fn llm_delta_bypasses_store_and_is_forwarded_unchanged() {
-    let agent_id = AgentId::new();
-    let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::new());
-    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
-    let delta = envelope(
-        agent_id,
-        RunId::new(),
-        AgentEvent::Llm {
-            llm_call_id: LlmCallId::from("call-1"),
-            event: LlmEvent::TextDelta {
-                role: LlmCallRole::Assistant,
-                delta: "partial".to_owned(),
-            },
-        },
-    );
-
-    bus.publish(delta.clone()).await.expect("publish delta");
-
-    assert!(store.appended.lock().expect("appended lock").is_empty());
-    assert!(store.updates.lock().expect("updates lock").is_empty());
-    assert_eq!(*store.loads.lock().expect("loads lock"), 0);
-    assert_eq!(
-        *inner.published.lock().expect("published lock"),
-        vec![delta]
-    );
-}
-
-#[tokio::test]
-async fn store_failure_is_persistence_error_and_prevents_inner_publish() {
-    let agent_id = AgentId::new();
-    let store = Arc::new(RecordingStore::failing(agent_id));
-    let inner = Arc::new(RecordingBus::new());
-    let bus = StoreEventStreamBus::new(store, inner.clone());
-    let message = envelope(
-        agent_id,
-        RunId::new(),
-        AgentEvent::Message {
-            turn_id: TurnId::new(),
-            message: ChatMessage::user("hello"),
-        },
-    );
-
-    let error = bus.publish(message).await.expect_err("store failure");
-
-    assert!(matches!(&error, EventStreamBusError::Persistence { .. }));
-    assert_eq!(error.to_string(), "event persistence failed");
-    assert!(inner.published.lock().expect("published lock").is_empty());
-}
-
-#[tokio::test]
-async fn inner_failure_after_committed_message_is_warn_only() {
-    let agent_id = AgentId::new();
-    let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::failing());
-    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
-    let message = envelope(
-        agent_id,
-        RunId::new(),
-        AgentEvent::Message {
-            turn_id: TurnId::new(),
-            message: ChatMessage::user("hello"),
-        },
-    );
-
-    bus.publish(message)
-        .await
-        .expect("durable store is authoritative");
-
-    assert_eq!(store.appended.lock().expect("appended lock").len(), 1);
+    let state = store.load_agent().await.expect("load state");
+    assert_eq!(state.status, AgentStatus::Finished);
+    assert_eq!(state.session_id, Some(session_id));
+    assert_eq!(state.turn_id, Some(turn_id));
+    assert_eq!(state.usage, usage);
     assert_eq!(inner.published.lock().expect("published lock").len(), 1);
 }
 
 #[tokio::test]
-async fn pending_inner_publish_is_bounded_after_message_commit() {
+async fn iteration_completion_advances_the_durable_frontier_before_forwarding() {
     let agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
     let store = Arc::new(RecordingStore::new(agent_id));
-    let bus = StoreEventStreamBus::new(store.clone(), Arc::new(PendingBus));
-    let message = envelope(
+    let inner = Arc::new(RecordingBus::default());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
+    let usage = TokenUsage {
+        input_tokens: 3,
+        output_tokens: 5,
+        total_tokens: 8,
+    };
+
+    bus.publish(agent_envelope(
+        session_id,
         agent_id,
-        RunId::new(),
-        AgentEvent::Message {
-            turn_id: TurnId::new(),
-            message: ChatMessage::user("hello"),
+        turn_id,
+        AgentEvent::IterationCompleted {
+            iteration: 4,
+            usage,
         },
-    );
+    ))
+    .await
+    .expect("publish iteration completion");
 
-    timeout(Duration::from_secs(2), bus.publish(message))
-        .await
-        .expect("best-effort forwarding is bounded")
-        .expect("durable commit remains authoritative");
-
-    assert_eq!(store.appended.lock().expect("appended lock").len(), 1);
+    let state = store.load_agent().await.expect("load state");
+    assert_eq!(state.next_iteration, 5);
+    assert_eq!(state.usage, usage);
+    assert_eq!(inner.published.lock().expect("published lock").len(), 1);
 }
 
 #[tokio::test]
-async fn subscription_delegates_agent_and_replay_start_unchanged() {
+async fn committed_event_remains_successful_when_retention_forwarding_fails() {
     let agent_id = AgentId::new();
     let store = Arc::new(RecordingStore::new(agent_id));
-    let inner = Arc::new(RecordingBus::new());
+    let inner = Arc::new(RecordingBus {
+        fail_publish: true,
+        ..Default::default()
+    });
+    let bus = StoreEventStreamBus::new(store, inner);
+
+    bus.publish(agent_envelope(
+        SessionId::new(),
+        agent_id,
+        TurnId::new(),
+        AgentEvent::Started,
+    ))
+    .await
+    .expect("durably committed event tolerates retention failure");
+}
+
+#[tokio::test]
+async fn session_events_propagate_inner_publish_errors() {
+    let store = Arc::new(RecordingStore::new(AgentId::new()));
+    let inner = Arc::new(RecordingBus {
+        fail_publish: true,
+        ..Default::default()
+    });
+    let bus = StoreEventStreamBus::new(store, inner);
+    let envelope = StreamEnvelope {
+        session_id: SessionId::new(),
+        timestamp: Utc::now(),
+        event: RuntimeEvent::Session {
+            event: SessionEvent::Created,
+        },
+        metadata: Default::default(),
+    };
+
+    assert!(matches!(
+        bus.publish(envelope).await,
+        Err(EventStreamBusError::CursorOverflow)
+    ));
+}
+
+#[tokio::test]
+async fn subscription_delegates_the_session_scope() {
+    let store = Arc::new(RecordingStore::new(AgentId::new()));
+    let inner = Arc::new(RecordingBus::default());
     let bus = StoreEventStreamBus::new(store, inner.clone());
-    let replay_start = ReplayStart::After(EventCursor::from_transport_sequence(41));
+    let session_id = SessionId::new();
 
     let _stream = bus
-        .subscribe_agent(agent_id, replay_start)
+        .subscribe_session(session_id, ReplayStart::New)
         .await
         .expect("subscribe");
 
     assert_eq!(
         *inner.subscriptions.lock().expect("subscriptions lock"),
-        vec![(agent_id, replay_start)]
+        [(session_id, ReplayStart::New)]
     );
 }

@@ -4,7 +4,7 @@ use std::{pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use stratum_core::{AgentId, EventRecord, ReplayStart, StreamEnvelope};
+use stratum_core::{EventRecord, ReplayStart, SessionId, StreamEnvelope};
 
 use super::EventStreamBusError;
 
@@ -19,20 +19,19 @@ pub trait EventStreamBus: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the envelope has no agent scope, cannot be serialized, or the backend
-    /// rejects the publish.
+    /// Returns an error if the envelope cannot be serialized or the backend rejects the publish.
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError>;
 
-    /// Subscribes to one agent's retained and live events from the requested position.
+    /// Subscribes to one session's retained and live events from the requested position.
     ///
     /// # Errors
     ///
     /// Returns [`EventStreamBusError::CursorExpired`] if the requested cursor is no longer
     /// retained, [`EventStreamBusError::CursorOverflow`] if the transport cannot advance past
     /// the cursor, or a backend error if the subscription cannot be created.
-    async fn subscribe_agent(
+    async fn subscribe_session(
         &self,
-        agent_id: AgentId,
+        session_id: SessionId,
         replay_start: ReplayStart,
     ) -> Result<EventStream, EventStreamBusError>;
 }
@@ -44,7 +43,7 @@ pub struct NatsEventStreamBusConfig {
     pub url: String,
     /// JetStream stream name.
     pub stream_name: String,
-    /// Subject prefix before `<agent_id>.<agent_event_type>`.
+    /// Subject prefix before `<session_id>.<runtime_event_type>`.
     pub subject_prefix: String,
     /// Number of stream replicas.
     pub replicas: usize,
@@ -60,8 +59,8 @@ impl Default for NatsEventStreamBusConfig {
     fn default() -> Self {
         Self {
             url: "nats://localhost:4222".to_owned(),
-            stream_name: "AGENT_EVENTS".to_owned(),
-            subject_prefix: "events.agent".to_owned(),
+            stream_name: "SESSION_EVENTS".to_owned(),
+            subject_prefix: "events.session".to_owned(),
             replicas: 1,
             max_age: Duration::from_secs(7 * 24 * 60 * 60),
             max_bytes: 1_073_741_824,

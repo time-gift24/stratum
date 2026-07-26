@@ -6,8 +6,8 @@ use std::sync::{
 };
 
 use stratum_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, HistoryQuery, RunId,
-    RuntimeEvent, TokenUsage, TurnId,
+    AgentEvent, AgentId, AgentRuntimeContext, ApprovalDecision, ApprovalId, ChatMessage, ChatRole,
+    HistoryQuery, ModelConfig, RuntimeEvent, SessionId, TokenUsage, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_infra::event_stream_bus::EventStreamBus;
 use stratum_llm::LlmProvider;
@@ -53,6 +53,7 @@ pub struct Agent {
     pub(crate) name: String,
     pub(crate) system_prompt: String,
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
+    pub(crate) model_config: ModelConfig,
     pub(crate) tool_registry: Arc<dyn ToolRegistry>,
     pub(crate) event_bus: Arc<dyn EventStreamBus>,
     pub(crate) store: Arc<dyn AgentStore>,
@@ -60,7 +61,7 @@ pub struct Agent {
     pub(crate) history: Arc<Mutex<Vec<ChatMessage>>>,
     pub(crate) usage: Arc<Mutex<TokenUsage>>,
     pub(crate) active: Arc<AtomicBool>,
-    current_run_id: Arc<Mutex<Option<RunId>>>,
+    current_context: Arc<Mutex<Option<AgentRuntimeContext>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
     pub(crate) active_approval: Arc<Mutex<Option<PendingApproval>>>,
@@ -77,8 +78,9 @@ pub(crate) struct ActiveApprovalGuard<'a> {
 }
 
 struct ResumeState {
-    run_id: RunId,
+    context: AgentRuntimeContext,
     turn_id: TurnId,
+    runtime_snapshot: TurnRuntimeSnapshot,
     next_iteration: u64,
     usage: TokenUsage,
     history: Vec<ChatMessage>,
@@ -151,19 +153,29 @@ impl Agent {
         AgentBuilder::default()
     }
 
-    /// Starts one user turn through the agent.
+    /// Returns whether this process is currently executing or resuming a Turn.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// Starts one user turn in a host-supplied runtime context.
     ///
     /// # Errors
     ///
-    /// Returns an error if the input message role is not `User`, another run is
-    /// active, or the required turn preamble cannot be published.
-    pub async fn run_turn(&self, message: ChatMessage) -> Result<RunId, AgentError> {
+    /// Returns an error if the input message role is not `User`, another operation is
+    /// active, or the exact runtime snapshot and required turn preamble cannot be committed.
+    pub async fn run_turn(
+        &self,
+        context: AgentRuntimeContext,
+        message: ChatMessage,
+    ) -> Result<TurnId, AgentError> {
         if message.role != ChatRole::User {
             return Err(AgentError::InvalidInputMessageRole { role: message.role });
         }
 
         if self.active.swap(true, Ordering::SeqCst) {
-            return Err(AgentError::RunAlreadyActive);
+            return Err(AgentError::OperationAlreadyActive);
         }
         let active_guard = ActiveGuard::new(&self.active);
 
@@ -175,21 +187,31 @@ impl Agent {
             });
         }
         if state.status == AgentStatus::Running {
-            return Err(AgentError::PersistedRunRequiresResume {
-                run_id: state.run_id.ok_or(AgentError::ResumeRunMissing)?,
+            return Err(AgentError::PersistedTurnRequiresResume {
+                session_id: state.session_id.ok_or(AgentError::ResumeSessionMissing)?,
                 turn_id: state.turn_id.ok_or(AgentError::ResumeTurnMissing)?,
             });
         }
         let history = self.load_complete_history(state.last_seq).await?;
         self.commit_history(history.clone());
 
-        let run_id = RunId::new();
         let turn_id = TurnId::new();
+        let runtime_snapshot = TurnRuntimeSnapshot::new(
+            state.agent_version_id,
+            self.model_config.clone(),
+            self.tool_registry.fingerprint()?,
+            state.skill_set_version_id,
+            state.extension_set_version_id,
+            state.hook_handler_versions,
+        );
+        self.store
+            .start_turn(&context, turn_id, runtime_snapshot)
+            .await?;
         let cancel = CancellationToken::new();
         *self
-            .current_run_id
+            .current_context
             .lock()
-            .expect("current run mutex should not be poisoned") = Some(run_id);
+            .expect("current context mutex should not be poisoned") = Some(context.clone());
         *self
             .current_turn_id
             .lock()
@@ -201,16 +223,9 @@ impl Agent {
         self.set_usage(TokenUsage::default());
 
         let mut history = history;
-        self.publish_required_agent_event(AgentEvent::Started { turn_id }, None)
+        self.publish_required_agent_event(AgentEvent::Started, None)
             .await?;
-        self.publish_required_agent_event(
-            AgentEvent::Message {
-                turn_id,
-                message: message.clone(),
-            },
-            None,
-        )
-        .await?;
+        self.commit_message(message.clone()).await?;
         history.push(message);
 
         let agent = self.clone();
@@ -219,11 +234,13 @@ impl Agent {
         tokio::spawn(async move {
             let result = agent.clone().continue_turn_loop(history, 0).await;
             active.store(false, Ordering::SeqCst);
-            agent.finish_background_continuation(run_id, result).await;
+            agent
+                .finish_background_continuation(context.session_id, result)
+                .await;
         });
         active_guard.disarm();
 
-        Ok(run_id)
+        Ok(turn_id)
     }
 
     /// Resumes the persisted running turn at its last durable iteration boundary.
@@ -232,13 +249,14 @@ impl Agent {
     ///
     /// Returns an error when another operation is active, persisted state is not
     /// resumable, history is invalid, or the store cannot be read.
-    pub async fn resume(&self) -> Result<RunId, AgentError> {
+    pub async fn resume(&self) -> Result<TurnId, AgentError> {
         if self.active.swap(true, Ordering::SeqCst) {
-            return Err(AgentError::RunAlreadyActive);
+            return Err(AgentError::OperationAlreadyActive);
         }
         let active_guard = ActiveGuard::new(&self.active);
 
         let resumed = self.initialize_resume().await?;
+        self.validate_runtime_snapshot(&resumed.runtime_snapshot)?;
         let continuation = self.prepare_resume_continuation(
             resumed.history,
             resumed.active_turn_start,
@@ -247,9 +265,9 @@ impl Agent {
 
         let cancel = CancellationToken::new();
         *self
-            .current_run_id
+            .current_context
             .lock()
-            .expect("current run mutex should not be poisoned") = Some(resumed.run_id);
+            .expect("current context mutex should not be poisoned") = Some(resumed.context.clone());
         *self
             .current_turn_id
             .lock()
@@ -267,12 +285,12 @@ impl Agent {
             let result = agent.clone().continue_resumed_turn_loop(continuation).await;
             active.store(false, Ordering::SeqCst);
             agent
-                .finish_background_continuation(resumed.run_id, result)
+                .finish_background_continuation(resumed.context.session_id, result)
                 .await;
         });
         active_guard.disarm();
 
-        Ok(resumed.run_id)
+        Ok(resumed.turn_id)
     }
 
     /// Loads the durable complete message history into this inactive agent.
@@ -288,7 +306,7 @@ impl Agent {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err(AgentError::RunAlreadyActive);
+            return Err(AgentError::OperationAlreadyActive);
         }
         let _active_guard = ActiveGuard::new(&self.active);
         let state = self.store.load_agent().await?;
@@ -331,10 +349,13 @@ impl Agent {
                 expected_seq = expected_seq
                     .checked_add(1)
                     .ok_or(AgentError::InvalidResumeHistory)?;
-                if envelope.business_seq != Some(expected_seq) {
+                if envelope.message_seq() != Some(expected_seq) {
                     return Err(AgentError::InvalidResumeHistory);
                 }
-                let RuntimeEvent::Agent { agent_id, event } = envelope.event else {
+                let RuntimeEvent::Agent {
+                    agent_id, event, ..
+                } = envelope.event
+                else {
                     return Err(AgentError::InvalidResumeHistory);
                 };
                 if agent_id != self.id {
@@ -359,16 +380,20 @@ impl Agent {
         Ok(history)
     }
 
-    async fn finish_background_continuation(&self, run_id: RunId, result: Result<(), AgentError>) {
+    async fn finish_background_continuation(
+        &self,
+        session_id: SessionId,
+        result: Result<(), AgentError>,
+    ) {
         match &result {
             Err(AgentError::Cancelled) => tracing::debug!(
                 agent_id = %self.id,
-                run_id = %run_id,
+                session_id = %session_id,
                 "agent continuation cancelled"
             ),
             Err(error) => tracing::error!(
                 agent_id = %self.id,
-                run_id = %run_id,
+                session_id = %session_id,
                 error_kind = continuation_error_kind(error),
                 "agent continuation failed"
             ),
@@ -382,7 +407,7 @@ impl Agent {
             Ok(history) => self.commit_history(history),
             Err(error) => tracing::error!(
                 agent_id = %self.id,
-                run_id = %run_id,
+                session_id = %session_id,
                 error_kind = continuation_error_kind(&error),
                 "agent history refresh failed"
             ),
@@ -402,8 +427,30 @@ impl Agent {
                 actual: state.agent_id,
             });
         }
-        let run_id = state.run_id.ok_or(AgentError::ResumeRunMissing)?;
+        let session_id = state.session_id.ok_or(AgentError::ResumeSessionMissing)?;
         let turn_id = state.turn_id.ok_or(AgentError::ResumeTurnMissing)?;
+        let location = state
+            .location
+            .clone()
+            .ok_or(AgentError::ResumeLocationMissing)?;
+        let runtime_snapshot = state
+            .turn_runtime_snapshot
+            .clone()
+            .ok_or(AgentError::ResumeSnapshotMissing)?;
+        let component = if runtime_snapshot.agent_version_id != state.agent_version_id {
+            Some("agent_version")
+        } else if runtime_snapshot.skill_set_version_id != state.skill_set_version_id {
+            Some("skill_set_version")
+        } else if runtime_snapshot.extension_set_version_id != state.extension_set_version_id {
+            Some("extension_set_version")
+        } else if runtime_snapshot.hook_handler_versions != state.hook_handler_versions {
+            Some("hook_handler_order")
+        } else {
+            None
+        };
+        if let Some(component) = component {
+            return Err(AgentError::ResumeSnapshotMismatch { component });
+        }
 
         let mut history = Vec::new();
         let mut after_seq = 0;
@@ -431,10 +478,16 @@ impl Agent {
                 expected_seq = expected_seq
                     .checked_add(1)
                     .ok_or(AgentError::InvalidResumeHistory)?;
-                if envelope.business_seq != Some(expected_seq) {
+                if envelope.message_seq() != Some(expected_seq) {
                     return Err(AgentError::InvalidResumeHistory);
                 }
-                let RuntimeEvent::Agent { agent_id, event } = envelope.event else {
+                let RuntimeEvent::Agent {
+                    agent_id,
+                    turn_id: message_turn_id,
+                    event,
+                    ..
+                } = envelope.event
+                else {
                     return Err(AgentError::InvalidResumeHistory);
                 };
                 if agent_id != self.id {
@@ -443,11 +496,7 @@ impl Agent {
                         actual: agent_id,
                     });
                 }
-                let AgentEvent::Message {
-                    turn_id: message_turn_id,
-                    message,
-                } = event
-                else {
+                let AgentEvent::Message { message, .. } = event else {
                     return Err(AgentError::InvalidResumeHistory);
                 };
                 if message_turn_id == turn_id {
@@ -475,8 +524,9 @@ impl Agent {
         }
 
         Ok(ResumeState {
-            run_id,
+            context: AgentRuntimeContext::new(session_id, location),
             turn_id,
+            runtime_snapshot,
             next_iteration: state.next_iteration,
             usage: state.usage,
             history,
@@ -533,12 +583,21 @@ impl Agent {
         receiver.await.map_err(|_| AgentError::NoActiveTurn)?
     }
 
-    /// Returns the current run id, if one has been started.
-    pub fn current_run(&self) -> Option<RunId> {
-        *self
-            .current_run_id
+    /// Returns the current session id, if one has been started or resumed.
+    pub fn current_session(&self) -> Option<SessionId> {
+        self.current_context
             .lock()
-            .expect("current run mutex should not be poisoned")
+            .expect("current context mutex should not be poisoned")
+            .as_ref()
+            .map(|context| context.session_id)
+    }
+
+    /// Returns the current immutable Agent runtime context.
+    pub fn current_context(&self) -> Option<AgentRuntimeContext> {
+        self.current_context
+            .lock()
+            .expect("current context mutex should not be poisoned")
+            .clone()
     }
 
     /// Returns the current turn id, if one has been started.
@@ -567,23 +626,37 @@ impl Agent {
             .lock()
             .expect("agent history mutex should not be poisoned") = history;
     }
+
+    fn validate_runtime_snapshot(&self, snapshot: &TurnRuntimeSnapshot) -> Result<(), AgentError> {
+        if snapshot.model != self.model_config {
+            return Err(AgentError::ResumeSnapshotMismatch { component: "model" });
+        }
+        if snapshot.tool_set_fingerprint != self.tool_registry.fingerprint()? {
+            return Err(AgentError::ResumeSnapshotMismatch { component: "tools" });
+        }
+        Ok(())
+    }
 }
 
 fn continuation_error_kind(error: &AgentError) -> &'static str {
     match error {
         AgentError::InvalidInputMessageRole { .. } => "invalid_input_message_role",
-        AgentError::RunAlreadyActive => "run_already_active",
-        AgentError::PersistedRunRequiresResume { .. } => "persisted_run_requires_resume",
+        AgentError::OperationAlreadyActive => "operation_already_active",
+        AgentError::PersistedTurnRequiresResume { .. } => "persisted_turn_requires_resume",
         AgentError::NoActiveTurn => "no_active_turn",
         AgentError::ApprovalNotFound { .. } => "approval_not_found",
         AgentError::UnsupportedApprovalDecision => "unsupported_approval_decision",
         AgentError::Llm { .. } => "llm",
         AgentError::EventBus { .. } => "event_bus",
         AgentError::Store { .. } => "store",
+        AgentError::ToolRuntime { .. } => "tool_runtime",
         AgentError::ResumeNotRunning { .. } => "resume_not_running",
         AgentError::LoadHistoryRunning => "load_history_running",
-        AgentError::ResumeRunMissing => "resume_run_missing",
+        AgentError::ResumeSessionMissing => "resume_session_missing",
         AgentError::ResumeTurnMissing => "resume_turn_missing",
+        AgentError::ResumeLocationMissing => "resume_location_missing",
+        AgentError::ResumeSnapshotMissing => "resume_snapshot_missing",
+        AgentError::ResumeSnapshotMismatch { .. } => "resume_snapshot_mismatch",
         AgentError::ResumeAgentMismatch { .. } => "resume_agent_mismatch",
         AgentError::InvalidResumeHistory => "invalid_resume_history",
         AgentError::IterationOutOfRange { .. } => "iteration_out_of_range",
@@ -602,6 +675,7 @@ pub struct AgentBuilder {
     name: Option<String>,
     system_prompt: Option<String>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
+    model_config: Option<ModelConfig>,
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     event_bus: Option<Arc<dyn EventStreamBus>>,
     store: Option<Arc<dyn AgentStore>>,
@@ -634,6 +708,13 @@ impl AgentBuilder {
     #[must_use]
     pub fn llm_provider(mut self, llm_provider: Arc<dyn LlmProvider>) -> Self {
         self.llm_provider = Some(llm_provider);
+        self
+    }
+
+    /// Sets the fully resolved model configuration pinned in new Turn snapshots.
+    #[must_use]
+    pub fn model_config(mut self, model_config: ModelConfig) -> Self {
+        self.model_config = Some(model_config);
         self
     }
 
@@ -671,6 +752,12 @@ impl AgentBuilder {
     ///
     /// Returns an error when a required builder field is missing.
     pub fn build(self) -> Result<Agent, AgentError> {
+        let llm_provider = self.llm_provider.ok_or(AgentError::MissingBuilderField {
+            field: "llm_provider",
+        })?;
+        let model_config = self
+            .model_config
+            .unwrap_or_else(|| ModelConfig::new(llm_provider.model_id(), serde_json::Map::new()));
         Ok(Agent {
             id: self.id.unwrap_or_default(),
             name: self
@@ -679,9 +766,8 @@ impl AgentBuilder {
             system_prompt: self.system_prompt.ok_or(AgentError::MissingBuilderField {
                 field: "system_prompt",
             })?,
-            llm_provider: self.llm_provider.ok_or(AgentError::MissingBuilderField {
-                field: "llm_provider",
-            })?,
+            llm_provider,
+            model_config,
             tool_registry: self.tool_registry.ok_or(AgentError::MissingBuilderField {
                 field: "tool_registry",
             })?,
@@ -695,7 +781,7 @@ impl AgentBuilder {
             history: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
-            current_run_id: Arc::new(Mutex::new(None)),
+            current_context: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
             active_approval: Arc::new(Mutex::new(None)),
@@ -713,7 +799,8 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::{StreamExt, stream};
     use stratum_core::{
-        ChatMessage, HistoryPage, HistoryQuery, ModelId, ReplayStart, StreamEnvelope,
+        ChatMessage, HistoryPage, HistoryQuery, ModelConfig, ModelId, NewAgentMessage, ReplayStart,
+        StreamEnvelope, TurnRuntimeSnapshot,
     };
     use stratum_infra::event_stream_bus::{
         EventStream, EventStreamBusError, InMemoryEventStreamBus,
@@ -731,52 +818,111 @@ mod tests {
 
     use super::*;
 
-    struct UnitTestStore;
+    struct UnitTestStore {
+        state: Mutex<AgentState>,
+        history: Mutex<Vec<StreamEnvelope>>,
+    }
+
+    impl UnitTestStore {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(AgentState::new_configured(
+                    test_agent_id(),
+                    "test-agent".to_owned(),
+                    ModelConfig::new(
+                        "mock:mock-model".parse().expect("model id parses"),
+                        serde_json::Map::new(),
+                    ),
+                )),
+                history: Mutex::new(Vec::new()),
+            }
+        }
+    }
 
     #[async_trait]
     impl AgentStore for UnitTestStore {
         async fn load_agent(&self) -> Result<AgentState, StoreError> {
-            Ok(AgentState::new(test_agent_id(), "test-agent".to_owned()))
+            Ok(self.state.lock().expect("state lock").clone())
         }
 
         async fn update_state(
             &self,
-            _status: AgentStatus,
-            _run_id: Option<RunId>,
-            _turn_id: Option<TurnId>,
-            _usage: TokenUsage,
+            status: AgentStatus,
+            session_id: Option<SessionId>,
+            turn_id: Option<TurnId>,
+            usage: TokenUsage,
         ) -> Result<AgentState, StoreError> {
-            Err(StoreError::AgentMissing)
+            let mut state = self.state.lock().expect("state lock");
+            state.status = status;
+            state.session_id = session_id;
+            state.turn_id = turn_id;
+            state.usage = usage;
+            Ok(state.clone())
+        }
+
+        async fn start_turn(
+            &self,
+            context: &AgentRuntimeContext,
+            turn_id: TurnId,
+            runtime_snapshot: TurnRuntimeSnapshot,
+        ) -> Result<AgentState, StoreError> {
+            let mut state = self.state.lock().expect("state lock");
+            state.status = AgentStatus::Running;
+            state.session_id = Some(context.session_id);
+            state.turn_id = Some(turn_id);
+            state.location = Some(context.location.clone());
+            state.turn_runtime_snapshot = Some(runtime_snapshot);
+            state.next_iteration = 0;
+            Ok(state.clone())
         }
 
         async fn complete_iteration(
             &self,
-            _run_id: RunId,
+            _session_id: SessionId,
             _turn_id: TurnId,
             iteration: u64,
             usage: TokenUsage,
         ) -> Result<AgentState, StoreError> {
-            let mut state = AgentState::new(AgentId::new(), "test-agent".to_owned());
+            let mut state = self.state.lock().expect("state lock");
             state.next_iteration = iteration
                 .checked_add(1)
                 .ok_or(StoreError::IterationOverflow)?;
             state.usage = usage;
-            Ok(state)
+            Ok(state.clone())
         }
 
         async fn append_message(
             &self,
-            _envelope: StreamEnvelope,
+            message: NewAgentMessage,
         ) -> Result<StreamEnvelope, StoreError> {
-            Err(StoreError::AgentMissing)
+            let mut history = self.history.lock().expect("history lock");
+            let seq = u64::try_from(history.len()).expect("history length fits u64") + 1;
+            let committed = message.into_envelope(seq);
+            history.push(committed.clone());
+            self.state.lock().expect("state lock").last_seq = seq;
+            Ok(committed)
         }
 
-        async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
+        async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, StoreError> {
+            let history = self.history.lock().expect("history lock");
+            let through_seq = query
+                .through_seq
+                .unwrap_or(u64::try_from(history.len()).expect("history length fits u64"));
+            let events = history
+                .iter()
+                .skip(usize::try_from(query.after_seq).expect("sequence fits usize"))
+                .take(query.limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let next_front_seq = events
+                .last()
+                .and_then(StreamEnvelope::message_seq)
+                .unwrap_or(query.after_seq);
             Ok(HistoryPage {
-                through_seq: 0,
-                events: Vec::new(),
-                next_front_seq: 0,
-                has_more: false,
+                through_seq,
+                events,
+                next_front_seq,
+                has_more: next_front_seq < through_seq,
             })
         }
     }
@@ -788,7 +934,7 @@ mod tests {
     }
 
     fn test_store() -> Arc<dyn AgentStore> {
-        Arc::new(UnitTestStore)
+        Arc::new(UnitTestStore::new())
     }
 
     fn test_agent() -> Agent {
@@ -838,7 +984,7 @@ mod tests {
                 return Ok(());
             };
             let event_type = match event {
-                AgentEvent::Started { .. } => "started",
+                AgentEvent::Started => "started",
                 AgentEvent::Message { .. } => "message",
                 _ => return Ok(()),
             };
@@ -849,12 +995,12 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
-            Err(EventStreamBusError::MissingAgentScope)
+            Err(EventStreamBusError::CursorOverflow)
         }
     }
 
@@ -867,17 +1013,17 @@ mod tests {
     impl EventStreamBus for FailingSecondPublishBus {
         async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
             if self.publish_count.fetch_add(1, Ordering::SeqCst) == 1 {
-                return Err(EventStreamBusError::MissingAgentScope);
+                return Err(EventStreamBusError::CursorOverflow);
             }
             Ok(())
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
-            Err(EventStreamBusError::MissingAgentScope)
+            Err(EventStreamBusError::CursorOverflow)
         }
     }
 
@@ -917,7 +1063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_returns_run_id_and_sets_current_ids() {
+    async fn run_turn_uses_host_session_and_sets_current_turn() {
         let provider = Arc::new(BlockingStartProvider::new());
         let bus = Arc::new(InMemoryEventStreamBus::default());
         let agent = Agent::builder()
@@ -931,13 +1077,17 @@ mod tests {
             .build()
             .expect("agent should build");
 
-        let run_id = agent
-            .run_turn(ChatMessage::user("hello"))
+        let session_id = SessionId::new();
+        let turn_id = agent
+            .run_turn(
+                AgentRuntimeContext::direct(session_id),
+                ChatMessage::user("hello"),
+            )
             .await
             .expect("run should start");
 
-        assert_eq!(agent.current_run(), Some(run_id));
-        assert!(agent.current_turn().is_some());
+        assert_eq!(agent.current_session(), Some(session_id));
+        assert_eq!(agent.current_turn(), Some(turn_id));
         agent.stop();
     }
 
@@ -947,7 +1097,10 @@ mod tests {
         let agent = test_agent_with_bus(bus.clone());
 
         agent
-            .run_turn(ChatMessage::user("hello"))
+            .run_turn(
+                AgentRuntimeContext::direct(SessionId::new()),
+                ChatMessage::user("hello"),
+            )
             .await
             .expect("run starts");
 
@@ -958,7 +1111,15 @@ mod tests {
     async fn run_turn_releases_active_when_preamble_fails() {
         let agent = test_agent_with_bus(Arc::new(FailingSecondPublishBus::default()));
 
-        assert!(agent.run_turn(ChatMessage::user("hello")).await.is_err());
+        assert!(
+            agent
+                .run_turn(
+                    AgentRuntimeContext::direct(SessionId::new()),
+                    ChatMessage::user("hello"),
+                )
+                .await
+                .is_err()
+        );
         assert!(!agent.active.load(Ordering::SeqCst));
     }
 
@@ -966,7 +1127,13 @@ mod tests {
     async fn stream_rejects_non_user_message() {
         let agent = test_agent();
 
-        let error = match agent.run_turn(ChatMessage::assistant("nope")).await {
+        let error = match agent
+            .run_turn(
+                AgentRuntimeContext::direct(SessionId::new()),
+                ChatMessage::assistant("nope"),
+            )
+            .await
+        {
             Ok(_) => panic!("assistant message should be rejected"),
             Err(error) => error,
         };
@@ -1051,8 +1218,12 @@ mod tests {
             .build()
             .expect("agent should build");
 
-        let first_run_id = agent
-            .run_turn(ChatMessage::user("hello"))
+        let session_id = SessionId::new();
+        let _first_turn_id = agent
+            .run_turn(
+                AgentRuntimeContext::direct(session_id),
+                ChatMessage::user("hello"),
+            )
             .await
             .expect("first run should start");
 
@@ -1068,19 +1239,25 @@ mod tests {
         .await
         .expect("background loop should start");
 
-        assert_eq!(agent.current_run(), Some(first_run_id));
+        assert_eq!(agent.current_session(), Some(session_id));
         assert!(agent.active.load(Ordering::SeqCst));
-        let error = match agent.run_turn(ChatMessage::user("again")).await {
+        let error = match agent
+            .run_turn(
+                AgentRuntimeContext::direct(session_id),
+                ChatMessage::user("again"),
+            )
+            .await
+        {
             Ok(_) => panic!("second run should be rejected while loop is active"),
             Err(error) => error,
         };
-        assert!(matches!(error, AgentError::RunAlreadyActive));
+        assert!(matches!(error, AgentError::OperationAlreadyActive));
 
         release.send(true).expect("release signal should send");
         timeout(Duration::from_secs(1), async {
             let mut events = agent
                 .event_bus()
-                .subscribe_agent(agent.id, ReplayStart::All)
+                .subscribe_session(session_id, ReplayStart::All)
                 .await
                 .expect("event subscription should succeed");
             while let Some(envelope) = events.next().await {
@@ -1121,7 +1298,7 @@ mod tests {
         for log in logs {
             let log = log.split(");").next().expect("error log closes");
             assert!(log.contains("agent_id"));
-            assert!(log.contains("run_id"));
+            assert!(log.contains("session_id"));
             assert!(log.contains("error_kind"));
             for sensitive in [
                 "message",

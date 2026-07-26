@@ -22,9 +22,10 @@ export type AgentView = {
   agent_name: string
   status: "idle" | "running" | "finished" | "failed" | "cancelled"
   model_config: ModelConfig
-  run_id: string | null
+  session_id: string | null
   turn_id: string | null
   usage: TokenUsage
+  location: AgentLocation | null
   last_seq: number
   updated_at: string
 }
@@ -63,8 +64,8 @@ export type LlmEvent =
   | { type: "finished"; data: { finish_reason: string; usage: unknown } }
   | { type: "failed"; data: { error_text: string } }
 export type AgentEvent =
-  | { type: "message"; data: { turn_id: string; message: ChatMessage } }
-  | { type: "started"; data: { turn_id: string } }
+  | { type: "message"; data: { message_seq: number; message: ChatMessage } }
+  | { type: "started" }
   | { type: "finished"; data: { finish_reason: string; usage: TokenUsage } }
   | { type: "failed"; data: { error_text: string; usage: TokenUsage } }
   | { type: "cancelled"; data: { usage: TokenUsage } }
@@ -86,22 +87,41 @@ export type AgentEvent =
     }
   | {
       type: "tool_execution_started"
-      data: { turn_id: string; call_id: string; tool_name: string }
+      data: { call_id: string; tool_name: string }
     }
   | {
       type: "iteration_completed"
-      data: { turn_id: string; iteration: number; usage: TokenUsage }
+      data: { iteration: number; usage: TokenUsage }
     }
   | { type: "llm"; data: { llm_call_id: string; event: LlmEvent } }
 
+export type AgentLocation =
+  | { type: "direct" }
+  | {
+      type: "workflow_node"
+      data: { workflow_version_id: string; node_id: string }
+    }
+
+export type RuntimeEvent =
+  | { type: "session"; data: { event: { type: "created" } } }
+  | {
+      type: "node"
+      data: { workflow_version_id: string; node_id: string; event: unknown }
+    }
+  | {
+      type: "agent"
+      data: {
+        agent_id: string
+        turn_id: string
+        location: AgentLocation
+        event: AgentEvent
+      }
+    }
+
 export type StreamEnvelope = {
-  business_seq?: number
-  run_id: string
+  session_id: string
   timestamp: string
-  event: {
-    type: "agent"
-    data: { agent_id: string; event: AgentEvent }
-  }
+  event: RuntimeEvent
 }
 
 export type HistoryPage = {
@@ -115,8 +135,14 @@ export type StratumApi = {
   createAgent(input: {
     agentName: string
     text: string
+    sessionId?: string
     modelConfig?: ModelConfig
-  }): Promise<{ agent_id: string; agent_name: string; run_id: string }>
+  }): Promise<{
+    agent_id: string
+    agent_name: string
+    session_id: string
+    turn_id: string
+  }>
   getAgentTemplates(): Promise<readonly AgentTemplateView[]>
   getModels(): Promise<readonly ModelDescriptor[]>
   getAgent(agentId: string): Promise<AgentView>
@@ -192,6 +218,9 @@ export function createStratumApi(options: {
         body: JSON.stringify({
           agent_name: input.agentName,
           text: input.text,
+          ...(input.sessionId === undefined
+            ? {}
+            : { session_id: input.sessionId }),
           ...(input.modelConfig === undefined
             ? {}
             : { model_config: input.modelConfig }),

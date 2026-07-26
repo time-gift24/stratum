@@ -12,8 +12,8 @@ use std::{
 use async_trait::async_trait;
 use serde_json::Value;
 use stratum_core::{
-    AgentEvent, AgentId, AgentTelemetryEvent, DurableAgentEvent, EventSource, LlmCallRole,
-    LlmEvent, RunId, RuntimeEvent, StreamEnvelope, TurnId,
+    AgentEvent, AgentId, AgentRuntimeContext, AgentTelemetryEvent, DurableAgentEvent, LlmCallRole,
+    LlmEvent, RuntimeEvent, SessionId, StreamEnvelope, TurnId,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
@@ -58,11 +58,11 @@ impl EnqueueState {
     }
 }
 
-/// Adds run, agent, and turn scope before publishing agent-loop events.
+/// Adds Session, Agent, and Turn scope before publishing agent-loop events.
 pub struct ScopedAgentEventSink {
     agent_id: AgentId,
     agent_name: String,
-    run_id: RunId,
+    runtime_context: AgentRuntimeContext,
     turn_id: TurnId,
     event_bus: Arc<dyn EventStreamBus>,
     durable: mpsc::Sender<QueuedDurable>,
@@ -78,7 +78,7 @@ impl ScopedAgentEventSink {
     pub fn new(
         agent_id: AgentId,
         agent_name: impl Into<String>,
-        run_id: RunId,
+        runtime_context: AgentRuntimeContext,
         turn_id: TurnId,
         event_bus: Arc<dyn EventStreamBus>,
     ) -> Self {
@@ -87,7 +87,7 @@ impl ScopedAgentEventSink {
         let sink = Self {
             agent_id,
             agent_name: agent_name.into(),
-            run_id,
+            runtime_context,
             turn_id,
             event_bus,
             durable,
@@ -119,7 +119,7 @@ impl ScopedAgentEventSink {
         let telemetry_drop_reported = Arc::clone(&self.telemetry_drop_reported);
         let scope = EventScope {
             agent_id: self.agent_id,
-            run_id: self.run_id,
+            session_id: self.runtime_context.session_id,
             turn_id: self.turn_id,
         };
         runtime.spawn(run_worker(
@@ -136,13 +136,10 @@ impl ScopedAgentEventSink {
     ) -> Result<AgentEvent, DurableEventSinkError> {
         let event_type = event.event_type();
         let event = match event {
-            DurableAgentEvent::LoopStarted => AgentEvent::Started {
-                turn_id: self.turn_id,
-            },
-            DurableAgentEvent::MessageAppended { message } => AgentEvent::Message {
-                turn_id: self.turn_id,
-                message,
-            },
+            DurableAgentEvent::LoopStarted => AgentEvent::Started,
+            DurableAgentEvent::MessageAppended { .. } => {
+                return Err(DurableEventSinkError::UnsupportedEvent { event_type });
+            }
             DurableAgentEvent::ToolApprovalRequested {
                 approval_id,
                 call_id,
@@ -167,18 +164,10 @@ impl ScopedAgentEventSink {
                 decision,
             },
             DurableAgentEvent::ToolExecutionStarted { call_id, tool_name } => {
-                AgentEvent::ToolExecutionStarted {
-                    turn_id: self.turn_id,
-                    call_id,
-                    tool_name,
-                }
+                AgentEvent::ToolExecutionStarted { call_id, tool_name }
             }
             DurableAgentEvent::IterationCompleted { iteration, usage } => {
-                AgentEvent::IterationCompleted {
-                    turn_id: self.turn_id,
-                    iteration,
-                    usage,
-                }
+                AgentEvent::IterationCompleted { iteration, usage }
             }
             DurableAgentEvent::LoopFinished {
                 finish_reason,
@@ -241,7 +230,7 @@ impl ScopedAgentEventSink {
             _ => {
                 warn!(
                     agent_id = %self.agent_id,
-                    run_id = %self.run_id,
+                    session_id = %self.runtime_context.session_id,
                     turn_id = %self.turn_id,
                     event_type,
                     "ignored unsupported agent telemetry event"
@@ -258,18 +247,13 @@ impl ScopedAgentEventSink {
             "agent_name".to_owned(),
             Value::String(self.agent_name.clone()),
         );
-        metadata.insert(
-            "turn_id".to_owned(),
-            Value::String(self.turn_id.to_string()),
-        );
-
         StreamEnvelope {
-            business_seq: None,
-            run_id: self.run_id,
+            session_id: self.runtime_context.session_id,
             timestamp: SystemTime::now().into(),
-            source: EventSource::Run,
             event: RuntimeEvent::Agent {
                 agent_id: self.agent_id,
+                turn_id: self.turn_id,
+                location: self.runtime_context.location.clone(),
                 event,
             },
             metadata,
@@ -329,7 +313,7 @@ impl TelemetryEventSink for ScopedAgentEventSink {
                 self.telemetry_drop_reported.as_ref(),
                 EventScope {
                     agent_id: self.agent_id,
-                    run_id: self.run_id,
+                    session_id: self.runtime_context.session_id,
                     turn_id: self.turn_id,
                 },
                 event_type,
@@ -341,7 +325,7 @@ impl TelemetryEventSink for ScopedAgentEventSink {
 #[derive(Clone, Copy)]
 struct EventScope {
     agent_id: AgentId,
-    run_id: RunId,
+    session_id: SessionId,
     turn_id: TurnId,
 }
 
@@ -477,7 +461,7 @@ async fn publish_telemetry(
             if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
                 warn!(
                     agent_id = %scope.agent_id,
-                    run_id = %scope.run_id,
+                    session_id = %scope.session_id,
                     turn_id = %scope.turn_id,
                     event_type = telemetry.event_type,
                     error = %error,
@@ -489,7 +473,7 @@ async fn publish_telemetry(
             if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
                 warn!(
                     agent_id = %scope.agent_id,
-                    run_id = %scope.run_id,
+                    session_id = %scope.session_id,
                     turn_id = %scope.turn_id,
                     event_type = telemetry.event_type,
                     error = %error,
@@ -508,7 +492,7 @@ fn report_telemetry_drop(
     if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
         warn!(
             agent_id = %scope.agent_id,
-            run_id = %scope.run_id,
+            session_id = %scope.session_id,
             turn_id = %scope.turn_id,
             event_type,
             "dropped agent telemetry event; further drops for this turn will be silent"
@@ -533,9 +517,10 @@ mod tests {
     use futures_util::stream;
     use serde_json::json;
     use stratum_core::{
-        AgentEvent, AgentId, AgentTelemetryEvent, ApprovalDecision, ApprovalId, CallId,
-        ChatMessage, DangerLevel, DurableAgentEvent, EventSource, LlmCallId, LlmCallRole, LlmEvent,
-        ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolKind, ToolName, TurnId,
+        AgentEvent, AgentId, AgentLocation, AgentRuntimeContext, AgentTelemetryEvent,
+        ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, DurableAgentEvent,
+        LlmCallId, LlmCallRole, LlmEvent, ReplayStart, RuntimeEvent, SessionId, StreamEnvelope,
+        TokenUsage, ToolKind, ToolName, TurnId,
     };
 
     use crate::{
@@ -546,6 +531,10 @@ mod tests {
     #[derive(Default)]
     struct RecordingEventStreamBus {
         published: Mutex<Vec<StreamEnvelope>>,
+    }
+
+    fn direct_context(session_id: SessionId) -> AgentRuntimeContext {
+        AgentRuntimeContext::direct(session_id)
     }
 
     async fn wait_for_published(published: &Mutex<Vec<StreamEnvelope>>, expected: usize) {
@@ -587,9 +576,9 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
             Ok(Box::pin(stream::empty()))
@@ -623,9 +612,9 @@ mod tests {
             pending().await
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
             Ok(Box::pin(stream::empty()))
@@ -652,9 +641,9 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
             Ok(Box::pin(stream::empty()))
@@ -675,9 +664,9 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
             Ok(Box::pin(stream::empty()))
@@ -702,12 +691,12 @@ mod tests {
                 .lock()
                 .expect("failing event stream bus lock should not be poisoned")
                 .push(envelope);
-            Err(EventStreamBusError::MissingAgentScope)
+            Err(EventStreamBusError::CursorOverflow)
         }
 
-        async fn subscribe_agent(
+        async fn subscribe_session(
             &self,
-            _agent_id: AgentId,
+            _session_id: SessionId,
             _replay_start: ReplayStart,
         ) -> Result<EventStream, EventStreamBusError> {
             Ok(Box::pin(stream::empty()))
@@ -717,14 +706,14 @@ mod tests {
     #[tokio::test]
     async fn durable_event_is_scoped_and_returns_bus_error() {
         let agent_id = AgentId::new();
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let recorder = Arc::new(FailingEventStreamBus::default());
         let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
         let sink = ScopedAgentEventSink::new(
             agent_id,
             "review-agent",
-            run_id,
+            direct_context(session_id),
             turn_id,
             Arc::clone(&event_bus),
         );
@@ -736,14 +725,13 @@ mod tests {
 
         assert!(matches!(
             error,
-            DurableEventSinkError::EventStreamBus(EventStreamBusError::MissingAgentScope)
+            DurableEventSinkError::EventStreamBus(EventStreamBusError::CursorOverflow)
         ));
         let [envelope] = recorder
             .take_published()
             .try_into()
             .expect("exactly one envelope should be published");
-        assert_eq!(envelope.run_id, run_id);
-        assert_eq!(envelope.source, EventSource::Run);
+        assert_eq!(envelope.session_id, session_id);
         assert_eq!(
             envelope.metadata.get("agent_name"),
             Some(&json!("review-agent"))
@@ -752,7 +740,9 @@ mod tests {
             envelope.event,
             RuntimeEvent::Agent {
                 agent_id,
-                event: AgentEvent::Started { turn_id },
+                turn_id,
+                location: AgentLocation::Direct,
+                event: AgentEvent::Started,
             }
         );
     }
@@ -760,14 +750,14 @@ mod tests {
     #[tokio::test]
     async fn telemetry_event_is_published_without_exposing_bus_error() {
         let agent_id = AgentId::new();
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let recorder = Arc::new(FailingEventStreamBus::default());
         let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
         let sink = ScopedAgentEventSink::new(
             agent_id,
             "review-agent",
-            run_id,
+            direct_context(session_id),
             turn_id,
             Arc::clone(&event_bus),
         );
@@ -783,11 +773,13 @@ mod tests {
             .take_published()
             .try_into()
             .expect("exactly one envelope should be published");
-        assert_eq!(envelope.run_id, run_id);
+        assert_eq!(envelope.session_id, session_id);
         assert_eq!(
             envelope.event,
             RuntimeEvent::Agent {
                 agent_id,
+                turn_id,
+                location: AgentLocation::Direct,
                 event: AgentEvent::Llm {
                     llm_call_id,
                     event: LlmEvent::TextDelta {
@@ -800,16 +792,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_turn_scoped_envelope_includes_stable_turn_metadata() {
+    async fn every_turn_scoped_envelope_includes_typed_turn_scope() {
         let agent_id = AgentId::new();
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let recorder = Arc::new(RecordingEventStreamBus::default());
         let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
         let sink = ScopedAgentEventSink::new(
             agent_id,
             "review-agent",
-            run_id,
+            direct_context(session_id),
             turn_id,
             Arc::clone(&event_bus),
         );
@@ -849,10 +841,15 @@ mod tests {
                 envelope.metadata.get("agent_name"),
                 Some(&json!("review-agent"))
             );
-            assert_eq!(
-                envelope.metadata.get("turn_id"),
-                Some(&json!(turn_id.to_string()))
-            );
+            assert!(matches!(
+                &envelope.event,
+                RuntimeEvent::Agent {
+                    agent_id: event_agent_id,
+                    turn_id: event_turn_id,
+                    location: AgentLocation::Direct,
+                    ..
+                } if event_agent_id == &agent_id && event_turn_id == &turn_id
+            ));
         }
         assert!(matches!(
             envelopes[0].event,
@@ -890,7 +887,7 @@ mod tests {
         let sink = ScopedAgentEventSink::new(
             AgentId::new(),
             "review-agent",
-            RunId::new(),
+            direct_context(SessionId::new()),
             TurnId::new(),
             event_bus,
         );
@@ -909,7 +906,7 @@ mod tests {
         let sink = Arc::new(ScopedAgentEventSink::new(
             AgentId::new(),
             "review-agent",
-            RunId::new(),
+            direct_context(SessionId::new()),
             TurnId::new(),
             event_bus,
         ));
@@ -919,13 +916,8 @@ mod tests {
         });
         recorder.first_publish_started.notified().await;
         let durable_sink = Arc::clone(&sink);
-        let append = tokio::spawn(async move {
-            durable_sink
-                .append(DurableAgentEvent::MessageAppended {
-                    message: ChatMessage::assistant("done"),
-                })
-                .await
-        });
+        let append =
+            tokio::spawn(async move { durable_sink.append(DurableAgentEvent::LoopStarted).await });
         tokio::task::yield_now().await;
         assert!(!append.is_finished());
 
@@ -949,7 +941,7 @@ mod tests {
         assert!(matches!(
             events[1].event,
             RuntimeEvent::Agent {
-                event: AgentEvent::Message { .. },
+                event: AgentEvent::Started,
                 ..
             }
         ));
@@ -962,7 +954,7 @@ mod tests {
         let sink = ScopedAgentEventSink::new(
             AgentId::new(),
             "review-agent",
-            RunId::new(),
+            direct_context(SessionId::new()),
             TurnId::new(),
             event_bus,
         );
@@ -980,9 +972,7 @@ mod tests {
 
         tokio::time::timeout(
             TELEMETRY_PUBLISH_TIMEOUT * 3,
-            sink.append(DurableAgentEvent::MessageAppended {
-                message: ChatMessage::assistant("done"),
-            }),
+            sink.append(DurableAgentEvent::LoopStarted),
         )
         .await
         .expect("durable publish should wait for at most the in-flight telemetry timeout")
@@ -999,7 +989,7 @@ mod tests {
         assert!(matches!(
             published[0].event,
             RuntimeEvent::Agent {
-                event: AgentEvent::Message { .. },
+                event: AgentEvent::Started,
                 ..
             }
         ));
@@ -1019,7 +1009,7 @@ mod tests {
         let sink = ScopedAgentEventSink::new(
             AgentId::new(),
             "review-agent",
-            RunId::new(),
+            direct_context(SessionId::new()),
             TurnId::new(),
             event_bus,
         );
@@ -1056,7 +1046,7 @@ mod tests {
         assert!(matches!(
             published[0].event,
             RuntimeEvent::Agent {
-                event: AgentEvent::Started { .. },
+                event: AgentEvent::Started,
                 ..
             }
         ));
@@ -1077,7 +1067,7 @@ mod tests {
         let sink = ScopedAgentEventSink::new(
             AgentId::new(),
             "review-agent",
-            RunId::new(),
+            direct_context(SessionId::new()),
             TurnId::new(),
             event_bus,
         );
@@ -1095,51 +1085,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_message_maps_to_external_message_event() {
+    async fn durable_message_requires_a_store_aware_projection() {
         let agent_id = AgentId::new();
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let recorder = Arc::new(RecordingEventStreamBus::default());
         let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
         let sink = ScopedAgentEventSink::new(
             agent_id,
             "review-agent",
-            run_id,
+            direct_context(session_id),
             turn_id,
             Arc::clone(&event_bus),
         );
-        let message = ChatMessage::assistant("done");
+        let error = sink
+            .append(DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("done"),
+            })
+            .await
+            .expect_err("message projection must allocate message_seq through AgentStore");
 
-        sink.append(DurableAgentEvent::MessageAppended {
-            message: message.clone(),
-        })
-        .await
-        .expect("recording event stream bus should accept the message");
-
-        let [envelope] = recorder
-            .take_published()
-            .try_into()
-            .expect("exactly one envelope should be published");
-        assert_eq!(
-            envelope.event,
-            RuntimeEvent::Agent {
-                agent_id,
-                event: AgentEvent::Message { turn_id, message },
+        assert!(matches!(
+            error,
+            DurableEventSinkError::UnsupportedEvent {
+                event_type: "message_appended"
             }
-        );
+        ));
+        assert!(recorder.take_published().is_empty());
     }
 
     #[tokio::test]
     async fn durable_tool_start_and_iteration_map_to_external_events() {
         let agent_id = AgentId::new();
-        let run_id = RunId::new();
+        let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let recorder = Arc::new(RecordingEventStreamBus::default());
         let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
         let sink = ScopedAgentEventSink::new(
             agent_id,
             "review-agent",
-            run_id,
+            direct_context(session_id),
             turn_id,
             Arc::clone(&event_bus),
         );
@@ -1186,8 +1171,9 @@ mod tests {
             started.event,
             RuntimeEvent::Agent {
                 agent_id,
+                turn_id,
+                location: AgentLocation::Direct,
                 event: AgentEvent::ToolExecutionStarted {
-                    turn_id,
                     call_id: CallId::from("tool-call-1"),
                     tool_name: ToolName::from("echo"),
                 },
@@ -1197,8 +1183,9 @@ mod tests {
             completed.event,
             RuntimeEvent::Agent {
                 agent_id,
+                turn_id,
+                location: AgentLocation::Direct,
                 event: AgentEvent::IterationCompleted {
-                    turn_id,
                     iteration: 4,
                     usage,
                 },

@@ -2,11 +2,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use stratum_core::{AgentId, ModelConfig, RunId, TokenUsage, TurnId};
+use stratum_core::{
+    AgentId, AgentLocation, AgentVersionId, ExtensionSetVersionId, HookHandlerVersionId,
+    ModelConfig, SessionId, SkillSetVersionId, TokenUsage, TurnId, TurnRuntimeSnapshot,
+};
 
 /// Current serialized agent-state schema version.
-pub const AGENT_STATE_VERSION: u32 = 2;
-pub(crate) const LEGACY_AGENT_STATE_VERSION: u32 = AGENT_STATE_VERSION - 1;
+pub const AGENT_STATE_VERSION: u32 = 3;
 
 /// Maximum number of messages returned by one history page.
 pub const MAX_HISTORY_PAGE_SIZE: usize = 256;
@@ -37,15 +39,27 @@ pub struct AgentState {
     pub agent_id: AgentId,
     /// Human-readable agent name.
     pub name: String,
+    /// Immutable version of the current agent definition.
+    pub agent_version_id: AgentVersionId,
+    /// Immutable version of the current ordered skill set.
+    pub skill_set_version_id: SkillSetVersionId,
+    /// Immutable version of the current ordered extension set.
+    pub extension_set_version_id: ExtensionSetVersionId,
+    /// Exact current hook handler order.
+    pub hook_handler_versions: Vec<HookHandlerVersionId>,
     /// Stable model configuration, when persisted by a host-aware caller.
     #[serde(default)]
     pub model_config: Option<ModelConfig>,
     /// Current runtime status.
     pub status: AgentStatus,
-    /// Active workflow run, when any.
-    pub run_id: Option<RunId>,
+    /// Long-lived session containing the current or most recent turn.
+    pub session_id: Option<SessionId>,
     /// Active resumable turn, when any.
     pub turn_id: Option<TurnId>,
+    /// Agent execution location for the current or most recent turn.
+    pub location: Option<AgentLocation>,
+    /// Exact runtime pinned for the active resumable turn.
+    pub turn_runtime_snapshot: Option<TurnRuntimeSnapshot>,
     /// Next LLM loop iteration that has not reached a durable boundary.
     pub next_iteration: u64,
     /// Cumulative model token usage.
@@ -61,13 +75,19 @@ impl AgentState {
     #[must_use]
     pub fn new(agent_id: AgentId, name: String) -> Self {
         Self {
-            state_version: LEGACY_AGENT_STATE_VERSION,
+            state_version: AGENT_STATE_VERSION,
             agent_id,
             name,
+            agent_version_id: AgentVersionId::new(),
+            skill_set_version_id: SkillSetVersionId::new(),
+            extension_set_version_id: ExtensionSetVersionId::new(),
+            hook_handler_versions: Vec::new(),
             model_config: None,
             status: AgentStatus::Idle,
-            run_id: None,
+            session_id: None,
             turn_id: None,
+            location: None,
+            turn_runtime_snapshot: None,
             next_iteration: 0,
             usage: TokenUsage::default(),
             last_seq: 0,
@@ -82,10 +102,16 @@ impl AgentState {
             state_version: AGENT_STATE_VERSION,
             agent_id,
             name,
+            agent_version_id: AgentVersionId::new(),
+            skill_set_version_id: SkillSetVersionId::new(),
+            extension_set_version_id: ExtensionSetVersionId::new(),
+            hook_handler_versions: Vec::new(),
             model_config: Some(model_config),
             status: AgentStatus::Idle,
-            run_id: None,
+            session_id: None,
             turn_id: None,
+            location: None,
+            turn_runtime_snapshot: None,
             next_iteration: 0,
             usage: TokenUsage::default(),
             last_seq: 0,
@@ -137,13 +163,19 @@ mod tests {
             keys,
             BTreeSet::from([
                 "agent_id".to_owned(),
+                "agent_version_id".to_owned(),
+                "extension_set_version_id".to_owned(),
+                "hook_handler_versions".to_owned(),
                 "last_seq".to_owned(),
+                "location".to_owned(),
                 "model_config".to_owned(),
                 "name".to_owned(),
                 "next_iteration".to_owned(),
-                "run_id".to_owned(),
+                "session_id".to_owned(),
+                "skill_set_version_id".to_owned(),
                 "state_version".to_owned(),
                 "status".to_owned(),
+                "turn_runtime_snapshot".to_owned(),
                 "turn_id".to_owned(),
                 "updated_at".to_owned(),
                 "usage".to_owned(),

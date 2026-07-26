@@ -22,6 +22,14 @@
 - UI 使用 Geist，标题使用 Outfit，数据使用 Geist Mono，中文回退使用 Noto Sans。
 - 禁止用主题化文案、无功能小字、伪技术参数或“就绪/未就绪”说明制造产品感。
 
+## Runtime protocol projection
+
+- Project Session-scoped envelopes and ignore non-Agent events in an Agent conversation view.
+- Stable message identity is `(agentId, messageSeq)`; `messageSeq` is nested in the committed Agent
+  message and is not a Session-global ordering field.
+- Preserve direct versus Workflow-node `AgentLocation` in protocol types.
+- Treat SSE cursor as transport-only and never compare it with another Agent's message barrier.
+
 ## 页面与壳层
 
 - `/` 只负责重定向到 `/chat`，不得恢复概览。

@@ -2,7 +2,7 @@ import type { AgentView, ApiError, StreamEnvelope } from "~/lib/stratum-api"
 
 export type StableMessage = {
   agentId: string
-  businessSeq: number
+  messageSeq: number
   role: "user" | "assistant" | "tool" | "system"
   text: string | null
   json: unknown | null

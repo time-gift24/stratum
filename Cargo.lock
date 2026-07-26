@@ -1777,6 +1777,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "stratum-macros",
  "thiserror",
  "uuid",
 ]
@@ -1825,6 +1826,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "stratum-macros"
+version = "0.1.0"
+
+[[package]]
 name = "stratum-store"
 version = "0.1.0"
 dependencies = [
@@ -1848,6 +1853,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sha2",
  "stratum-core",
  "stratum-filesystem",
  "thiserror",

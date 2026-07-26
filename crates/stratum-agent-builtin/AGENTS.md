@@ -13,3 +13,5 @@
   `StoreEventStreamBus`, and accepts `--resume` only for an exact existing agent ID.
 - `stratum_repl` registers only `EchoTool` in `RequireApproval` mode to validate the approval
   flow, prompting for `approve` or `reject` for every tool call.
+- The REPL owns one long-lived `SessionId` for its conversation and supplies
+  `AgentRuntimeContext::Direct` for every Turn; resume preserves the persisted Session.

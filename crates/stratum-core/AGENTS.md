@@ -1,9 +1,9 @@
-# Runtime event persistence conventions
+# stratum-core runtime protocol invariants
 
 ## Foundational agent-loop event contracts
 
 - `DurableAgentEvent` and `AgentTelemetryEvent` are local, scope-free events emitted by the
-  foundational `AgentLoop`; they are not wire envelopes and must not acquire run/agent/turn
+  foundational `AgentLoop`; they are not wire envelopes and must not acquire session/agent/turn
   fields merely for a transport adapter.
 - `DurableAgentEvent` names loop correctness boundaries. The loop waits for the injected durable
   sink acknowledgement before advancing. This does not mean every variant becomes an AgentStore
@@ -20,13 +20,12 @@
 
 - `StreamEnvelope` is the transport-facing type. `RuntimeEvent::Agent` nests `AgentEvent`; consumers
   must inspect the nested event type rather than infer it from metadata.
-- The current hosted-agent projection has no workflow node context, so `ScopedAgentEventSink` uses
-  `EventSource::Run` and carries `agent_id` in `RuntimeEvent::Agent`. Do not rewrite it to
-  `EventSource::Agent` without a real `node_id` supplied by orchestration.
-- `ScopedAgentEventSink` supplies run/agent/turn scope, projects durable loop events to `AgentEvent`,
+- `ScopedAgentEventSink` receives the host-provided `AgentRuntimeContext` and carries typed
+  `session_id`, `agent_id`, `turn_id`, and `AgentLocation` scope in the envelope.
+- `ScopedAgentEventSink` supplies session/agent/turn scope, projects durable loop events to `AgentEvent`,
   and projects supported telemetry to nested `LlmEvent`. Unsupported telemetry is a safe no-op with
   a warning; unsupported durable events are an error.
-- `business_seq`, retained `EventCursor`, and loop `iteration` are independent order domains and
+- Agent-scoped `message_seq`, retained `EventCursor`, and loop `iteration` are independent order domains and
   must never be compared or converted.
 
 ## Hosted model configuration
@@ -62,12 +61,11 @@ flowchart LR
   events directly to its inner retained bus.
 - JetStream is an independent file-backed, limits-retained cache. Neither it nor
   `FilesystemAgentStore` owns the other.
-- `business_seq` lives on the committed `StreamEnvelope` and is present only for
-  complete `AgentEvent::Message` events. `EventCursor` is an independent
+- `message_seq` lives only inside committed `AgentEvent::Message` values. `EventCursor` is an independent
   retained-transport position.
 - `AgentEvent::IterationCompleted` is projected by `StoreEventStreamBus` through
   `complete_iteration` before retained forwarding. `ToolExecutionStarted` is required by the loop
-  sink contract but is not a complete-message history record and receives no `business_seq`.
+  sink contract but is not a complete-message history record and receives no `message_seq`.
 
 ## Complete-message commit
 
@@ -80,7 +78,7 @@ sequenceDiagram
 
     A->>D: publish unsequenced complete message
     D->>C: append_message(envelope)
-    C-->>D: committed envelope with business_seq
+    C-->>D: committed Agent message with message_seq
     D->>J: publish committed envelope
 Note over D,J: retained publish failure does not roll back the commit
 ```
@@ -97,18 +95,18 @@ sequenceDiagram
 
     W->>A: resume()
     A->>S: load_agent()
-    S-->>A: Running state with run_id, turn_id, next_iteration, last_seq L
+    S-->>A: Running state with session_id, turn_id, next_iteration, last_seq L
     loop page the fixed range through L
         A->>S: history_page(after_seq, through_seq = L)
         S-->>A: sequenced complete messages through L
     end
     A->>A: validate history, frontier, and ordered tool-result prefixes
     Note right of A: invalid prefixes fail closed and only a missing suffix is resumable
-    A->>A: restore the same run_id and turn_id
+    A->>A: restore the same session_id and turn_id
     alt durable boundary
         A->>B: continue LLM events from next_iteration without immediate CAS
     else unadvanced terminal assistant
-        A->>S: complete_iteration(run_id, turn_id, next_iteration, usage)
+        A->>S: complete_iteration(session_id, turn_id, next_iteration, usage)
         S-->>A: CAS advances next_iteration
         A->>B: publish Finished without LLM
     else already-advanced terminal assistant
@@ -121,7 +119,7 @@ sequenceDiagram
             A->>B: publish unsequenced tool result message
             B-->>A: complete-message commit acknowledged
         end
-        A->>S: complete_iteration(run_id, turn_id, next_iteration, usage)
+        A->>S: complete_iteration(session_id, turn_id, next_iteration, usage)
         S-->>A: CAS advances next_iteration
         A->>B: continue next LLM events
     end
@@ -146,7 +144,7 @@ sequenceDiagram
     participant J as JetStream
     participant C as FilesystemAgentStore
 
-    W->>J: subscribe_agent and begin buffering
+    W->>J: subscribe_session and begin buffering
     W->>C: history_page through_seq = None
     C-->>W: first page and fixed last_seq barrier L
     loop while the fixed range has more pages
@@ -160,4 +158,25 @@ sequenceDiagram
 
 Fixed-barrier recovery stays in Web or another external reader composition; no
 runtime recovery manager owns both stores. The reader never compares an
-`EventCursor` with `business_seq`.
+`EventCursor` with `message_seq`.
+
+## Session and Hook runtime identity
+
+- `SessionId` is the UUIDv7 identity of a long-lived, graph-independent collaboration space.
+  Agents and Workflow versions may change while the Session remains stable.
+- A host supplies immutable `AgentRuntimeContext { session_id, location }`; the Agent creates the
+  `TurnId`. `AgentLocation` is either `Direct` or a typed `WorkflowNode` location.
+- `StreamEnvelope` is Session-scoped and contains no `EventSource`, top-level sequence, or legacy
+  run identity. `RuntimeEvent` ownership is expressed only through its Session, Node, and Agent
+  variants and their required identities.
+- LLM, Tool, approval, plan, lifecycle, and message events belong to the Agent event family.
+- Only committed `AgentEvent::Message` values contain a required `message_seq`. Its identity is
+  `(AgentId, message_seq)`; two Agents in one Session can both have message sequence 1.
+- `EventCursor` is an opaque retained-transport position. Never compare it with `message_seq` or
+  use it as persisted recovery state.
+- A resumable Turn pins Agent version, resolved `ModelConfig`, ToolSet fingerprint, SkillSet
+  version, ExtensionSet version, and ordered Hook Handler versions.
+- A Hook invocation address binds Session, Agent, Turn, Hook point, Handler position/version,
+  operation identity, and input digest. Pending retry identity is stable; mismatches fail closed.
+- The current beta protocol rejects unsupported state and payload shapes. Do not add migration,
+  downgrade, rollback, dual-read, or legacy-write paths.
