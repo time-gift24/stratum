@@ -260,7 +260,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
   return (
     <ProductWorkbenchContext.Provider value={contextValue}>
-      <div className="min-h-dvh bg-background text-foreground before:pointer-events-none before:fixed before:inset-x-0 before:top-0 before:h-[28rem] before:bg-[radial-gradient(ellipse_38rem_20rem_at_50%_-7rem,color-mix(in_srgb,var(--chart-5)_18%,transparent),transparent_72%),radial-gradient(ellipse_30rem_16rem_at_62%_-5rem,color-mix(in_srgb,var(--chart-1)_7%,transparent),transparent_74%)]">
+      <div className="min-h-dvh bg-background text-foreground">
         <a
           href="#main-content"
           className="fixed top-2 left-2 z-(--z-navigation) -translate-y-20 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:translate-y-0"
