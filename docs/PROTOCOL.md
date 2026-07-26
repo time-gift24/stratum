@@ -115,6 +115,16 @@ transport replay; it does not change durable Turn recovery.
 
 ## Persisted Turn runtime snapshot
 
+`ModelConfig` is mutable Agent configuration across Turn boundaries. Agent creation and a new
+message request may supply an optional validated model and provider-parameter override. An accepted
+Turn atomically makes that configuration the Agent's current default and pins the same value in the
+Turn snapshot. Omitting the override reuses the persisted current configuration. Validation,
+admission, or Turn-start failure leaves the previous configuration unchanged.
+
+Changing `ModelConfig` does not create a new Agent or Session. It is forbidden while another
+operation is active in that Session, and an unfinished Turn always resumes with its pinned model
+configuration rather than a later request.
+
 Starting a Turn atomically persists Session, Turn, location, and the exact runtime snapshot:
 
 - `AgentVersionId`;

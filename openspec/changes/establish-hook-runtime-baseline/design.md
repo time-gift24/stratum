@@ -134,6 +134,8 @@ Session stream 允许交错多个 Agent 的事件，但不提供跨 Agent 的业
 
 Session 不会永久固定到某一组版本。每个可恢复 Agent Turn 记录其已解析 Agent、model、tool、Skill set、Extension set 和精确 Handler 顺序的 snapshot。恢复时必须解析到同一 snapshot。同一 Session 中后续 Turn 可以选择更新的版本。
 
+`ModelConfig` 同时有两个明确边界：Agent 持久化当前配置，Turn snapshot 固定本次已接受执行的配置。调用方可以在 Agent 已无活跃 Turn 时为后续 Turn 提供新的模型或 LLM 参数；成功启动时，Store 将新配置作为 Agent 当前配置与 Turn snapshot 一起原子提交。未提供 override 时复用当前配置；校验或启动失败不得修改它。配置变化不创建新的 `AgentId` 或 `SessionId`，也不改变正在运行或恢复中的 Turn。
+
 `ToolSetFingerprint` 记录 Turn 使用的、provider 可见的精确有序 spec、授权 metadata 与实现身份。实现初期可以只支持内置 tool，但重启时不得在相同 fingerprint 下静默替换行为。
 
 使用具体 newtype 而不是通用 artifact/version wrapper，以免不同领域身份被意外混用。

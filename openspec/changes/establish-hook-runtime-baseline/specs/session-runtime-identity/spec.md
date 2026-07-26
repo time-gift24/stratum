@@ -36,6 +36,21 @@ Agent 必须（SHALL）为每个已接受的 Turn 创建新的 `TurnId`，并且
 - **WHEN** 持久化的 Agent Turn 在进程重启后恢复
 - **THEN** 恢复的工作使用原有的 `SessionId` 和 `TurnId`
 
+### Requirement: Agent 可在 Turn 之间修改模型配置
+`ModelConfig` 必须（SHALL）是 Agent 当前可修改的模型配置，而不是 Session 或 Agent version 的永久固定属性。创建 Agent 或在终态 Agent 上启动新 Turn 时，调用方可以提供已校验的模型与 LLM 参数；已接受的 Turn 必须（SHALL）原子地将该配置保存为 Agent 当前配置并固定到该 Turn 的 runtime snapshot。未提供新配置时必须复用 Agent 当前配置。
+
+#### Scenario: 后续 Turn 修改 LLM 参数
+- **WHEN** Agent 已结束当前 Turn，调用方使用新的有效 `ModelConfig` 启动后续 Turn
+- **THEN** 后续 Turn 使用并固定新配置，Agent 身份与 Session 身份保持不变，且新配置成为再后续 Turn 的默认配置
+
+#### Scenario: 模型配置修改未被接受
+- **WHEN** 新配置无效、模型不可用、Session 存在活跃操作或 Turn 启动失败
+- **THEN** Agent 已持久化的当前模型配置保持不变
+
+#### Scenario: 恢复固定的 Turn 配置
+- **WHEN** 未完成 Turn 在进程重启后恢复
+- **THEN** 恢复使用该 Turn 已固定的 `ModelConfig`，而不是任何更晚的配置请求
+
 ### Requirement: Agent 历史按 Agent 身份隔离
 对话历史必须（SHALL）归 `AgentId` 所有。同一 Session 中的不同 Agent 不得（SHALL NOT）隐式共享对话历史，包括 Agent 作为 Workflow 节点运行的情况。
 

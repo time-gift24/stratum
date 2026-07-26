@@ -17,6 +17,8 @@
 
 - Starting a Turn atomically commits Session, Turn, Agent location, and the exact runtime snapshot;
   a failed candidate must leave the prior durable state intact.
+- The accepted snapshot's `ModelConfig` also becomes the Agent's current configuration for later
+  Turns. Model parameters may change between Turns but never during resume of the active Turn.
 - `append_message` accepts only `NewAgentMessage`, allocates the next Agent-scoped `message_seq`,
   and returns the committed envelope. Retained-bus failure never rolls back this commit.
 - Agent history is isolated by Agent even when multiple Agents share one Session.

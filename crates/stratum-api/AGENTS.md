@@ -19,3 +19,6 @@
   exposes schemas only for configured models and never a second default-parameter representation.
 - `POST /v1/agents` accepts an optional `model_config`. When present, creation preflights,
   persists, and composes with that configuration; when absent, it uses the resolved template default.
+- `POST /v1/agents/{agent_id}/messages` also accepts an optional `model_config`. A valid override is
+  committed only with an accepted new Turn and becomes that Agent's persisted default; omission
+  reuses the persisted value, and any rejected start leaves it unchanged.

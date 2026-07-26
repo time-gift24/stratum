@@ -45,6 +45,8 @@ not the ownership model for the new `AgentLoop` kernel.
 - The Agent receives an injected `EventStreamBus` for event delivery and an
   injected `AgentStore` for durable resumption.
 - The host supplies `AgentRuntimeContext`; the Agent creates only `TurnId`.
+- `ModelConfig` may change between Turns. Each Agent instance uses the configuration selected by
+  the host for its next Turn, while an active or resumed Turn must keep its pinned snapshot value.
 - The Agent commits complete messages through `AgentStore::append_message` before publishing the
   returned sequenced envelope. Lifecycle and streaming events are observation-only envelopes.
 - Retained event delivery remains an EventBus responsibility; the Store is durable truth.
