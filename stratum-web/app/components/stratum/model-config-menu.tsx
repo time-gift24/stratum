@@ -23,6 +23,9 @@ type ConfigurationMenuProps = {
   commandPending: boolean
 }
 
+const COMPOSER_TOOL_CLASS =
+  "inline-flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-transparent bg-transparent px-2.5 text-xs font-medium text-muted-foreground transition-[background-color,border-color,color] duration-200 outline-none hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=open]:bg-secondary data-[state=open]:text-foreground sm:flex-none"
+
 export function AgentConfigMenu({
   configuration,
   commandPending,
@@ -37,7 +40,7 @@ export function AgentConfigMenu({
       <DropdownMenuTrigger
         aria-label={triggerText}
         data-tone="agent"
-        className="composer-tool inline-flex h-10 max-w-40 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+        className={`${COMPOSER_TOOL_CLASS} max-w-40`}
         disabled={menuDisabled(configuration, commandPending)}
       >
         <IconRobot className="size-3.5 shrink-0" aria-hidden="true" />
@@ -107,7 +110,7 @@ export function ModelConfigMenu({
         <DropdownMenuTrigger
           aria-label={triggerText}
           data-tone="model"
-          className="composer-tool inline-flex h-10 max-w-56 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+          className={`${COMPOSER_TOOL_CLASS} max-w-56`}
           disabled={
             configuration.currentModelConfig === null ||
             menuDisabled(configuration, commandPending)
@@ -149,7 +152,7 @@ export function ModelConfigMenu({
           <DropdownMenuTrigger
             aria-label={`${t("chat.composer.thinking")}: ${thinkingText}`}
             data-tone="thinking"
-            className="composer-tool inline-flex h-10 max-w-36 min-w-0 flex-1 items-center gap-2 px-2.5 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+            className={`${COMPOSER_TOOL_CLASS} max-w-36`}
             disabled={menuDisabled(configuration, commandPending)}
           >
             <IconBrain className="size-3.5 shrink-0" aria-hidden="true" />

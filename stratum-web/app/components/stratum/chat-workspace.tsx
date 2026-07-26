@@ -28,6 +28,7 @@ import {
 } from "~/components/ai-elements/prompt-input"
 import { Button } from "~/components/ui/button"
 import type { AgentConversation } from "~/hooks/use-agent-conversation"
+import { cn } from "~/lib/utils"
 
 gsap.registerPlugin(useGSAP)
 
@@ -96,7 +97,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     () => {
       if (reduceMotion) return
       gsap.fromTo(
-        ".chat-entrance",
+        "[data-chat-entrance]",
         { y: 14, opacity: 0, filter: "blur(7px)" },
         {
           y: 0,
@@ -217,15 +218,80 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     }
   }
 
+  const renderComposerInput = (inputGroupClassName: string) => (
+    <PromptInput
+      className={cn(
+        "relative z-10 border-0 bg-transparent shadow-none [&_[data-slot=input-group]]:border-0",
+        inputGroupClassName
+      )}
+      aria-busy={composerRunning}
+      onSubmit={(event) => {
+        event.preventDefault()
+        void submitMessage()
+      }}
+    >
+      <PromptInputBody>
+        <PromptInputTextarea
+          ref={composerRef}
+          aria-label={t("chat.composer.label")}
+          className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
+          disabled={composerRunning || composerUnavailable}
+          onChange={(event) => setComposerText(event.target.value)}
+          placeholder={t("chat.composer.placeholder")}
+          value={composerText}
+        />
+      </PromptInputBody>
+      <PromptInputFooter className="min-h-12 gap-2 px-2.5 pt-0 pb-[max(0.55rem,env(safe-area-inset-bottom))] sm:px-3.5">
+        <PromptInputTools className="[scrollbar-width:none] gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+          <AgentConfigMenu
+            configuration={configuration}
+            commandPending={isSubmitting}
+          />
+          <ModelConfigMenu
+            configuration={configuration}
+            commandPending={isSubmitting}
+          />
+          {state.phase === "connection_error" ? (
+            <PromptInputButton
+              className="h-10 shrink-0 rounded-lg border-transparent bg-transparent px-3 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              variant="outline"
+              onClick={() => conversation.reconnect()}
+            >
+              {t("chat.reconnect")}
+            </PromptInputButton>
+          ) : null}
+        </PromptInputTools>
+        <PromptInputSubmit
+          aria-label={t(canCancel ? "chat.cancel" : "chat.composer.send")}
+          className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
+          disabled={
+            !canCancel &&
+            (composerRunning ||
+              composerUnavailable ||
+              composerText.trim() === "")
+          }
+          onClick={canCancel ? () => void conversation.cancel() : undefined}
+          type={canCancel ? "button" : "submit"}
+        >
+          {canCancel ? (
+            <IconBan aria-hidden="true" />
+          ) : (
+            <IconArrowUp aria-hidden="true" />
+          )}
+        </PromptInputSubmit>
+      </PromptInputFooter>
+    </PromptInput>
+  )
+
   return (
     <section
       ref={chatRef}
       id="chat"
-      className="stratum-chat chat-page__workspace w-full"
+      className="relative isolate min-h-[calc(100dvh-var(--global-nav-offset))] w-full before:pointer-events-none before:fixed before:inset-x-0 before:top-(--global-nav-offset) before:bottom-0 before:-z-10 before:bg-[radial-gradient(ellipse_30rem_20rem_at_50%_48%,color-mix(in_srgb,var(--primary)_6%,transparent),transparent_72%),radial-gradient(ellipse_38rem_24rem_at_56%_42%,color-mix(in_srgb,var(--chart-5)_5%,transparent),transparent_74%)]"
       data-conversation-state={isNewConversation ? "new" : "active"}
     >
-      <div className="chat-stage px-4 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pb-[calc(14rem+env(safe-area-inset-bottom))]">
-        <div className="stratum-content-width mx-auto">
+      <div className="min-h-[calc(100dvh-var(--global-nav-offset))] px-4 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pb-[calc(14rem+env(safe-area-inset-bottom))]">
+        <div className="mx-auto w-full max-w-(--content-width)">
           <div data-slot="chat-main" className="flex min-w-0 flex-col">
             <div
               ref={messageListRef}
@@ -233,7 +299,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
               role="log"
               aria-live={state.phase === "recovering" ? "off" : "polite"}
               aria-relevant="additions text"
-              className="type-body w-full px-1 py-5 [overflow-anchor:none] sm:px-3 md:px-4 md:py-8"
+              className="w-full px-1 py-5 text-[0.9375rem]/[1.65] [overflow-anchor:none] sm:px-3 md:px-4 md:py-8"
             >
               <AgentMessageList
                 messages={state.messages}
@@ -257,7 +323,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           size="icon"
           variant="outline"
           onClick={() => resumeAutoFollow("smooth")}
-          className="stratum-floating-center fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
+          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
           <IconArrowDown aria-hidden="true" />
@@ -267,75 +333,25 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
       <div
         data-slot="chat-composer-positioner"
         data-composer-position={isNewConversation ? "centered" : "docked"}
-        className="stratum-composer-positioner fixed z-30"
+        className={cn(
+          "fixed right-[max(1rem,env(safe-area-inset-right))] left-[max(1rem,env(safe-area-inset-left))] z-(--z-composer) mx-auto w-auto max-w-(--composer-width) transition-[bottom] duration-300 ease-(--ease-interface)",
+          isNewConversation
+            ? "bottom-[46%] max-sm:bottom-[43%]"
+            : "bottom-[max(1rem,env(safe-area-inset-bottom))]"
+        )}
       >
         <div
           data-slot="chat-composer-surface"
-          className="stratum-composer-surface chat-entrance"
+          data-chat-entrance
+          className={cn(
+            "transition-transform duration-300 ease-(--ease-interface)",
+            isNewConversation && "translate-y-1/2"
+          )}
         >
-          <div className="stratum-prompt-shell">
-            <PromptInput
-              aria-busy={composerRunning}
-              onSubmit={(event) => {
-                event.preventDefault()
-                void submitMessage()
-              }}
-            >
-              <PromptInputBody>
-                <PromptInputTextarea
-                  ref={composerRef}
-                  aria-label={t("chat.composer.label")}
-                  className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
-                  disabled={composerRunning || composerUnavailable}
-                  onChange={(event) => setComposerText(event.target.value)}
-                  placeholder={t("chat.composer.placeholder")}
-                  value={composerText}
-                />
-              </PromptInputBody>
-              <PromptInputFooter className="min-h-12 gap-2 px-2.5 pt-0 pb-[max(0.55rem,env(safe-area-inset-bottom))] sm:px-3.5">
-                <PromptInputTools className="[scrollbar-width:none] gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-                  <AgentConfigMenu
-                    configuration={configuration}
-                    commandPending={isSubmitting}
-                  />
-                  <ModelConfigMenu
-                    configuration={configuration}
-                    commandPending={isSubmitting}
-                  />
-                  {state.phase === "connection_error" ? (
-                    <PromptInputButton
-                      className="composer-tool h-10 shrink-0 px-3"
-                      variant="outline"
-                      onClick={() => conversation.reconnect()}
-                    >
-                      {t("chat.reconnect")}
-                    </PromptInputButton>
-                  ) : null}
-                </PromptInputTools>
-                <PromptInputSubmit
-                  aria-label={t(
-                    canCancel ? "chat.cancel" : "chat.composer.send"
-                  )}
-                  className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
-                  disabled={
-                    !canCancel &&
-                    (composerRunning ||
-                      composerUnavailable ||
-                      composerText.trim() === "")
-                  }
-                  onClick={
-                    canCancel ? () => void conversation.cancel() : undefined
-                  }
-                  type={canCancel ? "button" : "submit"}
-                >
-                  {canCancel ? (
-                    <IconBan aria-hidden="true" />
-                  ) : (
-                    <IconArrowUp aria-hidden="true" />
-                  )}
-                </PromptInputSubmit>
-              </PromptInputFooter>
-            </PromptInput>
+          <div className="contents">
+            {renderComposerInput(
+              "[&_[data-slot=input-group]]:bg-card/66 [&_[data-slot=input-group]]:shadow-[0_28px_78px_color-mix(in_srgb,var(--background)_76%,transparent)] [&_[data-slot=input-group]]:backdrop-blur-2xl"
+            )}
           </div>
           {activityAnnouncement ? (
             <p className="sr-only" role="status" aria-live="polite">

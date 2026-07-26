@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next"
 import {
   VerticalNavigation,
   type VerticalNavigationItem,
-} from "~/components/react-bits/vertical-navigation"
+} from "~/components/stratum/vertical-navigation"
 import { ChatWorkspace } from "~/components/stratum/chat-workspace"
 import { useProductWorkbench } from "~/components/stratum/product-shell"
 import { RouteTransition } from "~/components/stratum/route-transition"
@@ -95,7 +95,7 @@ export default function Chat() {
 
   return (
     <RouteTransition>
-      <div className="chat-page">
+      <div className="relative min-h-[calc(100dvh-var(--global-nav-offset))]">
         <VerticalNavigation
           activeId={
             conversation.state.agentId === null

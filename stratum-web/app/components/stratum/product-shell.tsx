@@ -8,18 +8,14 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react"
-import { IconClock, IconHistory, IconTrash, IconX } from "@tabler/icons-react"
-import { AnimatePresence, motion, useReducedMotion } from "motion/react"
-import { Link, useLocation, useNavigate } from "react-router"
+import { useLocation, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import { Button } from "~/components/ui/button"
+import { HistoryPanel } from "~/components/stratum/history-panel"
 import type { AgentTemplateView, ModelDescriptor } from "~/lib/model-config"
 import {
-  formatRelativeTime,
   loadRecentAgents,
   rememberRecentAgent as rememberStoredRecentAgent,
   removeRecentAgent as removeStoredRecentAgent,
@@ -31,7 +27,6 @@ import {
   createStratumApi,
   STRATUM_API_BASE_URL,
 } from "~/lib/stratum-api"
-import { cn } from "~/lib/utils"
 
 type ResourcePhase = "loading" | "loaded" | "empty" | "error"
 
@@ -89,174 +84,6 @@ function toApiError(error: unknown): ApiError {
     "metadata_failed",
     0,
     error instanceof Error ? error.message : "metadata request failed"
-  )
-}
-
-type HistoryPanelProps = {
-  open: boolean
-  onClose(): void
-  activeAgentId: string | null
-  missingAgentId: string | null
-  recentAgents: readonly RecentAgent[]
-  onRemoveAgent(agentId: string): void
-}
-
-function HistoryPanel({
-  open,
-  onClose,
-  activeAgentId,
-  missingAgentId,
-  recentAgents,
-  onRemoveAgent,
-}: HistoryPanelProps) {
-  const { t, i18n } = useTranslation()
-  const reduceMotion = useReducedMotion()
-  const language = i18n.resolvedLanguage ?? "en"
-  const panelRef = useRef<HTMLElement>(null)
-  const closeButtonRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const focusFrame = requestAnimationFrame(() =>
-      closeButtonRef.current?.focus()
-    )
-    return () => cancelAnimationFrame(focusFrame)
-  }, [open])
-
-  const keepFocusInside = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Tab") return
-    const panel = panelRef.current
-    if (!panel) return
-    const focusable = Array.from(
-      panel.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-    )
-    const first = focusable[0]
-    const last = focusable.at(-1)
-    if (!first || !last) return
-
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
-    } else if (!panel.contains(document.activeElement)) {
-      event.preventDefault()
-      first.focus()
-    }
-  }
-
-  return (
-    <AnimatePresence initial={false}>
-      {open ? (
-        <>
-          <motion.button
-            type="button"
-            aria-label={t("chat.history.close")}
-            className="fixed inset-0 z-[80] cursor-default bg-background/70 backdrop-blur-sm"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.18 }}
-            onClick={onClose}
-          />
-          <motion.aside
-            ref={panelRef}
-            className="stratum-history-panel flex flex-col"
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("productShell.recent")}
-            onKeyDown={keepFocusInside}
-            initial={{ x: reduceMotion ? 0 : 16, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: reduceMotion ? 0 : 16, opacity: 0 }}
-            transition={{
-              duration: reduceMotion ? 0 : 0.24,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-          >
-            <div className="flex h-14 items-center justify-between px-4">
-              <div className="flex items-center gap-2.5">
-                <IconHistory
-                  className="size-4 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <h2 className="font-heading text-sm font-medium text-foreground">
-                  {t("productShell.recent")}
-                </h2>
-              </div>
-              <Button
-                ref={closeButtonRef}
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-10"
-                onClick={onClose}
-                aria-label={t("chat.history.close")}
-              >
-                <IconX aria-hidden="true" />
-              </Button>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {recentAgents.length === 0 ? (
-                <div className="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                  {t("productShell.noRecent")}
-                </div>
-              ) : (
-                <ul className="space-y-1">
-                  {recentAgents.map((agent) => {
-                    const active = agent.agentId === activeAgentId
-                    const missing = agent.agentId === missingAgentId
-                    return (
-                      <li key={agent.agentId} className="group flex gap-1">
-                        <Link
-                          to={`/chat?agent=${encodeURIComponent(agent.agentId)}`}
-                          onClick={onClose}
-                          aria-current={active ? "page" : undefined}
-                          className={cn(
-                            "flex min-h-12 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 transition-colors duration-200",
-                            active
-                              ? "bg-secondary text-foreground"
-                              : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground",
-                            missing && "text-destructive"
-                          )}
-                        >
-                          <IconClock
-                            className="size-4 shrink-0"
-                            aria-hidden="true"
-                          />
-                          <span className="min-w-0 flex-1 truncate text-sm">
-                            {agent.title}
-                          </span>
-                          <span className="shrink-0 font-mono text-[0.65rem] text-muted-foreground">
-                            {formatRelativeTime(agent.lastOpenedAt, language)}
-                          </span>
-                        </Link>
-                        {missing ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="size-12 text-destructive"
-                            onClick={() => onRemoveAgent(agent.agentId)}
-                            aria-label={t("chat.removeLocalEntry")}
-                          >
-                            <IconTrash aria-hidden="true" />
-                          </Button>
-                        ) : null}
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-          </motion.aside>
-        </>
-      ) : null}
-    </AnimatePresence>
   )
 }
 
@@ -413,10 +240,10 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
   return (
     <ProductWorkbenchContext.Provider value={contextValue}>
-      <div className="stratum-app-shell text-foreground">
+      <div className="min-h-dvh bg-background text-foreground before:pointer-events-none before:fixed before:inset-x-0 before:top-0 before:h-[28rem] before:bg-[radial-gradient(ellipse_38rem_20rem_at_50%_-7rem,color-mix(in_srgb,var(--chart-5)_18%,transparent),transparent_72%),radial-gradient(ellipse_30rem_16rem_at_62%_-5rem,color-mix(in_srgb,var(--chart-1)_7%,transparent),transparent_74%)]">
         <a
           href="#main-content"
-          className="fixed top-2 left-2 z-[70] -translate-y-20 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:translate-y-0"
+          className="fixed top-2 left-2 z-(--z-navigation) -translate-y-20 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:translate-y-0"
         >
           {t("productShell.skipToContent")}
         </a>
@@ -433,7 +260,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
         <main
           ref={mainRef}
           id="main-content"
-          className="stratum-main"
+          className="min-h-dvh pt-(--global-nav-offset)"
           tabIndex={-1}
         >
           {children}

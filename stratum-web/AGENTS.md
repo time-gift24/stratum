@@ -1,5 +1,19 @@
 # Stratum Web 开发约定
 
+## Utility-first 宪章
+
+以下规则是前端样式实现的最高约束；新增、重构与评审都必须执行：
+
+1. **`app/app.css` 只定义系统，不实现页面。** 该文件只允许包含依赖导入、shadcn 语义 Token、Tailwind `@theme` 映射、字体、基础元素样式和全局无障碍规则。禁止放入聊天、导航、弹窗、卡片或具体路由的类选择器。
+2. **具体样式写在组件的 Tailwind utilities 中。** 布局、间距、排版、颜色、状态与响应式行为应在 TSX 上清晰可见；禁止用 `@apply` 把 utilities 重新包装成传统 CSS 类。
+3. **复用依靠组件边界，不依靠全局 CSS 类。** 同时包含结构、视觉和行为的重复模式必须提取为 `app/components/stratum/` 下的模块级 React 组件。只有纯字符串重复且不形成独立语义时，才允许使用同模块的 class 常量。
+4. **颜色只消费语义 Token。** 组件不得写 Hex、RGB 或同义颜色变量；使用 `background`、`foreground`、`card`、`popover`、`primary`、`secondary`、`muted`、`accent`、`destructive`、`border`、`ring`、`chart-*` 与 `sidebar-*`。状态优先使用 `data-*` / ARIA variants 表达。
+5. **优先使用 Tailwind v4 的标准能力。** 使用移动优先断点、`gap-*`、`size-*`、`min-h-dvh`、`bg-linear-*` 等当前命名。任意值仅用于 Token 无法表达的真实约束；同一任意值重复出现时必须提升为 `@theme` Token。
+6. **React 结构必须可维护。** 不在组件函数内部声明子组件；可从 props 或现有 state 推导的值不另建 state；effect 依赖保持稳定；仅对真实昂贵计算使用 memoization。
+7. **外部组件保持隔离。** `ui`、`react-bits` 与 `ai-elements` 的适配优先通过 props、utility class、CSS 变量或 Stratum 包裹组件完成，不把产品实现重新写回供应组件或 `app.css`。
+
+违反以上任一项的改动不能视为完成。
+
 ## 设计上下文
 
 - 修改界面前必须阅读仓库根目录 `PRODUCT.md` 与本目录 `DESIGN.md`。

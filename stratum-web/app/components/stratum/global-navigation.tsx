@@ -8,7 +8,7 @@ import {
   CenteredNavigation,
   type CenteredNavigationGroup,
   type CenteredNavigationLink,
-} from "~/components/react-bits/centered-navigation"
+} from "~/components/stratum/centered-navigation"
 import { LanguageToggle } from "~/components/stratum/language-toggle"
 
 export function GlobalNavigation() {
