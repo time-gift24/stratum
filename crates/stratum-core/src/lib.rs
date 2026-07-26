@@ -9,221 +9,17 @@ use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
+use stratum_macros::{sha256_fingerprint, string_id, uuid_identity};
 
 pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
 pub use error::{FingerprintParseError, HookFailure, ModelIdParseError};
 
-/// Identity of one long-lived runtime session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(Uuid);
-
-impl SessionId {
-    /// Creates a new UUIDv7 session id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for SessionId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<SessionId> for Uuid {
-    fn from(value: SessionId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for SessionId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Identity of one resumable turn inside a workflow run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TurnId(Uuid);
-
-impl TurnId {
-    /// Creates a new UUIDv7 turn id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for TurnId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for TurnId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for TurnId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<TurnId> for Uuid {
-    fn from(value: TurnId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for TurnId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Identity of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AgentId(Uuid);
-
-impl AgentId {
-    /// Creates a new UUIDv7 agent id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for AgentId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for AgentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for AgentId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<AgentId> for Uuid {
-    fn from(value: AgentId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for AgentId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-macro_rules! uuid_identity {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(
-            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-        )]
-        #[serde(transparent)]
-        pub struct $name(Uuid);
-
-        impl $name {
-            /// Creates a new UUIDv7 identity.
-            #[must_use]
-            pub fn new() -> Self {
-                Self(Uuid::now_v7())
-            }
-
-            /// Returns the inner UUID.
-            #[must_use]
-            pub const fn as_uuid(self) -> Uuid {
-                self.0
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl From<Uuid> for $name {
-            fn from(value: Uuid) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<$name> for Uuid {
-            fn from(value: $name) -> Self {
-                value.0
-            }
-        }
-
-        impl FromStr for $name {
-            type Err = uuid::Error;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                value.parse::<Uuid>().map(Self)
-            }
-        }
-    };
-}
-
+uuid_identity!(SessionId, "Identity of one long-lived runtime session.");
+uuid_identity!(
+    TurnId,
+    "Identity of one resumable turn inside a workflow run."
+);
+uuid_identity!(AgentId, "Identity of an agent.");
 uuid_identity!(
     AgentVersionId,
     "Identity of one immutable published agent version."
@@ -248,57 +44,7 @@ uuid_identity!(
     HookInvocationId,
     "Identity of one hook handler invocation at one hook point."
 );
-
-/// Identity of one tool approval request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ApprovalId(Uuid);
-
-impl ApprovalId {
-    /// Creates a new UUIDv7 approval id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for ApprovalId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for ApprovalId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for ApprovalId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<ApprovalId> for Uuid {
-    fn from(value: ApprovalId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for ApprovalId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
+uuid_identity!(ApprovalId, "Identity of one tool approval request.");
 
 /// Whether a tool observes or mutates state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -335,114 +81,21 @@ pub enum ApprovalDecision {
     Reject,
 }
 
-macro_rules! string_id {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            /// Creates a new id from a string-like value.
-            #[must_use]
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
-            /// Returns the id as a string slice.
-            #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
-            }
-        }
-    };
-}
-
 string_id!(NodeId, "Identity of a workflow node.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
 
-macro_rules! sha256_fingerprint {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(try_from = "String", into = "String")]
-        pub struct $name(String);
-
-        impl $name {
-            /// Returns the canonical lowercase hexadecimal digest.
-            #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl FromStr for $name {
-            type Err = FingerprintParseError;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                if value.len() == 64
-                    && value
-                        .as_bytes()
-                        .iter()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-                {
-                    Ok(Self(value.to_owned()))
-                } else {
-                    Err(FingerprintParseError::InvalidFormat)
-                }
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = FingerprintParseError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                value.parse()
-            }
-        }
-
-        impl From<$name> for String {
-            fn from(value: $name) -> Self {
-                value.0
-            }
-        }
-    };
-}
-
 sha256_fingerprint!(
     ToolSetFingerprint,
-    "SHA-256 fingerprint of an exact ordered runtime tool set."
+    "SHA-256 fingerprint of an exact ordered runtime tool set.",
+    FingerprintParseError
 );
 sha256_fingerprint!(
     HookInputDigest,
-    "SHA-256 digest of the canonical input to one hook handler invocation."
+    "SHA-256 digest of the canonical input to one hook handler invocation.",
+    FingerprintParseError
 );
 
 /// Canonical identity of a provider model.

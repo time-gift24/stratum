@@ -9,6 +9,7 @@ members = [
     "crates/stratum-filesystem",
     "crates/stratum-infra",
     "crates/stratum-llm",
+    "crates/stratum-macros",
     "crates/stratum-tools",
 ]
 resolver = "3"
@@ -49,6 +50,7 @@ stratum-agent = { path = "crates/stratum-agent" }
 stratum-store = { path = "crates/stratum-store" }
 stratum-infra = { path = "crates/stratum-infra" }
 stratum-llm = { path = "crates/stratum-llm" }
+stratum-macros = { path = "crates/stratum-macros" }
 stratum-tools = { path = "crates/stratum-tools" }
 stratum-api = { path = "crates/stratum-api" }
 
