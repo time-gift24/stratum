@@ -1,6 +1,6 @@
 import type { ComponentProps, ReactNode } from "react"
 import { useState } from "react"
-import { ChevronDownIcon } from "lucide-react"
+import { IconChevronDown } from "@tabler/icons-react"
 
 import {
   Collapsible,
@@ -32,14 +32,14 @@ export function AgentDisclosure({
     >
       <CollapsibleTrigger
         data-slot="agent-disclosure-trigger"
-        className="flex w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full items-center gap-2 text-left text-sm font-normal text-muted-foreground transition-colors duration-200 hover:text-foreground"
       >
         {icon}
         {label}
-        <ChevronDownIcon
+        <IconChevronDown
           aria-hidden="true"
           className={cn(
-            "size-4 transition-transform",
+            "size-4 transition-transform duration-200",
             open ? "rotate-180" : "rotate-0"
           )}
         />
@@ -57,7 +57,7 @@ export function AgentDisclosureContent({
   return (
     <CollapsibleContent
       className={cn(
-        "mt-4 text-sm text-muted-foreground outline-none",
+        "mt-4 text-sm text-muted-foreground outline-hidden",
         "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:animate-in data-[state=open]:slide-in-from-top-2",
         className
       )}

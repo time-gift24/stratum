@@ -1,13 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ArrowDownIcon, ArrowUpIcon, BanIcon } from "lucide-react"
+import { IconArrowDown, IconArrowUp, IconBan } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
-import { useGSAP } from "@gsap/react"
-import gsap from "gsap"
-import { cn } from "~/lib/utils"
 
-import { ChatHistory } from "~/components/stratum/chat-history"
+import BorderGlow from "~/components/BorderGlow"
 import {
   AgentConfigMenu,
   ModelConfigMenu,
@@ -27,13 +24,12 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "~/components/ai-elements/prompt-input"
-import { useAgentConversation } from "~/hooks/use-agent-conversation"
-
-gsap.registerPlugin(useGSAP)
+import { Button } from "~/components/ui/button"
+import type { AgentConversation } from "~/hooks/use-agent-conversation"
+import { cn } from "~/lib/utils"
 
 type ChatWorkspaceProps = {
-  historyOpen?: boolean
-  onHistoryOpenChange?(open: boolean): void
+  conversation: AgentConversation
 }
 
 type AutoFollowScrollPosition = {
@@ -58,12 +54,8 @@ function resolveAutoFollowPaused({
   return scrollTop < previousScrollTop && !atBottom
 }
 
-export function ChatWorkspace({
-  historyOpen = false,
-  onHistoryOpenChange,
-}: ChatWorkspaceProps) {
+export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   const { t } = useTranslation()
-  const conversation = useAgentConversation()
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [autoFollowPaused, setAutoFollowPaused] = useState(false)
@@ -71,31 +63,30 @@ export function ChatWorkspace({
     ReadonlyMap<string, ApprovalDecision>
   >(() => new Map())
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const submitButtonRef = useRef<HTMLDivElement>(null)
-  const workspaceRef = useRef<HTMLElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
-  const inputContainerRef = useRef<HTMLDivElement>(null)
+  const chatRef = useRef<HTMLElement>(null)
   const autoFollowPausedRef = useRef(false)
   const previousScrollTopRef = useRef(0)
 
-  const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
+  const { state } = conversation
   const isNewConversation = state.agentId === null
-  const initialComposerBottom = useRef(
-    isNewConversation ? "50%" : "max(1rem, env(safe-area-inset-bottom))"
-  )
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
   const composerRunning = isSubmitting || isAgentBusy
+  const composerUnavailable = state.phase === "missing"
   const canCancel = state.agentId !== null && state.view?.status === "running"
-  const liveStatus = isSubmitting
-    ? t("chat.sending")
+  const configuration = conversation.composerConfiguration
+  const activityAnnouncement = isSubmitting
+    ? t(isNewConversation ? "chat.creating" : "chat.sending")
     : state.phase === "recovering"
       ? t("chat.connecting")
       : state.phase === "connection_error"
         ? t("chat.connectionFailed")
-        : state.view?.status === "running"
-          ? t("chat.thinking")
-          : t("chat.ready")
+        : state.phase === "missing"
+          ? t("chat.missingConversation")
+          : state.view?.status === "running"
+            ? t("chat.thinking")
+            : ""
 
   // 选择对话（包括新建）后聚焦输入框
   useEffect(() => {
@@ -122,11 +113,6 @@ export function ChatWorkspace({
     },
     [scrollToBottom]
   )
-  const closeHistory = useCallback(
-    () => onHistoryOpenChange?.(false),
-    [onHistoryOpenChange]
-  )
-
   useEffect(() => {
     if (typeof document === "undefined") return
     const scrollElement = document.documentElement
@@ -175,94 +161,6 @@ export function ChatWorkspace({
     resumeAutoFollow("auto")
   }, [resumeAutoFollow, state.agentId])
 
-  // workspace 入场动画：与 navbar 收缩完全同步
-  useGSAP(
-    () => {
-      const reduceMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
-      const messageList = messageListRef.current
-      const inputContainer = inputContainerRef.current
-      if (!messageList || !inputContainer) return
-
-      gsap.set([messageList, inputContainer], {
-        autoAlpha: 0,
-        y: 12,
-      })
-
-      const tl = gsap.timeline({ delay: 0.12 }) // 与 navbar timeline 错开 120ms
-      tl.to(messageList, {
-        autoAlpha: 1,
-        y: 0,
-        duration: reduceMotion ? 0 : 0.45,
-        ease: "sine.out",
-      })
-      tl.to(
-        inputContainer,
-        {
-          autoAlpha: 1,
-          y: 0,
-          duration: reduceMotion ? 0 : 0.35,
-          ease: "sine.out",
-        },
-        "-=0.3"
-      )
-    },
-    { scope: workspaceRef }
-  )
-
-  // 输入框位置切换动画：居中 <-> 底部
-  // 只用 bottom 属性控制，避免 top/bottom 切换导致的跳动
-  useGSAP(
-    () => {
-      const container = inputContainerRef.current
-      if (!container) return
-
-      const reduceMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
-
-      if (isNewConversation) {
-        // 居中状态 - 内层负责垂直偏移，避免与入场动画争用 transform。
-        gsap.to(container, {
-          bottom: "50%",
-          duration: reduceMotion ? 0 : 0.5,
-          ease: "sine.inOut",
-        })
-      } else {
-        // 底部状态
-        gsap.to(container, {
-          bottom: "max(1rem, env(safe-area-inset-bottom))",
-          duration: reduceMotion ? 0 : 0.5,
-          ease: "sine.inOut",
-        })
-      }
-    },
-    { dependencies: [isNewConversation], scope: workspaceRef }
-  )
-
-  useGSAP(
-    () => {
-      const btn = submitButtonRef.current
-      if (!btn) return
-
-      const reduceMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
-      if (reduceMotion) {
-        gsap.set(btn, { scale: 1 })
-        return
-      }
-
-      if (isSubmitting) {
-        gsap.to(btn, { scale: 0.92, duration: 0.1, ease: "power2.out" })
-      } else {
-        gsap.to(btn, { scale: 1, duration: 0.2, ease: "expo.out" })
-      }
-    },
-    { dependencies: [isSubmitting] }
-  )
-
   const submitMessage = async () => {
     const text = composerText.trim()
     if (text === "" || isSubmitting || isAgentBusy) return
@@ -279,169 +177,167 @@ export function ChatWorkspace({
     }
   }
 
-  const resolveApproval = async (
-    approvalId: string,
-    decision: "approve" | "reject"
-  ) => {
-    setApprovalSubmissions((submissions) =>
-      startApprovalSubmission(submissions, approvalId, decision)
-    )
-    try {
-      await conversation.resolveApproval(approvalId, decision)
-    } finally {
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject") => {
       setApprovalSubmissions((submissions) =>
-        finishApprovalSubmission(submissions, approvalId)
+        startApprovalSubmission(submissions, approvalId, decision)
       )
-    }
-  }
+      try {
+        await conversation.resolveApproval(approvalId, decision)
+      } finally {
+        setApprovalSubmissions((submissions) =>
+          finishApprovalSubmission(submissions, approvalId)
+        )
+      }
+    },
+    [conversation]
+  )
+
+  const renderComposerFooter = (
+    footerClassName: string,
+    toolsClassName: string
+  ) => (
+    <PromptInputFooter className={footerClassName}>
+      <PromptInputTools className={toolsClassName}>
+        <AgentConfigMenu
+          configuration={configuration}
+          commandPending={isSubmitting}
+        />
+        <ModelConfigMenu
+          configuration={configuration}
+          commandPending={isSubmitting}
+        />
+        {state.phase === "connection_error" ? (
+          <PromptInputButton
+            className="h-10 shrink-0 rounded-lg border-transparent bg-transparent px-3 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            variant="outline"
+            onClick={() => conversation.reconnect()}
+          >
+            {t("chat.reconnect")}
+          </PromptInputButton>
+        ) : null}
+      </PromptInputTools>
+      <PromptInputSubmit
+        aria-label={t(canCancel ? "chat.cancel" : "chat.composer.send")}
+        className="size-11 shrink-0 rounded-lg shadow-md sm:size-10"
+        disabled={
+          !canCancel &&
+          (composerRunning || composerUnavailable || composerText.trim() === "")
+        }
+        onClick={canCancel ? () => void conversation.cancel() : undefined}
+        type={canCancel ? "button" : "submit"}
+      >
+        {canCancel ? (
+          <IconBan aria-hidden="true" />
+        ) : (
+          <IconArrowUp aria-hidden="true" />
+        )}
+      </PromptInputSubmit>
+    </PromptInputFooter>
+  )
+
+  const renderComposerInput = (inputGroupClassName: string) => (
+    <PromptInput
+      className={cn(
+        "relative z-10 border-0 bg-transparent shadow-none [&_[data-slot=input-group]]:border-0",
+        inputGroupClassName
+      )}
+      aria-busy={composerRunning}
+      onSubmit={(event) => {
+        event.preventDefault()
+        void submitMessage()
+      }}
+    >
+      <PromptInputBody>
+        <PromptInputTextarea
+          ref={composerRef}
+          aria-label={t("chat.composer.label")}
+          className="max-h-56 min-h-24 px-4 pt-4 pb-3 text-base! leading-7! placeholder:text-muted-foreground md:px-5"
+          disabled={composerRunning || composerUnavailable}
+          onChange={(event) => setComposerText(event.target.value)}
+          placeholder={t("chat.composer.placeholder")}
+          value={composerText}
+        />
+      </PromptInputBody>
+      {renderComposerFooter(
+        "grid min-h-12 grid-cols-[minmax(0,1fr)_auto] [gap:calc(0.5rem*var(--p-density,1))] px-[calc(0.75rem*var(--p-density,1))] pt-0 pb-[max(0.55rem,env(safe-area-inset-bottom))]",
+        "[scrollbar-width:none] gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden [&_[data-tone]]:text-[0.8125rem] [&_[data-tone=agent]]:bg-primary/8 [&_[data-tone=agent]]:text-primary [&_[data-tone=model]]:bg-chart-1/8 [&_[data-tone=model]]:text-chart-1 [&_[data-tone=thinking]]:bg-chart-2/8 [&_[data-tone=thinking]]:text-chart-2"
+      )}
+    </PromptInput>
+  )
 
   return (
     <section
-      ref={workspaceRef}
-      id="longzhong"
-      className="min-h-[100dvh] w-full px-4 pt-20 pb-[calc(13rem+env(safe-area-inset-bottom))] md:px-8 md:pt-24 md:pb-[calc(14rem+env(safe-area-inset-bottom))]"
+      ref={chatRef}
+      id="chat"
+      className="relative isolate min-h-[calc(100dvh-var(--global-nav-offset))] w-full before:pointer-events-none before:fixed before:inset-x-0 before:top-(--global-nav-offset) before:bottom-0 before:-z-10 before:bg-[radial-gradient(ellipse_30rem_20rem_at_50%_48%,color-mix(in_srgb,var(--primary)_6%,transparent),transparent_72%),radial-gradient(ellipse_38rem_24rem_at_56%_42%,color-mix(in_srgb,var(--chart-5)_5%,transparent),transparent_74%)]"
+      data-conversation-state={isNewConversation ? "new" : "active"}
     >
-      <ChatHistory
-        open={historyOpen}
-        onClose={closeHistory}
-        state={state}
-        recentAgents={recentAgents}
-        onSelectAgent={selectAgent}
-        onRemoveAgent={removeRecentAgent}
-        onNewConversation={() => selectAgent(null)}
-      />
-
-      <div className="stratum-content-width mx-auto">
-        <div data-slot="chat-main" className="flex min-w-0 flex-col">
-          <div
-            ref={messageListRef}
-            data-slot="chat-message-list"
-            role="log"
-            aria-live={state.phase === "recovering" ? "off" : "polite"}
-            aria-relevant="additions text"
-            className="w-full px-1 py-6 [overflow-anchor:none] md:px-6"
-          >
-            <AgentMessageList
-              messages={state.messages}
-              drafts={state.drafts}
-              tools={state.tools}
-              approvals={state.approvals}
-              approvalSubmissions={approvalSubmissions}
-              onApprovalDecision={(approvalId, decision) => {
-                void resolveApproval(approvalId, decision)
-              }}
-              error={state.error}
-            />
+      <div className="min-h-[calc(100dvh-var(--global-nav-offset))] px-4 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pb-[calc(14rem+env(safe-area-inset-bottom))]">
+        <div className="mx-auto w-full max-w-(--content-width)">
+          <div data-slot="chat-main" className="flex min-w-0 flex-col">
+            <div
+              ref={messageListRef}
+              data-slot="chat-message-list"
+              role="log"
+              aria-live={state.phase === "recovering" ? "off" : "polite"}
+              aria-relevant="additions text"
+              className="w-full px-1 py-5 text-[0.9375rem]/[1.65] [overflow-anchor:none] sm:px-3 md:px-4 md:py-8"
+            >
+              <AgentMessageList
+                messages={state.messages}
+                drafts={state.drafts}
+                tools={state.tools}
+                approvals={state.approvals}
+                approvalSubmissions={approvalSubmissions}
+                onApprovalDecision={resolveApproval}
+                error={state.error}
+              />
+            </div>
           </div>
         </div>
       </div>
 
       {autoFollowPaused && (
-        <button
+        <Button
           type="button"
+          size="icon"
+          variant="outline"
           onClick={() => resumeAutoFollow("smooth")}
-          className="fixed bottom-[calc(var(--stratum-composer-min-height)+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-50 size-11 -translate-x-1/2 rounded-full border border-border bg-background/95 text-foreground shadow-stratum-soft transition-transform hover:scale-105 motion-reduce:transition-none"
+          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
-          <ArrowDownIcon className="size-4" aria-hidden="true" />
-        </button>
+          <IconArrowDown aria-hidden="true" />
+        </Button>
       )}
 
       <div
-        ref={inputContainerRef}
         data-slot="chat-composer-positioner"
         data-composer-position={isNewConversation ? "centered" : "docked"}
-        className="stratum-composer-width fixed inset-x-0 z-40 mx-auto"
-        style={{ bottom: initialComposerBottom.current }}
+        className={cn(
+          "fixed right-[max(1rem,env(safe-area-inset-right))] left-[max(1rem,env(safe-area-inset-left))] z-(--z-composer) mx-auto w-auto max-w-(--composer-width) transition-[bottom] duration-300 ease-(--ease-interface)",
+          isNewConversation
+            ? "bottom-[46%] max-sm:bottom-[43%]"
+            : "bottom-[max(1rem,env(safe-area-inset-bottom))]"
+        )}
       >
         <div
+          data-slot="chat-composer-surface"
           className={cn(
-            "transition-transform duration-500 ease-in-out motion-reduce:transition-none",
-            isNewConversation ? "translate-y-1/2" : "translate-y-0"
+            "transition-transform duration-300 ease-(--ease-interface)",
+            isNewConversation && "translate-y-1/2"
           )}
         >
-          <div className="stratum-prompt-shell relative">
-            <PromptInput
-              aria-busy={composerRunning}
-              className="[&_[data-slot=input-group]]:min-h-[var(--stratum-composer-min-height)] [&_[data-slot=input-group]]:rounded-[var(--radius-stratum-panel)]! [&_[data-slot=input-group]]:border-stratum-line! [&_[data-slot=input-group]]:bg-stratum-paper! [&_[data-slot=input-group]]:shadow-none! [&_[data-slot=input-group]]:backdrop-blur-none!"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void submitMessage()
-              }}
-            >
-              <PromptInputBody>
-                <PromptInputTextarea
-                  ref={composerRef}
-                  aria-label={t("chat.composer.label")}
-                  className="max-h-48 min-h-14 px-4 pt-3 pb-2 text-base! leading-6! md:px-5"
-                  disabled={composerRunning}
-                  onChange={(event) => setComposerText(event.target.value)}
-                  placeholder={t("chat.composer.placeholder")}
-                  value={composerText}
-                />
-              </PromptInputBody>
-              <PromptInputFooter className="min-h-11 gap-2 px-2 pt-0 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-3">
-                <PromptInputTools className="[scrollbar-width:none] gap-0.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-                  <AgentConfigMenu
-                    configuration={conversation.composerConfiguration}
-                    commandPending={isSubmitting}
-                  />
-                  <ModelConfigMenu
-                    configuration={conversation.composerConfiguration}
-                    commandPending={isSubmitting}
-                  />
-                  {state.phase === "connection_error" ? (
-                    <PromptInputButton
-                      className="shrink-0"
-                      variant="outline"
-                      onClick={() => conversation.reconnect()}
-                    >
-                      {t("chat.reconnect")}
-                    </PromptInputButton>
-                  ) : null}
-                </PromptInputTools>
-                <div
-                  ref={submitButtonRef}
-                  className="inline-flex shrink-0 items-center gap-1"
-                >
-                  <PromptInputSubmit
-                    aria-label={t(
-                      canCancel ? "chat.cancel" : "chat.composer.send"
-                    )}
-                    className={cn(
-                      "size-11 shrink-0 active:translate-y-px",
-                      !canCancel &&
-                        composerText.trim() === "" &&
-                        "bg-muted text-muted-foreground hover:bg-muted"
-                    )}
-                    disabled={
-                      !canCancel &&
-                      (composerRunning || composerText.trim() === "")
-                    }
-                    onClick={
-                      canCancel ? () => void conversation.cancel() : undefined
-                    }
-                    type={canCancel ? "button" : "submit"}
-                  >
-                    {canCancel ? (
-                      <BanIcon aria-hidden="true" />
-                    ) : (
-                      <ArrowUpIcon aria-hidden="true" />
-                    )}
-                  </PromptInputSubmit>
-                </div>
-              </PromptInputFooter>
-            </PromptInput>
-            {composerRunning ? (
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute top-0 left-1/2 h-0.5 w-16 -translate-x-1/2 animate-pulse rounded-full bg-stratum-action motion-reduce:animate-none"
-              />
-            ) : null}
-          </div>
-          <p className="sr-only" role="status" aria-live="polite">
-            {liveStatus}
-          </p>
+          <BorderGlow className="w-full" borderRadius="var(--radius-xl)">
+            {renderComposerInput(
+              "[&_[data-slot=input-group]]:bg-card/66 [&_[data-slot=input-group]]:shadow-[0_28px_78px_color-mix(in_srgb,var(--background)_76%,transparent)] [&_[data-slot=input-group]]:backdrop-blur-2xl"
+            )}
+          </BorderGlow>
+          {activityAnnouncement ? (
+            <p className="sr-only" role="status" aria-live="polite">
+              {activityAnnouncement}
+            </p>
+          ) : null}
         </div>
       </div>
     </section>

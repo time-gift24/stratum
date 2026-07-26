@@ -1,0 +1,24 @@
+schema: spec-driven
+
+context: |
+  Stratum 是 Rust-first 的 Agent Runtime 和工作流编排系统；当前 Web 产品是面向使用者的 Agent OS 对话界面。
+  当前公开产品路径只有 /chat，根路由 / 直接进入 /chat；画布是未来独立能力。
+  PRODUCT.md 是产品范围与语气的权威来源，stratum-web/DESIGN.md 是视觉系统的权威来源，相关 AGENTS.md 是实现约束的权威来源。
+  前端颜色通过 app/app.css 中的标准 shadcn 语义 Token 管理，具体组件遵循 Tailwind utility-first。
+  后端 API、事件协议、真实 Agent 状态、审批、恢复、取消和历史行为不得因视觉变更退化。
+
+rules:
+  proposal:
+    - 使用 OpenSpec 要求的英文结构标题，正文使用中文。
+    - 明确写出当前产品范围、非目标和被取代的旧 change。
+    - 不得把阶段性视觉探索描述为已经确认的产品能力。
+  design:
+    - 设计决策必须与 PRODUCT.md、相关 DESIGN.md 和 AGENTS.md 一致。
+    - 记录被否决方案、组件所有权边界、迁移方式和验证方法。
+  specs:
+    - 每项要求必须可通过场景验证，并使用 SHALL 或 MUST 表达规范强度。
+    - 不得引入虚构数据、未发布能力或与现有路由和 API 冲突的约束。
+  tasks:
+    - 任务按产品文档、实现、验证和归档准备分组。
+    - 只有真实完成并验证的任务才能标记为完成。
+    - 归档前必须运行 openspec validate --all --strict，并确认失效 change 不会合并到主 specs。

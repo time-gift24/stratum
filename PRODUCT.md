@@ -1,8 +1,6 @@
 # Product
 
-## Register
-
-product
+<!-- impeccable:product-schema 1 -->
 
 ## Platform
 
@@ -10,50 +8,63 @@ web
 
 ## Users
 
-Primary audience: end-users who interact with deployed agents through the Longzhong chat. They arrive with a real task — strategic, operational, or analytical — and want an agent that handles it with depth, not a chatbot that deflects. They are not developers; they should never need to understand the runtime, the event protocol, or the tool registry to get their work done.
+Stratum 当前优先服务通过对话委托真实任务的使用者。他们希望 Agent 能持续推进工作，并在需要时解释执行过程，而不必理解 Runtime、事件协议、工具注册等工程概念。
 
-Secondary audience: developers and operators who configure agent templates, compose workflows, and deploy agents behind the scenes. They need visibility into execution, approval flows, and recovery — but their workflow is configuration and orchestration, not chat. A future visual orchestration page (Dify-style workflow composition) will serve this audience directly.
+负责配置 Agent、编排工作流和部署运行环境的开发者是第二类使用者。他们需要更深的执行可见性与配置能力，但这些能力不能侵入最终用户的对话界面。
 
-The web frontend serves both from one product. The chat surface leads for end-users; the orchestration surface (planned) leads for developers. Neither audience is forced into the other's workflow.
+具体行业与团队规模尚未确认，后续设计不得自行假设。
 
 ## Product Purpose
 
-Stratum is a Rust-first agent runtime for composing agents, tools, and reliable execution paths. The web frontend, 运筹 Stratum, is the human surface of that runtime: end-users converse with agents through the Longzhong chat, and developers compose and deploy those agents through a future orchestration page.
+Stratum 是 Rust-first 的 Agent Runtime 和工作流编排系统；“运筹 Stratum”是它面向人的 Agent OS。产品让使用者通过对话发起真实任务，并在任务执行期间按需审批、取消、恢复和查看过程。
 
-Success looks like trust through transparency. The user trusts the agent to handle a real task end-to-end, with the ability to see what is happening whenever they want to. Thinking, tool execution, and intermediate steps are collapsed by default — the user trusts the agent to proceed — but any step can be expanded on demand to inspect reasoning, tool calls, and results in detail.
+当前产品只提供对话界面。成功意味着使用者可以清楚地发起任务、理解必要反馈，并让 Agent 可靠地继续推进，而不是只获得一次性回答。
 
 ## Positioning
 
-Strategic depth — composable agents for complex, high-stakes work. Not a chatbot, not a cloud console, not a developer tool. An agent product that earns trust through observable, controllable execution, where every interaction leaves the user with a better plan, not just a completed task.
+Stratum 的差异不是聊天外观，而是对持续 Agent 执行的产品化承载：对话是入口，Runtime 负责可靠执行，真实的审批、恢复、取消和渐进式过程透明共同建立信任。
 
-## Brand Personality
+未来的可视化画布服务 Agent 配置和工作流编排，它是独立能力，不是当前对话页面的视觉隐喻。
 
-Restrained, trustworthy, engineering-workbench. The product carries the quiet confidence of serious infrastructure — not loud, not playful, not personality-forward. The agent is a capable colleague, not a character.
+## Operating Context
 
-The brand name 运筹 (strategize, lay plans) and the chat name 隆中对 (Longzhong Plan, a famous Chinese strategic dialogue) carry a literary and strategic dimension. How central this dimension is to the visual and verbal identity remains an open tension — the product is exploring whether the strategic heritage is a brand pillar or an ambient accent. The positioning already commits to the strategic register; the literary treatment is being discovered through design.
+- 使用者在 `/chat` 选择真实存在的 Agent 与模型，输入任务或问题。
+- 对话过程中，思考、工具调用和中间步骤默认折叠，使用者按需展开。
+- 历史对话可以恢复；执行中的任务可以取消，受控操作可以审批。
+- 根路由 `/` 直接进入 `/chat`，当前没有概览页。
+- 未来画布会以独立路由和独立交互模型承载工作流配置。
 
-Motion is purposeful and interaction-driven. GSAP-powered animations respond to clicks, state changes, and transitions — not ambient decoration. The product moves when movement communicates something; it stays still when stillness is the right answer.
+## Capabilities and Constraints
 
-## Anti-references
+- 产品当前只有一个面向使用者的对话页面和一个新建对话入口。
+- Agent、模型、会话、审批与执行结果必须来自真实数据，不得为演示伪造。
+- 不存在面向用户的“就绪/未就绪”资源状态；加载、错误、发送和运行反馈只描述真实过程。
+- 画布、节点、连接线、参数检查器和常驻运行面板在能力正式推出前不得进入对话页面。
+- 产品需要支持中文与英文，并保持键盘操作、屏幕阅读器名称和移动端触控可用。
+- Rust Runtime、API 路径和既有表单字段属于工程契约；视觉重构不能无故改变其语义。
 
-Generic SaaS chatbot UIs — ChatGPT-clones, Intercom-style support chat, reskinned "AI assistant" widgets. The product must not read as a chatbot with a skin on top. The Longzhong chat is a workspace for real work, not a support channel.
+## Brand Commitments
 
-Visual anti-references (detailed in `stratum-web/DESIGN.md`): no emoji, no Inter, no generic serif, no pure black, no purple/blue neon, no glow, no high-saturation gradients, no card-in-card, no three-equal-cards, no side-stripe borders.
+- 保留“运筹 Stratum”名称和现有 Stratum 标志。
+- 语言直接、克制、可信，不用拟人化 AI 文案、伪技术参数或主题化小字解释产品气质。
+- 中国文化语境只能作为含蓄的秩序与节奏，不能使用文言包装、书法字体、仿古纹样或具象古风装饰。
+- 用户已将参考图的暗色科技方向设为后续视觉设计的约束；具体色彩、排版和组件规则由 `stratum-web/DESIGN.md` 管理。
 
-Positive reference for the future orchestration page: Dify's visual workflow editor — a node-based composition surface where agent workflows are built by connecting typed components.
+## Evidence on Hand
 
-## Design Principles
+- Stratum 标志：`stratum-web/app/assets/stratum-mark.svg` 与 `stratum-web/app/assets/stratum-mark-compact.svg`。
+- 现有对话、历史恢复、Agent/模型选择、思考展开、审批、取消和重连实现位于 `stratum-web/app`。
+- 产品没有可公开使用的客户案例、用量数据、定价、测试背书或市场声明；未来页面不得自行补造。
+- 用户提供了暗色节点式科技界面与黑白加蓝、黄、洋红强调色的视觉参考，仅用于确定视觉世界，不代表当前已发布画布能力。
 
-1. **Progressive transparency.** Default to trust — collapse thinking, tool execution, and intermediate steps. Let the user expand any step on demand. The user trusts because they *can* see, not because they *must* watch.
+## Product Principles
 
-2. **Strategic depth over task completion.** Every interaction should leave the user with a better understanding of their problem, not just a completed task. The agent surfaces insight, trade-offs, and next steps — not just output.
-
-3. **Engineering rigor in service of end-users.** The Rust foundation delivers reliability, observability, and control, but the UI must never feel like a developer tool. Restrained, not dense; capable, not overwhelming. The runtime's strength is invisible; the conversation is the product.
-
-4. **Motion with purpose.** GSAP-driven interactions respond to clicks, state changes, and transitions. Movement communicates state, not decoration. Reduced-motion is respected; when motion is removed, the state change still reads clearly.
-
-5. **One product, two surfaces, no forced context-switching.** End-users converse (chat); developers compose (orchestration). The product serves both from one brand, but neither audience is forced through the other's workflow. Both surfaces share a visual language but not a layout.
+1. **Agent OS 优先。** 每个界面都服务真实任务，不把底层 Runtime 术语变成用户负担。
+2. **战略深度来自执行能力。** 价值由持续推进、审批、恢复和真实过程建立，而不是主题化文案。
+3. **渐进式透明。** 中间过程默认退后，但用户需要时始终可以查看。
+4. **一个产品，界面各守边界。** 对话面向任务执行者，未来画布面向配置与编排。
+5. **真实状态胜过演示感。** 不伪造资源、状态、数据或结果。
 
 ## Accessibility & Inclusion
 
-Practical commitment: body text contrast ≥ 4.5:1, full keyboard navigation, and reduced-motion alternatives for every animation. Glass surfaces are not part of the target design; any retained third-party glass component must provide an opaque fallback, including for reduced-transparency preferences, before it is used in product UI. These are product requirements, not a claim that every current component already satisfies them. No formal WCAG audit target is set yet; revisit when the product matures beyond the current chat surface.
+主要流程必须支持键盘导航和屏幕阅读器。正文对比度至少 4.5:1，大号文字至少 3:1；主要触控目标至少 44px。动效提供 `prefers-reduced-motion` 结果，中文与英文均不能因截断或布局挤压损失关键操作。

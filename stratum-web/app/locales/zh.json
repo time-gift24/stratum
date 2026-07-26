@@ -2,39 +2,101 @@
   "brand": {
     "home": "首页"
   },
-  "nav": {
-    "overview": "概览",
-    "longzhong": "隆中对"
-  },
-  "hero": {
-    "title": "构建强类型智能体",
-    "description": "一个 Rust 优先的运行时，用于组合智能体、工具与可靠的执行路径。"
-  },
-  "actions": {
-    "getStarted": "开始使用",
-    "learnMore": "了解更多",
-    "signUp": "注册"
-  },
   "theme": {
-    "toggle": "切换深色主题"
+    "toggle": "切换深色主题",
+    "useDark": "使用深色主题",
+    "useLight": "使用浅色主题"
   },
   "language": {
     "switchToChinese": "切换至中文",
     "switchToEnglish": "切换至英文"
   },
+  "productShell": {
+    "skipToContent": "跳到主要内容",
+    "recent": "最近对话",
+    "noRecent": "暂无对话",
+    "newConversation": "新建对话"
+  },
+  "globalNavigation": {
+    "label": "Stratum 全局导航",
+    "chat": "对话",
+    "development": "开发",
+    "components": "组件校准",
+    "componentsDescription": "检查界面 Token 与交互组件",
+    "openMenu": "打开全局导航",
+    "closeMenu": "关闭全局导航"
+  },
+  "componentGallery": {
+    "title": "组件库",
+    "description": "Stratum 的界面校准面。这里集中检查色彩、排版、导航、控件和交互状态，再让这些规则进入真实产品页面。",
+    "backToChat": "返回对话",
+    "navigation": {
+      "label": "组件库导航",
+      "foundations": "视觉基础",
+      "navigation": "垂直导航",
+      "controls": "基础控件",
+      "states": "交互状态"
+    },
+    "centeredNavigation": {
+      "label": "Stratum 详细导航",
+      "openMenu": "打开详细导航",
+      "closeMenu": "关闭详细导航",
+      "groups": {
+        "system": "界面系统",
+        "components": "组件"
+      },
+      "items": {
+        "foundations": "色彩、排版与信号角色",
+        "navigation": "常用组件捷径与交互",
+        "controls": "按钮、输入与选择",
+        "states": "加载、错误与反馈"
+      }
+    },
+    "palette": {
+      "label": "界面强调色",
+      "information": "信息",
+      "selection": "选择",
+      "collaboration": "协作",
+      "action": "行动"
+    },
+    "verticalNavigation": {
+      "title": "垂直导航",
+      "description": "左侧按钮组就是组件本体。指针接近时，相邻项目按距离产生连续缩放；键盘焦点获得同样清晰的标签与边界反馈，窄屏仍保持居中单列。",
+      "desktop": "桌面尺寸",
+      "mobile": "移动触控",
+      "motion": "弹性参数"
+    },
+    "controls": {
+      "title": "基础控件",
+      "description": "所有控件只消费 app.css 中的标准 shadcn token。强调色有固定职责，不在组件内部写入独立配色。",
+      "actions": "操作",
+      "primary": "主要操作",
+      "secondary": "次要操作",
+      "outline": "边界操作",
+      "disabled": "不可用",
+      "input": "输入与选择",
+      "placeholder": "输入组件名称"
+    },
+    "states": {
+      "title": "状态语言",
+      "description": "颜色只描述组件交互或真实过程，不用于装饰，也不表达不存在的资源就绪状态。",
+      "action": "行动",
+      "neutral": "中性",
+      "information": "信息",
+      "selection": "选择",
+      "collaboration": "协作",
+      "error": "错误"
+    }
+  },
   "chat": {
-    "assistant": "隆中对",
+    "assistant": "助手",
     "you": "你",
     "history": {
-      "title": "历史对话",
-      "close": "关闭历史对话",
-      "new": "新建对话",
-      "activeNow": "当前对话",
-      "empty": "暂无历史对话"
+      "close": "关闭历史对话"
     },
     "composer": {
       "label": "输入消息",
-      "placeholder": "向隆中对提问……",
+      "placeholder": "输入任务或问题……",
       "send": "发送",
       "agent": "智能体",
       "model": "模型",
@@ -49,7 +111,6 @@
     "sending": "正在发送……",
     "connecting": "正在连接……",
     "connectionFailed": "连接失败",
-    "ready": "已连接",
     "continue": "继续",
     "cancel": "取消",
     "scrollToBottom": "滚动到底部",

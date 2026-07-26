@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next"
-import { ShieldCheckIcon } from "lucide-react"
+import { IconShieldCheck } from "@tabler/icons-react"
 
 import { Button } from "~/components/ui/button"
 import type { ApprovalRequest } from "~/features/agent-conversation/types"
@@ -37,12 +37,12 @@ export function AgentApprovalCard({
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 rounded-xl bg-primary/[0.055] px-4 py-4"
+      className="mt-2 rounded-xl border border-secondary bg-secondary/55 px-4 py-4"
     >
       <div className="flex items-start gap-3">
-        <ShieldCheckIcon
+        <IconShieldCheck
           aria-hidden="true"
-          className="mt-0.5 size-4 shrink-0 text-primary"
+          className="mt-0.5 size-4 shrink-0 text-secondary-foreground"
         />
         <div className="min-w-0 flex-1">
           <h3 id={titleId} className="text-sm font-semibold text-foreground">
@@ -54,7 +54,7 @@ export function AgentApprovalCard({
       <div className="mt-4 flex justify-end gap-2">
         <Button
           type="button"
-          className="h-9 px-3"
+          className="h-11 rounded-md px-3 text-sm font-normal"
           disabled={submitting}
           onClick={() => onDecision("reject")}
           variant="ghost"
@@ -65,7 +65,7 @@ export function AgentApprovalCard({
         </Button>
         <Button
           type="button"
-          className="h-9 px-3"
+          className="h-11 rounded-md px-3 text-sm font-normal"
           disabled={submitting}
           onClick={() => onDecision("approve")}
         >

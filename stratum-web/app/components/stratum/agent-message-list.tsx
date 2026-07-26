@@ -1,6 +1,6 @@
-import type { ReactNode } from "react"
+import { memo, useMemo, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
-import { BrainIcon } from "lucide-react"
+import { IconBrain } from "@tabler/icons-react"
 
 import {
   Message,
@@ -43,7 +43,7 @@ function ReasoningDisclosure({
 }: ReasoningDisclosureProps) {
   return (
     <AgentDisclosure
-      icon={<BrainIcon aria-hidden="true" className="size-4" />}
+      icon={<IconBrain aria-hidden="true" className="size-4" />}
       label={getThinkingMessage(isStreaming)}
     >
       <ReasoningContent>{children}</ReasoningContent>
@@ -90,7 +90,7 @@ function ExecutionTraceGroup({
   )
 }
 
-export function AgentMessageList({
+export const AgentMessageList = memo(function AgentMessageList({
   messages,
   drafts,
   tools,
@@ -100,10 +100,14 @@ export function AgentMessageList({
   error = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
-  const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
-    dateStyle: "short",
-    timeStyle: "short",
-  })
+  const dateTimeFormat = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+        dateStyle: "short",
+        timeStyle: "short",
+      }),
+    [i18n.resolvedLanguage]
+  )
   const thinkingMessage = (isStreaming: boolean) =>
     isStreaming ? (
       <Shimmer as="span" duration={1.4}>
@@ -112,27 +116,45 @@ export function AgentMessageList({
     ) : (
       t("chat.reasoningComplete")
     )
-  const toolValues = Object.values(tools)
-  const approvalValues = Object.values(approvals)
-  const approvalsByCallId = new Map(
-    approvalValues.map((approval) => [approval.callId, approval])
+  const toolValues = useMemo(() => Object.values(tools), [tools])
+  const approvalValues = useMemo(() => Object.values(approvals), [approvals])
+  const approvalsByCallId = useMemo(
+    () =>
+      new Map(approvalValues.map((approval) => [approval.callId, approval])),
+    [approvalValues]
   )
-  const stableToolCallIds = new Set(
-    messages.flatMap((message) =>
-      message.toolCalls.map((toolCall) => toolCall.callId)
-    )
+  const stableToolCallIds = useMemo(
+    () =>
+      new Set(
+        messages.flatMap((message) =>
+          message.toolCalls.map((toolCall) => toolCall.callId)
+        )
+      ),
+    [messages]
   )
-  const draftIds = new Set(Object.keys(drafts))
-  const knownToolCallIds = new Set(toolValues.map((tool) => tool.callId))
-  const orphanTools = toolValues.filter(
-    (tool) =>
-      !stableToolCallIds.has(tool.callId) && !draftIds.has(tool.llmCallId)
+  const draftIds = useMemo(() => new Set(Object.keys(drafts)), [drafts])
+  const knownToolCallIds = useMemo(
+    () => new Set(toolValues.map((tool) => tool.callId)),
+    [toolValues]
   )
-  const activeOrphanTools = orphanTools.filter(
-    (tool) => tool.status === "streaming"
+  const orphanTools = useMemo(
+    () =>
+      toolValues.filter(
+        (tool) =>
+          !stableToolCallIds.has(tool.callId) && !draftIds.has(tool.llmCallId)
+      ),
+    [draftIds, stableToolCallIds, toolValues]
   )
-  const orphanApprovals = approvalValues.filter(
-    (approval) => !knownToolCallIds.has(approval.callId)
+  const activeOrphanTools = useMemo(
+    () => orphanTools.filter((tool) => tool.status === "streaming"),
+    [orphanTools]
+  )
+  const orphanApprovals = useMemo(
+    () =>
+      approvalValues.filter(
+        (approval) => !knownToolCallIds.has(approval.callId)
+      ),
+    [approvalValues, knownToolCallIds]
   )
 
   return (
@@ -156,7 +178,7 @@ export function AgentMessageList({
                   {message.reasoning}
                 </ReasoningDisclosure>
               ) : null}
-              <MessageContent>
+              <MessageContent className="text-base! leading-6! group-[.is-user]:rounded-xl!">
                 <MessageResponse>{text}</MessageResponse>
               </MessageContent>
               <ExecutionTraceGroup
@@ -169,8 +191,8 @@ export function AgentMessageList({
                 dateTime={message.timestamp}
                 className={
                   isUser
-                    ? "self-end px-1 text-[0.625rem] text-muted-foreground"
-                    : "px-1 text-[0.625rem] text-muted-foreground"
+                    ? "self-end px-1 text-sm text-muted-foreground"
+                    : "px-1 text-sm text-muted-foreground"
                 }
               >
                 {dateTimeFormat.format(new Date(message.timestamp))}
@@ -195,7 +217,7 @@ export function AgentMessageList({
               </ReasoningDisclosure>
             ) : null}
             {draft.text ? (
-              <MessageContent>
+              <MessageContent className="text-base! leading-6!">
                 <MessageResponse>{draft.text}</MessageResponse>
               </MessageContent>
             ) : null}
@@ -241,9 +263,15 @@ export function AgentMessageList({
       {error ? (
         <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
           <Message from="assistant">
-            <MessageContent>
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                <p className="font-medium">{t("chat.connectionFailed")}</p>
+            <MessageContent className="text-base! leading-6!">
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                <p className="font-semibold">
+                  {t(
+                    error.status === 404
+                      ? "chat.missingConversation"
+                      : "chat.connectionFailed"
+                  )}
+                </p>
                 {error.message ? (
                   <p className="mt-1 text-destructive/80">{error.message}</p>
                 ) : null}
@@ -254,4 +282,4 @@ export function AgentMessageList({
       ) : null}
     </>
   )
-}
+})

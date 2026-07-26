@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { LanguagesIcon } from "lucide-react"
+import { IconLanguage } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "~/components/ui/button"
@@ -41,7 +41,11 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
     <Button
       variant="ghost"
       size="lg"
-      className={compact ? "size-11 p-0" : "min-h-11"}
+      className={
+        compact
+          ? "size-11 rounded-md p-0"
+          : "min-h-11 rounded-md px-3 text-sm font-normal"
+      }
       aria-label={label}
       title={label}
       onClick={() => {
@@ -51,7 +55,7 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
         void i18n.changeLanguage(nextLanguage)
       }}
     >
-      <LanguagesIcon data-icon="inline-start" aria-hidden="true" />
+      <IconLanguage data-icon="inline-start" aria-hidden="true" />
       {compact ? null : language === "en" ? "中" : "EN"}
     </Button>
   )

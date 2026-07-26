@@ -27,7 +27,7 @@ export function PromptInput({
       className={cn("w-full", className)}
       {...props}
     >
-      <InputGroup className="overflow-hidden rounded-[2rem] border-border/90 bg-card/95 shadow-[0_18px_45px_-35px_rgb(43_48_51/0.9)] backdrop-blur-sm">
+      <InputGroup className="overflow-hidden rounded-xl border-0 bg-card/60 backdrop-blur-2xl has-data-[align=block-end]:rounded-xl has-data-[align=block-start]:rounded-xl has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:ring-0 has-[textarea]:rounded-xl dark:bg-card/60">
         {children}
       </InputGroup>
     </form>

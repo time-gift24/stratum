@@ -1,6 +1,10 @@
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
-import { CheckCircle2Icon, CircleDashedIcon, CircleXIcon } from "lucide-react"
+import {
+  IconCircleCheck,
+  IconCircleDashed,
+  IconCircleX,
+} from "@tabler/icons-react"
 
 import { Shimmer } from "~/components/ai-elements/shimmer"
 import {
@@ -29,10 +33,10 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
   })
   const StatusIcon =
     tool.status === "finished"
-      ? CheckCircle2Icon
+      ? IconCircleCheck
       : tool.status === "failed"
-        ? CircleXIcon
-        : CircleDashedIcon
+        ? IconCircleX
+        : IconCircleDashed
 
   return (
     <div>
@@ -42,7 +46,8 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
             aria-hidden="true"
             className={cn(
               "size-4 shrink-0",
-              tool.status === "finished" && "text-primary",
+              tool.status === "finished" && "text-accent-foreground",
+              tool.status === "streaming" && "text-ring",
               tool.status === "failed" && "text-destructive"
             )}
           />
@@ -60,30 +65,30 @@ export function ToolTraceRow({ tool, children }: ToolTraceRowProps) {
         <AgentDisclosureContent className="grid gap-3">
           {tool.argumentsText ? (
             <div>
-              <p className="mb-1 text-xs text-muted-foreground">
+              <p className="mb-1 text-sm text-muted-foreground">
                 {t("chat.toolTrace.input")}
               </p>
-              <pre className="max-h-56 overflow-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
+              <pre className="max-h-56 overflow-auto rounded-xl border border-border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
                 {tool.argumentsText}
               </pre>
             </div>
           ) : null}
           {tool.result !== null ? (
             <div>
-              <p className="mb-1 text-xs text-muted-foreground">
+              <p className="mb-1 text-sm text-muted-foreground">
                 {t("chat.toolTrace.rawResult")}
               </p>
-              <pre className="max-h-56 overflow-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
+              <pre className="max-h-56 overflow-auto rounded-xl border border-border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-foreground/80">
                 {technicalValue(tool.result)}
               </pre>
             </div>
           ) : null}
           {tool.errorText ? (
             <div>
-              <p className="mb-1 text-xs text-muted-foreground">
+              <p className="mb-1 text-sm text-muted-foreground">
                 {t("chat.toolTrace.error")}
               </p>
-              <pre className="max-h-56 overflow-auto rounded-lg bg-destructive/5 px-3 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-destructive">
+              <pre className="max-h-56 overflow-auto rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap text-destructive">
                 {tool.errorText}
               </pre>
             </div>
