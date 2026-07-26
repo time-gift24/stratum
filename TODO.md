@@ -22,7 +22,8 @@
 flowchart LR
     M0["M0：身份与协议基线"] --> H1["H1：Hook 核心合同"]
     H1 --> H2["H2：有序 Runner 与工具校验"]
-    H2 --> H3["H3：Hook 执行日志与恢复"]
+    H2 --> H3["H3：Hook 存储与恢复"]
+    H3 --> H4["H4：Tool 幂等与恢复"]
     H3 --> S2["S2：Deno / Python 扩展宿主"]
     H3 --> R3["R3：Rust SDK 与 Hook Service"]
 
@@ -116,25 +117,42 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 审批界面展示的参数与实际执行参数一致。
 - [ ] Hook 修改后的非法参数不会进入审批或 Tool 执行。
 
-### H3：Hook 执行日志与恢复
+### H3：Hook 存储与恢复
 
 **依赖：** H2、P1。
 
-- [ ] 在 Turn runtime snapshot 中固定 ExtensionSet 与处理器版本。
-- [ ] 持久化 Hook Invocation 身份、输入摘要、结果和终态。
-- [ ] Resume 时复用匹配的既有结果。
-- [ ] 身份、版本或输入摘要不匹配时 Fail Closed。
-- [ ] Tool 执行前持久化最终参数或 Block 决策。
-- [ ] Tool Message 提交前持久化 `after_tool_call` 结果。
-- [ ] 迭代推进前持久化 Stop/Inject 决策。
-- [ ] 将 `HookInvocationId` 作为远程调用幂等键。
-- [ ] 定义记录大小、保留期和清理策略。
+- [ ] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构。
+- [ ] Hook 记录归 Session/Turn，不写进 Agent 消息或 EventBus。
+- [ ] 固定 ExtensionSet 和 Handler 版本与顺序。
+- [ ] 保存每次 Hook 的 ID、输入摘要、决定和最终状态。
+- [ ] 调用 Handler 前先保存 Pending，应用决定前先保存 Completed。
+- [ ] Resume 时复用已经保存的决定；记录不匹配时停止。
+- [ ] 重试 Pending Hook 时复用原来的 `HookInvocationId`。
+- [ ] Tool 执行前保存最终参数或 Block 决定。
+- [ ] Tool Message 提交前保存 `after_tool_call` 结果。
+- [ ] 进入下一次迭代前保存 Stop/Inject 决定。
+- [ ] 定义记录大小、保留时间和清理方式。
 
 **验收条件：**
 
-- [ ] 在每个 Hook 持久化边界注入进程崩溃后都能正确恢复。
-- [ ] 恢复过程不会重复应用已提交的 Hook 决策。
-- [ ] 运行中的 Extension 版本变化不会影响已固定的 Turn。
+- [ ] 在每个保存边界模拟崩溃后都能正确恢复。
+- [ ] 恢复时不会重新执行已经完成的 Hook。
+- [ ] Extension 更新不会改变正在运行或恢复的 Turn。
+
+### H4：Tool 幂等与恢复
+
+**依赖：** H3。
+
+- [ ] Hook 存储稳定后，再设计 Tool 的幂等规则。
+- [ ] 为一次 Tool 执行定义稳定的幂等键。
+- [ ] 保存 Tool 开始执行和执行结果。
+- [ ] Resume 时复用已经保存的 Tool 结果。
+- [ ] Tool 状态不确定时停止，不直接重复执行。
+
+**验收条件：**
+
+- [ ] 进程崩溃不会让 Tool 被静默执行两次。
+- [ ] 无法确认 Tool 结果时 Fail Closed。
 
 ### S1：第一档运行时 Skill
 
@@ -307,7 +325,8 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 ### 必须串行
 
 - Tool 参数修改 → 最终校验 → 用户审批 → Tool 执行。
-- Hook Journal 与版本固定完成后，才能接入 Script/Rust 远程执行。
+- Hook 存储和版本固定完成后，才能接入 Script/Rust 远程执行。
+- Hook 存储完成后，才能实现 Tool 幂等与恢复。
 - Session 与版本身份基线确定后，才能固化 Workflow 持久化协议。
 - 节点状态可持久化后，才能实现 Queue Resume。
 - 出现真实并发/重试需求并明确从属操作幂等语义后，才能加入 Loop 与 Retry 身份。
