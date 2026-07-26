@@ -1,8 +1,10 @@
-## 为什么
+> 归档状态：本方案已被 `unify-stratum-visual-language` 的最终产品与视觉决策替代。归档时只保留历史，不将本方案的 delta specs 合并到主规格。
+
+## Why
 
 当前概览页仍是临时 Hero，隆中对又采用另一套独立聊天布局；即使两者已经共享 Lovable 配色，整体仍不像一个连续、成熟的产品。以本地 Tavily 复刻站点作为最终视觉基准，可以把 Stratum 从“营销页加聊天页”升级为统一的产品工作台，同时继续使用真实运行数据与现有 Agent 能力。
 
-## 变更内容
+## What Changes
 
 - 建立桌面端共享产品壳层：约 285px 的固定侧栏、顶部状态区和受控宽度的主内容画布，并在移动端收敛为可访问的抽屉导航。
 - 将概览页从临时 Hero 改为真实工作台首页，展示模型可用性、Agent 模板、本地最近会话、连接或配置就绪状态，以及进入隆中对的明确操作；不得伪造用量、运行状态或业务指标。
@@ -14,7 +16,7 @@
 - 更新 `PRODUCT.md` 与 `stratum-web/DESIGN.md` 的相关约束，移除“首页保留 Hero”和“隆中对桌面端不得使用永久侧栏”等已失效决定；所有新增或修改文档均使用中文。
 - 保留现有路由路径、后端 API、事件协议、主题、本地化、可访问性要求，以及受保护可复用组件的边界。
 
-## 能力
+## Capabilities
 
 ### 新增能力
 
@@ -27,7 +29,7 @@
 
 无。当前 `openspec/specs/` 尚无已归档的对应能力；本变更会取代未归档变更 `unify-stratum-visual-language` 中与首页 Hero、导航形态及隆中对永久侧栏相冲突的规划约束。
 
-## 影响
+## Impact
 
 - 影响 `PRODUCT.md`、`stratum-web/DESIGN.md`、全局前端 token、路由级布局、导航、概览页、隆中对工作区、历史入口、Composer 使用方样式与相关本地化文案。
 - 预计主要影响 `stratum-web/app/routes`、`stratum-web/app/components/stratum` 与全局样式；`app/components/ui`、`app/components/react-bits` 和 `app/components/ai-elements` 的内部实现继续受保护，只能通过 props、语义 token、包装层或使用方样式适配。
