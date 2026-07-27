@@ -32,6 +32,7 @@ services:
       - ./templates:/var/lib/stratum/agents/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       RUST_LOG: info
 
   stratum-web:

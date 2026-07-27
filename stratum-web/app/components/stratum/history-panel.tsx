@@ -1,16 +1,15 @@
 "use client"
 
-import {
-  useEffect,
-  useRef,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from "react"
-import { IconClock, IconHistory, IconTrash, IconX } from "@tabler/icons-react"
+import { useEffect, useRef } from "react"
+import { IconClock, IconTrash, IconX } from "@tabler/icons-react"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Link } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import { glassSurface } from "~/components/stratum/glass-surface"
+import {
+  FeatureCard,
+  FeatureCardContent,
+} from "~/components/stratum/feature-card"
 import { Button } from "~/components/ui/button"
 import { formatRelativeTime, type RecentAgent } from "~/lib/recent-agents"
 import { cn } from "~/lib/utils"
@@ -30,8 +29,38 @@ type ConversationCardProps = {
   missing: boolean
   language: string
   removeLabel: string
-  onClose(): void
   onRemoveAgent(agentId: string): void
+}
+
+type ConversationIdentityProps = {
+  agent: RecentAgent
+  active?: boolean
+  language: string
+}
+
+function ConversationIdentity({
+  agent,
+  active = false,
+  language,
+}: ConversationIdentityProps) {
+  return (
+    <>
+      <span
+        className={cn(
+          "grid size-7 shrink-0 place-items-center transition-colors",
+          active
+            ? "text-primary"
+            : "text-muted-foreground group-hover:text-foreground"
+        )}
+      >
+        <IconClock className="size-4" aria-hidden="true" />
+      </span>
+      <span className="min-w-0 flex-1 truncate font-medium">{agent.title}</span>
+      <span className="shrink-0 text-xs text-muted-foreground">
+        {formatRelativeTime(agent.lastOpenedAt, language)}
+      </span>
+    </>
+  )
 }
 
 function ConversationCard({
@@ -40,39 +69,26 @@ function ConversationCard({
   missing,
   language,
   removeLabel,
-  onClose,
   onRemoveAgent,
 }: ConversationCardProps) {
   return (
-    <li className="group flex items-center gap-1">
+    <li className="group flex items-center gap-1 py-0.5">
       <Link
         to={`/chat?agent=${encodeURIComponent(agent.agentId)}`}
-        onClick={onClose}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-2.5 text-sm transition-[background-color,color,box-shadow,transform] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden",
+          "relative flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md px-3 text-sm transition-colors duration-200 ease-out before:absolute before:top-1/2 before:left-0 before:h-5 before:w-px before:-translate-y-1/2 before:rounded-full before:bg-transparent before:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden",
           active
-            ? "bg-foreground/7 text-foreground shadow-inner"
-            : "bg-secondary/45 text-muted-foreground shadow-lg shadow-background/15 hover:-translate-y-0.5 hover:bg-secondary/75 hover:text-foreground",
+            ? "text-foreground before:bg-primary"
+            : "text-muted-foreground hover:text-foreground",
           missing && "text-destructive"
         )}
       >
-        <span
-          className={cn(
-            "grid shrink-0 place-items-center rounded-md transition-colors",
-            active
-              ? "size-10 bg-primary/15 text-primary"
-              : "size-8 bg-secondary/75 text-muted-foreground group-hover:text-foreground"
-          )}
-        >
-          <IconClock className="size-4" aria-hidden="true" />
-        </span>
-        <span className="min-w-0 flex-1 truncate font-medium">
-          {agent.title}
-        </span>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {formatRelativeTime(agent.lastOpenedAt, language)}
-        </span>
+        <ConversationIdentity
+          agent={agent}
+          active={active}
+          language={language}
+        />
       </Link>
       {missing ? (
         <Button
@@ -94,42 +110,24 @@ function ConversationList({
   activeAgentId,
   missingAgentId,
   recentAgents,
-  onClose,
   onRemoveAgent,
   language,
   emptyLabel,
   removeLabel,
-}: Omit<HistoryPanelProps, "open"> & {
+}: Omit<HistoryPanelProps, "open" | "onClose"> & {
   language: string
   emptyLabel: string
   removeLabel: string
 }) {
-  const activeAgent = activeAgentId
-    ? recentAgents.find((agent) => agent.agentId === activeAgentId)
-    : undefined
-  const orderedAgents = activeAgent
-    ? [
-        activeAgent,
-        ...recentAgents.filter(
-          (agent) => agent.agentId !== activeAgent.agentId
-        ),
-      ]
-    : recentAgents
-
   return (
-    <div
-      className={cn(
-        glassSurface({ surface: "card", elevation: "inset" }),
-        "mx-2 mb-2 flex min-h-0 flex-1 flex-col rounded-xl p-2"
-      )}
-    >
-      {orderedAgents.length === 0 ? (
-        <div className="grid flex-1 place-items-center px-6 text-center text-sm text-muted-foreground">
+    <FeatureCardContent className="p-2">
+      {recentAgents.length === 0 ? (
+        <div className="grid min-h-16 place-items-center px-5 text-center text-sm text-muted-foreground">
           {emptyLabel}
         </div>
       ) : (
-        <ul className="flex min-h-0 flex-1 [scrollbar-width:thin] flex-col gap-2 overflow-y-auto">
-          {orderedAgents.map((agent) => (
+        <ul className="flex max-h-[calc(100dvh-var(--global-nav-offset)-5rem)] [scrollbar-width:thin] flex-col divide-y divide-border/25 overflow-y-auto">
+          {recentAgents.map((agent) => (
             <ConversationCard
               key={agent.agentId}
               agent={agent}
@@ -137,13 +135,12 @@ function ConversationList({
               missing={agent.agentId === missingAgentId}
               language={language}
               removeLabel={removeLabel}
-              onClose={onClose}
               onRemoveAgent={onRemoveAgent}
             />
           ))}
         </ul>
       )}
-    </div>
+    </FeatureCardContent>
   )
 }
 
@@ -158,7 +155,6 @@ export function HistoryPanel({
   const { t, i18n } = useTranslation()
   const reduceMotion = useReducedMotion()
   const language = i18n.resolvedLanguage ?? "en"
-  const panelRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
@@ -169,80 +165,35 @@ export function HistoryPanel({
     return () => cancelAnimationFrame(focusFrame)
   }, [open])
 
-  const keepFocusInside = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Tab") return
-    const panel = panelRef.current
-    if (!panel) return
-    const focusable = Array.from(
-      panel.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-    )
-    const first = focusable[0]
-    const last = focusable.at(-1)
-    if (!first || !last) return
-
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
-    } else if (!panel.contains(document.activeElement)) {
-      event.preventDefault()
-      first.focus()
-    }
-  }
-
   return (
     <AnimatePresence initial={false}>
       {open ? (
-        <>
-          <motion.button
-            type="button"
-            aria-label={t("chat.history.close")}
-            className="fixed inset-0 z-(--z-overlay) cursor-default bg-transparent"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.18 }}
-            onClick={onClose}
-          />
-          <motion.aside
-            ref={panelRef}
-            className={cn(
-              glassSurface({ surface: "popover", elevation: "overlay" }),
-              "fixed top-(--global-nav-offset) bottom-3 left-24 z-(--z-modal) flex w-84 flex-col rounded-xl max-sm:right-2 max-sm:bottom-2 max-sm:left-19 max-sm:w-auto"
-            )}
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("productShell.recent")}
-            onKeyDown={keepFocusInside}
-            initial={{
-              x: reduceMotion ? 0 : -18,
-              y: reduceMotion ? 0 : 8,
-              scale: reduceMotion ? 1 : 0.97,
-              opacity: 0,
-            }}
-            animate={{ x: 0, y: 0, scale: 1, opacity: 1 }}
-            exit={{
-              x: reduceMotion ? 0 : -12,
-              y: reduceMotion ? 0 : 5,
-              scale: reduceMotion ? 1 : 0.985,
-              opacity: 0,
-            }}
-            transition={{
-              duration: reduceMotion ? 0 : 0.24,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-          >
-            <div className="flex h-14 shrink-0 items-center justify-between px-4">
-              <div className="flex items-center gap-2.5">
-                <IconHistory
-                  className="size-4 text-muted-foreground"
+        <motion.aside
+          id="history-panel"
+          className="w-full self-start"
+          aria-label={t("productShell.recent")}
+          initial={{
+            x: reduceMotion ? 0 : -12,
+            opacity: 0,
+          }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={{
+            x: reduceMotion ? 0 : -8,
+            opacity: 0,
+          }}
+          transition={{
+            duration: reduceMotion ? 0 : 0.22,
+            ease: [0.22, 1, 0.36, 1],
+          }}
+        >
+          <FeatureCard>
+            <div className="flex h-9 shrink-0 items-center justify-between px-2">
+              <div className="flex items-center gap-2">
+                <span
                   aria-hidden="true"
+                  className="size-2 rounded-full bg-foreground shadow-[0_0_10px_color-mix(in_srgb,var(--foreground)_50%,transparent)]"
                 />
-                <h2 className="font-heading text-sm font-medium text-foreground">
+                <h2 className="font-heading text-[0.8125rem] font-medium text-foreground">
                   {t("productShell.recent")}
                 </h2>
               </div>
@@ -251,11 +202,11 @@ export function HistoryPanel({
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="size-10"
+                className="size-8 rounded-md"
                 onClick={onClose}
                 aria-label={t("chat.history.close")}
               >
-                <IconX aria-hidden="true" />
+                <IconX className="size-3.5" aria-hidden="true" />
               </Button>
             </div>
             <ConversationList
@@ -265,11 +216,10 @@ export function HistoryPanel({
               language={language}
               emptyLabel={t("productShell.noRecent")}
               removeLabel={t("chat.removeLocalEntry")}
-              onClose={onClose}
               onRemoveAgent={onRemoveAgent}
             />
-          </motion.aside>
-        </>
+          </FeatureCard>
+        </motion.aside>
       ) : null}
     </AnimatePresence>
   )

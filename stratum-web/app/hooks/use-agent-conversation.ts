@@ -59,7 +59,6 @@ export type AgentConversation = {
     approvalId: string,
     decision: "approve" | "reject"
   ): Promise<void>
-  reconnect(): void
   removeRecentAgent(agentId: string): void
 }
 
@@ -81,7 +80,7 @@ export function useAgentConversation(): AgentConversation {
     initialConversationState
   )
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
-  const [reconnectVersion, setReconnectVersion] = useState(0)
+  const [connectionRevision, setConnectionRevision] = useState(0)
   const [selectedTemplate, setSelectedTemplate] =
     useState<AgentTemplateView | null>(null)
   const [requestedModelConfig, setRequestedModelConfig] =
@@ -163,7 +162,7 @@ export function useAgentConversation(): AgentConversation {
     )
 
     return () => controller.abort()
-  }, [reconnectVersion, selectedAgentId])
+  }, [connectionRevision, selectedAgentId])
 
   const reportError = useCallback((error: unknown) => {
     const apiError = toApiError(error)
@@ -174,10 +173,10 @@ export function useAgentConversation(): AgentConversation {
     )
   }, [])
 
-  const reconnect = useCallback(() => {
+  const refreshConnection = useCallback(() => {
     if (selectedAgentRef.current === null) return
     selectionGeneration.current += 1
-    setReconnectVersion((version) => version + 1)
+    setConnectionRevision((revision) => revision + 1)
   }, [])
 
   const createConversation = useCallback(
@@ -307,12 +306,12 @@ export function useAgentConversation(): AgentConversation {
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
       if (isApiErrorCode(error, "resume_not_running")) {
-        reconnect()
+        refreshConnection()
         return
       }
       reportError(error)
     }
-  }, [reconnect, reportError, selectedClient])
+  }, [refreshConnection, reportError, selectedClient])
 
   const cancel = useCallback(async () => {
     const client = selectedClient()
@@ -323,12 +322,12 @@ export function useAgentConversation(): AgentConversation {
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
       if (isApiErrorCode(error, "resume_required")) {
-        reconnect()
+        refreshConnection()
         return
       }
       reportError(error)
     }
-  }, [reconnect, reportError, selectedClient])
+  }, [refreshConnection, reportError, selectedClient])
 
   const resolveApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject") => {
@@ -409,7 +408,6 @@ export function useAgentConversation(): AgentConversation {
     resume,
     cancel,
     resolveApproval,
-    reconnect,
     removeRecentAgent: removeWorkbenchRecentAgent,
   }
 }

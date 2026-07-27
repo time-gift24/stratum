@@ -42,7 +42,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         <I18nextProvider i18n={i18n}>
-          <GlobalNavigation />
           {children}
           <ScrollRestoration />
           <Scripts />
@@ -59,7 +58,14 @@ export default function App() {
     location.pathname === "/component-gallery" ||
     location.pathname.startsWith("/component-gallery/")
 
-  if (import.meta.env.DEV && isComponentGallery) return <Outlet />
+  if (import.meta.env.DEV && isComponentGallery) {
+    return (
+      <>
+        <GlobalNavigation />
+        <Outlet />
+      </>
+    )
+  }
 
   return (
     <ProductShell>

@@ -5,10 +5,7 @@ import { IconArrowDown, IconArrowUp, IconBan } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import BorderGlow from "~/components/BorderGlow"
-import {
-  AgentConfigMenu,
-  ModelConfigMenu,
-} from "~/components/stratum/model-config-menu"
+import { ComposerConfigurationMenu } from "~/components/stratum/composer-configuration-menu"
 import {
   type ApprovalDecision,
   finishApprovalSubmission,
@@ -18,7 +15,6 @@ import { AgentMessageList } from "~/components/stratum/agent-message-list"
 import {
   PromptInput,
   PromptInputBody,
-  PromptInputButton,
   PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
@@ -198,24 +194,13 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     toolsClassName: string
   ) => (
     <PromptInputFooter className={footerClassName}>
-      <PromptInputTools className={toolsClassName}>
-        <AgentConfigMenu
+      <PromptInputTools
+        className={cn(toolsClassName, "justify-end overflow-visible")}
+      >
+        <ComposerConfigurationMenu
           configuration={configuration}
           commandPending={isSubmitting}
         />
-        <ModelConfigMenu
-          configuration={configuration}
-          commandPending={isSubmitting}
-        />
-        {state.phase === "connection_error" ? (
-          <PromptInputButton
-            className="h-10 shrink-0 rounded-lg border-transparent bg-transparent px-3 text-muted-foreground hover:bg-secondary hover:text-foreground"
-            variant="outline"
-            onClick={() => conversation.reconnect()}
-          >
-            {t("chat.reconnect")}
-          </PromptInputButton>
-        ) : null}
       </PromptInputTools>
       <PromptInputSubmit
         aria-label={t(canCancel ? "chat.cancel" : "chat.composer.send")}
@@ -270,7 +255,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
     <section
       ref={chatRef}
       id="chat"
-      className="relative isolate min-h-[calc(100dvh-var(--global-nav-offset))] w-full before:pointer-events-none before:fixed before:inset-x-0 before:top-(--global-nav-offset) before:bottom-0 before:-z-10 before:bg-[radial-gradient(ellipse_30rem_20rem_at_50%_48%,color-mix(in_srgb,var(--primary)_6%,transparent),transparent_72%),radial-gradient(ellipse_38rem_24rem_at_56%_42%,color-mix(in_srgb,var(--chart-5)_5%,transparent),transparent_74%)]"
+      className="relative isolate min-h-[calc(100dvh-var(--global-nav-offset))] w-full"
       data-conversation-state={isNewConversation ? "new" : "active"}
     >
       <div className="min-h-[calc(100dvh-var(--global-nav-offset))] px-4 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pb-[calc(14rem+env(safe-area-inset-bottom))]">
@@ -304,7 +289,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           size="icon"
           variant="outline"
           onClick={() => resumeAutoFollow("smooth")}
-          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
+          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
           <IconArrowDown aria-hidden="true" />
@@ -315,7 +300,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
         data-slot="chat-composer-positioner"
         data-composer-position={isNewConversation ? "centered" : "docked"}
         className={cn(
-          "fixed right-[max(1rem,env(safe-area-inset-right))] left-[max(1rem,env(safe-area-inset-left))] z-(--z-composer) mx-auto w-auto max-w-(--composer-width) transition-[bottom] duration-300 ease-(--ease-interface)",
+          "fixed right-[max(1rem,env(safe-area-inset-right))] left-[max(calc(var(--workbench-panel-offset,0rem)+1rem),env(safe-area-inset-left))] z-(--z-composer) mx-auto w-auto max-w-(--composer-width) transition-[right,left,bottom] duration-300 ease-(--ease-interface)",
           isNewConversation
             ? "bottom-[46%] max-sm:bottom-[43%]"
             : "bottom-[max(1rem,env(safe-area-inset-bottom))]"
@@ -328,7 +313,13 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
             isNewConversation && "translate-y-1/2"
           )}
         >
-          <BorderGlow className="w-full" borderRadius="var(--radius-xl)">
+          <BorderGlow
+            backgroundColor="var(--card)"
+            className="w-full"
+            borderRadius="var(--radius-xl)"
+            colors={["var(--primary)", "var(--chart-2)", "var(--chart-1)"]}
+            fillOpacity={0}
+          >
             {renderComposerInput(
               "[&_[data-slot=input-group]]:bg-card/66 [&_[data-slot=input-group]]:shadow-[0_28px_78px_color-mix(in_srgb,var(--background)_76%,transparent)] [&_[data-slot=input-group]]:backdrop-blur-2xl"
             )}

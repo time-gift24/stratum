@@ -169,7 +169,7 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 
 前端设计约束由 impeccable skill 管理，两个文件构成完整上下文：
 
-- **`PRODUCT.md`**（worktree 根目录）：产品定位、目标用户、品牌人格、设计原则、反模式。回答"做什么、为谁做、为什么"。
+- **`stratum-web/PRODUCT.md`**：产品定位、目标用户、品牌人格、设计原则、反模式。回答"做什么、为谁做、为什么"。
 - **`stratum-web/DESIGN.md`**：视觉系统——色彩 token、字体、组件规范、布局、动效、反模式。回答"长什么样"。
 
 五个设计原则（PRODUCT.md 详述）：

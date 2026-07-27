@@ -97,7 +97,7 @@ export function CenteredNavigation({
   return (
     <nav
       className={cn(
-        "fixed top-4 left-1/2 z-(--z-navigation) w-[calc(100%-2rem)] max-w-(--global-nav-width) -translate-x-1/2 before:pointer-events-none before:absolute before:-inset-x-32 before:-top-16 before:-z-10 before:h-48 before:bg-[radial-gradient(ellipse_at_top,color-mix(in_srgb,var(--chart-5)_16%,transparent),transparent_72%)]",
+        "fixed top-4 left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-(--z-navigation) w-[calc(100%-2rem)] max-w-(--global-nav-width) -translate-x-1/2 transition-[left] duration-300 ease-(--ease-interface)",
         className
       )}
       aria-label={ariaLabel}
@@ -127,7 +127,7 @@ export function CenteredNavigation({
         <div
           className={cn(
             NAV_SURFACE,
-            "flex h-15 items-center justify-between rounded-xl px-2.5"
+            "flex h-15 items-center justify-between rounded-xl px-2.5 [backdrop-filter:none]!"
           )}
         >
           <BrandLink compact href={brandHref} label={brandLabel} />
@@ -239,7 +239,7 @@ function DesktopNavigation({
       className={cn(
         "mx-auto hidden w-full lg:block",
         NAV_SURFACE,
-        "max-w-[31rem] overflow-hidden rounded-xl bg-popover/54 shadow-[0_28px_72px_-28px_color-mix(in_srgb,var(--background)_78%,transparent)]"
+        "max-w-[31rem] overflow-hidden rounded-xl bg-popover/54 shadow-[0_28px_72px_-28px_color-mix(in_srgb,var(--background)_78%,transparent)] [backdrop-filter:none]!"
       )}
       initial={reduceMotion ? false : { opacity: 0, y: -12 }}
       animate={{ opacity: 1, y: 0 }}
