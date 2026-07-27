@@ -97,7 +97,7 @@ export function CenteredNavigation({
   return (
     <nav
       className={cn(
-        "fixed top-4 left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-(--z-navigation) w-[calc(100%-2rem)] max-w-(--global-nav-width) [transform:translateX(-50%)] transition-[left] duration-300 ease-(--ease-interface)",
+        "fixed top-4 left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-(--z-navigation) w-[calc(100%-2rem)] max-w-(--global-nav-width) -translate-x-1/2 transition-[left] duration-300 ease-(--ease-interface)",
         className
       )}
       aria-label={ariaLabel}

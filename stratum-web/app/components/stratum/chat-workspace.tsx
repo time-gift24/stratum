@@ -289,7 +289,7 @@ export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
           size="icon"
           variant="outline"
           onClick={() => resumeAutoFollow("smooth")}
-          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-40 size-10 [transform:translate(-50%,0)] rounded-full shadow-lg transition-transform duration-200 hover:[transform:translate(-50%,-0.125rem)] motion-reduce:transition-none"
+          className="fixed bottom-[calc(10rem+max(1.75rem,env(safe-area-inset-bottom)))] left-[calc((100%+var(--workbench-panel-offset,0rem))/2)] z-40 size-10 -translate-x-1/2 rounded-full shadow-lg transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
           <IconArrowDown aria-hidden="true" />

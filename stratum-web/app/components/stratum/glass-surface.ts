@@ -1,7 +1,7 @@
 import { cva, type VariantProps } from "class-variance-authority"
 
 export const glassSurface = cva(
-  "relative isolate transform-gpu overflow-hidden border-0 backdrop-blur-2xl backdrop-saturate-125 [backface-visibility:hidden] before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(145deg,color-mix(in_srgb,var(--foreground)_11%,transparent),transparent_40%,color-mix(in_srgb,var(--foreground)_3%,transparent))] [&>*]:relative [&>*]:z-10",
+  "relative isolate overflow-hidden border-0 backdrop-blur-2xl backdrop-saturate-125 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(145deg,color-mix(in_srgb,var(--foreground)_11%,transparent),transparent_40%,color-mix(in_srgb,var(--foreground)_3%,transparent))] [&>*]:relative [&>*]:z-10",
   {
     variants: {
       surface: {

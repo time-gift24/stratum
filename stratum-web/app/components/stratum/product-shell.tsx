@@ -289,7 +289,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
         <a
           href="#main-content"
-          className="fixed top-2 left-2 z-(--z-navigation) [transform:translateY(-5rem)] rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:[transform:translateY(0)]"
+          className="fixed top-2 left-2 z-(--z-navigation) -translate-y-20 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:translate-y-0"
         >
           {t("productShell.skipToContent")}
         </a>
