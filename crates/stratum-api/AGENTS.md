@@ -22,3 +22,4 @@
 - `POST /v1/agents/{agent_id}/messages` also accepts an optional `model_config`. A valid override is
   committed only with an accepted new Turn and becomes that Agent's persisted default; omission
   reuses the persisted value, and any rejected start leaves it unchanged.
+- 启动时，非空 `DEEPSEEK_API_KEY` 环境变量覆盖 TOML 中的 DeepSeek key；容器编排必须显式传递该变量，且日志和错误不得记录其内容。

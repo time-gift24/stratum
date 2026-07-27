@@ -21,6 +21,7 @@ pub use host::{HostState, HostedAgent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 
 /// Reads a config file and serves until shutdown.
 ///
@@ -30,10 +31,20 @@ const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 /// fails.
 pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
     let contents = tokio::fs::read_to_string(path).await?;
-    let config = Config::parse(&contents)?;
+    let mut config = Config::parse(&contents)?;
+    apply_deepseek_api_key_override(&mut config, std::env::var(DEEPSEEK_API_KEY_ENV).ok());
     config.require_api()?;
     config.require_nats()?;
     serve(config).await
+}
+
+fn apply_deepseek_api_key_override(config: &mut Config, api_key: Option<String>) {
+    let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    if let Some(provider) = config.llm.deepseek.as_mut() {
+        provider.api_key = api_key;
+    }
 }
 
 /// Composes the configured providers, filesystem, NATS bus, restored host, and HTTP listener.
@@ -136,9 +147,39 @@ fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostError, providers};
+    use super::{HostError, apply_deepseek_api_key_override, providers};
     use stratum_config::Config;
     use stratum_core::ModelId;
+
+    #[test]
+    fn deepseek_environment_key_overrides_file_key() {
+        let mut config = Config::parse(
+            r#"
+[agent]
+storage_root = "."
+
+[llm]
+default = "deepseek:deepseek-v4-flash"
+
+[llm.deepseek]
+api_key = "file-key"
+models = ["deepseek-v4-flash"]
+"#,
+        )
+        .expect("config parses");
+
+        apply_deepseek_api_key_override(&mut config, Some("environment-key".to_owned()));
+
+        assert_eq!(
+            config
+                .llm
+                .deepseek
+                .as_ref()
+                .expect("deepseek is configured")
+                .api_key,
+            "environment-key"
+        );
+    }
 
     #[test]
     fn registers_every_configured_openai_and_deepseek_model() {
