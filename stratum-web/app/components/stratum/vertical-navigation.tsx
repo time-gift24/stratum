@@ -25,6 +25,8 @@ export interface VerticalNavigationItem {
   label: string
   href?: string
   onSelect?: () => void
+  controls?: string
+  expanded?: boolean
   tone?: VerticalNavigationTone
 }
 
@@ -220,6 +222,8 @@ function NavigationItem({
           type="button"
           className={itemClassName}
           aria-label={item.label}
+          aria-controls={item.controls}
+          aria-expanded={item.expanded}
           onClick={item.onSelect}
         >
           {content}

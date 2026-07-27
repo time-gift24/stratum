@@ -16,7 +16,7 @@
 
 ## 设计上下文
 
-- 修改界面前必须阅读仓库根目录 `PRODUCT.md` 与本目录 `DESIGN.md`。
+- 修改界面前必须阅读本目录的 `PRODUCT.md` 与 `DESIGN.md`。
 - 当前面向用户的产品只提供对话；`/component-gallery` 是内部视觉校准页，不属于一级产品导航。未来画布不得提前进入产品壳层或 `/chat`。
 - `app/app.css` 的标准 shadcn 语义 Token 是产品颜色唯一来源。业务组件不得写裸 RGB、Hex 或同义颜色变量；透明度与阴影从标准 Token 推导。
 - UI 使用 Geist，标题使用 Outfit，数据使用 Geist Mono，中文回退使用 Noto Sans。

@@ -14,6 +14,7 @@ import { useLocation, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import { HistoryPanel } from "~/components/stratum/history-panel"
+import { GlobalNavigation } from "~/components/stratum/global-navigation"
 import {
   VerticalNavigation,
   type VerticalNavigationItem,
@@ -32,6 +33,7 @@ import {
   createStratumApi,
   STRATUM_API_BASE_URL,
 } from "~/lib/stratum-api"
+import { cn } from "~/lib/utils"
 
 type ResourcePhase = "loading" | "loaded" | "empty" | "error"
 
@@ -186,6 +188,20 @@ export function ProductShell({ children }: { children: ReactNode }) {
         : null
     setHistoryOpen(true)
   }, [])
+
+  const closeHistory = useCallback(() => {
+    setHistoryOpen(false)
+    requestAnimationFrame(() => historyReturnFocusRef.current?.focus())
+  }, [])
+
+  const toggleHistory = useCallback(() => {
+    if (historyOpen) {
+      closeHistory()
+      return
+    }
+    openHistory()
+  }, [closeHistory, historyOpen, openHistory])
+
   const navigationItems = useMemo<readonly VerticalNavigationItem[]>(
     () =>
       CHAT_NAVIGATION_DEFINITIONS.map((item) => ({
@@ -195,17 +211,20 @@ export function ProductShell({ children }: { children: ReactNode }) {
         href: "href" in item ? item.href : undefined,
         onSelect:
           "action" in item && item.action === "open-history"
-            ? openHistory
+            ? toggleHistory
+            : undefined,
+        controls:
+          "action" in item && item.action === "open-history"
+            ? "history-panel"
+            : undefined,
+        expanded:
+          "action" in item && item.action === "open-history"
+            ? historyOpen
             : undefined,
         tone: item.tone,
       })),
-    [openHistory, t]
+    [historyOpen, t, toggleHistory]
   )
-
-  const closeHistory = useCallback(() => {
-    setHistoryOpen(false)
-    requestAnimationFrame(() => historyReturnFocusRef.current?.focus())
-  }, [])
 
   useEffect(() => {
     if (previousPathRef.current === location.pathname) return
@@ -260,7 +279,14 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
   return (
     <ProductWorkbenchContext.Provider value={contextValue}>
-      <div className="min-h-dvh bg-background text-foreground">
+      <div
+        className={cn(
+          "min-h-dvh bg-background text-foreground",
+          historyOpen && "lg:[--workbench-panel-offset:27.75rem]"
+        )}
+      >
+        <GlobalNavigation />
+
         <a
           href="#main-content"
           className="fixed top-2 left-2 z-(--z-navigation) -translate-y-20 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground focus:translate-y-0"
@@ -268,35 +294,48 @@ export function ProductShell({ children }: { children: ReactNode }) {
           {t("productShell.skipToContent")}
         </a>
 
-        <HistoryPanel
-          open={historyOpen}
-          onClose={closeHistory}
-          activeAgentId={activeAgentId}
-          missingAgentId={missingAgentId}
-          recentAgents={recentAgents}
-          onRemoveAgent={removeRecentAgent}
-        />
-
         {location.pathname === "/chat" ? (
           <VerticalNavigation
             activeId={
-              activeAgentId === null
-                ? "new-conversation"
-                : "active-conversation"
+              historyOpen
+                ? "history"
+                : activeAgentId === null
+                  ? "new-conversation"
+                  : "active-conversation"
             }
             ariaLabel={t("globalNavigation.chat")}
             items={navigationItems}
           />
         ) : null}
 
-        <main
-          ref={mainRef}
-          id="main-content"
-          className="min-h-dvh pt-(--global-nav-offset)"
-          tabIndex={-1}
+        <div
+          className={cn(
+            "min-h-dvh pt-(--global-nav-offset)",
+            historyOpen &&
+              "grid gap-3 px-3 pb-3 sm:px-6 lg:grid-cols-[21rem_minmax(0,1fr)] lg:px-0 lg:pr-3 lg:pl-24"
+          )}
         >
-          {children}
-        </main>
+          <HistoryPanel
+            open={historyOpen}
+            onClose={closeHistory}
+            activeAgentId={activeAgentId}
+            missingAgentId={missingAgentId}
+            recentAgents={recentAgents}
+            onRemoveAgent={removeRecentAgent}
+          />
+
+          <main
+            ref={mainRef}
+            id="main-content"
+            className={cn(
+              "min-h-[calc(100dvh-var(--global-nav-offset))] min-w-0",
+              historyOpen && "max-lg:hidden"
+            )}
+            tabIndex={-1}
+          >
+            {children}
+          </main>
+        </div>
       </div>
     </ProductWorkbenchContext.Provider>
   )
