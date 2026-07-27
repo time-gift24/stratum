@@ -127,7 +127,7 @@ export function CenteredNavigation({
         <div
           className={cn(
             NAV_SURFACE,
-            "flex h-15 items-center justify-between rounded-xl px-2.5"
+            "flex h-15 items-center justify-between rounded-xl px-2.5 [backdrop-filter:none]!"
           )}
         >
           <BrandLink compact href={brandHref} label={brandLabel} />
@@ -239,7 +239,7 @@ function DesktopNavigation({
       className={cn(
         "mx-auto hidden w-full lg:block",
         NAV_SURFACE,
-        "max-w-[31rem] overflow-hidden rounded-xl bg-popover/54 shadow-[0_28px_72px_-28px_color-mix(in_srgb,var(--background)_78%,transparent)]"
+        "max-w-[31rem] overflow-hidden rounded-xl bg-popover/54 shadow-[0_28px_72px_-28px_color-mix(in_srgb,var(--background)_78%,transparent)] [backdrop-filter:none]!"
       )}
       initial={reduceMotion ? false : { opacity: 0, y: -12 }}
       animate={{ opacity: 1, y: 0 }}
