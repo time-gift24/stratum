@@ -1,26 +1,33 @@
 //! Concrete agent-loop runner.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, future::Future, sync::Arc};
 
 use stratum_core::{
-    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage,
-    ToolCall,
+    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, HookFailure, HookPoint,
+    LlmCallId, TokenUsage, ToolCall,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ToolApprovalError, ToolExecutor, ToolExecutorError};
+use crate::{
+    AfterToolCallDecision, AfterToolCallInput, BeforeToolCallDecision, BeforeToolCallInput,
+    HookControl, HookRuntime, NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
+    ToolApprovalError, ToolExecutor, ToolExecutorError, TransformContextDecision,
+    TransformContextInput,
+};
 
 use super::{
-    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimits, LoopOutcome,
-    stream::consume_assistant_stream,
+    AgentLoopBuildError, AgentLoopError, LoopCompletionReason, LoopContext, LoopLimits,
+    LoopOutcome, stream::consume_assistant_stream,
 };
 
 /// Executes the foundational LLM and tool control flow without owning session state.
 pub struct AgentLoop {
     llm_provider: Arc<dyn LlmProvider>,
     tool_executor: ToolExecutor,
+    hook_runtime: Arc<dyn HookRuntime>,
     durable_events: Arc<dyn DurableEventSink>,
     telemetry: Arc<dyn TelemetryEventSink>,
     limits: LoopLimits,
@@ -110,6 +117,133 @@ impl AgentLoop {
         }
     }
 
+    /// Runs one hook invocation under the shared cancellation and deadline contract.
+    ///
+    /// Cancellation wins over every decision: a token cancelled before the call
+    /// never reaches the runtime, and cancellation while waiting stops the wait.
+    /// Hooks that gate a new external action (context transform, before-tool)
+    /// treat cancellation as loop cancellation; hooks on the recording path of
+    /// an already-started tool cycle (after-tool, prepare-next-turn) degrade to
+    /// their no-op decision so the loop can finish recording the outcome and
+    /// then reach its regular cancellation boundary. A missed deadline fails
+    /// closed with [`HookFailure::TimedOut`]. Runtime failures are already safe
+    /// classifications, so the mapped error only keeps the hook point and the
+    /// typed failure.
+    async fn execute_hook<D, F>(
+        &self,
+        point: HookPoint,
+        cancellation: &CancellationToken,
+        invoke: impl FnOnce(HookControl) -> F,
+    ) -> Result<HookInvocation<D>, AgentLoopError>
+    where
+        F: Future<Output = Result<D, HookFailure>>,
+    {
+        if cancellation.is_cancelled() {
+            return Ok(HookInvocation::Cancelled);
+        }
+        let control = HookControl::new(
+            cancellation.clone(),
+            Instant::now() + self.limits.hook_timeout,
+        );
+        let deadline = tokio::time::sleep_until(control.deadline());
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
+            () = deadline => Err(AgentLoopError::Hook {
+                point,
+                failure: HookFailure::TimedOut,
+            }),
+            decision = invoke(control) => decision
+                .map(HookInvocation::Decision)
+                .map_err(|failure| AgentLoopError::Hook { point, failure }),
+        }
+    }
+
+    /// Runs one provider-authorized tool call through the before/after hooks.
+    async fn execute_authorized_tool_call(
+        &self,
+        iteration: u64,
+        tool_call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Result<ChatMessage, AgentLoopError> {
+        let HookInvocation::Decision(before) = self
+            .execute_hook(HookPoint::BeforeToolCall, cancellation, |control| {
+                self.hook_runtime.before_tool_call(
+                    BeforeToolCallInput {
+                        iteration,
+                        tool_call,
+                    },
+                    control,
+                )
+            })
+            .await?
+        else {
+            return Err(AgentLoopError::Cancelled);
+        };
+        let before = before.validate().map_err(|failure| AgentLoopError::Hook {
+            point: HookPoint::BeforeToolCall,
+            failure,
+        })?;
+
+        let (executed_call, mut message) = match before {
+            BeforeToolCallDecision::Continue => (
+                Cow::Borrowed(tool_call),
+                self.execute_tool(tool_call, cancellation).await?,
+            ),
+            BeforeToolCallDecision::ModifyArguments { arguments } => {
+                let mut modified = tool_call.clone();
+                modified.arguments = arguments;
+                let message = self.execute_tool(&modified, cancellation).await?;
+                (Cow::Owned(modified), message)
+            }
+            BeforeToolCallDecision::Block { reason } => (
+                Cow::Borrowed(tool_call),
+                hook_blocked_result(tool_call, &reason),
+            ),
+        };
+
+        // Cancellation here means the started tool's outcome must still be
+        // recorded: the after hook degrades to Keep and the loop reaches its
+        // regular cancellation boundary after the durable commits.
+        let after = match self
+            .execute_hook(HookPoint::AfterToolCall, cancellation, |control| {
+                self.hook_runtime.after_tool_call(
+                    AfterToolCallInput {
+                        iteration,
+                        tool_call: &executed_call,
+                        result: &message,
+                    },
+                    control,
+                )
+            })
+            .await?
+        {
+            HookInvocation::Decision(decision) => decision,
+            HookInvocation::Cancelled => AfterToolCallDecision::Keep,
+        };
+        if let AfterToolCallDecision::ReplaceResult { result } = after {
+            message = ChatMessage::tool(executed_call.call_id.clone(), result);
+        }
+        Ok(message)
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Result<ChatMessage, AgentLoopError> {
+        match self.tool_executor.execute(tool_call, cancellation).await {
+            Ok(message) => Ok(message),
+            Err(ToolExecutorError::Durability { source }) => {
+                Err(AgentLoopError::Durability { source })
+            }
+            Err(ToolExecutorError::Approval {
+                source: ToolApprovalError::Cancelled,
+            }) => Err(AgentLoopError::Cancelled),
+            Err(source) => Err(AgentLoopError::ToolExecution { source }),
+        }
+    }
+
     async fn run_started(
         &self,
         mut context: LoopContext,
@@ -132,17 +266,48 @@ impl AgentLoop {
             new_messages.push(prompt);
         }
 
+        let mut pending_inject: Option<Vec<ChatMessage>> = None;
         for iteration in 0..self.limits.max_iterations {
             if cancellation.is_cancelled() {
                 return Err(AgentLoopError::Cancelled);
             }
+            let iteration_index = u64::try_from(iteration).unwrap_or(u64::MAX);
+            let request_view = match pending_inject.take() {
+                Some(injected) => {
+                    let mut view = context.clone();
+                    view.messages.extend(injected);
+                    Cow::Owned(view)
+                }
+                None => Cow::Borrowed(&context),
+            };
+            let HookInvocation::Decision(transform) = self
+                .execute_hook(HookPoint::TransformContext, cancellation, |control| {
+                    self.hook_runtime.transform_context(
+                        TransformContextInput {
+                            iteration: iteration_index,
+                            context: &request_view,
+                        },
+                        control,
+                    )
+                })
+                .await?
+            else {
+                return Err(AgentLoopError::Cancelled);
+            };
+            let request_view = match transform {
+                TransformContextDecision::Unchanged => request_view,
+                TransformContextDecision::Replace {
+                    context: replacement,
+                } => Cow::Owned(replacement),
+            };
+
             let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
             self.telemetry.emit(AgentTelemetryEvent::LlmStarted {
                 llm_call_id: llm_call_id.clone(),
             });
             let request = ChatRequest {
                 model: self.llm_provider.model_id(),
-                messages: request_messages(&context.system_prompt, &context.messages),
+                messages: request_messages(&request_view.system_prompt, &request_view.messages),
                 tools: self.tool_executor.specs(),
                 structured_output: None,
             };
@@ -183,16 +348,8 @@ impl AgentLoop {
                     let message = if finish_reason != FinishReason::ToolCalls {
                         unexecutable_tool_result(tool_call, finish_reason)
                     } else {
-                        match self.tool_executor.execute(tool_call, cancellation).await {
-                            Ok(message) => message,
-                            Err(ToolExecutorError::Durability { source }) => {
-                                return Err(AgentLoopError::Durability { source });
-                            }
-                            Err(ToolExecutorError::Approval {
-                                source: ToolApprovalError::Cancelled,
-                            }) => return Err(AgentLoopError::Cancelled),
-                            Err(source) => return Err(AgentLoopError::ToolExecution { source }),
-                        }
+                        self.execute_authorized_tool_call(iteration_index, tool_call, cancellation)
+                            .await?
                     };
                     self.durable_events
                         .append(DurableAgentEvent::MessageAppended {
@@ -202,29 +359,82 @@ impl AgentLoop {
                     context.messages.push(message.clone());
                     new_messages.push(message);
                 }
+
+                // Cancellation degrades the decision to Continue so the
+                // iteration boundary is committed before the loop reaches its
+                // regular cancellation check.
+                let prepare = match self
+                    .execute_hook(HookPoint::PrepareNextTurn, cancellation, |control| {
+                        self.hook_runtime.prepare_next_turn(
+                            PrepareNextTurnInput {
+                                iteration: iteration_index,
+                                context: &context,
+                            },
+                            control,
+                        )
+                    })
+                    .await?
+                {
+                    HookInvocation::Decision(decision) => {
+                        decision
+                            .validate()
+                            .map_err(|failure| AgentLoopError::Hook {
+                                point: HookPoint::PrepareNextTurn,
+                                failure,
+                            })?
+                    }
+                    HookInvocation::Cancelled => PrepareNextTurnDecision::Continue,
+                };
+
+                self.durable_events
+                    .append(DurableAgentEvent::IterationCompleted {
+                        iteration: iteration_index,
+                        usage: *usage,
+                    })
+                    .await?;
+
+                match prepare {
+                    PrepareNextTurnDecision::Continue => {}
+                    PrepareNextTurnDecision::Inject { messages } => {
+                        pending_inject = Some(messages);
+                    }
+                    PrepareNextTurnDecision::Stop => {
+                        self.durable_events
+                            .append(DurableAgentEvent::LoopFinished {
+                                finish_reason: LoopCompletionReason::HookStopped
+                                    .as_str()
+                                    .to_owned(),
+                                usage: *usage,
+                            })
+                            .await?;
+                        return Ok(LoopOutcome {
+                            new_messages,
+                            completion: LoopCompletionReason::HookStopped,
+                            usage: *usage,
+                        });
+                    }
+                }
+                continue;
             }
 
-            let iteration = u64::try_from(iteration).unwrap_or(u64::MAX);
             self.durable_events
                 .append(DurableAgentEvent::IterationCompleted {
-                    iteration,
+                    iteration: iteration_index,
                     usage: *usage,
                 })
                 .await?;
 
-            if tool_calls.is_empty() {
-                self.durable_events
-                    .append(DurableAgentEvent::LoopFinished {
-                        finish_reason: finish_reason.as_str().to_owned(),
-                        usage: *usage,
-                    })
-                    .await?;
-                return Ok(LoopOutcome {
-                    new_messages,
-                    finish_reason,
+            self.durable_events
+                .append(DurableAgentEvent::LoopFinished {
+                    finish_reason: finish_reason.as_str().to_owned(),
                     usage: *usage,
-                });
-            }
+                })
+                .await?;
+            return Ok(LoopOutcome {
+                new_messages,
+                completion: LoopCompletionReason::Model(finish_reason),
+                usage: *usage,
+            });
         }
 
         if cancellation.is_cancelled() {
@@ -241,6 +451,7 @@ impl AgentLoop {
 pub struct AgentLoopBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_executor: Option<ToolExecutor>,
+    hook_runtime: Option<Arc<dyn HookRuntime>>,
     telemetry: Option<Arc<dyn TelemetryEventSink>>,
     limits: LoopLimits,
 }
@@ -257,6 +468,13 @@ impl AgentLoopBuilder {
     #[must_use]
     pub fn tool_executor(mut self, tool_executor: ToolExecutor) -> Self {
         self.tool_executor = Some(tool_executor);
+        self
+    }
+
+    /// Sets the composed hook runtime; defaults to [`NoopHookRuntime`].
+    #[must_use]
+    pub fn hook_runtime(mut self, hook_runtime: Arc<dyn HookRuntime>) -> Self {
+        self.hook_runtime = Some(hook_runtime);
         self
     }
 
@@ -291,6 +509,9 @@ impl AgentLoopBuilder {
         Ok(AgentLoop {
             llm_provider,
             tool_executor,
+            hook_runtime: self
+                .hook_runtime
+                .unwrap_or_else(|| Arc::new(NoopHookRuntime)),
             durable_events,
             telemetry: self
                 .telemetry
@@ -325,6 +546,27 @@ fn unexecutable_tool_result(tool_call: &ToolCall, finish_reason: FinishReason) -
             "error": {
                 "code": code,
                 "message": message,
+            }
+        }),
+    )
+}
+
+/// Outcome of one hook invocation under the loop's cancellation contract.
+enum HookInvocation<D> {
+    /// The runtime returned a decision in time.
+    Decision(D),
+    /// Cancellation won before or during the invocation; the hook has no
+    /// decision and the loop follows its regular cancellation path.
+    Cancelled,
+}
+
+fn hook_blocked_result(tool_call: &ToolCall, reason: &str) -> ChatMessage {
+    ChatMessage::tool(
+        tool_call.call_id.clone(),
+        serde_json::json!({
+            "error": {
+                "code": "hook_blocked",
+                "message": reason,
             }
         }),
     )

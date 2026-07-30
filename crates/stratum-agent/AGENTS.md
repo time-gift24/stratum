@@ -36,6 +36,44 @@ legacy stateful `Agent` compatibility path.
 - `ToolExecutor` is the single source of the durable sink used by `AgentLoop`; the builder must not
   accept a second sink that could split tool and loop boundaries across transports.
 
+## Hook Runtime (H1)
+
+- `hook_runtime` holds the single `HookRuntime` async trait (`runtime.rs`) and its
+  `NoopHookRuntime` default (`noop.rs`); failure types come from
+  `stratum-core::HookFailure` and the loop-side mapping lives in
+  `agent_loop/error.rs` (`AgentLoopError::Hook`). Do not add per-hook closures
+  to the builder: the runtime is the single composition boundary.
+- The trait exposes exactly four hooks — `transform_context`, `before_tool_call`,
+  `after_tool_call`, `prepare_next_turn` — taking borrowed inputs and returning
+  owned decisions. `AgentLoop` holds one `Arc<dyn HookRuntime>` injected via
+  `AgentLoopBuilder::hook_runtime`; without injection the no-op runtime keeps
+  pre-hook kernel behavior byte-identical.
+- Identity is kernel-owned: hooks may never change `CallId` or tool names.
+  `before_tool_call` may only continue, replace arguments, or block (a block
+  skips approval and `ToolExecutionStarted` and yields the fixed
+  `{"error":{"code":"hook_blocked",...}}` model-visible result, which still
+  passes through `after_tool_call`). `after_tool_call` may only replace the
+  JSON result; the kernel rebuilds the tool message with the original `CallId`.
+- `transform_context` replacement and `prepare_next_turn` injection are
+  request-only views: they never write back to the committed context, never
+  emit durable messages, and never appear in `LoopOutcome.new_messages`.
+  Injected user messages are consumed exactly once by the next model request;
+  empty or non-user-role injections are rejected as `HookFailure::InvalidOutput`.
+- Every hook call goes through the kernel's shared execution helper: pre-call
+  cancellation and in-flight cancellation resolve to loop cancellation, the
+  absolute deadline maps to `HookFailure::TimedOut`, and runtime failures are
+  reported as `AgentLoopError::Hook` carrying only the `HookPoint` and the safe
+  failure category — never prompts, tool payloads, or handler internals. The
+  hook timeout defaults via `LoopLimits::hook_timeout`.
+- `LoopOutcome.completion` is a `LoopCompletionReason` distinguishing
+  `Model(FinishReason)` from `HookStopped`; the durable `LoopFinished` reason
+  projects to stable strings such as `hook_stopped`. A hook stop must never be
+  disguised as a provider finish reason.
+- Deferred to later milestones (do not add here): multi-handler ordering and
+  short-circuiting (H2), tool argument re-validation and approval reordering
+  (H2), hook invocation journal and crash recovery of decisions (H3),
+  Skill/Script/service adapters, and hook telemetry or EventBus payloads.
+
 ## Legacy Agent Compatibility
 
 The following rules describe the existing `Agent`, session, resume, store, and

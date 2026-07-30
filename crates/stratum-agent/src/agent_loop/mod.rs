@@ -7,4 +7,4 @@ mod types;
 
 pub use error::{AgentLoopBuildError, AgentLoopError, ProtocolError};
 pub use runner::{AgentLoop, AgentLoopBuilder};
-pub use types::{LoopContext, LoopLimits, LoopOutcome};
+pub use types::{LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome};
