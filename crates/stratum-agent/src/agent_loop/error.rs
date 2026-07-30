@@ -1,6 +1,6 @@
 //! Typed failures that stop the agent loop kernel.
 
-use stratum_core::{CallId, ChatRole};
+use stratum_core::{CallId, ChatRole, HookFailure, HookPoint};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
@@ -132,6 +132,17 @@ pub enum AgentLoopError {
         #[source]
         reason: ProtocolError,
     },
+    /// A hook runtime invocation failed or violated its decision contract.
+    ///
+    /// The failure is a safe classification: it never carries hook inputs, tool
+    /// payloads, or internal runtime error text.
+    #[error("hook at {} failed: {failure}", hook_point_name(*point))]
+    Hook {
+        /// Decision point whose invocation failed.
+        point: HookPoint,
+        /// Safe typed failure classification.
+        failure: HookFailure,
+    },
     /// The caller cancelled the loop before a terminal outcome was committed.
     #[error("agent loop cancelled")]
     Cancelled,
@@ -185,6 +196,16 @@ impl From<ProtocolError> for AgentLoopError {
     }
 }
 
+fn hook_point_name(point: HookPoint) -> &'static str {
+    match point {
+        HookPoint::TransformContext => "transform_context",
+        HookPoint::BeforeToolCall => "before_tool_call",
+        HookPoint::AfterToolCall => "after_tool_call",
+        HookPoint::PrepareNextTurn => "prepare_next_turn",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
@@ -219,6 +240,19 @@ mod tests {
                 .and_then(|source| source.downcast_ref::<LlmError>()),
             Some(LlmError::MockExhausted)
         ));
+    }
+
+    #[test]
+    fn hook_error_exposes_only_the_point_and_safe_classification() {
+        let error = AgentLoopError::Hook {
+            point: HookPoint::BeforeToolCall,
+            failure: HookFailure::TimedOut,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "hook at before_tool_call failed: hook invocation timed out"
+        );
     }
 
     #[test]

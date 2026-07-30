@@ -83,20 +83,20 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **依赖：** M0。
 
-- [ ] 定义 `transform_context` 输入与决策。
-- [ ] 定义 `before_tool_call` 的继续、修改和阻断决策。
-- [ ] 定义 `after_tool_call` 的结果替换决策。
-- [ ] 定义 `prepare_next_turn` 的继续、停止和注入消息决策。
-- [ ] 提供无处理器时保持现有行为的 No-op Runtime。
-- [ ] 通过 `AgentBuilder` 注入单一 Hook Runtime。
-- [ ] 将取消和 Deadline 传入每次 Hook 调用。
-- [ ] 保持 Hook 决策与 EventBus 观察路径分离。
+- [x] 定义 `transform_context` 输入与决策。
+- [x] 定义 `before_tool_call` 的继续、修改和阻断决策。
+- [x] 定义 `after_tool_call` 的结果替换决策。
+- [x] 定义 `prepare_next_turn` 的继续、停止和注入消息决策。
+- [x] 提供无处理器时保持现有行为的 No-op Runtime。
+- [x] 通过 `AgentLoopBuilder` 注入单一 Hook Runtime。
+- [x] 将取消和 Deadline 传入每次 Hook 调用。
+- [x] 保持 Hook 决策与 EventBus 观察路径分离。
 
 **验收条件：**
 
-- [ ] No-op Runtime 下现有 Agent 测试行为不变。
-- [ ] 四个 Hook 均有正常、错误、超时和取消测试。
-- [ ] Block 不执行 Tool，并生成模型可见的类型化结果。
+- [x] No-op Runtime 下现有 Agent 测试行为不变。
+- [x] 四个 Hook 均有正常、错误、超时和取消测试。
+- [x] Block 不执行 Tool，并生成模型可见的类型化结果。
 
 ### H2：有序执行器、工具校验与审批
 

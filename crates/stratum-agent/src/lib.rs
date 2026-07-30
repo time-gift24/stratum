@@ -3,16 +3,22 @@
 pub mod agent_loop;
 pub mod definition;
 pub mod error;
+pub mod hook_runtime;
 pub mod tool_executor;
 
 pub(crate) mod r#loop;
 
 pub use agent_loop::{
-    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, LoopContext, LoopLimits,
-    LoopOutcome, ProtocolError,
+    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, LoopCompletionReason,
+    LoopContext, LoopLimits, LoopOutcome, ProtocolError,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
+pub use hook_runtime::{
+    AfterToolCallDecision, AfterToolCallInput, BeforeToolCallDecision, BeforeToolCallInput,
+    HookControl, HookRuntime, NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
+    TransformContextDecision, TransformContextInput,
+};
 pub use tool_executor::{
     AllowAllToolApproval, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
     ToolExecutorError,

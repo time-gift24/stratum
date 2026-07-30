@@ -1,5 +1,7 @@
 //! Context, limits, and successful outcome types for the agent loop kernel.
 
+use std::time::Duration;
+
 use stratum_core::{ChatMessage, TokenUsage};
 use stratum_llm::FinishReason;
 
@@ -45,12 +47,15 @@ pub struct LoopLimits {
     pub max_reasoning_bytes: usize,
     /// Maximum streamed argument bytes for one tool call.
     pub max_tool_argument_bytes: usize,
+    /// Maximum wall-clock time one hook invocation may take.
+    pub hook_timeout: Duration,
 }
 
 impl LoopLimits {
     const DEFAULT_MAX_TEXT_BYTES: usize = 1024 * 1024;
     const DEFAULT_MAX_REASONING_BYTES: usize = 1024 * 1024;
     const DEFAULT_MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+    const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Creates loop safety bounds.
     #[must_use]
@@ -61,6 +66,7 @@ impl LoopLimits {
             max_text_bytes: Self::DEFAULT_MAX_TEXT_BYTES,
             max_reasoning_bytes: Self::DEFAULT_MAX_REASONING_BYTES,
             max_tool_argument_bytes: Self::DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+            hook_timeout: Self::DEFAULT_HOOK_TIMEOUT,
         }
     }
 
@@ -77,11 +83,39 @@ impl LoopLimits {
         self.max_tool_argument_bytes = max_tool_argument_bytes;
         self
     }
+
+    /// Overrides the per-invocation hook timeout.
+    #[must_use]
+    pub const fn with_hook_timeout(mut self, hook_timeout: Duration) -> Self {
+        self.hook_timeout = hook_timeout;
+        self
+    }
 }
 
 impl Default for LoopLimits {
     fn default() -> Self {
         Self::new(16, 16)
+    }
+}
+
+/// Reason an agent loop run reached its terminal boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LoopCompletionReason {
+    /// The provider finished without executable tool calls.
+    Model(FinishReason),
+    /// A `prepare_next_turn` hook stopped the loop.
+    HookStopped,
+}
+
+impl LoopCompletionReason {
+    /// Returns the stable durable projection of this completion reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model(finish_reason) => finish_reason.as_str(),
+            Self::HookStopped => "hook_stopped",
+        }
     }
 }
 
@@ -91,8 +125,8 @@ impl Default for LoopLimits {
 pub struct LoopOutcome {
     /// Messages committed during this loop run.
     pub new_messages: Vec<ChatMessage>,
-    /// Reason the final model response completed.
-    pub finish_reason: FinishReason,
+    /// Why the loop reached its terminal boundary.
+    pub completion: LoopCompletionReason,
     /// Aggregate model token usage for this loop run.
     pub usage: TokenUsage,
 }
@@ -112,5 +146,25 @@ mod tests {
             vec![ChatMessage::user("hello"), ChatMessage::assistant("hi"),]
         );
         assert_eq!(LoopLimits::default(), LoopLimits::new(16, 16));
+    }
+
+    #[test]
+    fn completion_reason_projects_stable_strings() {
+        assert_eq!(
+            LoopCompletionReason::Model(FinishReason::Stop).as_str(),
+            "stop"
+        );
+        assert_eq!(LoopCompletionReason::HookStopped.as_str(), "hook_stopped");
+    }
+
+    #[test]
+    fn hook_timeout_has_a_default_and_an_override() {
+        assert_eq!(LoopLimits::default().hook_timeout, Duration::from_secs(30));
+        assert_eq!(
+            LoopLimits::default()
+                .with_hook_timeout(Duration::from_millis(50))
+                .hook_timeout,
+            Duration::from_millis(50)
+        );
     }
 }

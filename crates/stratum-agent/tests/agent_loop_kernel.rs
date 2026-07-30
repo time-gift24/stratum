@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
-    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimits,
-    ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
+    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopCompletionReason,
+    LoopContext, LoopLimits, ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest,
+    ToolExecutor,
 };
 use stratum_core::{
     AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -409,7 +410,10 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
         outcome.new_messages,
         vec![prompts[0].clone(), prompts[1].clone(), assistant.clone()]
     );
-    assert_eq!(outcome.finish_reason, FinishReason::Stop);
+    assert_eq!(
+        outcome.completion,
+        LoopCompletionReason::Model(FinishReason::Stop)
+    );
     assert_eq!(outcome.usage, usage);
 
     let operations = operations
