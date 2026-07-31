@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use stratum_core::{ChatMessage, TokenUsage};
+use stratum_core::{ChatMessage, HookPoint, TokenUsage};
 use stratum_llm::FinishReason;
 
 /// Committed conversation state supplied to an agent loop run.
@@ -33,6 +33,96 @@ impl LoopContext {
     }
 }
 
+/// Per-hook-point deadlines enforced by the loop around every hook invocation.
+///
+/// A `None` deadline means the point is bounded by the turn cancellation token
+/// only. `decide_tool_call` defaults to `None` so interactive approval
+/// handlers can wait for a human; every other point defaults to a timeout and
+/// stays fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HookTimeouts {
+    /// Deadline for `transform_context`.
+    pub transform_context: Option<Duration>,
+    /// Deadline for `transform_tool_call`.
+    pub transform_tool_call: Option<Duration>,
+    /// Deadline for `decide_tool_call`; `None` (cancellation only) by default.
+    pub decide_tool_call: Option<Duration>,
+    /// Deadline for `after_tool_call`.
+    pub after_tool_call: Option<Duration>,
+    /// Deadline for `prepare_next_turn`.
+    pub prepare_next_turn: Option<Duration>,
+}
+
+impl HookTimeouts {
+    const DEFAULT_TIMEOUT: Option<Duration> = Some(Duration::from_secs(30));
+
+    /// Creates per-point deadlines with the default configuration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            transform_context: Self::DEFAULT_TIMEOUT,
+            transform_tool_call: Self::DEFAULT_TIMEOUT,
+            decide_tool_call: None,
+            after_tool_call: Self::DEFAULT_TIMEOUT,
+            prepare_next_turn: Self::DEFAULT_TIMEOUT,
+        }
+    }
+
+    /// Overrides the `transform_context` deadline.
+    #[must_use]
+    pub const fn with_transform_context(mut self, timeout: Option<Duration>) -> Self {
+        self.transform_context = timeout;
+        self
+    }
+
+    /// Overrides the `transform_tool_call` deadline.
+    #[must_use]
+    pub const fn with_transform_tool_call(mut self, timeout: Option<Duration>) -> Self {
+        self.transform_tool_call = timeout;
+        self
+    }
+
+    /// Overrides the `decide_tool_call` deadline.
+    #[must_use]
+    pub const fn with_decide_tool_call(mut self, timeout: Option<Duration>) -> Self {
+        self.decide_tool_call = timeout;
+        self
+    }
+
+    /// Overrides the `after_tool_call` deadline.
+    #[must_use]
+    pub const fn with_after_tool_call(mut self, timeout: Option<Duration>) -> Self {
+        self.after_tool_call = timeout;
+        self
+    }
+
+    /// Overrides the `prepare_next_turn` deadline.
+    #[must_use]
+    pub const fn with_prepare_next_turn(mut self, timeout: Option<Duration>) -> Self {
+        self.prepare_next_turn = timeout;
+        self
+    }
+
+    /// Returns the configured deadline for one hook point.
+    pub(crate) fn for_point(&self, point: HookPoint) -> Option<Duration> {
+        match point {
+            HookPoint::TransformContext => self.transform_context,
+            HookPoint::TransformToolCall => self.transform_tool_call,
+            HookPoint::DecideToolCall => self.decide_tool_call,
+            HookPoint::AfterToolCall => self.after_tool_call,
+            HookPoint::PrepareNextTurn => self.prepare_next_turn,
+            _ => Self::DEFAULT_TIMEOUT,
+        }
+    }
+}
+
+impl Default for HookTimeouts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Safety bounds applied before the loop starts additional work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -47,15 +137,14 @@ pub struct LoopLimits {
     pub max_reasoning_bytes: usize,
     /// Maximum streamed argument bytes for one tool call.
     pub max_tool_argument_bytes: usize,
-    /// Maximum wall-clock time one hook invocation may take.
-    pub hook_timeout: Duration,
+    /// Per-hook-point invocation deadlines.
+    pub hook_timeouts: HookTimeouts,
 }
 
 impl LoopLimits {
     const DEFAULT_MAX_TEXT_BYTES: usize = 1024 * 1024;
     const DEFAULT_MAX_REASONING_BYTES: usize = 1024 * 1024;
     const DEFAULT_MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
-    const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Creates loop safety bounds.
     #[must_use]
@@ -66,7 +155,7 @@ impl LoopLimits {
             max_text_bytes: Self::DEFAULT_MAX_TEXT_BYTES,
             max_reasoning_bytes: Self::DEFAULT_MAX_REASONING_BYTES,
             max_tool_argument_bytes: Self::DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
-            hook_timeout: Self::DEFAULT_HOOK_TIMEOUT,
+            hook_timeouts: HookTimeouts::new(),
         }
     }
 
@@ -84,10 +173,10 @@ impl LoopLimits {
         self
     }
 
-    /// Overrides the per-invocation hook timeout.
+    /// Overrides the per-hook-point invocation deadlines.
     #[must_use]
-    pub const fn with_hook_timeout(mut self, hook_timeout: Duration) -> Self {
-        self.hook_timeout = hook_timeout;
+    pub const fn with_hook_timeouts(mut self, hook_timeouts: HookTimeouts) -> Self {
+        self.hook_timeouts = hook_timeouts;
         self
     }
 }
@@ -158,13 +247,28 @@ mod tests {
     }
 
     #[test]
-    fn hook_timeout_has_a_default_and_an_override() {
-        assert_eq!(LoopLimits::default().hook_timeout, Duration::from_secs(30));
+    fn hook_timeouts_default_per_point_and_accept_overrides() {
+        let defaults = HookTimeouts::default();
+        assert_eq!(defaults.transform_context, Some(Duration::from_secs(30)),);
+        assert_eq!(defaults.decide_tool_call, None);
+        assert_eq!(defaults.after_tool_call, Some(Duration::from_secs(30)));
+        assert_eq!(LoopLimits::default().hook_timeouts, defaults);
+        assert_eq!(defaults.for_point(HookPoint::DecideToolCall), None,);
+        assert_eq!(
+            defaults.for_point(HookPoint::TransformToolCall),
+            Some(Duration::from_secs(30)),
+        );
+
+        let overridden = defaults
+            .with_decide_tool_call(Some(Duration::from_millis(50)))
+            .with_after_tool_call(None);
+        assert_eq!(overridden.decide_tool_call, Some(Duration::from_millis(50)));
+        assert_eq!(overridden.after_tool_call, None);
         assert_eq!(
             LoopLimits::default()
-                .with_hook_timeout(Duration::from_millis(50))
-                .hook_timeout,
-            Duration::from_millis(50)
+                .with_hook_timeouts(overridden)
+                .hook_timeouts,
+            overridden
         );
     }
 }

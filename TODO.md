@@ -103,19 +103,19 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 **依赖：** H1。
 
 - [ ] 在 `stratum-tools` 建立统一参数校验边界。
-- [ ] Hook 前校验模型生成的原始参数。
-- [ ] 完整 Hook Chain 后重新校验最终参数。
+- [x] Hook 前校验模型生成的原始参数（kernel 在 `transform_tool_call` 前完成）。
+- [x] transform 相位后重新校验最终参数（`hookify-tool-approval` 已在 kernel 编排中固化；完整 Hook Chain 后的复验随链实现自然继承）。
 - [ ] 固化 ExtensionSet 中的处理器顺序。
 - [ ] 实现顺序变换、Block 短路和 Stop 短路。
-- [ ] 决策型 Hook 失败时关闭当前操作并返回类型化错误。
-- [ ] 将内置授权与用户审批放在最终参数校验之后。
-- [ ] 保持本阶段 Tool Call 顺序执行。
+- [x] 决策型 Hook 失败时关闭当前操作并返回类型化错误。
+- [x] 将内置授权与用户审批放在最终参数校验之后（审批已 hook 化为 `decide_tool_call` 相位的普通 Handler，`ToolApproval` 边界已移除）。
+- [x] 保持本阶段 Tool Call 顺序执行。
 
 **验收条件：**
 
 - [ ] 重启前后处理器顺序一致。
-- [ ] 审批界面展示的参数与实际执行参数一致。
-- [ ] Hook 修改后的非法参数不会进入审批或 Tool 执行。
+- [x] 审批界面展示的参数与实际执行参数一致（由相位顺序结构性保证：decide 只接收复验后的最终参数，且 decide 不允许修改参数）。
+- [x] Hook 修改后的非法参数不会进入审批或 Tool 执行（transform 结果必须过复验）。
 
 ### H3：Hook 存储与恢复
 

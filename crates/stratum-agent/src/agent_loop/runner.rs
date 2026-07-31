@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashSet, future::Future, sync::Arc};
 
 use stratum_core::{
     AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, HookFailure, HookPoint,
-    LlmCallId, TokenUsage, ToolCall,
+    LlmCallId, TokenUsage, ToolCall, ToolName,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
@@ -12,10 +12,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AfterToolCallDecision, AfterToolCallInput, BeforeToolCallDecision, BeforeToolCallInput,
+    AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
     HookControl, HookRuntime, NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
-    ToolApprovalError, ToolExecutor, ToolExecutorError, TransformContextDecision,
-    TransformContextInput,
+    ToolExecutor, ToolExecutorError, ToolHookTarget, TransformContextDecision,
+    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
 };
 
 use super::{
@@ -121,11 +121,14 @@ impl AgentLoop {
     ///
     /// Cancellation wins over every decision: a token cancelled before the call
     /// never reaches the runtime, and cancellation while waiting stops the wait.
-    /// Hooks that gate a new external action (context transform, before-tool)
-    /// treat cancellation as loop cancellation; hooks on the recording path of
-    /// an already-started tool cycle (after-tool, prepare-next-turn) degrade to
-    /// their no-op decision so the loop can finish recording the outcome and
-    /// then reach its regular cancellation boundary. A missed deadline fails
+    /// Hooks that gate a new external action (context transform, tool-call
+    /// transform, tool-call decide) treat cancellation as loop cancellation;
+    /// hooks on the recording path of an already-started tool cycle
+    /// (after-tool, prepare-next-turn) degrade to their no-op decision so the
+    /// loop can finish recording the outcome and then reach its regular
+    /// cancellation boundary. The deadline is configured per hook point through
+    /// [`LoopLimits::hook_timeouts`]; a point without a deadline (the default
+    /// for decide) is bounded by cancellation only. A missed deadline fails
     /// closed with [`HookFailure::TimedOut`]. Runtime failures are already safe
     /// classifications, so the mapped error only keeps the hook point and the
     /// typed failure.
@@ -141,37 +144,77 @@ impl AgentLoop {
         if cancellation.is_cancelled() {
             return Ok(HookInvocation::Cancelled);
         }
-        let control = HookControl::new(
-            cancellation.clone(),
-            Instant::now() + self.limits.hook_timeout,
-        );
-        let deadline = tokio::time::sleep_until(control.deadline());
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
-            () = deadline => Err(AgentLoopError::Hook {
-                point,
-                failure: HookFailure::TimedOut,
-            }),
-            decision = invoke(control) => decision
+        let deadline = self
+            .limits
+            .hook_timeouts
+            .for_point(point)
+            .map(|timeout| Instant::now() + timeout);
+        let control = HookControl::new(cancellation.clone(), deadline);
+        let invocation = invoke(control);
+        let map_decision = |decision: Result<D, HookFailure>| {
+            decision
                 .map(HookInvocation::Decision)
-                .map_err(|failure| AgentLoopError::Hook { point, failure }),
+                .map_err(|failure| AgentLoopError::Hook { point, failure })
+        };
+        match deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => Err(AgentLoopError::Hook {
+                        point,
+                        failure: HookFailure::TimedOut,
+                    }),
+                    decision = invocation => map_decision(decision),
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
+                    decision = invocation => map_decision(decision),
+                }
+            }
         }
     }
 
-    /// Runs one provider-authorized tool call through the before/after hooks.
+    /// Runs one provider-authorized tool call through lookup, validation, the
+    /// transform/decide/after hooks, and the executor.
+    ///
+    /// The fixed phase order makes the decide phase (for example an approval
+    /// handler) see exactly the arguments that execute: lookup and
+    /// authorization metadata first, original-argument validation, the
+    /// transform hook, final-argument re-validation, the decide hook, then the
+    /// durable start and the call. A missing tool or a failed validation
+    /// produces the executor's structured error result without entering any
+    /// tool hook.
     async fn execute_authorized_tool_call(
         &self,
         iteration: u64,
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
     ) -> Result<ChatMessage, AgentLoopError> {
-        let HookInvocation::Decision(before) = self
-            .execute_hook(HookPoint::BeforeToolCall, cancellation, |control| {
-                self.hook_runtime.before_tool_call(
-                    BeforeToolCallInput {
+        let tool_name = ToolName::new(tool_call.name.clone());
+        let (authorization, tool) = match self.tool_executor.hook_lookup(&tool_name) {
+            Ok(target) => target,
+            Err(error) => return Ok(crate::tool_executor::tool_error_result(tool_call, &error)),
+        };
+        let target = ToolHookTarget {
+            authorization,
+            spec: tool.spec(),
+        };
+
+        if let Err(error) = self.tool_executor.validate_call(&tool_name, tool_call) {
+            return Ok(crate::tool_executor::tool_error_result(tool_call, &error));
+        }
+
+        let HookInvocation::Decision(transform) = self
+            .execute_hook(HookPoint::TransformToolCall, cancellation, |control| {
+                self.hook_runtime.transform_tool_call(
+                    TransformToolCallInput {
                         iteration,
                         tool_call,
+                        tool: &target,
                     },
                     control,
                 )
@@ -180,26 +223,45 @@ impl AgentLoop {
         else {
             return Err(AgentLoopError::Cancelled);
         };
-        let before = before.validate().map_err(|failure| AgentLoopError::Hook {
-            point: HookPoint::BeforeToolCall,
+        let final_call = match transform {
+            TransformToolCallDecision::Continue => Cow::Borrowed(tool_call),
+            TransformToolCallDecision::ModifyArguments { arguments } => {
+                let mut modified = tool_call.clone();
+                modified.arguments = arguments;
+                Cow::Owned(modified)
+            }
+        };
+
+        // The decide phase only sees arguments that passed the final
+        // re-validation, so an approval decision always covers the exact
+        // payload that would execute.
+        if let Err(error) = self.tool_executor.validate_call(&tool_name, &final_call) {
+            return Ok(crate::tool_executor::tool_error_result(tool_call, &error));
+        }
+
+        let HookInvocation::Decision(decide) = self
+            .execute_hook(HookPoint::DecideToolCall, cancellation, |control| {
+                self.hook_runtime.decide_tool_call(
+                    DecideToolCallInput {
+                        iteration,
+                        tool_call: &final_call,
+                        tool: &target,
+                    },
+                    control,
+                )
+            })
+            .await?
+        else {
+            return Err(AgentLoopError::Cancelled);
+        };
+        let decide = decide.validate().map_err(|failure| AgentLoopError::Hook {
+            point: HookPoint::DecideToolCall,
             failure,
         })?;
 
-        let (executed_call, mut message) = match before {
-            BeforeToolCallDecision::Continue => (
-                Cow::Borrowed(tool_call),
-                self.execute_tool(tool_call, cancellation).await?,
-            ),
-            BeforeToolCallDecision::ModifyArguments { arguments } => {
-                let mut modified = tool_call.clone();
-                modified.arguments = arguments;
-                let message = self.execute_tool(&modified, cancellation).await?;
-                (Cow::Owned(modified), message)
-            }
-            BeforeToolCallDecision::Block { reason } => (
-                Cow::Borrowed(tool_call),
-                hook_blocked_result(tool_call, &reason),
-            ),
+        let mut message = match decide {
+            DecideToolCallDecision::Execute => self.execute_tool(&final_call, cancellation).await?,
+            DecideToolCallDecision::Block { reason } => hook_blocked_result(tool_call, &reason),
         };
 
         // Cancellation here means the started tool's outcome must still be
@@ -210,7 +272,8 @@ impl AgentLoop {
                 self.hook_runtime.after_tool_call(
                     AfterToolCallInput {
                         iteration,
-                        tool_call: &executed_call,
+                        tool_call: &final_call,
+                        tool: &target,
                         result: &message,
                     },
                     control,
@@ -222,7 +285,7 @@ impl AgentLoop {
             HookInvocation::Cancelled => AfterToolCallDecision::Keep,
         };
         if let AfterToolCallDecision::ReplaceResult { result } = after {
-            message = ChatMessage::tool(executed_call.call_id.clone(), result);
+            message = ChatMessage::tool(final_call.call_id.clone(), result);
         }
         Ok(message)
     }
@@ -237,10 +300,7 @@ impl AgentLoop {
             Err(ToolExecutorError::Durability { source }) => {
                 Err(AgentLoopError::Durability { source })
             }
-            Err(ToolExecutorError::Approval {
-                source: ToolApprovalError::Cancelled,
-            }) => Err(AgentLoopError::Cancelled),
-            Err(source) => Err(AgentLoopError::ToolExecution { source }),
+            Err(ToolExecutorError::Cancelled) => Err(AgentLoopError::Cancelled),
         }
     }
 
@@ -464,7 +524,7 @@ impl AgentLoopBuilder {
         self
     }
 
-    /// Sets the approval-aware tool executor.
+    /// Sets the tool executor.
     #[must_use]
     pub fn tool_executor(mut self, tool_executor: ToolExecutor) -> Self {
         self.tool_executor = Some(tool_executor);
