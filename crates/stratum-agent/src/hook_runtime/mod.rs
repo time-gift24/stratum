@@ -10,7 +10,7 @@ mod runtime;
 pub use noop::NoopHookRuntime;
 pub use runtime::{
     AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
-    HookControl, HookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput, ToolHookTarget,
-    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    HookControl, HookRuntime, HookSnapshot, PrepareNextTurnDecision, PrepareNextTurnInput,
+    ToolHookTarget, TransformContextDecision, TransformContextInput, TransformToolCallDecision,
     TransformToolCallInput,
 };

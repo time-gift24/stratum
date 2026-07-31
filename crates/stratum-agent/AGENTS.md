@@ -53,6 +53,19 @@ legacy stateful `Agent` compatibility path.
   `AgentLoop` holds one `Arc<dyn HookRuntime>` injected via
   `AgentLoopBuilder::hook_runtime`; without injection the no-op runtime keeps
   pre-hook kernel behavior byte-identical.
+- Every hook input embeds the same borrowed `HookSnapshot` (`iteration`,
+  `&LoopContext`, `Option<TokenUsage>`). This is the wide-read/narrow-write
+  principle: handlers may read ambient loop state, but their effects stay
+  confined to the narrow typed decisions. New ambient input fields go into
+  `HookSnapshot` only — never into the per-hook input structs, which carry
+  just their point-specific payloads (`tool_call`, `tool`, `result`).
+- `snapshot.context` is the committed context at that hook's boundary:
+  `transform_context` sees committed context plus pending one-shot injects;
+  tool hooks see the committed context including already-committed results of
+  the current cycle; `after_tool_call` never sees its own uncommitted result
+  (that lives in the `result` payload); `prepare_next_turn` sees the cycle's
+  full committed results. `snapshot.usage` is the run's accumulated
+  `TokenUsage` up to the boundary, or `None` when the provider never reported.
 - The three tool hooks receive a borrowed `ToolHookTarget` (authorization
   metadata `ToolKind`/`DangerLevel` plus `ToolSpec`) looked up by the kernel
   before the call; handlers never query the registry themselves.

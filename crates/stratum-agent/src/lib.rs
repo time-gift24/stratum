@@ -16,8 +16,8 @@ pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
 pub use hook_runtime::{
     AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
-    HookControl, HookRuntime, NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
-    ToolHookTarget, TransformContextDecision, TransformContextInput, TransformToolCallDecision,
-    TransformToolCallInput,
+    HookControl, HookRuntime, HookSnapshot, NoopHookRuntime, PrepareNextTurnDecision,
+    PrepareNextTurnInput, ToolHookTarget, TransformContextDecision, TransformContextInput,
+    TransformToolCallDecision, TransformToolCallInput,
 };
 pub use tool_executor::{ToolExecutor, ToolExecutorError};
