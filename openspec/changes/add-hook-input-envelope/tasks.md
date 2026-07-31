@@ -19,7 +19,7 @@
 
 ## 4. 文档、质量门禁与校验
 
-- [ ] 4.1 更新 `crates/stratum-agent/AGENTS.md`：归档 `HookSnapshot`、逐点 context 语义与"宽读窄写"原则
-- [ ] 4.2 勾选 `TODO.md` 的 H2.5 条目
+- [x] 4.1 更新 `crates/stratum-agent/AGENTS.md`：归档 `HookSnapshot`、逐点 context 语义与"宽读窄写"原则
+- [x] 4.2 勾选 `TODO.md` 的 H2.5 条目
 - [x] 4.3 运行 `cargo fmt --check`、`cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets`、`cargo test --workspace --all-targets`，修复本 change 引入的失败
 - [x] 4.4 运行 `openspec validate add-hook-input-envelope --type change --strict --no-interactive` 与 `openspec validate --all --strict`

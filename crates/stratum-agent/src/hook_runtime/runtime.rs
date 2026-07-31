@@ -51,7 +51,7 @@ impl HookControl {
 
 /// Borrowed read-side snapshot shared by every hook input.
 ///
-/// The kernel builds one snapshot per hook boundary with zero allocation: it
+/// The kernel builds snapshots at hook boundaries with zero allocation: it
 /// borrows the committed context and copies the small usage accumulator. The
 /// snapshot is read-only; point-specific payloads (the tool call, the tool
 /// target, the produced result) stay in the individual input structures and
@@ -71,8 +71,10 @@ impl HookControl {
 ///   committed results.
 ///
 /// Read-side state shared by all hooks is added here only; the five hook
-/// inputs embed the snapshot and inherit new fields unchanged.
-#[derive(Debug, Clone, Copy)]
+/// inputs embed the snapshot and inherit new fields unchanged. Note that
+/// adding a non-`Copy` field (for example an owned tool list) will require
+/// dropping the `Copy` implementation.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct HookSnapshot<'a> {
     /// Zero-based model iteration the hook boundary belongs to.
@@ -83,6 +85,19 @@ pub struct HookSnapshot<'a> {
     /// Token usage accumulated from provider reports in this run up to this
     /// boundary, or `None` when no provider response has reported usage yet.
     pub usage: Option<TokenUsage>,
+}
+
+impl<'a> HookSnapshot<'a> {
+    /// Creates a snapshot from its parts, for handler tests and compositions
+    /// outside the kernel.
+    #[must_use]
+    pub const fn new(iteration: u64, context: &'a LoopContext, usage: Option<TokenUsage>) -> Self {
+        Self {
+            iteration,
+            context,
+            usage,
+        }
+    }
 }
 
 /// Borrowed input to [`HookRuntime::transform_context`].
