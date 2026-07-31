@@ -22,8 +22,10 @@
 flowchart LR
     M0["M0：身份与协议基线"] --> H1["H1：Hook 核心合同"]
     H1 --> H2["H2：有序 Runner 与工具校验"]
-    H2 --> H3["H3：Hook 存储与恢复"]
+    H2 --> H25["H2.5：Hook 输入公共信封"]
+    H25 --> H3["H3：Hook 存储与恢复"]
     H3 --> H4["H4：Tool 幂等与恢复"]
+    H3 --> H5["H5：上下文压缩"]
     H3 --> S2["S2：Deno / Python 扩展宿主"]
     H3 --> R3["R3：Rust SDK 与 Hook Service"]
 
@@ -117,6 +119,21 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 审批界面展示的参数与实际执行参数一致（由相位顺序结构性保证：decide 只接收复验后的最终参数，且 decide 不允许修改参数）。
 - [x] Hook 修改后的非法参数不会进入审批或 Tool 执行（transform 结果必须过复验）。
 
+### H2.5：Hook 输入公共信封
+
+**依赖：** H1。**阻塞：** H3 输入摘要冻结、S1 handler 编写、S2 协议冻结（破坏性合同修订，越晚越贵）。
+
+- [ ] 定义借用公共信封 `HookSnapshot`（`iteration`、`&LoopContext`、`Option<TokenUsage>`，未来可扩展工具列表与预算），嵌入全部五个 Hook 输入。
+- [ ] 逐点钉死 `snapshot.context` 语义：该 Hook 边界时刻的 committed context；`transform_context` 含待消费 Inject；`after_tool_call` 不含未提交的当前 result。
+- [ ] 保持宽读窄写：decision 词汇不变，公共信息只读。
+- [ ] `after_tool_call` 经由信封获得完整历史，使结果级压缩等内容感知决策可行。
+- [ ] 同步 No-op、公共导出、recording 测试基建与全部 hook 测试。
+
+**验收条件：**
+
+- [ ] 新增公共字段只改 `HookSnapshot` 一处即可被全部 Hook 点继承（以一次模拟新增字段验证）。
+- [ ] 信封化后所有既有 hook 行为测试保持不变。
+
 ### H3：Hook 存储与恢复
 
 **依赖：** H2、P1。
@@ -154,6 +171,23 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 进程崩溃不会让 Tool 被静默执行两次。
 - [ ] 无法确认 Tool 结果时 Fail Closed。
 
+### H5：上下文压缩
+
+**依赖：** H2.5、H3。
+
+- [ ] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
+- [ ] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"，不触碰历史，写回由 kernel 代执行。
+- [ ] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记，不得伪装成用户或助手消息。
+- [ ] 压缩后的 transcript 成为新的 durable 基线（新增 transcript 改写类耐久事件），resume 从压缩基线恢复。
+- [ ] 决定摘要算力归属：kernel 注入的 summarizer 边界（版本可固定在 runtime snapshot）还是 handler 自带 provider。
+- [ ] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
+
+**验收条件：**
+
+- [ ] 压缩后 resume 重建的历史与压缩基线一致。
+- [ ] 任何压缩结果都不切断 tool_call/tool_result 配对，切割点只在迭代边界。
+- [ ] 崩溃于压缩提交前时恢复为未压缩基线（fail-safe），不重复执行已完成的工作。
+
 ### S1：第一档运行时 Skill
 
 **依赖：** H1 的 `transform_context`、M0 的制品版本模型。
@@ -167,6 +201,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [ ] 为通用 Agent 提供受信任的 Skill 上下文处理器。
 - [ ] Skill 只能使用已授权 Tool，不能自行扩权。
 - [ ] API 和 Web 支持发布 Skill 并挂载到通用 Agent。
+- [ ] 评估 `transform_context` 扩展：当前输入只有 `LoopContext`（system prompt + messages），不含工具 schema（schema 在构造 `ChatRequest` 时才注入）。若 Skill 需要按迭代动态裁剪工具列表，需让 `transform_context` 可见甚至可替换 `Vec<ToolSpec>`；只读可见则加一个 `tools: &[ToolSpec]` 借用字段即可。注意三个 Tool Hook 的 `ToolHookTarget.spec` 已携带单个工具的 schema，审批/校验路径不受影响。
 
 **纵向切片：**
 
@@ -325,8 +360,10 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 ### 必须串行
 
 - Tool 参数修改 → 最终校验 → 用户审批 → Tool 执行。
+- Hook 输入公共信封（H2.5）冻结后，才能冻结 H3 输入摘要与 S2 Hook Wire Protocol。
 - Hook 存储和版本固定完成后，才能接入 Script/Rust 远程执行。
 - Hook 存储完成后，才能实现 Tool 幂等与恢复。
+- 上下文压缩只能在迭代边界切割，禁止在 tool cycle 中间改写历史。
 - Session 与版本身份基线确定后，才能固化 Workflow 持久化协议。
 - 节点状态可持久化后，才能实现 Queue Resume。
 - 出现真实并发/重试需求并明确从属操作幂等语义后，才能加入 Loop 与 Retry 身份。

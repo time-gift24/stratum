@@ -57,7 +57,7 @@ AgentLoop 必须（SHALL）为每个 Hook 提供当前 CancellationToken，并�
 - **WHEN** 任一 Hook Runtime 返回安全的类型化 HookFailure
 - **THEN** AgentLoop 保留 HookPoint 与失败分类，且公开错误、trace 和 durable terminal event 不包含 prompt、Tool 参数、Tool result 或 Runtime 内部错误正文
 
-#### Scenario: 各 Hook 的失败矩阵
+#### Scenario: 四个 Hook 的失败矩阵
 - **WHEN** transform_context、transform_tool_call、decide_tool_call、after_tool_call 或 prepare_next_turn 分别发生正常返回、Handler 失败、timeout 或取消
 - **THEN** 每个 Hook point 都遵守相同的成功、fail-closed、deadline 和 cancellation 合同
 
