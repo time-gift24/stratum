@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use stratum_core::{ChatMessage, ChatRole, HookFailure, ToolCall};
+use stratum_core::{ChatMessage, ChatRole, DangerLevel, HookFailure, ToolCall, ToolKind, ToolSpec};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -14,17 +14,19 @@ use crate::LoopContext;
 /// Control information the agent loop enforces for every hook invocation.
 ///
 /// The loop stops waiting for a hook when the cancellation token fires or the
-/// absolute deadline passes, regardless of what the runtime itself does.
+/// absolute deadline passes, regardless of what the runtime itself does. A
+/// hook point without a configured deadline is bounded by cancellation only.
 #[derive(Debug, Clone)]
 pub struct HookControl {
     cancellation: CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl HookControl {
-    /// Creates control information from the turn token and an absolute deadline.
+    /// Creates control information from the turn token and an optional absolute
+    /// deadline.
     #[must_use]
-    pub fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+    pub fn new(cancellation: CancellationToken, deadline: Option<Instant>) -> Self {
         Self {
             cancellation,
             deadline,
@@ -37,9 +39,10 @@ impl HookControl {
         &self.cancellation
     }
 
-    /// Returns the absolute deadline after which the loop stops waiting.
+    /// Returns the absolute deadline after which the loop stops waiting, or
+    /// `None` when this hook point is bounded by cancellation only.
     #[must_use]
-    pub const fn deadline(&self) -> Instant {
+    pub const fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
 }
@@ -67,35 +70,82 @@ pub enum TransformContextDecision {
     },
 }
 
-/// Borrowed input to [`HookRuntime::before_tool_call`].
-#[derive(Debug)]
-pub struct BeforeToolCallInput<'a> {
-    /// Zero-based model iteration that produced the tool call.
-    pub iteration: u64,
-    /// Provider tool call authorized by a `tool_calls` finish reason.
-    pub tool_call: &'a ToolCall,
+/// Borrowed view of the tool one tool hook invocation applies to.
+///
+/// The kernel resolves the target before any tool hook runs; handlers must
+/// treat it as display and decision context and must not query the tool
+/// registry themselves. `None` authorization means the tool is pre-authorized
+/// and carries no approval metadata.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct ToolHookTarget<'a> {
+    /// Authorization metadata (`ToolKind`, `DangerLevel`) from the registry,
+    /// or `None` when the tool is pre-authorized.
+    pub authorization: Option<(ToolKind, DangerLevel)>,
+    /// Provider-visible specification of the tool being called.
+    pub spec: &'a ToolSpec,
 }
 
-/// Decision returned by [`HookRuntime::before_tool_call`].
+/// Borrowed input to [`HookRuntime::transform_tool_call`].
+#[derive(Debug)]
+pub struct TransformToolCallInput<'a> {
+    /// Zero-based model iteration that produced the tool call.
+    pub iteration: u64,
+    /// Provider tool call authorized by a `tool_calls` finish reason, carrying
+    /// the original validated arguments.
+    pub tool_call: &'a ToolCall,
+    /// Resolved tool target with authorization metadata and specification.
+    pub tool: &'a ToolHookTarget<'a>,
+}
+
+/// Decision returned by [`HookRuntime::transform_tool_call`].
+///
+/// The transform phase may only continue or replace arguments; it can neither
+/// block the call nor change its identity. Replacement arguments are
+/// re-validated by the kernel before the decide phase.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub enum BeforeToolCallDecision {
-    /// Hand the original tool call to the tool executor.
+pub enum TransformToolCallDecision {
+    /// Keep the original arguments.
     Continue,
     /// Execute the same call identity and tool name with new arguments.
     ModifyArguments {
         /// Replacement JSON arguments.
         arguments: Value,
     },
-    /// Skip approval and execution, answering with a structured `hook_blocked`
-    /// tool result. The reason must be non-empty and safe to show the model.
+}
+
+/// Borrowed input to [`HookRuntime::decide_tool_call`].
+#[derive(Debug)]
+pub struct DecideToolCallInput<'a> {
+    /// Zero-based model iteration that produced the tool call.
+    pub iteration: u64,
+    /// Tool call carrying the final re-validated arguments exactly as they
+    /// would be executed.
+    pub tool_call: &'a ToolCall,
+    /// Resolved tool target with authorization metadata and specification.
+    pub tool: &'a ToolHookTarget<'a>,
+}
+
+/// Decision returned by [`HookRuntime::decide_tool_call`].
+///
+/// The decide phase may only execute or block; it can never modify arguments,
+/// so the arguments a decider (for example an approval handler) sees are
+/// exactly the arguments that execute.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum DecideToolCallDecision {
+    /// Commit `ToolExecutionStarted` and execute the call.
+    Execute,
+    /// Skip execution, answering with a structured `hook_blocked` tool result.
+    /// The reason must be non-empty and safe to show the model.
     Block {
         /// Model-visible block reason.
         reason: String,
     },
 }
 
-impl BeforeToolCallDecision {
+impl DecideToolCallDecision {
     /// Enforces the decision contract before the loop applies it.
     pub(crate) fn validate(self) -> Result<Self, HookFailure> {
         match &self {
@@ -112,7 +162,9 @@ pub struct AfterToolCallInput<'a> {
     pub iteration: u64,
     /// Tool call as it was executed, including hook-modified arguments.
     pub tool_call: &'a ToolCall,
-    /// Model-visible tool result produced by execution or a before-tool block.
+    /// Resolved tool target with authorization metadata and specification.
+    pub tool: &'a ToolHookTarget<'a>,
+    /// Model-visible tool result produced by execution or a decide-phase block.
     pub result: &'a ChatMessage,
 }
 
@@ -179,9 +231,10 @@ fn is_plain_user_message(message: &ChatMessage) -> bool {
 ///
 /// A runtime is a single already-composed strategy boundary: it does not expose
 /// handler lists, sessions, journals, or event buses. The loop enforces the
-/// [`HookControl`] cancellation token and absolute deadline around every call;
-/// hook futures must therefore be cancellation-safe and must not start external
-/// side effects that cannot be abandoned safely before returning a decision.
+/// [`HookControl`] cancellation token and optional absolute deadline around
+/// every call; hook futures must therefore be cancellation-safe and must not
+/// start external side effects that cannot be abandoned safely before
+/// returning a decision.
 ///
 /// Returned failures must already be safe [`HookFailure`] classifications: the
 /// loop never records hook inputs, tool payloads, or internal error text.
@@ -199,17 +252,37 @@ pub trait HookRuntime: Send + Sync {
         control: HookControl,
     ) -> Result<TransformContextDecision, HookFailure>;
 
-    /// Decides whether and how one authorized tool call executes.
+    /// Transforms the arguments of one authorized tool call.
+    ///
+    /// Runs after the original arguments validate and before the final
+    /// re-validation and the decide phase.
     ///
     /// # Errors
     ///
     /// Returns a safe [`HookFailure`] classification; the affected tool call is
-    /// then neither approved nor executed and the loop fails closed.
-    async fn before_tool_call<'a>(
+    /// then neither decided nor executed and the loop fails closed.
+    async fn transform_tool_call<'a>(
         &self,
-        input: BeforeToolCallInput<'a>,
+        input: TransformToolCallInput<'a>,
         control: HookControl,
-    ) -> Result<BeforeToolCallDecision, HookFailure>;
+    ) -> Result<TransformToolCallDecision, HookFailure>;
+
+    /// Decides whether one re-validated tool call executes.
+    ///
+    /// Runs after the final argument re-validation and before
+    /// `ToolExecutionStarted`. Interactive approval is an ordinary handler at
+    /// this phase; the point has no default deadline and is bounded by
+    /// cancellation only unless configured otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe [`HookFailure`] classification; the affected tool call is
+    /// then not executed and the loop fails closed.
+    async fn decide_tool_call<'a>(
+        &self,
+        input: DecideToolCallInput<'a>,
+        control: HookControl,
+    ) -> Result<DecideToolCallDecision, HookFailure>;
 
     /// Processes one model-visible tool result before it is committed.
     ///
@@ -246,24 +319,24 @@ mod tests {
     #[test]
     fn block_decisions_require_a_non_empty_reason() {
         for reason in ["", "   "] {
-            let decision = BeforeToolCallDecision::Block {
+            let decision = DecideToolCallDecision::Block {
                 reason: reason.to_owned(),
             };
             assert_eq!(decision.validate(), Err(HookFailure::InvalidOutput));
         }
-        let decision = BeforeToolCallDecision::Block {
+        let decision = DecideToolCallDecision::Block {
             reason: "policy denied".to_owned(),
         };
         assert_eq!(
             decision.validate(),
-            Ok(BeforeToolCallDecision::Block {
+            Ok(DecideToolCallDecision::Block {
                 reason: "policy denied".to_owned(),
             })
         );
-        let decision = BeforeToolCallDecision::ModifyArguments {
-            arguments: json!({"value": 1}),
-        };
-        assert!(decision.validate().is_ok());
+        assert_eq!(
+            DecideToolCallDecision::Execute.validate(),
+            Ok(DecideToolCallDecision::Execute)
+        );
     }
 
     #[test]
@@ -314,11 +387,14 @@ mod tests {
     fn hook_control_exposes_the_shared_token_and_deadline() {
         let cancellation = CancellationToken::new();
         let deadline = Instant::now();
-        let control = HookControl::new(cancellation.clone(), deadline);
+        let control = HookControl::new(cancellation.clone(), Some(deadline));
 
         assert!(!control.cancellation().is_cancelled());
-        assert_eq!(control.deadline(), deadline);
+        assert_eq!(control.deadline(), Some(deadline));
         cancellation.cancel();
         assert!(control.cancellation().is_cancelled());
+
+        let control = HookControl::new(CancellationToken::new(), None);
+        assert_eq!(control.deadline(), None);
     }
 }

@@ -9,14 +9,14 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::{Value, json};
 use stratum_agent::{
-    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, AllowAllToolApproval,
-    BeforeToolCallDecision, BeforeToolCallInput, HookControl, HookRuntime, LoopCompletionReason,
-    LoopContext, LoopLimits, PrepareNextTurnDecision, PrepareNextTurnInput, ToolApproval,
-    ToolApprovalError, ToolApprovalRequest, ToolExecutor, TransformContextDecision,
-    TransformContextInput,
+    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, DecideToolCallDecision,
+    DecideToolCallInput, HookControl, HookRuntime, HookTimeouts, LoopCompletionReason, LoopContext,
+    LoopLimits, PrepareNextTurnDecision, PrepareNextTurnInput, ToolExecutor, ToolHookTarget,
+    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    TransformToolCallInput,
 };
 use stratum_core::{
-    AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
+    AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
     DurableAgentEvent, HookFailure, HookPoint, ModelId, ToolCall, ToolCallDelta, ToolKind,
     ToolName, ToolSpec,
 };
@@ -27,6 +27,7 @@ use stratum_llm::{
 use stratum_tools::{
     BuiltinToolRegistry, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry,
 };
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,19 +38,42 @@ enum Operation {
     Hook(HookCall),
 }
 
+/// Owned snapshot of the borrowed [`ToolHookTarget`] one hook received.
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedTarget {
+    authorization: Option<(ToolKind, DangerLevel)>,
+    spec: ToolSpec,
+}
+
+impl RecordedTarget {
+    fn of(target: &ToolHookTarget<'_>) -> Self {
+        Self {
+            authorization: target.authorization,
+            spec: target.spec.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum HookCall {
     TransformContext {
         iteration: u64,
         context: LoopContext,
     },
-    BeforeToolCall {
+    TransformToolCall {
         iteration: u64,
         tool_call: ToolCall,
+        target: RecordedTarget,
+    },
+    DecideToolCall {
+        iteration: u64,
+        tool_call: ToolCall,
+        target: RecordedTarget,
     },
     AfterToolCall {
         iteration: u64,
         tool_call: ToolCall,
+        target: RecordedTarget,
         result: ChatMessage,
     },
     PrepareNextTurn {
@@ -68,9 +92,17 @@ enum TransformBehavior {
 }
 
 #[derive(Debug, Clone)]
-enum BeforeBehavior {
+enum ToolTransformBehavior {
     Continue,
     Modify(Value),
+    Fail(HookFailure),
+    Pending,
+    CancelThenPending,
+}
+
+#[derive(Debug, Clone)]
+enum DecideBehavior {
+    Execute,
     Block(String),
     Fail(HookFailure),
     Pending,
@@ -101,6 +133,7 @@ enum PrepareBehavior {
 struct ObservedControl {
     point: HookPoint,
     token_cancelled: bool,
+    has_deadline: bool,
     deadline_in_future: bool,
 }
 
@@ -108,7 +141,8 @@ struct RecordingHookRuntime {
     operations: Arc<Mutex<Vec<Operation>>>,
     controls: Arc<Mutex<Vec<ObservedControl>>>,
     transforms: Mutex<VecDeque<TransformBehavior>>,
-    befores: Mutex<VecDeque<BeforeBehavior>>,
+    tool_transforms: Mutex<VecDeque<ToolTransformBehavior>>,
+    decides: Mutex<VecDeque<DecideBehavior>>,
     afters: Mutex<VecDeque<AfterBehavior>>,
     prepares: Mutex<VecDeque<PrepareBehavior>>,
 }
@@ -119,7 +153,8 @@ impl RecordingHookRuntime {
             operations: Arc::clone(operations),
             controls: Arc::new(Mutex::new(Vec::new())),
             transforms: Mutex::new(VecDeque::new()),
-            befores: Mutex::new(VecDeque::new()),
+            tool_transforms: Mutex::new(VecDeque::new()),
+            decides: Mutex::new(VecDeque::new()),
             afters: Mutex::new(VecDeque::new()),
             prepares: Mutex::new(VecDeque::new()),
         }
@@ -133,8 +168,19 @@ impl RecordingHookRuntime {
         self
     }
 
-    fn with_befores(self, behaviors: impl IntoIterator<Item = BeforeBehavior>) -> Self {
-        self.befores
+    fn with_tool_transforms(
+        self,
+        behaviors: impl IntoIterator<Item = ToolTransformBehavior>,
+    ) -> Self {
+        self.tool_transforms
+            .lock()
+            .expect("behavior lock should not be poisoned")
+            .extend(behaviors);
+        self
+    }
+
+    fn with_decides(self, behaviors: impl IntoIterator<Item = DecideBehavior>) -> Self {
+        self.decides
             .lock()
             .expect("behavior lock should not be poisoned")
             .extend(behaviors);
@@ -158,16 +204,17 @@ impl RecordingHookRuntime {
     }
 
     fn record_control(&self, point: HookPoint, control: &HookControl) {
-        let remaining = control
-            .deadline()
-            .saturating_duration_since(tokio::time::Instant::now());
+        let deadline = control.deadline();
         self.controls
             .lock()
             .expect("control lock should not be poisoned")
             .push(ObservedControl {
                 point,
                 token_cancelled: control.cancellation().is_cancelled(),
-                deadline_in_future: remaining > Duration::ZERO,
+                has_deadline: deadline.is_some(),
+                deadline_in_future: deadline.is_some_and(|deadline| {
+                    deadline.saturating_duration_since(tokio::time::Instant::now()) > Duration::ZERO
+                }),
             });
     }
 
@@ -211,31 +258,60 @@ impl HookRuntime for RecordingHookRuntime {
         }
     }
 
-    async fn before_tool_call<'a>(
+    async fn transform_tool_call<'a>(
         &self,
-        input: BeforeToolCallInput<'a>,
+        input: TransformToolCallInput<'a>,
         control: HookControl,
-    ) -> Result<BeforeToolCallDecision, HookFailure> {
-        self.record_control(HookPoint::BeforeToolCall, &control);
-        self.record(HookCall::BeforeToolCall {
+    ) -> Result<TransformToolCallDecision, HookFailure> {
+        self.record_control(HookPoint::TransformToolCall, &control);
+        self.record(HookCall::TransformToolCall {
             iteration: input.iteration,
             tool_call: input.tool_call.clone(),
+            target: RecordedTarget::of(input.tool),
         });
         let behavior = self
-            .befores
+            .tool_transforms
             .lock()
             .expect("behavior lock should not be poisoned")
             .pop_front()
-            .unwrap_or(BeforeBehavior::Continue);
+            .unwrap_or(ToolTransformBehavior::Continue);
         match behavior {
-            BeforeBehavior::Continue => Ok(BeforeToolCallDecision::Continue),
-            BeforeBehavior::Modify(arguments) => {
-                Ok(BeforeToolCallDecision::ModifyArguments { arguments })
+            ToolTransformBehavior::Continue => Ok(TransformToolCallDecision::Continue),
+            ToolTransformBehavior::Modify(arguments) => {
+                Ok(TransformToolCallDecision::ModifyArguments { arguments })
             }
-            BeforeBehavior::Block(reason) => Ok(BeforeToolCallDecision::Block { reason }),
-            BeforeBehavior::Fail(failure) => Err(failure),
-            BeforeBehavior::Pending => pending().await,
-            BeforeBehavior::CancelThenPending => {
+            ToolTransformBehavior::Fail(failure) => Err(failure),
+            ToolTransformBehavior::Pending => pending().await,
+            ToolTransformBehavior::CancelThenPending => {
+                control.cancellation().cancel();
+                pending().await
+            }
+        }
+    }
+
+    async fn decide_tool_call<'a>(
+        &self,
+        input: DecideToolCallInput<'a>,
+        control: HookControl,
+    ) -> Result<DecideToolCallDecision, HookFailure> {
+        self.record_control(HookPoint::DecideToolCall, &control);
+        self.record(HookCall::DecideToolCall {
+            iteration: input.iteration,
+            tool_call: input.tool_call.clone(),
+            target: RecordedTarget::of(input.tool),
+        });
+        let behavior = self
+            .decides
+            .lock()
+            .expect("behavior lock should not be poisoned")
+            .pop_front()
+            .unwrap_or(DecideBehavior::Execute);
+        match behavior {
+            DecideBehavior::Execute => Ok(DecideToolCallDecision::Execute),
+            DecideBehavior::Block(reason) => Ok(DecideToolCallDecision::Block { reason }),
+            DecideBehavior::Fail(failure) => Err(failure),
+            DecideBehavior::Pending => pending().await,
+            DecideBehavior::CancelThenPending => {
                 control.cancellation().cancel();
                 pending().await
             }
@@ -251,6 +327,7 @@ impl HookRuntime for RecordingHookRuntime {
         self.record(HookCall::AfterToolCall {
             iteration: input.iteration,
             tool_call: input.tool_call.clone(),
+            target: RecordedTarget::of(input.tool),
             result: input.result.clone(),
         });
         let behavior = self
@@ -383,6 +460,7 @@ impl LlmProvider for ScriptedProvider {
 struct EchoRecordingTool {
     spec: ToolSpec,
     operations: Arc<Mutex<Vec<Operation>>>,
+    strict_validation: bool,
 }
 
 #[async_trait]
@@ -391,7 +469,13 @@ impl Tool for EchoRecordingTool {
         &self.spec
     }
 
-    fn validate(&self, _input: &ToolInput) -> Result<(), ToolError> {
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        if self.strict_validation && !input.arguments.is_object() {
+            return Err(ToolError::InvalidArgument {
+                name: "arguments",
+                reason: "must be an object",
+            });
+        }
         Ok(())
     }
 
@@ -411,19 +495,12 @@ impl Tool for EchoRecordingTool {
     }
 }
 
-struct FailingToolApproval;
-
-#[async_trait]
-impl ToolApproval for FailingToolApproval {
-    async fn request(
-        &self,
-        _request: ToolApprovalRequest,
-        _cancellation: &CancellationToken,
-    ) -> Result<ApprovalDecision, ToolApprovalError> {
-        Err(ToolApprovalError::interaction(std::io::Error::other(
-            "scripted approval failure",
-        )))
-    }
+fn echo_spec() -> ToolSpec {
+    ToolSpec::builder()
+        .name("echo")
+        .description("records calls")
+        .input_schema(json!({"type": "object"}))
+        .build()
 }
 
 fn tool_delta(index: usize, call_id: &str, name: &str, arguments: &Value) -> ChatStreamEvent {
@@ -457,20 +534,22 @@ fn stop_turn(text: &str) -> Vec<ChatStreamEvent> {
     ]
 }
 
-fn echo_registry(
+fn echo_registry(operations: &Arc<Mutex<Vec<Operation>>>) -> Arc<dyn ToolRegistry> {
+    echo_registry_with(operations, ToolPermissionMode::Allow, false)
+}
+
+fn echo_registry_with(
     operations: &Arc<Mutex<Vec<Operation>>>,
     permission_mode: ToolPermissionMode,
+    strict_validation: bool,
 ) -> Arc<dyn ToolRegistry> {
     let mut registry = BuiltinToolRegistry::new(permission_mode);
     registry
         .register(
             Arc::new(EchoRecordingTool {
-                spec: ToolSpec::builder()
-                    .name("echo")
-                    .description("records calls")
-                    .input_schema(json!({"type": "object"}))
-                    .build(),
+                spec: echo_spec(),
                 operations: Arc::clone(operations),
+                strict_validation,
             }),
             ToolKind::Read,
             DangerLevel::Low,
@@ -483,7 +562,6 @@ fn build_loop(
     behaviors: VecDeque<Vec<ChatStreamEvent>>,
     limits: LoopLimits,
     registry: Arc<dyn ToolRegistry>,
-    approval: Arc<dyn ToolApproval>,
     durable: Arc<dyn DurableEventSink>,
     hook_runtime: Option<Arc<dyn HookRuntime>>,
     operations: &Arc<Mutex<Vec<Operation>>>,
@@ -497,7 +575,7 @@ fn build_loop(
     });
     let builder = AgentLoop::builder()
         .llm_provider(provider)
-        .tool_executor(ToolExecutor::new(registry, approval, durable))
+        .tool_executor(ToolExecutor::new(registry, durable))
         .telemetry(Arc::new(NullTelemetrySink))
         .limits(limits);
     let builder = match hook_runtime {
@@ -516,8 +594,7 @@ fn default_loop(
     build_loop(
         behaviors,
         LoopLimits::new(8, 4),
-        echo_registry(operations, ToolPermissionMode::Allow),
-        Arc::new(AllowAllToolApproval),
+        echo_registry(operations),
         Arc::new(RecordingDurableSink {
             operations: Arc::clone(operations),
         }),
@@ -535,8 +612,7 @@ fn hooked_loop(
     let agent_loop = build_loop(
         behaviors,
         LoopLimits::new(8, 4),
-        echo_registry(operations, ToolPermissionMode::Allow),
-        Arc::new(AllowAllToolApproval),
+        echo_registry(operations),
         Arc::new(RecordingDurableSink {
             operations: Arc::clone(operations),
         }),
@@ -583,6 +659,16 @@ fn chat_requests(operations: &[Operation]) -> Vec<ChatRequest> {
         .collect()
 }
 
+fn has_approval_events(operations: &[Operation]) -> bool {
+    durable_events(operations).iter().any(|event| {
+        matches!(
+            event,
+            DurableAgentEvent::ToolApprovalRequested { .. }
+                | DurableAgentEvent::ToolApprovalResolved { .. }
+        )
+    })
+}
+
 async fn run_once(
     agent_loop: &AgentLoop,
     cancellation: CancellationToken,
@@ -596,7 +682,7 @@ async fn run_once(
         .await
 }
 
-// 3.1: the default builder keeps the pre-hook kernel behavior unchanged.
+// 4.1: the default builder keeps the pre-hook kernel behavior unchanged.
 #[tokio::test]
 async fn default_noop_runtime_preserves_pre_hook_behavior() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -677,9 +763,10 @@ async fn default_noop_runtime_preserves_pre_hook_behavior() {
     ));
 }
 
-// 3.1: an injected runtime is called at all four points in the fixed order.
+// 4.1: an injected runtime is called at all five points in the fixed order,
+// and only the decide point has no deadline by default.
 #[tokio::test]
-async fn custom_runtime_is_invoked_at_all_four_points_in_order() {
+async fn custom_runtime_is_invoked_at_all_five_points_in_order() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations);
     let (agent_loop, controls) = hooked_loop(
@@ -700,6 +787,15 @@ async fn custom_runtime_is_invoked_at_all_four_points_in_order() {
         LoopCompletionReason::Model(FinishReason::Stop)
     );
     let recorded = snapshot(&operations);
+    let expected_call = ToolCall {
+        call_id: CallId::from("call-1"),
+        name: "echo".to_owned(),
+        arguments: json!({"value": "one"}),
+    };
+    let expected_target = RecordedTarget {
+        authorization: None,
+        spec: echo_spec(),
+    };
     assert_eq!(
         hook_calls(&recorded),
         vec![
@@ -708,21 +804,20 @@ async fn custom_runtime_is_invoked_at_all_four_points_in_order() {
                 context: LoopContext::new("be precise")
                     .with_messages(vec![ChatMessage::user("use echo")]),
             },
-            HookCall::BeforeToolCall {
+            HookCall::TransformToolCall {
                 iteration: 0,
-                tool_call: ToolCall {
-                    call_id: CallId::from("call-1"),
-                    name: "echo".to_owned(),
-                    arguments: json!({"value": "one"}),
-                },
+                tool_call: expected_call.clone(),
+                target: expected_target.clone(),
+            },
+            HookCall::DecideToolCall {
+                iteration: 0,
+                tool_call: expected_call.clone(),
+                target: expected_target.clone(),
             },
             HookCall::AfterToolCall {
                 iteration: 0,
-                tool_call: ToolCall {
-                    call_id: CallId::from("call-1"),
-                    name: "echo".to_owned(),
-                    arguments: json!({"value": "one"}),
-                },
+                tool_call: expected_call.clone(),
+                target: expected_target,
                 result: ChatMessage::tool(
                     CallId::from("call-1"),
                     json!({"echo": {"value": "one"}}),
@@ -736,11 +831,7 @@ async fn custom_runtime_is_invoked_at_all_four_points_in_order() {
                 iteration: 1,
                 context: LoopContext::new("be precise").with_messages(vec![
                     ChatMessage::user("use echo"),
-                    ChatMessage::assistant("").with_tool_calls(vec![ToolCall {
-                        call_id: CallId::from("call-1"),
-                        name: "echo".to_owned(),
-                        arguments: json!({"value": "one"}),
-                    }]),
+                    ChatMessage::assistant("").with_tool_calls(vec![expected_call]),
                     ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}})),
                 ]),
             },
@@ -749,28 +840,35 @@ async fn custom_runtime_is_invoked_at_all_four_points_in_order() {
     let controls = controls
         .lock()
         .expect("control lock should not be poisoned");
-    assert_eq!(controls.len(), 5);
-    for (index, observed) in controls.iter().enumerate() {
-        let expected = [
-            HookPoint::TransformContext,
-            HookPoint::BeforeToolCall,
-            HookPoint::AfterToolCall,
-            HookPoint::PrepareNextTurn,
-            HookPoint::TransformContext,
-        ][index];
-        assert_eq!(observed.point, expected);
+    let expected = [
+        (HookPoint::TransformContext, true),
+        (HookPoint::TransformToolCall, true),
+        (HookPoint::DecideToolCall, false),
+        (HookPoint::AfterToolCall, true),
+        (HookPoint::PrepareNextTurn, true),
+        (HookPoint::TransformContext, true),
+    ];
+    assert_eq!(controls.len(), expected.len());
+    for (index, (observed, (point, has_deadline))) in
+        controls.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(observed.point, *point);
+        assert_eq!(
+            observed.has_deadline, *has_deadline,
+            "hook {index} deadline presence"
+        );
         assert!(
             !observed.token_cancelled,
             "hook {index} should observe a live token"
         );
-        assert!(
-            observed.deadline_in_future,
-            "hook {index} should get a future deadline"
+        assert_eq!(
+            observed.deadline_in_future, *has_deadline,
+            "hook {index} deadline should be in the future when present"
         );
     }
 }
 
-// 3.2: a replaced context is used for the current request only.
+// 3.2 (H1): a replaced context is used for the current request only.
 #[tokio::test]
 async fn transform_replace_is_request_scoped_and_never_committed() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -823,12 +921,12 @@ async fn transform_replace_is_request_scoped_and_never_committed() {
     )));
 }
 
-// 3.2: modified arguments keep the call identity and reach the executor.
+// 4.2: modified arguments keep the call identity and reach the executor.
 #[tokio::test]
-async fn before_modify_arguments_preserves_call_identity() {
+async fn transform_modify_arguments_preserves_call_identity() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_befores([BeforeBehavior::Modify(json!({"value": "modified"}))]);
+        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -858,18 +956,15 @@ async fn before_modify_arguments_preserves_call_identity() {
         )]
     );
     // The after hook observes the call as executed, with modified arguments.
-    assert!(hook_calls(&recorded).contains(&HookCall::AfterToolCall {
-        iteration: 0,
-        tool_call: ToolCall {
-            call_id: CallId::from("call-1"),
-            name: "echo".to_owned(),
-            arguments: json!({"value": "modified"}),
-        },
-        result: ChatMessage::tool(
-            CallId::from("call-1"),
-            json!({"echo": {"value": "modified"}}),
-        ),
-    }));
+    assert!(hook_calls(&recorded).iter().any(|call| matches!(
+        call,
+        HookCall::AfterToolCall { tool_call, result, .. }
+            if tool_call.arguments == json!({"value": "modified"})
+                && result == &ChatMessage::tool(
+                    CallId::from("call-1"),
+                    json!({"echo": {"value": "modified"}}),
+                )
+    )));
     assert_eq!(
         outcome.new_messages[2],
         ChatMessage::tool(
@@ -879,29 +974,123 @@ async fn before_modify_arguments_preserves_call_identity() {
     );
 }
 
-// 3.2 + 3.4: a block skips approval and execution, produces the fixed
-// hook_blocked result, and still passes through the after hook.
+// 4.2: a transformed argument payload that fails the final re-validation
+// produces the validation error result without reaching decide or execution.
 #[tokio::test]
-async fn before_block_skips_approval_and_execution_but_reaches_after() {
+async fn transform_modify_failing_revalidation_never_reaches_decide() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_befores([BeforeBehavior::Block("policy denied".to_owned())]);
-    let controls = Arc::clone(&runtime.controls);
+        .with_tool_transforms([ToolTransformBehavior::Modify(json!(42))]);
     let agent_loop = build_loop(
         VecDeque::from([
-            tool_call_turn("call-1", "echo", json!({"value": "one"})),
-            stop_turn("done"),
+            tool_call_turn("call-1", "echo", json!({"value": "original"})),
+            stop_turn("recovered"),
         ]),
         LoopLimits::new(8, 4),
-        echo_registry(&operations, ToolPermissionMode::RequireApproval),
-        Arc::new(FailingToolApproval),
+        echo_registry_with(&operations, ToolPermissionMode::Allow, true),
         Arc::new(RecordingDurableSink {
             operations: Arc::clone(&operations),
         }),
         Some(Arc::new(runtime)),
         &operations,
     );
-    let _ = controls;
+
+    let outcome = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("re-validation failures stay model-visible results");
+
+    let expected_result = ChatMessage::tool(
+        CallId::from("call-1"),
+        json!({"error": "invalid argument arguments: must be an object"}),
+    );
+    assert_eq!(outcome.new_messages[2], expected_result);
+    let recorded = snapshot(&operations);
+    let calls = hook_calls(&recorded);
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, HookCall::TransformToolCall { .. })),
+        "the transform hook must run before re-validation"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            HookCall::DecideToolCall { .. } | HookCall::AfterToolCall { .. }
+        )),
+        "re-validation failures must not reach decide or after"
+    );
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    let requests = chat_requests(&recorded);
+    assert_eq!(requests[1].messages.last(), Some(&expected_result));
+}
+
+// 4.3: the decide hook receives the re-validated final arguments produced by
+// the transform phase.
+#[tokio::test]
+async fn decide_sees_the_revalidated_final_arguments() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations)
+        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "original"})),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let calls = hook_calls(&snapshot(&operations));
+    let decide_calls = calls
+        .iter()
+        .filter_map(|call| match call {
+            HookCall::DecideToolCall { tool_call, .. } => Some(tool_call.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decide_calls,
+        vec![ToolCall {
+            call_id: CallId::from("call-1"),
+            name: "echo".to_owned(),
+            arguments: json!({"value": "modified"}),
+        }]
+    );
+}
+
+// 4.3 + 2.2: a decide block skips the durable start and execution, produces
+// the fixed hook_blocked result, and still passes through the after hook.
+#[tokio::test]
+async fn decide_block_produces_hook_blocked_result_and_reaches_after() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations)
+        .with_decides([DecideBehavior::Block("policy denied".to_owned())]);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
 
     let outcome = run_once(&agent_loop, CancellationToken::new())
         .await
@@ -913,15 +1102,11 @@ async fn before_block_skips_approval_and_execution_but_reaches_after() {
     );
     assert_eq!(outcome.new_messages[2], blocked);
     let recorded = snapshot(&operations);
-    assert!(hook_calls(&recorded).contains(&HookCall::AfterToolCall {
-        iteration: 0,
-        tool_call: ToolCall {
-            call_id: CallId::from("call-1"),
-            name: "echo".to_owned(),
-            arguments: json!({"value": "one"}),
-        },
-        result: blocked.clone(),
-    }));
+    assert!(hook_calls(&recorded).iter().any(|call| matches!(
+        call,
+        HookCall::AfterToolCall { tool_call, result, .. }
+            if tool_call.arguments == json!({"value": "one"}) && result == &blocked
+    )));
     assert!(
         !recorded
             .iter()
@@ -929,17 +1114,52 @@ async fn before_block_skips_approval_and_execution_but_reaches_after() {
         "a blocked call must never dispatch"
     );
     let durable = durable_events(&recorded);
-    assert!(!durable.iter().any(|event| matches!(
-        event,
-        DurableAgentEvent::ToolApprovalRequested { .. }
-            | DurableAgentEvent::ToolApprovalResolved { .. }
-            | DurableAgentEvent::ToolExecutionStarted { .. }
-    )));
+    assert!(
+        !durable
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    assert!(!has_approval_events(&recorded));
     let requests = chat_requests(&recorded);
     assert_eq!(requests[1].messages.last(), Some(&blocked));
 }
 
-// 3.2: a replaced result keeps the tool role and call identity.
+// 4.3: an empty block reason is rejected as invalid output.
+#[tokio::test]
+async fn empty_block_reason_is_invalid_output() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations)
+        .with_decides([DecideBehavior::Block("   ".to_owned())]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+
+    let error = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect_err("an empty block reason should fail closed");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            point: HookPoint::DecideToolCall,
+            failure: HookFailure::InvalidOutput,
+        }
+    ));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(!durable_events(&recorded).iter().any(|event| matches!(
+        event,
+        DurableAgentEvent::MessageAppended { message } if message.role == ChatRole::Tool
+    )));
+}
+
+// 3.2 (H1): a replaced result keeps the tool role and call identity.
 #[tokio::test]
 async fn after_replace_result_preserves_role_and_call_identity() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -975,7 +1195,7 @@ async fn after_replace_result_preserves_role_and_call_identity() {
     assert_eq!(requests[1].messages.last(), Some(&replaced));
 }
 
-// 3.2: prepare stop commits the iteration and finishes as hook_stopped.
+// 3.2 (H1): prepare stop commits the iteration and finishes as hook_stopped.
 #[tokio::test]
 async fn prepare_stop_commits_iteration_and_finishes_hook_stopped() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -1016,7 +1236,7 @@ async fn prepare_stop_commits_iteration_and_finishes_hook_stopped() {
     assert!(iteration_position < finished_position);
 }
 
-// 3.2 + 3.4: injected messages reach only the next request, exactly once.
+// 3.2 (H1): injected messages reach only the next request, exactly once.
 #[tokio::test]
 async fn prepare_inject_is_consumed_once_by_the_next_request_only() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -1065,7 +1285,7 @@ async fn prepare_inject_is_consumed_once_by_the_next_request_only() {
     assert_eq!(transform_views[0].messages.last(), Some(&injected));
 }
 
-// 3.3: runtime failures fail closed at every hook point.
+// 4.1 + 4.5: runtime failures fail closed at every hook point.
 #[tokio::test]
 async fn runtime_failure_fails_closed_at_every_hook_point() {
     // transform_context: no model request starts.
@@ -1086,10 +1306,10 @@ async fn runtime_failure_fails_closed_at_every_hook_point() {
     let recorded = snapshot(&operations);
     assert!(chat_requests(&recorded).is_empty());
 
-    // before_tool_call: the tool is neither approved nor executed.
+    // transform_tool_call: the tool is neither decided nor executed.
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_befores([BeforeBehavior::Fail(HookFailure::HandlerFailed)]);
+        .with_tool_transforms([ToolTransformBehavior::Fail(HookFailure::HandlerFailed)]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
         runtime,
@@ -1097,11 +1317,42 @@ async fn runtime_failure_fails_closed_at_every_hook_point() {
     );
     let error = run_once(&agent_loop, CancellationToken::new())
         .await
-        .expect_err("before failure should stop the loop");
+        .expect_err("tool transform failure should stop the loop");
     assert!(matches!(
         error,
         AgentLoopError::Hook {
-            point: HookPoint::BeforeToolCall,
+            point: HookPoint::TransformToolCall,
+            failure: HookFailure::HandlerFailed,
+        }
+    ));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+
+    // decide_tool_call: the tool is not executed.
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations)
+        .with_decides([DecideBehavior::Fail(HookFailure::HandlerFailed)]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+    let error = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect_err("decide failure should stop the loop");
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            point: HookPoint::DecideToolCall,
             failure: HookFailure::HandlerFailed,
         }
     ));
@@ -1183,10 +1434,19 @@ async fn runtime_failure_fails_closed_at_every_hook_point() {
     );
 }
 
-// 3.3: a missed deadline maps to a typed timeout at every hook point.
+// 4.5: a missed configured deadline maps to a typed timeout at every point,
+// including decide when one is configured explicitly.
 #[tokio::test]
 async fn hook_deadline_maps_to_typed_timeout_at_every_point() {
-    let limits = LoopLimits::new(8, 4).with_hook_timeout(Duration::from_millis(50));
+    let timeout = Duration::from_millis(50);
+    let limits = LoopLimits::new(8, 4).with_hook_timeouts(
+        HookTimeouts::new()
+            .with_transform_context(Some(timeout))
+            .with_transform_tool_call(Some(timeout))
+            .with_decide_tool_call(Some(timeout))
+            .with_after_tool_call(Some(timeout))
+            .with_prepare_next_turn(Some(timeout)),
+    );
     type Configurer = Box<dyn FnOnce(RecordingHookRuntime) -> RecordingHookRuntime>;
     let cases: Vec<(HookPoint, Vec<Vec<ChatStreamEvent>>, Configurer)> = vec![
         (
@@ -1195,9 +1455,14 @@ async fn hook_deadline_maps_to_typed_timeout_at_every_point() {
             Box::new(|runtime| runtime.with_transforms([TransformBehavior::Pending])),
         ),
         (
-            HookPoint::BeforeToolCall,
+            HookPoint::TransformToolCall,
             vec![tool_call_turn("call-1", "echo", json!({}))],
-            Box::new(|runtime| runtime.with_befores([BeforeBehavior::Pending])),
+            Box::new(|runtime| runtime.with_tool_transforms([ToolTransformBehavior::Pending])),
+        ),
+        (
+            HookPoint::DecideToolCall,
+            vec![tool_call_turn("call-1", "echo", json!({}))],
+            Box::new(|runtime| runtime.with_decides([DecideBehavior::Pending])),
         ),
         (
             HookPoint::AfterToolCall,
@@ -1213,19 +1478,16 @@ async fn hook_deadline_maps_to_typed_timeout_at_every_point() {
     for (point, behaviors, configure) in cases {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let runtime = configure(RecordingHookRuntime::new(&operations));
-        let controls = Arc::clone(&runtime.controls);
         let agent_loop = build_loop(
             VecDeque::from(behaviors),
             limits,
-            echo_registry(&operations, ToolPermissionMode::Allow),
-            Arc::new(AllowAllToolApproval),
+            echo_registry(&operations),
             Arc::new(RecordingDurableSink {
                 operations: Arc::clone(&operations),
             }),
             Some(Arc::new(runtime)),
             &operations,
         );
-        let _ = controls;
 
         let error = run_once(&agent_loop, CancellationToken::new())
             .await
@@ -1249,19 +1511,87 @@ async fn hook_deadline_maps_to_typed_timeout_at_every_point() {
     }
 }
 
-// 3.3: cancellation before a hook never calls the runtime.
+// 4.5: with the default configuration decide has no deadline, so a long wait
+// only ends when the turn cancellation token fires.
+#[tokio::test(start_paused = true)]
+async fn decide_tool_call_without_deadline_waits_until_cancellation() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_decides([DecideBehavior::Pending]);
+    let controls = Arc::clone(&runtime.controls);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { run_once(&agent_loop, task_cancellation).await });
+
+    for _ in 0..100 {
+        if hook_calls(&snapshot(&operations))
+            .iter()
+            .any(|call| matches!(call, HookCall::DecideToolCall { .. }))
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        hook_calls(&snapshot(&operations))
+            .iter()
+            .any(|call| matches!(call, HookCall::DecideToolCall { .. })),
+        "the decide hook should be pending"
+    );
+
+    // An hour passes: no deadline fires for the decide point.
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "decide without a deadline must keep waiting"
+    );
+
+    cancellation.cancel();
+    let error = task
+        .await
+        .expect("loop task should not panic")
+        .expect_err("cancellation should stop the loop");
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let decide_control = controls
+        .lock()
+        .expect("control lock should not be poisoned")
+        .iter()
+        .find(|control| control.point == HookPoint::DecideToolCall)
+        .copied()
+        .expect("decide control should be recorded");
+    assert!(!decide_control.has_deadline);
+    let durable = durable_events(&snapshot(&operations));
+    assert!(
+        !durable
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|event| matches!(event, DurableAgentEvent::LoopCancelled { .. }))
+            .count(),
+        1
+    );
+}
+
+// 3.3 (H1): cancellation before a hook never calls the runtime.
 #[tokio::test]
 async fn pre_cancelled_hooks_never_reach_the_runtime() {
     // Cancellation committed after the assistant message prevents
-    // before_tool_call from being invoked.
+    // transform_tool_call from being invoked.
     let operations = Arc::new(Mutex::new(Vec::new()));
     let cancellation = CancellationToken::new();
     let runtime = RecordingHookRuntime::new(&operations);
     let agent_loop = build_loop(
         VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
         LoopLimits::new(8, 4),
-        echo_registry(&operations, ToolPermissionMode::Allow),
-        Arc::new(AllowAllToolApproval),
+        echo_registry(&operations),
         Arc::new(CancellingDurableSink {
             operations: Arc::clone(&operations),
             cancellation: cancellation.clone(),
@@ -1291,8 +1621,7 @@ async fn pre_cancelled_hooks_never_reach_the_runtime() {
     let agent_loop = build_loop(
         VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
         LoopLimits::new(8, 4),
-        echo_registry(&operations, ToolPermissionMode::Allow),
-        Arc::new(AllowAllToolApproval),
+        echo_registry(&operations),
         Arc::new(CancellingDurableSink {
             operations: Arc::clone(&operations),
             cancellation: cancellation.clone(),
@@ -1324,8 +1653,8 @@ async fn pre_cancelled_hooks_never_reach_the_runtime() {
     );
 }
 
-// 3.3: cancellation during a gate hook (transform, before) cancels the loop
-// without starting the affected action.
+// 3.3 (H1): cancellation during a gate hook (context transform, tool
+// transform, decide) cancels the loop without starting the affected action.
 #[tokio::test]
 async fn mid_hook_cancellation_at_gates_skips_the_affected_action() {
     // transform_context: no model request starts.
@@ -1339,10 +1668,35 @@ async fn mid_hook_cancellation_at_gates_skips_the_affected_action() {
     assert!(matches!(error, AgentLoopError::Cancelled));
     assert!(chat_requests(&snapshot(&operations)).is_empty());
 
-    // before_tool_call: the tool is not executed.
+    // transform_tool_call: the tool is neither decided nor executed.
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations)
+        .with_tool_transforms([ToolTransformBehavior::CancelThenPending]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+    let error = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect_err("mid-hook cancellation should stop the loop");
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+
+    // decide_tool_call: the tool is not executed.
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime =
-        RecordingHookRuntime::new(&operations).with_befores([BeforeBehavior::CancelThenPending]);
+        RecordingHookRuntime::new(&operations).with_decides([DecideBehavior::CancelThenPending]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
         runtime,
@@ -1365,8 +1719,9 @@ async fn mid_hook_cancellation_at_gates_skips_the_affected_action() {
     );
 }
 
-// 3.3: cancellation during a recording-path hook (after, prepare) degrades to
-// the no-op decision so the started tool cycle finishes its durable records.
+// 3.3 (H1): cancellation during a recording-path hook (after, prepare)
+// degrades to the no-op decision so the started tool cycle finishes its
+// durable records.
 #[tokio::test]
 async fn mid_hook_cancellation_on_recording_path_completes_durable_records() {
     // after_tool_call: the original result is still committed.
@@ -1428,42 +1783,7 @@ async fn mid_hook_cancellation_on_recording_path_completes_durable_records() {
     );
 }
 
-// 3.4: an empty block reason is rejected as invalid output.
-#[tokio::test]
-async fn empty_block_reason_is_invalid_output() {
-    let operations = Arc::new(Mutex::new(Vec::new()));
-    let runtime = RecordingHookRuntime::new(&operations)
-        .with_befores([BeforeBehavior::Block("   ".to_owned())]);
-    let (agent_loop, _) = hooked_loop(
-        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
-        runtime,
-        &operations,
-    );
-
-    let error = run_once(&agent_loop, CancellationToken::new())
-        .await
-        .expect_err("an empty block reason should fail closed");
-
-    assert!(matches!(
-        error,
-        AgentLoopError::Hook {
-            point: HookPoint::BeforeToolCall,
-            failure: HookFailure::InvalidOutput,
-        }
-    ));
-    let recorded = snapshot(&operations);
-    assert!(
-        !recorded
-            .iter()
-            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
-    );
-    assert!(!durable_events(&recorded).iter().any(|event| matches!(
-        event,
-        DurableAgentEvent::MessageAppended { message } if message.role == ChatRole::Tool
-    )));
-}
-
-// 3.4: invalid inject payloads are rejected before the next model request.
+// 3.4 (H1): invalid inject payloads are rejected before the next model request.
 #[tokio::test]
 async fn invalid_inject_payloads_are_rejected_before_the_next_request() {
     let cases: Vec<Vec<ChatMessage>> = vec![
@@ -1507,7 +1827,7 @@ async fn invalid_inject_payloads_are_rejected_before_the_next_request() {
     }
 }
 
-// 3.4: tool calls with a non-tool_calls finish reason never enter tool hooks.
+// 2.3: tool calls with a non-tool_calls finish reason never enter tool hooks.
 #[tokio::test]
 async fn non_tool_calls_finish_reason_never_enters_tool_hooks() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -1547,18 +1867,102 @@ async fn non_tool_calls_finish_reason_never_enters_tool_hooks() {
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            HookCall::BeforeToolCall { .. } | HookCall::AfterToolCall { .. }
+            HookCall::TransformToolCall { .. }
+                | HookCall::DecideToolCall { .. }
+                | HookCall::AfterToolCall { .. }
         )),
         "unauthorized tool cycles must not enter tool hooks"
     );
 }
 
-// 3.4: hook errors never leak hook inputs or internal error text.
+// 2.3 + 4.4: a missing tool produces the lookup error result without entering
+// any tool hook.
+#[tokio::test]
+async fn missing_tool_never_enters_tool_hooks() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "ghost", json!({"value": 1})),
+            stop_turn("recovered"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    let outcome = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("a missing tool stays a model-visible result");
+
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool(
+            CallId::from("call-1"),
+            json!({"error": "tool not found: ghost"}),
+        )
+    );
+    let calls = hook_calls(&snapshot(&operations));
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            HookCall::TransformToolCall { .. }
+                | HookCall::DecideToolCall { .. }
+                | HookCall::AfterToolCall { .. }
+        )),
+        "a missing tool must not enter tool hooks"
+    );
+}
+
+// 4.4: all three tool hooks receive the authorization metadata and the tool
+// spec exactly as registered.
+#[tokio::test]
+async fn tool_hooks_receive_authorization_metadata_and_spec() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let expected_target = RecordedTarget {
+        authorization: Some((ToolKind::Read, DangerLevel::Low)),
+        spec: echo_spec(),
+    };
+    let targets = hook_calls(&snapshot(&operations))
+        .into_iter()
+        .filter_map(|call| match call {
+            HookCall::TransformToolCall { target, .. }
+            | HookCall::DecideToolCall { target, .. }
+            | HookCall::AfterToolCall { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 3);
+    assert!(
+        targets.iter().all(|target| target == &expected_target),
+        "every tool hook must observe the registry authorization metadata and spec"
+    );
+}
+
+// 3.4 (H1): hook errors never leak hook inputs or internal error text.
 #[tokio::test]
 async fn hook_failure_terminal_event_is_redacted() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_befores([BeforeBehavior::Fail(HookFailure::HandlerFailed)]);
+        .with_decides([DecideBehavior::Fail(HookFailure::HandlerFailed)]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([tool_call_turn(
             "call-1",
@@ -1586,11 +1990,11 @@ async fn hook_failure_terminal_event_is_redacted() {
         .expect("loop failure should be durable");
     assert_eq!(
         terminal,
-        "hook at before_tool_call failed: hook handler failed"
+        "hook at decide_tool_call failed: hook handler failed"
     );
 }
 
-// 3.5: one end-to-end flow through every hook decision.
+// 4.1: one end-to-end flow through every hook decision.
 #[tokio::test]
 async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -1599,10 +2003,11 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let injected = ChatMessage::user("one more constraint");
     let runtime = RecordingHookRuntime::new(&operations)
         .with_transforms([TransformBehavior::Replace(replacement)])
-        .with_befores([
-            BeforeBehavior::Modify(json!({"value": "modified"})),
-            BeforeBehavior::Continue,
+        .with_tool_transforms([
+            ToolTransformBehavior::Modify(json!({"value": "modified"})),
+            ToolTransformBehavior::Continue,
         ])
+        .with_decides([DecideBehavior::Execute, DecideBehavior::Execute])
         .with_afters([
             AfterBehavior::Replace(json!({"redacted": true})),
             AfterBehavior::Keep,
@@ -1696,7 +2101,8 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
         .into_iter()
         .map(|call| match call {
             HookCall::TransformContext { iteration, .. } => ("transform", iteration),
-            HookCall::BeforeToolCall { iteration, .. } => ("before", iteration),
+            HookCall::TransformToolCall { iteration, .. } => ("tool_transform", iteration),
+            HookCall::DecideToolCall { iteration, .. } => ("decide", iteration),
             HookCall::AfterToolCall { iteration, .. } => ("after", iteration),
             HookCall::PrepareNextTurn { iteration, .. } => ("prepare", iteration),
         })
@@ -1705,11 +2111,13 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
         hook_order,
         vec![
             ("transform", 0),
-            ("before", 0),
+            ("tool_transform", 0),
+            ("decide", 0),
             ("after", 0),
             ("prepare", 0),
             ("transform", 1),
-            ("before", 1),
+            ("tool_transform", 1),
+            ("decide", 1),
             ("after", 1),
             ("prepare", 1),
         ]
@@ -1731,4 +2139,230 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
         Some(DurableAgentEvent::LoopFinished { finish_reason, .. })
             if finish_reason == "hook_stopped"
     ));
+    assert!(!has_approval_events(&recorded));
+}
+
+// 4.6: a simulated approval handler implemented as an ordinary decide-phase
+// hook with a private ask-the-human channel.
+#[derive(Debug, Clone, Copy)]
+enum ApprovalOutcome {
+    Approve,
+    Reject,
+}
+
+struct SimulatedApprovalRuntime {
+    entered: Arc<Notify>,
+    outcomes: tokio::sync::Mutex<mpsc::Receiver<ApprovalOutcome>>,
+}
+
+impl SimulatedApprovalRuntime {
+    fn new() -> (Self, mpsc::Sender<ApprovalOutcome>) {
+        let (sender, receiver) = mpsc::channel(1);
+        (
+            Self {
+                entered: Arc::new(Notify::new()),
+                outcomes: tokio::sync::Mutex::new(receiver),
+            },
+            sender,
+        )
+    }
+}
+
+#[async_trait]
+impl HookRuntime for SimulatedApprovalRuntime {
+    async fn transform_context<'a>(
+        &self,
+        _input: TransformContextInput<'a>,
+        _control: HookControl,
+    ) -> Result<TransformContextDecision, HookFailure> {
+        Ok(TransformContextDecision::Unchanged)
+    }
+
+    async fn transform_tool_call<'a>(
+        &self,
+        _input: TransformToolCallInput<'a>,
+        _control: HookControl,
+    ) -> Result<TransformToolCallDecision, HookFailure> {
+        Ok(TransformToolCallDecision::Continue)
+    }
+
+    async fn decide_tool_call<'a>(
+        &self,
+        _input: DecideToolCallInput<'a>,
+        _control: HookControl,
+    ) -> Result<DecideToolCallDecision, HookFailure> {
+        self.entered.notify_one();
+        match self.outcomes.lock().await.recv().await {
+            Some(ApprovalOutcome::Approve) => Ok(DecideToolCallDecision::Execute),
+            Some(ApprovalOutcome::Reject) => Ok(DecideToolCallDecision::Block {
+                reason: "user rejected the tool call".to_owned(),
+            }),
+            // The ask channel is gone; wait for the turn cancellation token.
+            None => pending().await,
+        }
+    }
+
+    async fn after_tool_call<'a>(
+        &self,
+        _input: AfterToolCallInput<'a>,
+        _control: HookControl,
+    ) -> Result<AfterToolCallDecision, HookFailure> {
+        Ok(AfterToolCallDecision::Keep)
+    }
+
+    async fn prepare_next_turn<'a>(
+        &self,
+        _input: PrepareNextTurnInput<'a>,
+        _control: HookControl,
+    ) -> Result<PrepareNextTurnDecision, HookFailure> {
+        Ok(PrepareNextTurnDecision::Continue)
+    }
+}
+
+fn approval_loop(
+    runtime: SimulatedApprovalRuntime,
+    operations: &Arc<Mutex<Vec<Operation>>>,
+) -> (AgentLoop, Arc<Notify>) {
+    let entered = Arc::clone(&runtime.entered);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(operations),
+        }),
+        Some(Arc::new(runtime)),
+        operations,
+    );
+    (agent_loop, entered)
+}
+
+// 4.6: an approved call executes through the ordinary Execute path, without
+// any approval durable events.
+#[tokio::test]
+async fn approval_handler_approval_executes_the_tool() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let (runtime, outcomes) = SimulatedApprovalRuntime::new();
+    let (agent_loop, entered) = approval_loop(runtime, &operations);
+    let task = tokio::spawn(async move { run_once(&agent_loop, CancellationToken::new()).await });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("the approval handler should begin waiting");
+
+    outcomes
+        .send(ApprovalOutcome::Approve)
+        .await
+        .expect("approval channel should be open");
+    let outcome = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the loop should finish after approval")
+        .expect("loop task should not panic")
+        .expect("an approved call should execute");
+
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}}))
+    );
+    let recorded = snapshot(&operations);
+    assert!(
+        durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(!has_approval_events(&recorded));
+}
+
+// 4.6: a rejected call becomes the hook_blocked result without execution and
+// without approval durable events.
+#[tokio::test]
+async fn approval_handler_rejection_blocks_with_hook_blocked() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let (runtime, outcomes) = SimulatedApprovalRuntime::new();
+    let (agent_loop, entered) = approval_loop(runtime, &operations);
+    let task = tokio::spawn(async move { run_once(&agent_loop, CancellationToken::new()).await });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("the approval handler should begin waiting");
+
+    outcomes
+        .send(ApprovalOutcome::Reject)
+        .await
+        .expect("approval channel should be open");
+    let outcome = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the loop should finish after rejection")
+        .expect("loop task should not panic")
+        .expect("a rejected call should stay a model-visible result");
+
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool(
+            CallId::from("call-1"),
+            json!({"error": {"code": "hook_blocked", "message": "user rejected the tool call"}}),
+        )
+    );
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    assert!(!has_approval_events(&recorded));
+}
+
+// 4.6: cancellation while the approval handler waits ends in loop
+// cancellation without an execution start.
+#[tokio::test]
+async fn approval_handler_pending_cancel_ends_in_loop_cancellation() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let (runtime, _outcomes) = SimulatedApprovalRuntime::new();
+    let (agent_loop, entered) = approval_loop(runtime, &operations);
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { run_once(&agent_loop, task_cancellation).await });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("the approval handler should begin waiting");
+
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the loop should stop after cancellation")
+        .expect("loop task should not panic")
+        .expect_err("cancellation during approval should fail the run");
+
+    assert!(matches!(error, AgentLoopError::Cancelled));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    let durable = durable_events(&recorded);
+    assert!(
+        !durable
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|event| matches!(event, DurableAgentEvent::LoopCancelled { .. }))
+            .count(),
+        1
+    );
+    assert!(!has_approval_events(&recorded));
 }

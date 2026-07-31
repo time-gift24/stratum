@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use stratum_core::HookFailure;
 
 use super::{
-    AfterToolCallDecision, AfterToolCallInput, BeforeToolCallDecision, BeforeToolCallInput,
+    AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
     HookControl, HookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
-    TransformContextDecision, TransformContextInput,
+    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    TransformToolCallInput,
 };
 
 /// Hook runtime that changes nothing and borrows without copying.
@@ -27,12 +28,20 @@ impl HookRuntime for NoopHookRuntime {
         Ok(TransformContextDecision::Unchanged)
     }
 
-    async fn before_tool_call<'a>(
+    async fn transform_tool_call<'a>(
         &self,
-        _input: BeforeToolCallInput<'a>,
+        _input: TransformToolCallInput<'a>,
         _control: HookControl,
-    ) -> Result<BeforeToolCallDecision, HookFailure> {
-        Ok(BeforeToolCallDecision::Continue)
+    ) -> Result<TransformToolCallDecision, HookFailure> {
+        Ok(TransformToolCallDecision::Continue)
+    }
+
+    async fn decide_tool_call<'a>(
+        &self,
+        _input: DecideToolCallInput<'a>,
+        _control: HookControl,
+    ) -> Result<DecideToolCallDecision, HookFailure> {
+        Ok(DecideToolCallDecision::Execute)
     }
 
     async fn after_tool_call<'a>(
@@ -54,14 +63,14 @@ impl HookRuntime for NoopHookRuntime {
 
 #[cfg(test)]
 mod tests {
-    use stratum_core::{CallId, ChatMessage, ToolCall};
+    use stratum_core::{CallId, ChatMessage, DangerLevel, ToolCall, ToolKind, ToolSpec};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::LoopContext;
+    use crate::{LoopContext, ToolHookTarget};
 
     fn control() -> HookControl {
-        HookControl::new(CancellationToken::new(), tokio::time::Instant::now())
+        HookControl::new(CancellationToken::new(), None)
     }
 
     #[tokio::test]
@@ -72,6 +81,15 @@ mod tests {
             call_id: CallId::from("call-1"),
             name: "echo".to_owned(),
             arguments: serde_json::json!({}),
+        };
+        let spec = ToolSpec::builder()
+            .name("echo")
+            .description("records calls")
+            .input_schema(serde_json::json!({"type": "object"}))
+            .build();
+        let target = ToolHookTarget {
+            authorization: Some((ToolKind::Read, DangerLevel::Low)),
+            spec: &spec,
         };
         let result = ChatMessage::tool(tool_call.call_id.clone(), serde_json::json!({"ok": true}));
 
@@ -89,15 +107,29 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .before_tool_call(
-                    BeforeToolCallInput {
+                .transform_tool_call(
+                    TransformToolCallInput {
                         iteration: 0,
                         tool_call: &tool_call,
+                        tool: &target,
                     },
                     control(),
                 )
                 .await,
-            Ok(BeforeToolCallDecision::Continue)
+            Ok(TransformToolCallDecision::Continue)
+        );
+        assert_eq!(
+            runtime
+                .decide_tool_call(
+                    DecideToolCallInput {
+                        iteration: 0,
+                        tool_call: &tool_call,
+                        tool: &target,
+                    },
+                    control(),
+                )
+                .await,
+            Ok(DecideToolCallDecision::Execute)
         );
         assert_eq!(
             runtime
@@ -105,6 +137,7 @@ mod tests {
                     AfterToolCallInput {
                         iteration: 0,
                         tool_call: &tool_call,
+                        tool: &target,
                         result: &result,
                     },
                     control(),

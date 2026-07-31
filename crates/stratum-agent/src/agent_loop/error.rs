@@ -118,7 +118,7 @@ pub enum AgentLoopError {
         #[source]
         source: LlmError,
     },
-    /// Approval or execution orchestration failed before producing a model-visible tool result.
+    /// Tool execution orchestration failed before producing a model-visible tool result.
     #[error("tool execution orchestration failed")]
     ToolExecution {
         /// Tool executor failure.
@@ -199,7 +199,8 @@ impl From<ProtocolError> for AgentLoopError {
 fn hook_point_name(point: HookPoint) -> &'static str {
     match point {
         HookPoint::TransformContext => "transform_context",
-        HookPoint::BeforeToolCall => "before_tool_call",
+        HookPoint::TransformToolCall => "transform_tool_call",
+        HookPoint::DecideToolCall => "decide_tool_call",
         HookPoint::AfterToolCall => "after_tool_call",
         HookPoint::PrepareNextTurn => "prepare_next_turn",
         _ => "unknown",
@@ -245,13 +246,13 @@ mod tests {
     #[test]
     fn hook_error_exposes_only_the_point_and_safe_classification() {
         let error = AgentLoopError::Hook {
-            point: HookPoint::BeforeToolCall,
+            point: HookPoint::DecideToolCall,
             failure: HookFailure::TimedOut,
         };
 
         assert_eq!(
             error.to_string(),
-            "hook at before_tool_call failed: hook invocation timed out"
+            "hook at decide_tool_call failed: hook invocation timed out"
         );
     }
 
