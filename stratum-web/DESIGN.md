@@ -1,39 +1,43 @@
 # Design
 
-<!-- 视觉世界的持久规则。产品事实见 PRODUCT.md；视觉基准：.impeccable/reference/workflow-editor.png -->
+<!-- 视觉世界的持久规则。产品事实见 PRODUCT.md；token 与组件实现即视觉真相。 -->
 
 ## World
 
-暗色节点工作台（node workbench）：近黑画布 + 点阵网格，深色卡片节点悬浮其上，细灰贝塞尔连线表达数据流。工具感、低饱和，只有端口、状态与主行动作用语义色。UI 正文用 Geist sans，数据/遥测用 Geist Mono，展示页标题用 Roboto Slab（`--font-heading`）。
+克制的对话工作台：中性底（亮/暗随主题）+ 单一高饱和行动色（绿 primary），界面退后、内容在前。工具感来自排版与秩序，不来自装饰——没有渐变 hero、没有装饰性动效。canvas 时代的暗色节点世界（点阵网格、贝塞尔连线、固定暗色容器）已随 showcase 页面删除，不再是本产品的视觉语言。
 
 ## Tokens
 
-- 唯一来源 `app/globals.css`（shadcn neutral 基色 + cssVariables）。组件只消费语义 token（`bg-card`、`text-muted-foreground`、`border-border` 等），不写死色值。
-- `--primary(-foreground)` = 画布绿（Generate 按钮的唯一高饱和色，浅色 `oklch(0.72 0.18 155)` / 深色 `oklch(0.87 0.22 150)`，前景为深绿），`--ring`、`--sidebar-primary` 同源。
-- 领域 token 在同一文件内扩展（`:root` / `.dark` 双份）：`--canvas-grid`、`--edge`、`--port-model/-positive/-negative/-image`、`--node-aurora`（Generator 节点头部极光带），颜色类在 `@theme inline` 登记为 Tailwind 色。
-- 色彩语义：绿（primary）= 行动/完成/品牌；蓝（port-image）= AI 生成中/处理中；中性（muted）= 纯悬停反馈。Markdown 世界整页主色为蓝——`app/(site)/markdown/layout.tsx` 用容器把 `--primary`/`--ring` 重映射为 `var(--port-image)`，容器内组件零改动自动跟随；站点 chrome 在容器外保持绿色。
-- 画布世界固定暗色：用 `dark` class 容器呈现，不随主题切换；展示页其余部分跟随主题。
-- 阅读衬线 `--font-reading`（Charter 系 + 中文宋体系，系统字体零加载），仅 `.prose-medium` 阅读排版使用。
+- 唯一来源 `app/globals.css`（shadcn neutral 基色 + cssVariables），`:root` / `.dark` 双份，在 `@theme inline` 登记为 Tailwind 色。组件只消费语义 token（`bg-card`、`text-muted-foreground`、`border-border`、`bg-popover` 等），禁止写死色值/hex。
+- `--primary(-foreground)` = 绿（浅色 `oklch(0.72 0.18 155)` / 深色 `oklch(0.87 0.22 150)`，前景深绿），`--ring`、`--sidebar-primary` 同源。语义：主行动（发送按钮）、选中态（会话 rail、provider chips、模型勾）、焦点环。
+- `--destructive` = 错误语义：发送失败、生成中断、连接错误、会话 404。
+- `--muted(-foreground)` = 次级文字与纯悬停反馈；`--accent(-foreground)` = 分段控件选中底（model-selector 的 Thinking 行）。
+- 主题切换：`components/theme-provider.tsx`（next-themes）+ `.dark` class，整站跟随主题；不存在固定暗色的子世界。
+- 遗产 token：`--canvas-grid`、`--edge`、`--port-model/-positive/-negative`、`--node-aurora` 的消费方（canvas/markdown 页）已删除，不再具有设计语义，新组件不得使用，待后续清理。例外：`--port-image`（蓝，light `oklch(0.6 0.15 250)` / dark `oklch(0.72 0.13 240)`）重新启用为"AI 处理中"状态色——目前只用于 reasoning streaming 的 Brain 图标与 shimmer（完成/折叠态回 muted 中性）；蓝只编码"进行中"，不做装饰。
+- 圆角体系：`--radius: 0.875rem` 及倍数（`rounded-sm` ~ `rounded-4xl`）。popover/卡片用 `rounded-xl`~`rounded-2xl`，小控件（触发器、chips、composer）用 pill（`rounded-full`）。阴影要有 offset + 柔和 blur（如 composer 的 `shadow-[0_8px_30px] shadow-black/10`）。
 
-## Node anatomy
+## Typography
 
-- 卡片：`bg-card`、`border`（1px `--border`）、`rounded-2xl`；头部 = 状态点 + 标题 + 收起 chevron；主行动（Generate）为亮绿 pill，黑字。
-- 端口：小色点 + muted 标签；输入在左、输出在右；色点颜色 = 数据类型语义（model 黄绿 / positive 绿 / negative 红 / image 蓝）。
-- 节点标签（色点 + 名称）悬浮于节点上方，不属于卡片本体。
+- Geist（`font-sans`）：界面正文与控件；Geist Mono（`font-mono`）：html 默认基底、数据感场景；Roboto Slab（`--font-heading` → `font-heading`）：展示性标题（如对话页 welcome）。均由 `app/layout.tsx` 经 next/font 加载。
+- 消息体排版：`components/stratum/styles/prose-medium.module.css`——`--font-reading`（Charter 系 + 中文宋体系衬线，系统字体零加载），对话用 `.proseMediumChat` 档（15→17px，行高收紧）。只消费外层 token、随主题切换；module 内规则保持无 `@layer`，压过 streamdown 注入元素的 utility class。
+- 组件级 CSS 一律 CSS Module 随组件走（共享的放 `components/stratum/styles/`），不进 `globals.css`（globals 只放 token 与第三方样式引入）。
 
-## Edges & Canvas
+## Layout & Chrome
 
-- 连线：1.5px 水平贝塞尔曲线，`--edge` 色、半透明，无箭头、无动画。
-- 画布：近黑底 + 径向点阵网格（`--canvas-grid`），网格只在画布世界出现。
-- 协作光标：彩色箭头指针 + 同色名牌，颜色是协作者身份，走 props 而非 token。
+- 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx`（数据来自 `components/react-bits/site-nav.tsx`，fixed 悬浮不占位），只挂对话入口。SideDockNav 双 nav 体系已删除。
+- 页面自管避让：对话页（`app/(site)/conversation/page.tsx`）整屏 `h-svh` + 顶部留白（`pt-24 sm:pt-28`）；消息列 `max-w-[44rem]` 居中；composer sticky 在消息列底部。空会话是 Gemini 式居中开场：欢迎语 + composer 整体垂直居中（同一 DOM 树，`justify-center` + 去掉 sticky/mt-auto），首发消息时 GSAP FLIP 滑回底部。
+- 会话列表 `components/stratum/conversation/thread-list-rail.tsx`：页面内 absolute 悬浮卡片，收起为图标列（w-11）、展开 w-64，选中态 `bg-primary/15 text-primary`，Esc 收回。
 
-## Stratum 规则
+## Components
 
-- `components/ui`（shadcn 官方）只加不改；新组件一律用 shadcn CLI 从 registry 安装（官方 / reactbits），不手写已有组件。
-- 内部组件放 `components/stratum`，通过组合官方组件扩展。
-- 第三方组件（`components/react-bits`）引入后必须改造：数据驱动（内容走 props）+ 颜色只消费最外层 token（不写死 neutral/black/white 与 `dark:` 变体），动效与结构保留原样。
-- 动画库统一 GSAP（`gsap` + `@gsap/react`；`useGSAP` 带 scope，reduced-motion 必须处理）；不引入第二个动画库（motion 已移除）。
-- 展示页逐件登记：每件组件一个 section（标题 + 说明 + demo），新增组件 = 新 section + 在 `components/chrome/site-chrome.tsx` 登记两个 nav。现有展示页：`/`、`/markdown`；`/conversation` 为整屏界面页（chat 场景，非 section 模式）。
-- conversation 组件库：`components/assistant-ui/` 是 CLI 拉取的底稿区（第三方源码，只读参考，eslint 忽略，不作为库使用）；fork 产物落 `components/stratum/conversation/`——剥掉 runtime（primitives/provider/hooks），数据全部走 props（`ConversationMessage` / `ConversationThreadMeta`），消息体渲染用我们自己的 streamdown + `.prose-medium`（不引 assistant-ui 的 markdown-text / composer）。
-- 布局：双 nav 悬浮体系是唯一固定外壳——SiteNav 顶部 fixed（`(site)` 组 layout 挂载）、SideDockNav 左侧 fixed（各页面场景自挂自登记）；两者不占位、悬浮于所有页面之上，页面自管避让。核心界面 `/canvas` 也在 `(site)` 组内，整屏暗色，nav 悬浮其上。
-- 阅读排版：Medium 风格集中在共享的 `components/stratum/styles/prose-medium.module.css`（`--font-reading` Charter 系衬线正文 + Geist 无衬线标题 + 居中三点分节符 + 无边斜体引用），只消费外层 token、随主题切换；组件级 CSS 一律用 CSS Module 随组件走（跨组件共享的放 `stratum/styles/`），不进 `globals.css`（globals 只放 token 与第三方样式引入）。module 内规则保持无 `@layer`，压过 Streamdown 注入元素的 utility class。
+- **底稿隔离**：`components/ui`（shadcn 官方）只加不改；`components/assistant-ui` 是 CLI 拉取的第三方底稿，只读参考、不作为库使用；`components/react-bits` 引入后必须改造为数据驱动 + 只消费外层 token。定制全部落在 `components/stratum/`，数据走 props。
+- **conversation**（`components/stratum/conversation/`）：数据驱动（`ConversationMessage`）。assistant 消息用 streamdown + `.proseMediumChat` 渲染，streaming 态带 caret；用户消息为右侧 muted 气泡；错误消息用 destructive 边框/横幅表达，重试入口由调用方决定是否提供。
+- **渐进式透明块**（正文上方，顺序：reasoning → tools → 正文）：`reasoning.tsx` 三态（折叠/简略 3 行预览/撑开），GSAP 高度手风琴，历史默认折叠、本轮新消息默认简略；`tool-call.tsx` / `tool-group.tsx` 工具调用默认折叠（trigger = 状态图标 + 工具名，streaming 转圈 + shimmer），展开显示参数/结果/错误。审批操作入口是 composer 正上方的浮层 `approval-dock.tsx`（absolute bottom-full，不推挤消息区，GSAP 浮入/滑出，onComplete 后才移除）；内联工具块的审批区只读（待决"等待审批…"，已决终态）。卡片内容共享自 `approval-card.tsx`。dangerLevel 编码：high → destructive（边框 + 横幅），medium → port-image 蓝，low → 中性，并配中文危险度文案（不只靠颜色）。
+- **PromptInput**（`components/stratum/prompt-input.tsx`）：药丸 composer，右侧 `trailing` 插槽承载 model-selector；激活态是 BorderGlow 电弧（`components/react-bits/border-glow.tsx`——聚焦时整圈 mesh 渐变边框 + 外发光点亮，失焦淡出），这是界面里唯一的高亮度装饰，且有明确语义（输入激活）。
+- **ModelSelector**（`components/stratum/model-selector.tsx`）：触发器 pill = 模型名 + Thinking 等级 badge + chevron；popover（`rounded-xl shadow-lg`）自上而下：cmdk 搜索框 → provider chips（选中态与 rail 同语言）→ 按 provider 分组的模型列表（选中打勾）→ Thinking 分段行。Thinking 等级由模型 schema 解析传入，无等级则不渲染该行；schema 驱动是本组件的硬约束。
+
+## Motion
+
+- 动画库统一 GSAP（`gsap` + `@gsap/react`，`useGSAP` 带 scope）：SiteNav 入场/下拉、PageTransition 方向性页面转场（`components/chrome/page-transition.tsx`，`PAGE_ORDER` 当前仅 `/conversation`）。不引入第二个动画库。
+- 基础件（popover、dialog 等）的进出动效来自 tw-animate-css，随 `components/ui` 底稿走，不再叠加。
+- 所有动效必须提供 `prefers-reduced-motion` 最终态；不做装饰性循环、滚动劫持。流式消息的 caret 是排版状态而非动效，由 streamdown 提供。

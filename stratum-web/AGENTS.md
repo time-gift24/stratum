@@ -12,10 +12,12 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 - `lib/stratum/api.ts` — REST client + 全部协议类型（`AgentEvent` / `RuntimeEvent` / `StreamEnvelope` / `ChatMessage` / `LlmEvent`）。base URL 为 `process.env.NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"`。
 - `lib/stratum/event-stream.ts` — SSE 解析与 `subscribeToAgentEvents`。
-- `lib/stratum/model-config.ts`、`lib/stratum/recent-agents.ts` — 模型配置 helper、最近会话与 SSE cursor 的 localStorage 持久化。
+- `lib/stratum/model-config.ts`、`lib/stratum/recent-agents.ts` — 模型配置 helper、最近会话与 SSE cursor 的 localStorage 持久化。模型参数（如 Thinking 等级）一律从每个模型自己的 `parameters_schema` 动态解析（`thinkingLevels` / `currentThinkingLevel` / `withThinkingLevel`），禁止在 UI 或 hook 里硬编码等级。
 - `features/agent-conversation/{types,reducer,recovery}.ts` — 事件流 → 会话状态的 reducer，以及 recovery（历史分页 + SSE replay + cursor 过期重试）。UI 无关。
 - `hooks/use-agent-conversation.ts` — 自包含 hook（不依赖任何 shell）：拉取 templates/models，管理 recent agents 与 cursor，驱动 reducer/recovery，暴露 `state`、`createConversation`、`sendMessage`、`cancel`、`resume`、`resolveApproval`、`reconnect`。
 - `/conversation` 页是唯一接真实后端的页面：state → `ConversationMessage[]` 的映射在该页完成，conversation 组件保持数据驱动、无 runtime。
+- reasoning 与 tool calls/approvals 在消息正文上方渲染：`components/stratum/conversation/reasoning.tsx`（三态折叠 + GSAP 手风琴）、`tool-call.tsx` / `tool-group.tsx`（默认折叠）。审批操作入口是 composer 上方的浮层 `approval-dock.tsx`（GSAP 进出场，按钮调 hook 的 `resolveApproval`，页面侧管 submitting/已决终态）；内联审批区只读，卡片内容与浮层共享 `approval-card.tsx`。历史消息工具结果从 `state.tools[callId]` 配对，配不上就只渲染 name + arguments。
+- 模型/Thinking 选择器为 `components/stratum/model-selector.tsx`（assistant-ui model-selector 底稿的数据驱动 fork，不接其 runtime/ModelContext）：搜索 + provider chips + 分组列表 + Thinking 分段行，经 `composerConfiguration` 与 hook 接线；通过 `PromptInput` 的 `trailing` 插槽挂载。
 
 ## Runtime protocol projection
 

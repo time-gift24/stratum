@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { ArrowUp, Plus } from "lucide-react"
 
 import { BorderGlow } from "@/components/react-bits/border-glow"
@@ -9,22 +9,22 @@ import { cn } from "@/lib/utils"
 
 /**
  * PromptInput —— Gemini 式药丸提示词输入框。
- * 布局：左侧 + 按钮 / 中间输入 / 右侧模型名（静态展示）与发送（空输入禁用，
+ * 布局：左侧 + 按钮 / 中间输入 / 右侧 trailing 插槽（如模型选择器）与发送（空输入禁用，
  * Enter 提交，IME 组合态除外）。激活态：聚焦时 BorderGlow 全线段点亮——
  * 整圈 mesh 渐变边框 + 全周外发光（port/primary token 配色），失焦 0.75s 淡出。
  * 值默认内部自管（提交后清空），也可传 value/onChange 受控。
  */
 export function PromptInput({
   placeholder = "问问 Stratum",
-  model,
+  trailing,
   value,
   onChange,
   onSubmit,
   className,
 }: {
   placeholder?: string
-  /** 当前模型名；不传则不显示模型位 */
-  model?: string
+  /** 输入框右侧、发送按钮之前的插槽（如模型选择器）；不传则不渲染 */
+  trailing?: React.ReactNode
   /** 受控值；不传则内部自管（提交后自动清空） */
   value?: string
   onChange?: (value: string) => void
@@ -35,6 +35,7 @@ export function PromptInput({
   const controlled = value !== undefined
   const currentValue = controlled ? value : innerValue
   const [focused, setFocused] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
   const canSend = currentValue.trim().length > 0
 
   const updateValue = (next: string) => {
@@ -56,9 +57,19 @@ export function PromptInput({
       data-slot="prompt-input"
       className={cn("w-full", className)}
       onFocus={() => setFocused(true)}
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false)
+      onBlur={() => {
+        // popover（如 ModelSelector 内容）portal 到 body，relatedTarget 判断
+        // 必然失效；延迟一帧看真实焦点落点——在组件内或任一 popover 内都保持点亮
+        requestAnimationFrame(() => {
+          const active = document.activeElement
+          if (active instanceof HTMLElement) {
+            if (rootRef.current?.contains(active)) return
+            if (active.closest('[data-slot="popover-content"]')) return
+          }
+          setFocused(false)
+        })
       }}
+      ref={rootRef}
     >
       <BorderGlow
         active={focused}
@@ -87,11 +98,7 @@ export function PromptInput({
             aria-label={placeholder}
             className="min-w-0 flex-1 bg-transparent px-1 font-sans text-sm text-foreground outline-none placeholder:text-muted-foreground"
           />
-          {model ? (
-            <span className="px-2 font-sans text-sm text-muted-foreground">
-              {model}
-            </span>
-          ) : null}
+          {trailing}
           <Button
             size="icon"
             className="rounded-full"
