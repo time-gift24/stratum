@@ -1,11 +1,11 @@
 {
   "$schema": "https://ui.shadcn.com/schema.json",
   "style": "base-mira",
-  "rsc": false,
+  "rsc": true,
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "app/app.css",
+    "css": "app/globals.css",
     "baseColor": "neutral",
     "cssVariables": true,
     "prefix": ""
@@ -13,15 +13,33 @@
   "iconLibrary": "lucide",
   "rtl": false,
   "menuColor": "default",
-  "menuAccent": "subtle",
+  "menuAccent": "bold",
   "aliases": {
-    "components": "~/components",
-    "utils": "~/lib/utils",
-    "ui": "~/components/ui",
-    "lib": "~/lib",
-    "hooks": "~/hooks"
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
   },
   "registries": {
+    "@assistant-ui": {
+      "url": "https://r.assistant-ui.com/base/{name}.json"
+    },
+    "@react-bits": {
+      "url": "https://reactbits.dev/r/{name}.json"
+    },
+    "@reactbits-starter": {
+      "url": "https://proxy.collectui.pro/api/r/reactbits/starter/{name}.json",
+      "headers": {
+        "Authorization": "Bearer ${REACTBITS_LICENSE_KEY}"
+      }
+    },
+    "@reactbits-pro": {
+      "url": "https://proxy.collectui.pro/api/r/reactbits/pro/{name}.json",
+      "headers": {
+        "Authorization": "Bearer ${REACTBITS_LICENSE_KEY}"
+      }
+    },
     "@react-bits": "https://reactbits.dev/r/{name}.json"
   }
 }

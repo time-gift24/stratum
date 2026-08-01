@@ -1,18 +1,21 @@
-# Stratum Web
+# Next.js template
 
-The Compose frontend is available at `http://localhost:5173` and connects to
-the local Stratum API at `http://127.0.0.1:18080`.
+This is a Next.js template with shadcn/ui.
+
+## Adding components
+
+To add components to your app, run the following command:
 
 ```bash
-podman compose up --build
+npx shadcn@latest add button
 ```
 
-For local frontend development, run:
+This will place the ui components in the `components` directory.
 
-```bash
-pnpm install
-pnpm dev
-pnpm typecheck
-pnpm test
-pnpm build
+## Using components
+
+To use the components in your app, import them as follows:
+
+```tsx
+import { Button } from "@/components/ui/button";
 ```
