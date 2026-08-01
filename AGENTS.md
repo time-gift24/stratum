@@ -4,6 +4,10 @@
 
 Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现时优先保持模块化、强类型、可观测，并默认安全。
 
+## 第一原则
+
+- 任何编码工作开始前，先阅读根目录 `CONSTITUTION.md`；其条款是本项目的最高强制规范，优先级高于本文件其他章节的一般约定。
+
 ## Rust 开发规范
 
 编写、审查或重构 Rust 代码时，遵循本地 `rust-skills` 规范：`.agents/skills/rust-skills/SKILL.md`。规则优先级如下：
@@ -133,7 +137,7 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 - workspace skeleton 创建后，在 workspace 层统一配置 lints。
 - 先启用 correctness、suspicious、style、complexity、perf 相关 lints。
 - 不要无理由 silence lint；确实需要时写简短原因。
-- PR 合入前必须对照根 `CONSTITUTION.md` 完成 constitution-review（可派发子代理分条款审查完整 diff）；red-flag 与 violation 必须修复后才能合入。
+- PR 合入前必须对照根 `CONSTITUTION.md` 完成 constitution-review：务必派发子代理分条款审查完整 diff；red-flag 与 violation 必须修复后才能合入。
 
 ## 文档
 
