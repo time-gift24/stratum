@@ -83,6 +83,7 @@
 - 从持久层读回的 `#[non_exhaustive]` 枚举，`_` 分支必须返回错误（fail closed），禁止提供默认值——尤其禁止向放宽权限的方向默认。
 - NATS subject / bucket 命名集中定义，禁止散落字符串字面量。
 - 持久化 shape 变更必须与协议兼容策略一致：不支持的旧 shape 显式报错，禁止静默吞掉或猜测性迁移。
+- Hook handler 的版本身份（`HookHandlerVersionId`）由 handler 作者声明并稳定持有：同一版本必须始终返回同一 ID——构造时生成一次或确定性派生，禁止在 `descriptor()` 中每次现生成随机 ID；决策行为发生任何变更必须同步分配新版本 ID。
 
 ---
 

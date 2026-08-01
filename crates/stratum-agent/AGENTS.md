@@ -175,6 +175,16 @@ legacy stateful `Agent` compatibility path.
   construction, the kernel commits it with `LoopStarted`, and `resume` fails
   closed when the injected runtime reports a different version. Runtimes
   reporting no version skip the check.
+- Handler version identity is self-declared by the handler author via
+  `HookHandler::descriptor()`; the kernel and chain only consume it. The
+  contract has two halves: the id must be *stable* for one handler version
+  (create it once at construction or derive it deterministically — never call
+  `HookHandlerVersionId::new()` inside `descriptor()` per invocation, which
+  would change the chain version every call and make every resume fail), and
+  any change to decision behavior must come with a new id. The kernel can
+  detect "the id changed" but not "behavior changed while the id stayed" —
+  that gap closes when handlers become distributable artifacts whose version
+  derives from a content digest (S1/S2) or a pinned service identity (R3).
 - Deferred to later milestones (do not add here): per-handler journal
   granularity (H3b evaluation), kernel-durable history compaction (H5),
   Skill/Script/service adapters, and hook telemetry or EventBus payloads.
