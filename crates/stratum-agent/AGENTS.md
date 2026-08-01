@@ -29,8 +29,11 @@ legacy stateful `Agent` compatibility path.
   A durable start without a result is an unknown outcome and is never retried
   automatically by the kernel.
 - `ToolExecutor` is pure mechanics: lookup, validation, durable
-  `ToolExecutionStarted`, and dispatch. It holds no approval policy and emits
-  no approval events; execution decisions belong to `decide_tool_call` hooks.
+  `ToolExecutionStarted`, and dispatch. `execute` is `pub(crate)` and takes the
+  resolved tool handle plus the decide-approved final call; its body is only
+  the cancellation check, the durable start, and the dispatch. It has no
+  authorization concept, holds no approval policy, and emits no approval
+  events; execution decisions belong to `decide_tool_call` hooks.
 - Only a provider `FinishReason::ToolCalls` authorizes dispatch. If a response contains tool calls
   with `length`, `stop`, or another finish reason, commit structured tool-error messages without
   invoking the tools.
@@ -66,12 +69,22 @@ legacy stateful `Agent` compatibility path.
   (that lives in the `result` payload); `prepare_next_turn` sees the cycle's
   full committed results. `snapshot.usage` is the run's accumulated
   `TokenUsage` up to the boundary, or `None` when the provider never reported.
-- The three tool hooks receive a borrowed `ToolHookTarget` (authorization
-  metadata `ToolKind`/`DangerLevel` plus `ToolSpec`) looked up by the kernel
-  before the call; handlers never query the registry themselves.
+- The three tool hooks receive a borrowed `ToolHookTarget` (effective
+  authorization metadata `ToolKind`/`DangerLevel` plus `ToolSpec`) looked up by
+  the kernel before the call; handlers never query the registry themselves.
+  `authorization` is the effective per-call value: the registry-declared
+  default at `transform_tool_call`, and the transform-overridden value (when
+  any) at `decide_tool_call` and `after_tool_call`. The kernel transports the
+  value without interpreting it.
 - Identity is kernel-owned: hooks may never change `CallId` or tool names.
-  `transform_tool_call` may only continue or replace arguments; the kernel
-  re-validates transformed arguments before deciding. `decide_tool_call` may
+  `transform_tool_call` may only continue or return a `Modify` carrying
+  optional replacement arguments and/or an optional authorization override
+  (`PreAuthorize` or `Set`); a `Modify` with every field unchanged is rejected
+  as `HookFailure::InvalidOutput`. The kernel re-validates transformed
+  arguments before deciding, and carries the effective authorization to decide
+  and after without any sanity checks (including downgrade checks) —
+  overriding authorization is the handler's explicit responsibility.
+  `decide_tool_call` may
   only `Execute` or `Block` — it can never modify arguments, so approvers
   always see exactly the parameters that will run. A block skips
   `ToolExecutionStarted` and yields the fixed

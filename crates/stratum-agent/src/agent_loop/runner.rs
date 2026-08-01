@@ -8,13 +8,14 @@ use stratum_core::{
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
+use stratum_tools::Tool;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
-    HookControl, HookRuntime, HookSnapshot, NoopHookRuntime, PrepareNextTurnDecision,
-    PrepareNextTurnInput, ToolExecutor, ToolExecutorError, ToolHookTarget,
+    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, DecideToolCallDecision,
+    DecideToolCallInput, HookControl, HookRuntime, HookSnapshot, NoopHookRuntime,
+    PrepareNextTurnDecision, PrepareNextTurnInput, ToolExecutor, ToolExecutorError, ToolHookTarget,
     TransformContextDecision, TransformContextInput, TransformToolCallDecision,
     TransformToolCallInput,
 };
@@ -195,7 +196,9 @@ impl AgentLoop {
     /// transform hook, final-argument re-validation, the decide hook, then the
     /// durable start and the call. A missing tool or a failed validation
     /// produces the executor's structured error result without entering any
-    /// tool hook.
+    /// tool hook. The transform hook may override the effective authorization;
+    /// the kernel carries the effective value to the decide and after phases
+    /// without interpreting it.
     async fn execute_authorized_tool_call(
         &self,
         iteration: u64,
@@ -241,13 +244,37 @@ impl AgentLoop {
         else {
             return Err(AgentLoopError::Cancelled);
         };
-        let final_call = match transform {
-            TransformToolCallDecision::Continue => Cow::Borrowed(tool_call),
-            TransformToolCallDecision::ModifyArguments { arguments } => {
-                let mut modified = tool_call.clone();
-                modified.arguments = arguments;
-                Cow::Owned(modified)
+        let transform = transform
+            .validate()
+            .map_err(|failure| AgentLoopError::Hook {
+                point: HookPoint::TransformToolCall,
+                failure,
+            })?;
+        // The kernel only transports the effective authorization: no override
+        // keeps the registry default, overrides apply verbatim, and the kernel
+        // never branches on or interprets the value.
+        let (final_call, effective_authorization) = match transform {
+            TransformToolCallDecision::Continue => (Cow::Borrowed(tool_call), authorization),
+            TransformToolCallDecision::Modify(modification) => {
+                let effective_authorization = match modification.authorization {
+                    None => authorization,
+                    Some(AuthorizationOverride::PreAuthorize) => None,
+                    Some(AuthorizationOverride::Set { kind, danger }) => Some((kind, danger)),
+                };
+                let final_call = match modification.arguments {
+                    Some(arguments) => {
+                        let mut modified = tool_call.clone();
+                        modified.arguments = arguments;
+                        Cow::Owned(modified)
+                    }
+                    None => Cow::Borrowed(tool_call),
+                };
+                (final_call, effective_authorization)
             }
+        };
+        let effective_target = ToolHookTarget {
+            authorization: effective_authorization,
+            spec: target.spec,
         };
 
         // The decide phase only sees arguments that passed the final
@@ -263,7 +290,7 @@ impl AgentLoop {
                     DecideToolCallInput {
                         snapshot,
                         tool_call: &final_call,
-                        tool: &target,
+                        tool: &effective_target,
                     },
                     control,
                 )
@@ -278,7 +305,9 @@ impl AgentLoop {
         })?;
 
         let mut message = match decide {
-            DecideToolCallDecision::Execute => self.execute_tool(&final_call, cancellation).await?,
+            DecideToolCallDecision::Execute => {
+                self.execute_tool(&tool, &final_call, cancellation).await?
+            }
             DecideToolCallDecision::Block { reason } => hook_blocked_result(tool_call, &reason),
         };
 
@@ -291,7 +320,7 @@ impl AgentLoop {
                     AfterToolCallInput {
                         snapshot,
                         tool_call: &final_call,
-                        tool: &target,
+                        tool: &effective_target,
                         result: &message,
                     },
                     control,
@@ -310,10 +339,15 @@ impl AgentLoop {
 
     async fn execute_tool(
         &self,
+        tool: &Arc<dyn Tool>,
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
     ) -> Result<ChatMessage, AgentLoopError> {
-        match self.tool_executor.execute(tool_call, cancellation).await {
+        match self
+            .tool_executor
+            .execute(tool, tool_call, cancellation)
+            .await
+        {
             Ok(message) => Ok(message),
             Err(ToolExecutorError::Durability { source }) => {
                 Err(AgentLoopError::Durability { source })

@@ -126,13 +126,14 @@ pub enum TransformContextDecision {
 ///
 /// The kernel resolves the target before any tool hook runs; handlers must
 /// treat it as display and decision context and must not query the tool
-/// registry themselves. `None` authorization means the tool is pre-authorized
+/// registry themselves. `None` authorization means the call is pre-authorized
 /// and carries no approval metadata.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ToolHookTarget<'a> {
-    /// Authorization metadata (`ToolKind`, `DangerLevel`) from the registry,
-    /// or `None` when the tool is pre-authorized.
+    /// Effective authorization metadata (`ToolKind`, `DangerLevel`) for this
+    /// call: the registry-declared default unless `transform_tool_call`
+    /// overrode it. The kernel carries this value without interpreting it.
     pub authorization: Option<(ToolKind, DangerLevel)>,
     /// Provider-visible specification of the tool being called.
     pub spec: &'a ToolSpec,
@@ -154,18 +155,82 @@ pub struct TransformToolCallInput<'a> {
 
 /// Decision returned by [`HookRuntime::transform_tool_call`].
 ///
-/// The transform phase may only continue or replace arguments; it can neither
+/// The transform phase may only continue or modify the call; it can neither
 /// block the call nor change its identity. Replacement arguments are
-/// re-validated by the kernel before the decide phase.
+/// re-validated by the kernel before the decide phase, and an authorization
+/// override becomes the effective authorization the decide and after phases
+/// observe.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TransformToolCallDecision {
-    /// Keep the original arguments.
+    /// Keep the original arguments and the registry-declared authorization.
     Continue,
-    /// Execute the same call identity and tool name with new arguments.
-    ModifyArguments {
-        /// Replacement JSON arguments.
-        arguments: Value,
+    /// Modify the arguments and/or the effective authorization of the call.
+    Modify(TransformToolCallModification),
+}
+
+impl TransformToolCallDecision {
+    /// Enforces the decision contract before the loop applies it.
+    pub(crate) fn validate(self) -> Result<Self, HookFailure> {
+        match &self {
+            Self::Modify(modification)
+                if modification.arguments.is_none() && modification.authorization.is_none() =>
+            {
+                Err(HookFailure::InvalidOutput)
+            }
+            _ => Ok(self),
+        }
+    }
+}
+
+/// Per-call modifications returned by [`HookRuntime::transform_tool_call`].
+///
+/// Fields left as `None` keep their original values; a modification with
+/// every field set to `None` is invalid output (use
+/// [`TransformToolCallDecision::Continue`] instead).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct TransformToolCallModification {
+    /// Replacement arguments; `None` keeps the original arguments.
+    pub arguments: Option<Value>,
+    /// Overrides the effective authorization for this call; `None` keeps the
+    /// registry-declared default.
+    pub authorization: Option<AuthorizationOverride>,
+}
+
+impl TransformToolCallModification {
+    /// Creates a modification from optional replacement arguments and an
+    /// optional authorization override; `None` fields keep the original
+    /// values.
+    #[must_use]
+    pub const fn new(
+        arguments: Option<Value>,
+        authorization: Option<AuthorizationOverride>,
+    ) -> Self {
+        Self {
+            arguments,
+            authorization,
+        }
+    }
+}
+
+/// Per-call authorization override returned by
+/// [`HookRuntime::transform_tool_call`].
+///
+/// Overriding authorization is the handler's explicit responsibility: the
+/// kernel carries the override to the decide and after phases without any
+/// sanity checks, including checks against downgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthorizationOverride {
+    /// Mark this call pre-authorized regardless of the registry declaration.
+    PreAuthorize,
+    /// Replace the declared authorization metadata for this call.
+    Set {
+        /// Replacement tool kind.
+        kind: ToolKind,
+        /// Replacement danger level.
+        danger: DangerLevel,
     },
 }
 
@@ -309,10 +374,12 @@ pub trait HookRuntime: Send + Sync {
         control: HookControl,
     ) -> Result<TransformContextDecision, HookFailure>;
 
-    /// Transforms the arguments of one authorized tool call.
+    /// Transforms the arguments and optionally the effective authorization of
+    /// one authorized tool call.
     ///
     /// Runs after the original arguments validate and before the final
-    /// re-validation and the decide phase.
+    /// re-validation and the decide phase. The kernel carries an authorization
+    /// override to the later phases without interpreting it.
     ///
     /// # Errors
     ///
@@ -393,6 +460,30 @@ mod tests {
         assert_eq!(
             DecideToolCallDecision::Execute.validate(),
             Ok(DecideToolCallDecision::Execute)
+        );
+    }
+
+    #[test]
+    fn modify_decisions_require_at_least_one_change() {
+        let no_change = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: None,
+            authorization: None,
+        });
+        assert_eq!(no_change.validate(), Err(HookFailure::InvalidOutput));
+
+        let arguments_only = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: Some(json!({"value": 1})),
+            authorization: None,
+        });
+        assert!(arguments_only.validate().is_ok());
+        let authorization_only = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: None,
+            authorization: Some(AuthorizationOverride::PreAuthorize),
+        });
+        assert!(authorization_only.validate().is_ok());
+        assert_eq!(
+            TransformToolCallDecision::Continue.validate(),
+            Ok(TransformToolCallDecision::Continue)
         );
     }
 

@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::{Value, json};
 use stratum_agent::{
-    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, DecideToolCallDecision,
-    DecideToolCallInput, HookControl, HookRuntime, HookSnapshot, HookTimeouts,
-    LoopCompletionReason, LoopContext, LoopLimits, PrepareNextTurnDecision, PrepareNextTurnInput,
-    ToolExecutor, ToolHookTarget, TransformContextDecision, TransformContextInput,
-    TransformToolCallDecision, TransformToolCallInput,
+    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, AuthorizationOverride,
+    DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime, HookSnapshot,
+    HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits, PrepareNextTurnDecision,
+    PrepareNextTurnInput, ToolExecutor, ToolHookTarget, TransformContextDecision,
+    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
+    TransformToolCallModification,
 };
 use stratum_core::{
     AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -123,10 +124,15 @@ enum TransformBehavior {
 #[derive(Debug, Clone)]
 enum ToolTransformBehavior {
     Continue,
-    Modify(Value),
+    Modify(TransformToolCallModification),
     Fail(HookFailure),
     Pending,
     CancelThenPending,
+}
+
+/// Builds an arguments-only tool transform behavior.
+fn modify_arguments(arguments: Value) -> ToolTransformBehavior {
+    ToolTransformBehavior::Modify(TransformToolCallModification::new(Some(arguments), None))
 }
 
 #[derive(Debug, Clone)]
@@ -305,8 +311,8 @@ impl HookRuntime for RecordingHookRuntime {
             .unwrap_or(ToolTransformBehavior::Continue);
         match behavior {
             ToolTransformBehavior::Continue => Ok(TransformToolCallDecision::Continue),
-            ToolTransformBehavior::Modify(arguments) => {
-                Ok(TransformToolCallDecision::ModifyArguments { arguments })
+            ToolTransformBehavior::Modify(modification) => {
+                Ok(TransformToolCallDecision::Modify(modification))
             }
             ToolTransformBehavior::Fail(failure) => Err(failure),
             ToolTransformBehavior::Pending => pending().await,
@@ -961,7 +967,7 @@ async fn transform_replace_is_request_scoped_and_never_committed() {
 async fn transform_modify_arguments_preserves_call_identity() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
+        .with_tool_transforms([modify_arguments(json!({"value": "modified"}))]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -1014,8 +1020,8 @@ async fn transform_modify_arguments_preserves_call_identity() {
 #[tokio::test]
 async fn transform_modify_failing_revalidation_never_reaches_decide() {
     let operations = Arc::new(Mutex::new(Vec::new()));
-    let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!(42))]);
+    let runtime =
+        RecordingHookRuntime::new(&operations).with_tool_transforms([modify_arguments(json!(42))]);
     let agent_loop = build_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -1074,7 +1080,7 @@ async fn transform_modify_failing_revalidation_never_reaches_decide() {
 async fn decide_sees_the_revalidated_final_arguments() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
+        .with_tool_transforms([modify_arguments(json!({"value": "modified"}))]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -1103,6 +1109,222 @@ async fn decide_sees_the_revalidated_final_arguments() {
             name: "echo".to_owned(),
             arguments: json!({"value": "modified"}),
         }]
+    );
+}
+
+// 4.2: a Set authorization override becomes the effective authorization the
+// decide and after phases observe, while the transform phase still sees the
+// registry-declared default.
+#[tokio::test]
+async fn transform_set_authorization_override_reaches_decide_and_after() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            None,
+            Some(AuthorizationOverride::Set {
+                kind: ToolKind::Write,
+                danger: DangerLevel::High,
+            }),
+        )),
+    ]);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let recorded = snapshot(&operations);
+    let calls = hook_calls(&recorded);
+    let effective_target = RecordedTarget {
+        authorization: Some((ToolKind::Write, DangerLevel::High)),
+        spec: echo_spec(),
+    };
+    for call in &calls {
+        match call {
+            HookCall::TransformToolCall { target, .. } => assert_eq!(
+                target.authorization,
+                Some((ToolKind::Read, DangerLevel::Low)),
+                "transform must observe the registry-declared default"
+            ),
+            HookCall::DecideToolCall { target, .. } | HookCall::AfterToolCall { target, .. } => {
+                assert_eq!(
+                    target, &effective_target,
+                    "decide and after must observe the effective authorization"
+                );
+            }
+            _ => {}
+        }
+    }
+    // The kernel transports the override without branching on it: the call
+    // still dispatches and commits its durable start.
+    assert!(
+        recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+}
+
+// 4.2: a PreAuthorize override erases the declared authorization, so the
+// decide and after phases observe a pre-authorized target.
+#[tokio::test]
+async fn transform_pre_authorize_override_erases_authorization_at_decide() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            None,
+            Some(AuthorizationOverride::PreAuthorize),
+        )),
+    ]);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let calls = hook_calls(&snapshot(&operations));
+    for call in &calls {
+        match call {
+            HookCall::TransformToolCall { target, .. } => assert_eq!(
+                target.authorization,
+                Some((ToolKind::Read, DangerLevel::Low)),
+                "transform must observe the registry-declared default"
+            ),
+            HookCall::DecideToolCall { target, .. } | HookCall::AfterToolCall { target, .. } => {
+                assert_eq!(
+                    target.authorization, None,
+                    "PreAuthorize must erase the declared authorization at decide and after"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+// 3.4: a Modify decision with every field left unchanged is invalid output
+// and fails closed before decide and execution.
+#[tokio::test]
+async fn transform_modify_without_changes_is_invalid_output() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(None, None)),
+    ]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+
+    let error = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect_err("a no-op Modify should fail closed");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            point: HookPoint::TransformToolCall,
+            failure: HookFailure::InvalidOutput,
+        }
+    ));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+}
+
+// 4.2 + 4.3: a transform that modifies arguments and authorization together
+// lets the decide phase see both the final arguments and the effective
+// authorization, and the call executes with the final arguments.
+#[tokio::test]
+async fn transform_modify_arguments_and_authorization_together() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            Some(json!({"value": "modified"})),
+            Some(AuthorizationOverride::Set {
+                kind: ToolKind::Write,
+                danger: DangerLevel::Medium,
+            }),
+        )),
+    ]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "original"})),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    let outcome = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let recorded = snapshot(&operations);
+    let decide_calls = hook_calls(&recorded)
+        .into_iter()
+        .filter_map(|call| match call {
+            HookCall::DecideToolCall {
+                tool_call, target, ..
+            } => Some((tool_call, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decide_calls,
+        vec![(
+            ToolCall {
+                call_id: CallId::from("call-1"),
+                name: "echo".to_owned(),
+                arguments: json!({"value": "modified"}),
+            },
+            RecordedTarget {
+                authorization: Some((ToolKind::Write, DangerLevel::Medium)),
+                spec: echo_spec(),
+            },
+        )]
+    );
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool(
+            CallId::from("call-1"),
+            json!({"echo": {"value": "modified"}})
+        )
     );
 }
 
@@ -2053,7 +2275,7 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let runtime = RecordingHookRuntime::new(&operations)
         .with_transforms([TransformBehavior::Replace(replacement)])
         .with_tool_transforms([
-            ToolTransformBehavior::Modify(json!({"value": "modified"})),
+            modify_arguments(json!({"value": "modified"})),
             ToolTransformBehavior::Continue,
         ])
         .with_decides([DecideBehavior::Execute, DecideBehavior::Execute])
