@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
-    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimits,
-    ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
+    AgentLoop, AgentLoopBuildError, AgentLoopError, LoopCompletionReason, LoopContext, LoopLimits,
+    ProtocolError, ToolExecutor,
 };
 use stratum_core::{
-    AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
+    AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
     DurableAgentEvent, ModelId, TokenUsage, ToolCall, ToolCallDelta, ToolKind, ToolName, ToolSpec,
 };
 use stratum_infra::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
@@ -28,7 +28,7 @@ use stratum_tools::{
     BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
     ToolRegistry,
 };
-use tokio::{sync::Notify, time::timeout};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +58,6 @@ struct RecordingDurableSink {
 enum CancellationTrigger {
     FirstToolResult,
     Iteration(u64),
-    ApprovalResolved,
 }
 
 struct TriggeredCancellationSink {
@@ -79,10 +78,6 @@ impl DurableEventSink for TriggeredCancellationSink {
                 CancellationTrigger::Iteration(expected),
                 DurableAgentEvent::IterationCompleted { iteration, .. },
             ) => iteration == expected,
-            (
-                CancellationTrigger::ApprovalResolved,
-                DurableAgentEvent::ToolApprovalResolved { .. },
-            ) => true,
             _ => false,
         };
         self.operations
@@ -242,40 +237,6 @@ impl Tool for RecordingTool {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FailingToolApproval;
-
-#[async_trait]
-impl ToolApproval for FailingToolApproval {
-    async fn request(
-        &self,
-        _request: ToolApprovalRequest,
-        _cancellation: &CancellationToken,
-    ) -> Result<ApprovalDecision, ToolApprovalError> {
-        Err(ToolApprovalError::interaction(std::io::Error::other(
-            "scripted approval failure",
-        )))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CancellationAwareApproval {
-    entered: Arc<Notify>,
-}
-
-#[async_trait]
-impl ToolApproval for CancellationAwareApproval {
-    async fn request(
-        &self,
-        _request: ToolApprovalRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<ApprovalDecision, ToolApprovalError> {
-        self.entered.notify_one();
-        cancellation.cancelled().await;
-        Err(ToolApprovalError::Cancelled)
-    }
-}
-
 fn test_agent_loop(events: Vec<ChatStreamEvent>) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     test_agent_loop_with(provider_events(events), LoopLimits::default(), None)
 }
@@ -302,14 +263,7 @@ fn test_agent_loop_with_behaviors(
     registry
         .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo tool should register");
-    build_agent_loop(
-        behaviors,
-        limits,
-        fail_at,
-        Arc::new(registry),
-        Arc::new(AllowAllToolApproval),
-        operations,
-    )
+    build_agent_loop(behaviors, limits, fail_at, Arc::new(registry), operations)
 }
 
 fn build_agent_loop(
@@ -317,7 +271,6 @@ fn build_agent_loop(
     limits: LoopLimits,
     fail_at: Option<usize>,
     registry: Arc<dyn ToolRegistry>,
-    approval: Arc<dyn ToolApproval>,
     operations: Arc<Mutex<Vec<Operation>>>,
 ) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     let durable: Arc<dyn DurableEventSink> = Arc::new(RecordingDurableSink {
@@ -329,7 +282,6 @@ fn build_agent_loop(
         behaviors,
         limits,
         registry,
-        approval,
         durable,
         Arc::clone(&operations),
     );
@@ -340,7 +292,6 @@ fn assemble_agent_loop(
     behaviors: VecDeque<ProviderBehavior>,
     limits: LoopLimits,
     registry: Arc<dyn ToolRegistry>,
-    approval: Arc<dyn ToolApproval>,
     durable: Arc<dyn DurableEventSink>,
     operations: Arc<Mutex<Vec<Operation>>>,
 ) -> AgentLoop {
@@ -354,7 +305,7 @@ fn assemble_agent_loop(
             .parse()
             .expect("static model id should parse"),
     });
-    let tool_executor = ToolExecutor::new(registry, approval, Arc::clone(&durable));
+    let tool_executor = ToolExecutor::new(registry, Arc::clone(&durable));
     AgentLoop::builder()
         .llm_provider(provider)
         .tool_executor(tool_executor)
@@ -409,7 +360,10 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
         outcome.new_messages,
         vec![prompts[0].clone(), prompts[1].clone(), assistant.clone()]
     );
-    assert_eq!(outcome.finish_reason, FinishReason::Stop);
+    assert_eq!(
+        outcome.completion,
+        LoopCompletionReason::Model(FinishReason::Stop)
+    );
     assert_eq!(outcome.usage, usage);
 
     let operations = operations
@@ -1625,7 +1579,6 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
         LoopLimits::new(2, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
     let prompt = ChatMessage::user("use echo");
@@ -1753,7 +1706,6 @@ async fn multiple_tools_execute_and_commit_strictly_in_assistant_order() {
         LoopLimits::new(2, 2),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -1825,7 +1777,6 @@ async fn failed_and_missing_tool_results_are_committed_and_visible_to_the_model(
         LoopLimits::new(2, 2),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -1855,7 +1806,7 @@ async fn failed_and_missing_tool_results_are_committed_and_visible_to_the_model(
 }
 
 #[tokio::test]
-async fn invalid_builtin_tool_input_is_committed_without_approval_or_execution_start() {
+async fn invalid_builtin_tool_input_is_committed_without_execution_start() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
     registry
@@ -1873,7 +1824,6 @@ async fn invalid_builtin_tool_input_is_committed_without_approval_or_execution_s
         LoopLimits::new(2, 1),
         None,
         Arc::new(registry),
-        Arc::new(FailingToolApproval),
         Arc::clone(&operations),
     );
 
@@ -1884,7 +1834,7 @@ async fn invalid_builtin_tool_input_is_committed_without_approval_or_execution_s
             CancellationToken::new(),
         )
         .await
-        .expect("invalid input should be returned to the model without approval");
+        .expect("invalid input should be returned to the model without execution");
 
     let expected_result = ChatMessage::tool(
         CallId::new("call-invalid"),
@@ -1910,11 +1860,8 @@ async fn invalid_builtin_tool_input_is_committed_without_approval_or_execution_s
     )));
     assert!(!recorded.iter().any(|operation| matches!(
         operation,
-        Operation::Durable(
-            DurableAgentEvent::ToolApprovalRequested { .. }
-                | DurableAgentEvent::ToolApprovalResolved { .. }
-                | DurableAgentEvent::ToolExecutionStarted { .. }
-        ) | Operation::ToolCall { .. }
+        Operation::Durable(DurableAgentEvent::ToolExecutionStarted { .. })
+            | Operation::ToolCall { .. }
     )));
 }
 
@@ -1935,7 +1882,6 @@ async fn iteration_limit_fails_once_before_another_model_request() {
         LoopLimits::new(1, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -1995,7 +1941,6 @@ async fn cancellation_during_last_started_tool_wins_after_result_and_iteration_c
         LoopLimits::new(1, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -2073,7 +2018,6 @@ async fn length_with_calls_commits_typed_errors_without_executing_tools() {
         LoopLimits::new(2, 2),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -2145,7 +2089,6 @@ async fn unexpected_finish_reason_commits_errors_without_executing_tools() {
         LoopLimits::new(2, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -2207,7 +2150,6 @@ async fn tool_executor_durability_failure_is_fail_closed_without_terminal_retry(
         LoopLimits::new(2, 1),
         Some(3),
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -2243,57 +2185,6 @@ async fn tool_executor_durability_failure_is_fail_closed_without_terminal_retry(
 }
 
 #[tokio::test]
-async fn tool_executor_approval_failure_preserves_source_and_commits_loop_failed() {
-    let operations = Arc::new(Mutex::new(Vec::new()));
-    let registry = recording_registry(
-        &operations,
-        &[("echo", RecordingToolBehavior::Echo)],
-        ToolPermissionMode::RequireApproval,
-    );
-    let (agent_loop, recorded) = build_agent_loop(
-        VecDeque::from([tool_call_turn(
-            &[("call-1", "echo", json!({}))],
-            FinishReason::ToolCalls,
-            None,
-        )]),
-        LoopLimits::new(2, 1),
-        None,
-        registry,
-        Arc::new(FailingToolApproval),
-        Arc::clone(&operations),
-    );
-
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("tool")],
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("approval backend failure should stop the loop");
-
-    assert!(matches!(&error, AgentLoopError::ToolExecution { .. }));
-    assert!(
-        error
-            .source()
-            .and_then(|source| source.downcast_ref::<stratum_agent::ToolExecutorError>())
-            .is_some()
-    );
-    assert_eq!(
-        recorded
-            .lock()
-            .expect("operation lock should not be poisoned")
-            .iter()
-            .filter(|operation| matches!(
-                operation,
-                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
-            ))
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn repeated_call_id_in_a_later_iteration_fails_before_committing_or_dispatching_it() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let registry = recording_registry(
@@ -2317,7 +2208,6 @@ async fn repeated_call_id_in_a_later_iteration_fails_before_committing_or_dispat
         LoopLimits::new(3, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -2386,7 +2276,6 @@ async fn call_id_from_initial_context_cannot_be_reused_by_a_new_assistant() {
         LoopLimits::new(2, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
     let historical_call = ToolCall {
@@ -2445,8 +2334,6 @@ async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
         "loop_started",
         "message_appended",
         "message_appended",
-        "tool_approval_requested",
-        "tool_approval_resolved",
         "tool_execution_started",
         "message_appended",
         "iteration_completed",
@@ -2468,7 +2355,6 @@ async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
             LoopLimits::new(2, 1),
             Some(fail_at),
             registry,
-            Arc::new(AllowAllToolApproval),
             Arc::clone(&operations),
         );
 
@@ -2517,7 +2403,7 @@ async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
                 .iter()
                 .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
                 .count(),
-            usize::from(fail_at >= 6),
+            usize::from(fail_at >= 4),
             "tool activity crossed {}",
             boundaries[fail_at]
         );
@@ -2574,151 +2460,6 @@ async fn cancellation_before_first_model_call_records_one_cancelled_terminal() {
 }
 
 #[tokio::test]
-async fn cancelled_approval_maps_to_loop_cancellation_without_execution() {
-    let operations = Arc::new(Mutex::new(Vec::new()));
-    let approval_entered = Arc::new(Notify::new());
-    let registry = recording_registry(
-        &operations,
-        &[("echo", RecordingToolBehavior::Echo)],
-        ToolPermissionMode::RequireApproval,
-    );
-    let (agent_loop, recorded) = build_agent_loop(
-        VecDeque::from([tool_call_turn(
-            &[("call-approval", "echo", json!({}))],
-            FinishReason::ToolCalls,
-            None,
-        )]),
-        LoopLimits::new(2, 1),
-        None,
-        registry,
-        Arc::new(CancellationAwareApproval {
-            entered: Arc::clone(&approval_entered),
-        }),
-        Arc::clone(&operations),
-    );
-    let cancellation = CancellationToken::new();
-    let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(async move {
-        agent_loop
-            .run(
-                LoopContext::new("be precise"),
-                vec![ChatMessage::user("request approval")],
-                task_cancellation,
-            )
-            .await
-    });
-    timeout(Duration::from_secs(1), approval_entered.notified())
-        .await
-        .expect("approval implementation should begin waiting");
-
-    cancellation.cancel();
-    let error = timeout(Duration::from_secs(1), task)
-        .await
-        .expect("approval cancellation should stop")
-        .expect("loop task should not panic")
-        .expect_err("approval cancellation should return an error");
-
-    assert!(matches!(error, AgentLoopError::Cancelled));
-    let recorded = recorded
-        .lock()
-        .expect("operation lock should not be poisoned");
-    assert_eq!(
-        recorded
-            .iter()
-            .filter(|operation| matches!(
-                operation,
-                Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
-            ))
-            .count(),
-        1
-    );
-    assert!(!recorded.iter().any(|operation| matches!(
-        operation,
-        Operation::Durable(
-            DurableAgentEvent::ToolApprovalResolved { .. }
-                | DurableAgentEvent::ToolExecutionStarted { .. }
-                | DurableAgentEvent::LoopFailed { .. }
-        ) | Operation::ToolCall { .. }
-    )));
-}
-
-#[tokio::test]
-async fn cancellation_after_approval_resolution_stops_before_execution_start() {
-    let operations = Arc::new(Mutex::new(Vec::new()));
-    let cancellation = CancellationToken::new();
-    let durable: Arc<dyn DurableEventSink> = Arc::new(TriggeredCancellationSink {
-        operations: Arc::clone(&operations),
-        cancellation: cancellation.clone(),
-        trigger: CancellationTrigger::ApprovalResolved,
-    });
-    let registry = recording_registry(
-        &operations,
-        &[("echo", RecordingToolBehavior::Echo)],
-        ToolPermissionMode::RequireApproval,
-    );
-    let agent_loop = assemble_agent_loop(
-        VecDeque::from([tool_call_turn(
-            &[("call-approval", "echo", json!({}))],
-            FinishReason::ToolCalls,
-            None,
-        )]),
-        LoopLimits::new(2, 1),
-        registry,
-        Arc::new(AllowAllToolApproval),
-        durable,
-        Arc::clone(&operations),
-    );
-
-    let error = agent_loop
-        .run(
-            LoopContext::new("be precise"),
-            vec![ChatMessage::user("request approval")],
-            cancellation,
-        )
-        .await
-        .expect_err("cancellation after approval resolution should stop execution");
-
-    assert!(matches!(error, AgentLoopError::Cancelled));
-    let operations = operations
-        .lock()
-        .expect("operation lock should not be poisoned");
-    let durable_types = operations
-        .iter()
-        .filter_map(|operation| match operation {
-            Operation::Durable(event) => Some(event.event_type()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        durable_types,
-        vec![
-            "loop_started",
-            "message_appended",
-            "message_appended",
-            "tool_approval_requested",
-            "tool_approval_resolved",
-            "loop_cancelled",
-        ]
-    );
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|operation| matches!(
-                operation,
-                Operation::Durable(DurableAgentEvent::LoopCancelled { .. })
-            ))
-            .count(),
-        1
-    );
-    assert!(!operations.iter().any(|operation| matches!(
-        operation,
-        Operation::Durable(
-            DurableAgentEvent::ToolExecutionStarted { .. } | DurableAgentEvent::LoopFailed { .. }
-        ) | Operation::ToolCall { .. }
-    )));
-}
-
-#[tokio::test]
 async fn cancellation_after_tool_start_awaits_result_and_completes_iteration() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let usage = TokenUsage {
@@ -2740,7 +2481,6 @@ async fn cancellation_after_tool_start_awaits_result_and_completes_iteration() {
         LoopLimits::new(2, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
     let cancellation = CancellationToken::new();
@@ -2827,7 +2567,6 @@ async fn cancellation_committed_after_first_result_prevents_second_tool_start() 
         )]),
         LoopLimits::new(2, 2),
         registry,
-        Arc::new(AllowAllToolApproval),
         durable,
         Arc::clone(&operations),
     );
@@ -2932,7 +2671,6 @@ async fn failed_terminal_usage_saturates_completed_frames_and_excludes_failed_st
         LoopLimits::new(3, 1),
         None,
         registry,
-        Arc::new(AllowAllToolApproval),
         Arc::clone(&operations),
     );
 
@@ -3000,7 +2738,6 @@ async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
         ]),
         LoopLimits::new(3, 1),
         registry,
-        Arc::new(AllowAllToolApproval),
         durable,
         Arc::clone(&operations),
     );

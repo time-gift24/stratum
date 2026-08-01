@@ -317,8 +317,10 @@ impl TurnRuntimeSnapshot {
 pub enum HookPoint {
     /// Transform model context before a model call.
     TransformContext,
-    /// Decide what to do immediately before a tool call.
-    BeforeToolCall,
+    /// Transform tool call arguments before the execution decision.
+    TransformToolCall,
+    /// Decide whether a validated tool call executes.
+    DecideToolCall,
     /// Process a completed tool call before the loop continues.
     AfterToolCall,
     /// Prepare state for the next model iteration.
@@ -1656,7 +1658,7 @@ mod tests {
             session_id: SessionId::new(),
             agent_id: AgentId::new(),
             turn_id: TurnId::new(),
-            hook_point: HookPoint::BeforeToolCall,
+            hook_point: HookPoint::DecideToolCall,
             handler_position,
             handler_version_id: HookHandlerVersionId::new(),
             operation: HookOperationIdentity::ToolCall {
