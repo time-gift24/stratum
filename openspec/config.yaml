@@ -22,3 +22,4 @@ rules:
     - 任务按产品文档、实现、验证和归档准备分组。
     - 只有真实完成并验证的任务才能标记为完成。
     - 归档前必须运行 openspec validate --all --strict，并确认失效 change 不会合并到主 specs。
+    - 验证分组必须包含 constitution-review 任务：对照仓库根 CONSTITUTION.md 审查本 change 的完整 diff（可派发子代理分条款进行），修复全部 red-flag 与 violation 后才能归档。

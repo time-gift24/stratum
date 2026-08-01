@@ -178,6 +178,10 @@ legacy stateful `Agent` compatibility path.
 - Deferred to later milestones (do not add here): per-handler journal
   granularity (H3b evaluation), kernel-durable history compaction (H5),
   Skill/Script/service adapters, and hook telemetry or EventBus payloads.
+  Also recorded for evaluation: the resume chain-version check passes when
+  the event stream recorded a version but the injected runtime reports none
+  (replacing the chain with a version-less runtime bypasses the guard) —
+  decide whether that combination should fail closed.
 
 ## Legacy Agent Compatibility
 
