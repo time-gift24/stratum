@@ -216,10 +216,16 @@ impl JournalDecision for TransformToolCallDecision {
             }
             HookDecisionRecord::TransformToolCall(TransformToolCallDecisionRecord::Modify(
                 modification,
-            )) => Some(Self::Modify(TransformToolCallModification::new(
-                modification.arguments.clone(),
-                modification.authorization.map(AuthorizationOverride::from),
-            ))),
+            )) => {
+                let authorization = match modification.authorization.as_ref() {
+                    Some(record) => Some(AuthorizationOverride::from_record(record)?),
+                    None => None,
+                };
+                Some(Self::Modify(TransformToolCallModification::new(
+                    modification.arguments.clone(),
+                    authorization,
+                )))
+            }
             _ => None,
         }
     }
@@ -234,12 +240,19 @@ impl From<AuthorizationOverride> for AuthorizationOverrideRecord {
     }
 }
 
-impl From<AuthorizationOverrideRecord> for AuthorizationOverride {
-    fn from(record: AuthorizationOverrideRecord) -> Self {
+impl AuthorizationOverride {
+    /// Converts a journaled record back to the runtime override.
+    ///
+    /// Unknown (future) record variants fail closed as `None`; a persisted
+    /// override must never default toward pre-authorization.
+    fn from_record(record: &AuthorizationOverrideRecord) -> Option<Self> {
         match record {
-            AuthorizationOverrideRecord::PreAuthorize => Self::PreAuthorize,
-            AuthorizationOverrideRecord::Set { kind, danger } => Self::Set { kind, danger },
-            _ => Self::PreAuthorize,
+            AuthorizationOverrideRecord::PreAuthorize => Some(Self::PreAuthorize),
+            AuthorizationOverrideRecord::Set { kind, danger } => Some(Self::Set {
+                kind: *kind,
+                danger: *danger,
+            }),
+            _ => None,
         }
     }
 }

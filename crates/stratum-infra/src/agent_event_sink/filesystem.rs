@@ -116,20 +116,23 @@ fn append_line(run_dir: &Path, line: &str) -> Result<(), FilesystemEventSinkErro
 /// parse.
 pub fn read_events(run_dir: &Path) -> Result<Vec<DurableAgentEvent>, FilesystemEventSinkError> {
     let path = run_dir.join(EVENTS_FILE_NAME);
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(FilesystemEventSinkError::Read { path, source }),
     };
-    let lines: Vec<(u64, &str)> = contents
-        .lines()
+    // Parse from bytes rather than UTF-8 text so a torn write that lands in
+    // the middle of a multi-byte character is tolerated like any other
+    // truncated tail line instead of failing the whole read.
+    let lines: Vec<(u64, &[u8])> = bytes
+        .split(|byte| *byte == b'\n')
         .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
+        .filter(|(_, line)| line.iter().any(|byte| !byte.is_ascii_whitespace()))
         .map(|(index, line)| (index as u64 + 1, line))
         .collect();
     let mut events = Vec::with_capacity(lines.len());
     for (position, (line_number, line)) in lines.iter().enumerate() {
-        match serde_json::from_str(line) {
+        match serde_json::from_slice(line) {
             Ok(event) => events.push(event),
             Err(_) if position + 1 == lines.len() => {
                 // Truncated tail line left by a crash mid-append.
@@ -397,6 +400,31 @@ mod tests {
 
         assert_eq!(
             read_events(run.path()).expect("truncated tail must be tolerated"),
+            events
+        );
+    }
+
+    #[tokio::test]
+    async fn torn_utf8_tail_line_is_tolerated() {
+        let run = TestRunDir::new("torn-utf8-tail");
+        let sink = FilesystemDurableEventSink::new(run.path());
+        let events = sample_events();
+        for event in &events {
+            sink.append(event.clone())
+                .await
+                .expect("append should succeed");
+        }
+
+        // Simulate a crash mid-append that stops inside a multi-byte UTF-8
+        // character: the tail is not even valid UTF-8.
+        let log_path = run.path().join(EVENTS_FILE_NAME);
+        let mut raw = std::fs::read(&log_path).expect("event log should be readable");
+        raw.extend_from_slice("{\"type\":\"message_appended\",\"data\":\"".as_bytes());
+        raw.extend_from_slice(&"中".as_bytes()[..2]);
+        std::fs::write(&log_path, raw).expect("event log should be writable");
+
+        assert_eq!(
+            read_events(run.path()).expect("torn utf-8 tail must be tolerated"),
             events
         );
     }
