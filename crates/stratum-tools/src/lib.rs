@@ -3,6 +3,7 @@
 pub mod builtin;
 pub mod definition;
 pub mod error;
+mod schema_validation;
 
 pub use builtin::{
     ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,

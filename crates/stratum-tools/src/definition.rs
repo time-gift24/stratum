@@ -97,9 +97,13 @@ pub trait Tool: Send + Sync {
 pub trait ToolRegistry: Send + Sync {
     /// Registers a tool by its provider-visible name.
     ///
+    /// The tool's `input_schema` is compiled and cached here; every later validation runs
+    /// against the compiled schema before tool-specific checks.
+    ///
     /// # Errors
     ///
-    /// Returns an error when another tool with the same name is already registered.
+    /// Returns an error when another tool with the same name is already registered or the
+    /// tool's `input_schema` is not a valid JSON Schema document.
     fn register(
         &mut self,
         tool: Arc<dyn Tool>,
@@ -115,6 +119,9 @@ pub trait ToolRegistry: Send + Sync {
     fn authorization(&self, name: &ToolName) -> Result<Option<(ToolKind, DangerLevel)>, ToolError>;
 
     /// Validates input for a registered tool without starting external work.
+    ///
+    /// Input is checked against the tool's compiled `input_schema` first; only input that
+    /// satisfies the schema reaches the tool's own [`Tool::validate`] semantic checks.
     ///
     /// # Errors
     ///

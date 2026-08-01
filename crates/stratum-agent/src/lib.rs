@@ -15,10 +15,10 @@ pub use agent_loop::{
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
 pub use hook_runtime::{
-    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, ContextPatch,
-    DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime, HookSnapshot,
-    NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput, ToolHookTarget,
-    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
-    TransformToolCallInput, TransformToolCallModification,
+    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, ChainHookRuntime,
+    ContextPatch, DecideToolCallDecision, DecideToolCallInput, HookControl, HookHandler,
+    HookHandlerDescriptor, HookRuntime, HookSnapshot, NoopHookRuntime, PrepareNextTurnDecision,
+    PrepareNextTurnInput, ToolHookTarget, TransformContextDecision, TransformContextInput,
+    TransformToolCallDecision, TransformToolCallInput, TransformToolCallModification,
 };
 pub use tool_executor::{ToolExecutor, ToolExecutorError};

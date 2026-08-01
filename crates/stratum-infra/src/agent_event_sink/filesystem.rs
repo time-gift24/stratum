@@ -219,7 +219,9 @@ mod tests {
 
     fn sample_events() -> Vec<DurableAgentEvent> {
         vec![
-            DurableAgentEvent::LoopStarted,
+            DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            },
             DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("hello"),
             },
@@ -347,7 +349,11 @@ mod tests {
         permissions.set_readonly(true);
         std::fs::set_permissions(run.path(), permissions).expect("permissions should be settable");
 
-        let result = sink.append(DurableAgentEvent::LoopStarted).await;
+        let result = sink
+            .append(DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            })
+            .await;
 
         let mut permissions = std::fs::metadata(run.path())
             .expect("run dir metadata should be readable")
@@ -448,9 +454,11 @@ mod tests {
     async fn malformed_middle_line_is_a_typed_error() {
         let run = TestRunDir::new("malformed-middle");
         let sink = FilesystemDurableEventSink::new(run.path());
-        sink.append(DurableAgentEvent::LoopStarted)
-            .await
-            .expect("append should succeed");
+        sink.append(DurableAgentEvent::LoopStarted {
+            extension_set_version_id: None,
+        })
+        .await
+        .expect("append should succeed");
 
         let log_path = run.path().join(EVENTS_FILE_NAME);
         let mut raw = std::fs::read_to_string(&log_path).expect("event log should be readable");

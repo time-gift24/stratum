@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     future::pending,
     sync::{Arc, Mutex},
@@ -504,7 +505,7 @@ impl Tool for EchoRecordingTool {
         if self.strict_validation && !input.arguments.is_object() {
             return Err(ToolError::InvalidArgument {
                 name: "arguments",
-                reason: "must be an object",
+                reason: Cow::Borrowed("must be an object"),
             });
         }
         Ok(())
@@ -1048,11 +1049,17 @@ async fn transform_modify_failing_revalidation_never_reaches_decide() {
         .await
         .expect("re-validation failures stay model-visible results");
 
-    let expected_result = ChatMessage::tool(
-        CallId::from("call-1"),
-        json!({"error": "invalid argument arguments: must be an object"}),
+    // The unified validation boundary owns the exact reason text; the kernel
+    // contract is only that the call becomes a structured invalid-argument
+    // error result under the original call identity.
+    let result = &outcome.new_messages[2];
+    assert_eq!(result.role, ChatRole::Tool);
+    assert_eq!(result.tool_call_id, Some(CallId::from("call-1")));
+    let error = serde_json::to_value(&result.content).expect("content serializes");
+    assert!(
+        error.to_string().contains("invalid argument"),
+        "the committed result must be a structured invalid-argument error, got {error}"
     );
-    assert_eq!(outcome.new_messages[2], expected_result);
     let recorded = snapshot(&operations);
     let calls = hook_calls(&recorded);
     assert!(
@@ -1079,7 +1086,7 @@ async fn transform_modify_failing_revalidation_never_reaches_decide() {
             .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
     );
     let requests = chat_requests(&recorded);
-    assert_eq!(requests[1].messages.last(), Some(&expected_result));
+    assert_eq!(requests[1].messages.last(), Some(result));
 }
 
 // 4.3: the decide hook receives the re-validated final arguments produced by

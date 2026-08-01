@@ -1,6 +1,6 @@
 //! Typed failures that stop the agent loop kernel.
 
-use stratum_core::{CallId, ChatRole, HookFailure, HookPoint};
+use stratum_core::{CallId, ChatRole, ExtensionSetVersionId, HookFailure, HookPoint};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
@@ -131,6 +131,17 @@ pub enum ResumeError {
     HookDigestMismatch {
         /// Decision point whose input changed across the crash boundary.
         point: HookPoint,
+    },
+    /// The extension set version recorded at `LoopStarted` differs from the
+    /// version the currently injected hook runtime reports.
+    #[error(
+        "hook extension set version mismatch: stream recorded {recorded}, runtime reports {current}"
+    )]
+    ExtensionSetVersionMismatch {
+        /// Version durably recorded with the run's `LoopStarted`.
+        recorded: ExtensionSetVersionId,
+        /// Version reported by the re-injected hook runtime.
+        current: ExtensionSetVersionId,
     },
 }
 

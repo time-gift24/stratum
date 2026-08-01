@@ -74,21 +74,21 @@ async fn builtin_validation_rejects_every_deterministic_invalid_input_without_fi
         (
             "read_file_lines",
             json!({"path": "notes.txt", "start_line": 1}),
-            "invalid tool input",
+            "invalid argument arguments",
         ),
         (
             "read_file_lines",
             json!({"path": "notes.txt", "start_line": 0, "line_count": 1}),
-            "invalid tool input",
+            "invalid argument arguments",
         ),
         (
             "read_file_lines",
             json!({"path": "../secret", "start_line": 1, "line_count": 1}),
             "invalid path",
         ),
-        ("list_dir", json!({}), "invalid tool input"),
+        ("list_dir", json!({}), "invalid argument arguments"),
         ("list_dir", json!({"path": "../secret"}), "invalid path"),
-        ("file_metadata", json!({}), "invalid tool input"),
+        ("file_metadata", json!({}), "invalid argument arguments"),
         (
             "file_metadata",
             json!({"path": "../secret"}),
@@ -97,23 +97,23 @@ async fn builtin_validation_rejects_every_deterministic_invalid_input_without_fi
         (
             "search_text",
             json!({"path": "src", "query": ""}),
-            "invalid argument query",
+            "invalid argument arguments",
         ),
         (
             "search_text",
             json!({"path": "src", "query": "needle", "max_results": 0}),
-            "invalid tool input",
+            "invalid argument arguments",
         ),
         (
             "search_text",
             json!({"path": "../secret", "query": "needle"}),
             "invalid path",
         ),
-        ("apply_patch", json!({}), "invalid tool input"),
+        ("apply_patch", json!({}), "invalid argument arguments"),
         (
             "apply_patch",
             json!({"operation": {"type": "rename_file", "path": "notes.txt"}}),
-            "invalid tool operation",
+            "invalid argument arguments",
         ),
         (
             "apply_patch",
@@ -123,12 +123,12 @@ async fn builtin_validation_rejects_every_deterministic_invalid_input_without_fi
         (
             "apply_patch",
             json!({"operation": {"type": "create_file", "path": "notes.txt"}}),
-            "invalid argument diff",
+            "invalid argument arguments",
         ),
         (
             "apply_patch",
             json!({"operation": {"type": "update_file", "path": "notes.txt"}}),
-            "invalid argument diff",
+            "invalid argument arguments",
         ),
     ];
 

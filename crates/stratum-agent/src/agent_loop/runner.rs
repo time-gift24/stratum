@@ -97,7 +97,9 @@ impl AgentLoop {
         }
 
         self.durable_events
-            .append(DurableAgentEvent::LoopStarted)
+            .append(DurableAgentEvent::LoopStarted {
+                extension_set_version_id: self.hook_runtime.extension_set_version(),
+            })
             .await?;
         // `None` until a provider response reports usage; durable events and
         // the loop outcome project it back to a zero-filled `TokenUsage`.
@@ -125,8 +127,12 @@ impl AgentLoop {
     /// results, and consults the journaled hook invocations before calling
     /// the hook runtime again: digest-matching completed decisions are reused,
     /// pending invocations are retried under their original identity, and
-    /// failures are reproduced. The resumed run keeps appending to the same
-    /// durable sink and does not record a second `LoopStarted`.
+    /// failures are reproduced. When the stream's `LoopStarted` recorded an
+    /// extension set version and the injected runtime reports a different one,
+    /// the resume fails closed before any model, tool, or hook action; a
+    /// runtime reporting no version skips that check. The resumed run keeps
+    /// appending to the same durable sink and does not record a second
+    /// `LoopStarted`.
     ///
     /// Tool execution stays at-least-once: a call started before the crash
     /// without a committed result re-executes as part of the missing result
@@ -151,6 +157,16 @@ impl AgentLoop {
             return Err(AgentLoopError::IterationLimitExceeded { maximum: 0 });
         }
         let replay = replay_events(events)?;
+        // A run that pinned its handler chain refuses to resume under a chain
+        // reporting a different version (changed membership, order, or handler
+        // version). A runtime without a pinned version skips the check.
+        if let (Some(recorded), Some(current)) = (
+            replay.extension_set_version_id,
+            self.hook_runtime.extension_set_version(),
+        ) && recorded != current
+        {
+            return Err(ResumeError::ExtensionSetVersionMismatch { recorded, current }.into());
+        }
         let start = RunStart {
             context: LoopContext::new(system_prompt).with_messages(replay.messages),
             prompts: Vec::new(),
@@ -1025,13 +1041,17 @@ impl AgentLoopBuilder {
 /// zero-based, left-closed/right-open prefix end that must stay in bounds and
 /// must not cut a tool_call/tool_result pair (a dropped assistant message's
 /// results must be dropped with it). A rewrite summary must not itself open a
-/// tool-call pair or pose as a tool result.
-fn validate_context_patch(
+/// tool-call pair or pose as a tool result. A `Composite` validates its
+/// sub-patches in order against the evolving view each one produces.
+pub(crate) fn validate_context_patch(
     committed: &[ChatMessage],
     patch: &ContextPatch,
 ) -> Result<(), HookFailure> {
     let upto = match patch {
         ContextPatch::ReplaceSystemPrompt(_) => return Ok(()),
+        ContextPatch::Composite(patches) => {
+            return validate_composite_patch(committed, patches);
+        }
         ContextPatch::DropHistory { upto } => *upto,
         ContextPatch::RewriteHistory { upto, summary } => {
             if !summary.tool_calls.is_empty() || summary.tool_call_id.is_some() {
@@ -1055,13 +1075,49 @@ fn validate_context_patch(
     Ok(())
 }
 
+/// Validates a non-empty patch composition sequentially: every sub-patch must
+/// be valid against the view produced by the sub-patches before it.
+fn validate_composite_patch(
+    committed: &[ChatMessage],
+    patches: &[ContextPatch],
+) -> Result<(), HookFailure> {
+    if patches.is_empty() {
+        return Err(HookFailure::InvalidOutput);
+    }
+    let mut scratch = committed.to_vec();
+    for patch in patches {
+        validate_context_patch(&scratch, patch)?;
+        apply_messages_patch(&mut scratch, patch);
+    }
+    Ok(())
+}
+
+/// Applies one validated patch's message rewrite to a scratch message list;
+/// system-prompt replacements do not touch messages.
+fn apply_messages_patch(messages: &mut Vec<ChatMessage>, patch: &ContextPatch) {
+    match patch {
+        ContextPatch::DropHistory { upto } => {
+            messages.drain(..*upto);
+        }
+        ContextPatch::RewriteHistory { upto, summary } => {
+            messages.splice(..*upto, std::iter::once(summary.clone()));
+        }
+        _ => {}
+    }
+}
+
 /// Applies a validated context patch to the request view. The patch only ever
 /// rewrites the view: the committed transcript, durable messages, and the loop
 /// outcome never observe it.
-fn apply_context_patch(view: &mut LoopContext, patch: &ContextPatch) {
+pub(crate) fn apply_context_patch(view: &mut LoopContext, patch: &ContextPatch) {
     match patch {
         ContextPatch::ReplaceSystemPrompt(prompt) => {
             view.system_prompt.clone_from(prompt);
+        }
+        ContextPatch::Composite(patches) => {
+            for sub_patch in patches {
+                apply_context_patch(view, sub_patch);
+            }
         }
         ContextPatch::DropHistory { upto } => {
             view.messages.drain(..*upto);

@@ -10,3 +10,5 @@ mod types;
 pub use error::{AgentLoopBuildError, AgentLoopError, ProtocolError, ResumeError};
 pub use runner::{AgentLoop, AgentLoopBuilder};
 pub use types::{HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome};
+
+pub(crate) use runner::{apply_context_patch, validate_context_patch};

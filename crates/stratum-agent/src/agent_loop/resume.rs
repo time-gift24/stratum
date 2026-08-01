@@ -14,7 +14,7 @@
 //! part of the missing result suffix. Terminal events (`LoopFinished`,
 //! `LoopFailed`, `LoopCancelled`) make a run non-resumable.
 
-use stratum_core::{ChatMessage, ChatRole, DurableAgentEvent, ToolCall};
+use stratum_core::{ChatMessage, ChatRole, DurableAgentEvent, ExtensionSetVersionId, ToolCall};
 
 use super::ResumeError;
 use super::journal::{HookAddress, HookJournal};
@@ -32,6 +32,9 @@ pub(crate) struct ReplayState {
     pub(crate) continuation: Option<ResumeContinuation>,
     /// Hook invocation journal reconstructed from the stream.
     pub(crate) journal: HookJournal,
+    /// Extension set version the run pinned at `LoopStarted`, when the hook
+    /// runtime reported one.
+    pub(crate) extension_set_version_id: Option<ExtensionSetVersionId>,
 }
 
 /// Work the resumed run must finish at the frontier iteration.
@@ -64,10 +67,13 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
     let mut seen_loop_started = false;
     let mut activity_after_frontier = false;
     let mut journal = HookJournal::default();
+    let mut extension_set_version_id = None;
     for (event_index, event) in events.into_iter().enumerate() {
         let event_type = event.event_type();
         match event {
-            DurableAgentEvent::LoopStarted => {
+            DurableAgentEvent::LoopStarted {
+                extension_set_version_id: recorded,
+            } => {
                 if seen_loop_started {
                     tracing::warn!(
                         event_index,
@@ -77,6 +83,7 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                     return Err(ResumeError::UnexpectedLoopStarted);
                 }
                 seen_loop_started = true;
+                extension_set_version_id = recorded;
             }
             DurableAgentEvent::MessageAppended { message } => {
                 messages.push(message);
@@ -181,6 +188,7 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
         frontier,
         continuation,
         journal,
+        extension_set_version_id,
     })
 }
 
@@ -274,7 +282,9 @@ mod tests {
     }
 
     fn stream(messages: Vec<ChatMessage>) -> Vec<DurableAgentEvent> {
-        let mut events = vec![DurableAgentEvent::LoopStarted];
+        let mut events = vec![DurableAgentEvent::LoopStarted {
+            extension_set_version_id: None,
+        }];
         events.extend(
             messages
                 .into_iter()
@@ -338,7 +348,9 @@ mod tests {
             ResumeError::MissingLoopStarted
         );
         let mut duplicated = stream(vec![]);
-        duplicated.push(DurableAgentEvent::LoopStarted);
+        duplicated.push(DurableAgentEvent::LoopStarted {
+            extension_set_version_id: None,
+        });
         assert_eq!(
             replay_events(duplicated).expect_err("a duplicated start must refuse resume"),
             ResumeError::UnexpectedLoopStarted

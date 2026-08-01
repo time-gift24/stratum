@@ -152,10 +152,24 @@ legacy stateful `Agent` compatibility path.
   `Model(FinishReason)` from `HookStopped`; the durable `LoopFinished` reason
   projects to stable strings such as `hook_stopped`. A hook stop must never be
   disguised as a provider finish reason.
-- Deferred to later milestones (do not add here): multi-handler ordering and
-  short-circuiting (H2), the unified `stratum-tools` validation boundary (H2),
-  kernel-durable history compaction (H5), Skill/Script/service adapters, and
-  hook telemetry or EventBus payloads.
+- `ChainHookRuntime` (`hook_runtime/chain.rs`) is the ordered handler-chain
+  `HookRuntime`; the kernel still sees one runtime, so cancellation, deadline,
+  and hook-point journal semantics are unchanged. `HookHandler`
+  (`hook_runtime/handler.rs`) mirrors the five hook methods with no-op
+  defaults plus an immutable `HookHandlerVersionId` descriptor. Chain
+  semantics per point: transform/after thread the evolving view through
+  handlers in order (Cow, zero-copy when unmodified); decide short-circuits
+  on the first `Block`; prepare short-circuits on `Stop` (dropping collected
+  injects) and merges multiple `Inject` payloads in handler order. Any handler
+  failure or invalid decision fails the whole point closed.
+- Chain order is pinned data, not private code: a `ChainHookRuntime` computes
+  its `ExtensionSetVersionId` from the ordered handler versions at
+  construction, the kernel commits it with `LoopStarted`, and `resume` fails
+  closed when the injected runtime reports a different version. Runtimes
+  reporting no version skip the check.
+- Deferred to later milestones (do not add here): per-handler journal
+  granularity (H3b evaluation), kernel-durable history compaction (H5),
+  Skill/Script/service adapters, and hook telemetry or EventBus payloads.
 
 ## Legacy Agent Compatibility
 

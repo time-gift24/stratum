@@ -45,3 +45,21 @@
 - `ToolRegistry::fingerprint` is part of the resumable Turn snapshot. It must deterministically
   cover ordered provider-visible specs, authorization outcomes, and concrete implementation
   identities; a changed fingerprint fails resume before Tool or model work.
+
+## Schema Validation Boundary
+
+- `ToolSpec.input_schema` is the authoritative validation contract for tool arguments.
+  `BuiltinToolRegistry::register` compiles the schema once (meta-schema check plus
+  `jsonschema::validator_for`) and caches the compiled `jsonschema::Validator`; a tool with an
+  uncompilable schema fails registration with `ToolError::InvalidInputSchema` and never enters
+  the registry.
+- `BuiltinToolRegistry::validate` and `BuiltinToolRegistry::call` run the compiled schema first;
+  a schema rejection is a typed `ToolError::InvalidArgument` naming the failing instance path,
+  and the tool's custom `Tool::validate` (or `Tool::call`) never runs for schema-invalid input.
+  Schema-valid input still flows through `Tool::validate` for per-tool semantic checks.
+- Per-tool `validate` implementations keep their existing checks: `Tool::call` invoked directly
+  (bypassing the registry) must still reject the same invalid input.
+- Dependency rationale: `jsonschema` (MIT) is the de-facto standard JSON Schema validator;
+  handwriting draft-compliant validation is not realistic. It is used with
+  `default-features = false` so tool schemas never trigger network or filesystem reference
+  resolution at registration time.

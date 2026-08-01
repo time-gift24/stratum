@@ -138,7 +138,7 @@ fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolErro
     {
         return Err(ToolError::InvalidArgument {
             name: "diff",
-            reason: "is required for create_file and update_file",
+            reason: "is required for create_file and update_file".into(),
         });
     }
     Ok(ApplyPatchOperation::new(kind, path, raw.diff))

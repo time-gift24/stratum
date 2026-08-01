@@ -371,7 +371,7 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
         .expect("operation lock should not be poisoned");
     assert!(matches!(
         operations.first(),
-        Some(Operation::Durable(DurableAgentEvent::LoopStarted))
+        Some(Operation::Durable(DurableAgentEvent::LoopStarted { .. }))
     ));
     assert_eq!(
         operations.get(1),
@@ -480,7 +480,9 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
     assert_eq!(
         transcript,
         vec![
-            &DurableAgentEvent::LoopStarted,
+            &DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            },
             &DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("first new question"),
             },
@@ -1746,7 +1748,9 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
                 .expect("operation lock should not be poisoned")
         ),
         vec![
-            Operation::Durable(DurableAgentEvent::LoopStarted),
+            Operation::Durable(DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            }),
             Operation::Durable(DurableAgentEvent::MessageAppended { message: prompt }),
             Operation::ChatStream(first_request),
             Operation::Durable(DurableAgentEvent::MessageAppended { message: assistant }),
@@ -1935,11 +1939,17 @@ async fn invalid_builtin_tool_input_is_committed_without_execution_start() {
         .await
         .expect("invalid input should be returned to the model without execution");
 
-    let expected_result = ChatMessage::tool(
-        CallId::new("call-invalid"),
-        json!({"error": "invalid argument arguments: must be an object"}),
+    // The unified validation boundary owns the exact reason text; the kernel
+    // contract is only that the call becomes a structured invalid-argument
+    // error result under the original call identity.
+    let result = &outcome.new_messages[2];
+    assert_eq!(result.role, ChatRole::Tool);
+    assert_eq!(result.tool_call_id, Some(CallId::new("call-invalid")));
+    let error = serde_json::to_value(&result.content).expect("content serializes");
+    assert!(
+        error.to_string().contains("invalid argument"),
+        "the committed result must be a structured invalid-argument error, got {error}"
     );
-    assert_eq!(outcome.new_messages[2], expected_result);
     let recorded = recorded
         .lock()
         .expect("operation lock should not be poisoned");
@@ -1951,11 +1961,11 @@ async fn invalid_builtin_tool_input_is_committed_without_execution_start() {
         })
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages.last(), Some(&expected_result));
+    assert_eq!(requests[1].messages.last(), Some(result));
     assert!(recorded.iter().any(|operation| matches!(
         operation,
         Operation::Durable(DurableAgentEvent::MessageAppended { message })
-            if message == &expected_result
+            if message == result
     )));
     assert!(!recorded.iter().any(|operation| matches!(
         operation,
