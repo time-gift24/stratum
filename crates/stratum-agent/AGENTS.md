@@ -185,9 +185,30 @@ legacy stateful `Agent` compatibility path.
   detect "the id changed" but not "behavior changed while the id stayed" —
   that gap closes when handlers become distributable artifacts whose version
   derives from a content digest (S1/S2) or a pinned service identity (R3).
+- `prepare_next_turn` may also return `Compact { upto, summary }`: the handler
+  supplies the summary, the kernel executes the durable compaction at the
+  iteration boundary. Invariants enforced before commit: `upto` is nonzero,
+  in bounds, never splits a tool_call/tool_result pair, and never cuts into
+  the current iteration's committed messages; the summary must be a plain
+  system message (no tool identity, no reasoning). `Compact.upto` is always
+  an index into the committed context shown by the prepare snapshot — never
+  reuse indices computed from a patched request view, and recompute after
+  every compaction. The kernel wraps the summary with the stable marker
+  template (`COMPACTION_MARKER_PREFIX` + newline + body, see
+  `agent_loop/compaction.rs`) and commits `TranscriptCompacted` before the
+  iteration boundary; the marker message is committed history (and appears in
+  `LoopOutcome.new_messages`), so handlers can detect a past compaction at
+  the head of the snapshot context.
+- Compaction is replay-safe: the event log keeps every original message and
+  replay applies `TranscriptCompacted` in order; a crash between the
+  journaled `Completed(Compact)` and the compaction event is closed by
+  replaying the recorded summary — the handler is never re-invoked and the
+  summary is never regenerated. `compacted_iterations` dedupes a crash that
+  lands after the compaction event but before the iteration boundary.
+  Compaction never changes hook addressing or digests.
 - Deferred to later milestones (do not add here): per-handler journal
-  granularity (H3b evaluation), kernel-durable history compaction (H5),
-  Skill/Script/service adapters, and hook telemetry or EventBus payloads.
+  granularity (H3b evaluation), Skill/Script/service adapters, and hook
+  telemetry or EventBus payloads.
   Also recorded for evaluation: the resume chain-version check passes when
   the event stream recorded a version but the injected runtime reports none
   (replacing the chain with a version-less runtime bypasses the guard) —

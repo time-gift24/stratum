@@ -331,6 +331,27 @@ pub enum PrepareNextTurnDecision {
         /// Non-empty plain user messages for the next request view.
         messages: Vec<ChatMessage>,
     },
+    /// Durably compact the committed transcript prefix `[0, upto)` into a
+    /// kernel-owned summary marker message, then commit the iteration boundary
+    /// and start the next model iteration from the compacted baseline.
+    ///
+    /// `upto` is a zero-based, left-closed/right-open index into the committed
+    /// context exactly as the prepare snapshot presents it. It is a committed
+    /// coordinate: request-only patch views (for example `DropHistory`) use a
+    /// different coordinate system and must never be mixed in. Because every
+    /// compaction moves later positions, handlers must recompute `upto` from
+    /// the current snapshot each time and never reuse a cached index.
+    Compact {
+        /// Exclusive end index of the replaced committed-context prefix;
+        /// zero is invalid (a no-op compaction is a handler bug).
+        upto: usize,
+        /// Summary message supplied by the handler. It must be a plain system
+        /// message: no tool calls, no tool-call identity, no reasoning
+        /// content. The kernel rewrites its text into its own marker template
+        /// before committing; compaction never forges user or assistant
+        /// messages.
+        summary: ChatMessage,
+    },
 }
 
 impl PrepareNextTurnDecision {
@@ -342,6 +363,9 @@ impl PrepareNextTurnDecision {
             {
                 Err(HookFailure::InvalidOutput)
             }
+            Self::Compact { upto, summary } if *upto == 0 || !is_plain_system_summary(summary) => {
+                Err(HookFailure::InvalidOutput)
+            }
             _ => Ok(()),
         }
     }
@@ -349,6 +373,13 @@ impl PrepareNextTurnDecision {
 
 fn is_plain_user_message(message: &ChatMessage) -> bool {
     message.role == ChatRole::User
+        && message.tool_calls.is_empty()
+        && message.reasoning_content.is_none()
+        && message.tool_call_id.is_none()
+}
+
+fn is_plain_system_summary(message: &ChatMessage) -> bool {
+    message.role == ChatRole::System
         && message.tool_calls.is_empty()
         && message.reasoning_content.is_none()
         && message.tool_call_id.is_none()
@@ -535,6 +566,52 @@ mod tests {
         assert!(decision.check().is_ok());
         let decision = PrepareNextTurnDecision::Stop;
         assert!(decision.check().is_ok());
+    }
+
+    #[test]
+    fn compact_decisions_require_a_cut_and_a_plain_system_summary() {
+        let valid = ChatMessage::system("summary so far");
+        let cases: Vec<(usize, ChatMessage, bool)> = vec![
+            (1, valid.clone(), true),
+            // A zero cut is a no-op compaction: a handler bug.
+            (0, valid.clone(), false),
+            // The summary must not forge another role.
+            (1, ChatMessage::user("forged"), false),
+            (1, ChatMessage::assistant("forged"), false),
+            (
+                1,
+                ChatMessage::tool(CallId::from("call-1"), json!({})),
+                false,
+            ),
+            // The summary must not carry tool identity or reasoning.
+            (
+                1,
+                ChatMessage::system("summary").with_reasoning_content("forged"),
+                false,
+            ),
+            (
+                1,
+                ChatMessage::system("summary").with_tool_calls(vec![ToolCall {
+                    call_id: CallId::from("call-1"),
+                    name: "echo".to_owned(),
+                    arguments: json!({}),
+                }]),
+                false,
+            ),
+            (
+                1,
+                {
+                    let mut message = ChatMessage::system("summary");
+                    message.tool_call_id = Some(CallId::from("call-1"));
+                    message
+                },
+                false,
+            ),
+        ];
+        for (upto, summary, expected) in cases {
+            let decision = PrepareNextTurnDecision::Compact { upto, summary };
+            assert_eq!(decision.check().is_ok(), expected);
+        }
     }
 
     #[test]

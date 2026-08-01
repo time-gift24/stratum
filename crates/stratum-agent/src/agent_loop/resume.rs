@@ -4,15 +4,23 @@
 //! [`AgentLoop::resume`](super::AgentLoop::resume) together with a freshly
 //! supplied system prompt and run configuration; the kernel never touches
 //! storage itself. Replay rebuilds the committed context from the
-//! `MessageAppended` sequence, fixes the iteration frontier at one past the
-//! maximum committed `IterationCompleted`, reconciles committed tool results
-//! against their preceding assistant `tool_calls`, and reconstructs the hook
-//! invocation journal.
+//! `MessageAppended` sequence, applies every `TranscriptCompacted` in event
+//! order by replacing the rebuilt prefix with its summary marker message,
+//! fixes the iteration frontier at one past the maximum committed
+//! `IterationCompleted`, reconciles committed tool results against their
+//! preceding assistant `tool_calls`, and reconstructs the hook invocation
+//! journal.
+//!
+//! A replay window may start at a `TranscriptCompacted` line (a derived
+//! checkpoint index can skip the compacted prefix): when no `MessageAppended`
+//! preceded it in the window, the summary marker becomes the rebuild start.
 //!
 //! Tool execution stays at-least-once: a call whose `ToolExecutionStarted`
 //! committed without a result has an unknown outcome and simply re-executes as
 //! part of the missing result suffix. Terminal events (`LoopFinished`,
 //! `LoopFailed`, `LoopCancelled`) make a run non-resumable.
+
+use std::collections::HashSet;
 
 use stratum_core::{ChatMessage, ChatRole, DurableAgentEvent, ExtensionSetVersionId, ToolCall};
 
@@ -35,6 +43,14 @@ pub(crate) struct ReplayState {
     /// Extension set version the run pinned at `LoopStarted`, when the hook
     /// runtime reported one.
     pub(crate) extension_set_version_id: Option<ExtensionSetVersionId>,
+    /// Committed message count at the most recent iteration boundary, shifted
+    /// by any compaction applied afterwards: the index where the frontier
+    /// iteration's messages begin.
+    pub(crate) iteration_start: usize,
+    /// Iterations whose compaction replay already applied; the prepare
+    /// boundary of such an iteration reuses its journaled compact decision
+    /// without re-executing the compaction.
+    pub(crate) compacted_iterations: HashSet<u64>,
 }
 
 /// Work the resumed run must finish at the frontier iteration.
@@ -65,12 +81,25 @@ pub(crate) enum ResumeContinuation {
 pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayState, ResumeError> {
     let mut messages = Vec::new();
     let mut frontier = 0_u64;
+    let mut iteration_start = 0_usize;
+    // The kernel commits every prompt right after `LoopStarted`, before any
+    // hook, tool, or model activity: the leading `MessageAppended` run is
+    // exactly the prompt block, which belongs to the first iteration and
+    // seeds its start index.
+    let mut prompts_open = true;
+    let mut compacted_iterations = HashSet::new();
     let mut seen_loop_started = false;
     let mut activity_after_frontier = false;
     let mut journal = HookJournal::default();
     let mut extension_set_version_id = None;
     for (event_index, event) in events.into_iter().enumerate() {
         let event_type = event.event_type();
+        if !matches!(
+            event,
+            DurableAgentEvent::LoopStarted { .. } | DurableAgentEvent::MessageAppended { .. }
+        ) {
+            prompts_open = false;
+        }
         match event {
             DurableAgentEvent::LoopStarted {
                 extension_set_version_id: recorded,
@@ -87,12 +116,44 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 extension_set_version_id = recorded;
             }
             DurableAgentEvent::MessageAppended { message } => {
+                if prompts_open {
+                    iteration_start += 1;
+                }
                 messages.push(message);
                 activity_after_frontier = true;
             }
             DurableAgentEvent::IterationCompleted { iteration, .. } => {
                 frontier = frontier.max(iteration.saturating_add(1));
+                iteration_start = messages.len();
                 activity_after_frontier = false;
+            }
+            DurableAgentEvent::TranscriptCompacted {
+                upto,
+                summary,
+                compacted_iteration,
+            } => {
+                let upto = usize::try_from(upto).unwrap_or(usize::MAX);
+                if messages.is_empty() {
+                    // A replay window starting at the compaction line (derived
+                    // checkpoint fast path) has no compacted prefix; the
+                    // summary marker becomes the rebuild start.
+                    messages.push(summary);
+                } else if upto == 0 || upto > messages.len() {
+                    tracing::warn!(
+                        event_index,
+                        event_type,
+                        "refusing resume: compaction cut exceeds the rebuilt context"
+                    );
+                    return Err(ResumeError::CorruptedCompaction);
+                } else {
+                    messages.splice(..upto, std::iter::once(summary));
+                    // Compaction never cuts the frontier iteration, so its
+                    // start index shifts down by the removed prefix length
+                    // minus the one marker message.
+                    iteration_start = iteration_start.saturating_sub(upto.saturating_sub(1));
+                }
+                compacted_iterations.insert(compacted_iteration);
+                activity_after_frontier = true;
             }
             DurableAgentEvent::LoopFinished { .. }
             | DurableAgentEvent::LoopFailed { .. }
@@ -200,6 +261,8 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
         continuation,
         journal,
         extension_set_version_id,
+        iteration_start,
+        compacted_iterations,
     })
 }
 
@@ -478,5 +541,97 @@ mod tests {
                 ResumeError::ToolResultMismatch,
             );
         }
+    }
+
+    fn compaction(upto: u64, summary: &str, iteration: u64) -> DurableAgentEvent {
+        DurableAgentEvent::TranscriptCompacted {
+            upto,
+            summary: ChatMessage::system(summary),
+            compacted_iteration: iteration,
+        }
+    }
+
+    #[test]
+    fn replay_applies_compactions_in_event_order() {
+        let mut events = stream(vec![
+            ChatMessage::user("one"),
+            ChatMessage::user("two"),
+            ChatMessage::user("three"),
+        ]);
+        events.push(compaction(2, "summary one", 0));
+        events.push(DurableAgentEvent::IterationCompleted {
+            iteration: 0,
+            usage: TokenUsage::default(),
+        });
+        events.push(DurableAgentEvent::MessageAppended {
+            message: ChatMessage::assistant("answer"),
+        });
+        events.push(compaction(1, "summary two", 1));
+
+        let replay = replay_events(events).expect("compactions should replay in order");
+
+        // The second compaction addresses the baseline the first produced:
+        // its prefix is the first marker alone.
+        assert_eq!(
+            replay.messages,
+            vec![
+                ChatMessage::system("summary two"),
+                ChatMessage::user("three"),
+                ChatMessage::assistant("answer"),
+            ]
+        );
+        assert_eq!(replay.frontier, 1);
+        assert!(replay.compacted_iterations.contains(&0));
+        assert!(replay.compacted_iterations.contains(&1));
+    }
+
+    #[test]
+    fn replay_window_starting_at_a_compaction_uses_the_summary_as_start() {
+        // A derived checkpoint index lets replay skip the compacted prefix;
+        // the window then starts at the compaction line itself and the
+        // summary marker becomes the rebuild start.
+        let events = vec![
+            DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            },
+            compaction(7, "checkpoint summary", 3),
+            DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("later answer"),
+            },
+            DurableAgentEvent::IterationCompleted {
+                iteration: 4,
+                usage: TokenUsage::default(),
+            },
+        ];
+
+        let replay = replay_events(events).expect("a checkpoint window should replay");
+
+        assert_eq!(
+            replay.messages,
+            vec![
+                ChatMessage::system("checkpoint summary"),
+                ChatMessage::assistant("later answer"),
+            ]
+        );
+        assert_eq!(replay.frontier, 5);
+        assert_eq!(replay.iteration_start, 2);
+        assert!(replay.compacted_iterations.contains(&3));
+    }
+
+    #[test]
+    fn replay_rejects_a_compaction_cut_outside_the_rebuilt_context() {
+        let mut beyond = stream(vec![ChatMessage::user("one")]);
+        beyond.push(compaction(3, "summary", 0));
+        assert_eq!(
+            replay_events(beyond).expect_err("a cut past the context must fail closed"),
+            ResumeError::CorruptedCompaction,
+        );
+
+        let mut zero = stream(vec![ChatMessage::user("one")]);
+        zero.push(compaction(0, "summary", 0));
+        assert_eq!(
+            replay_events(zero).expect_err("a zero cut must fail closed"),
+            ResumeError::CorruptedCompaction,
+        );
     }
 }

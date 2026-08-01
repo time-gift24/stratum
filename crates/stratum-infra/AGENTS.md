@@ -52,6 +52,14 @@
   typed error, and a malformed tail line is ignored as crash truncation. The reader does blocking
   IO; async callers with large logs should offload it with `spawn_blocking`. No retention or
   cleanup policy exists yet; that decision belongs to the future sqlite backend.
+- A `TranscriptCompacted` append additionally appends one `CompactionCheckpoint` line to
+  `<root>/<run_id>/compact.jsonl` after the event is durable (write order is irreversible: event
+  first, index second). The index is a rebuildable derivative, never a second source of truth;
+  it only accelerates resume. `read_events_from_checkpoint(run_dir)` returns `LoopStarted` plus
+  the event window starting at the newest checkpoint whose target line re-validates as the
+  matching `TranscriptCompacted` (iteration, upto, summary sha-256). A missing, empty, truncated,
+  corrupt, or mismatching index falls back to a full `read_events` replay — index problems never
+  fail closed; only event-log corruption itself is a typed error.
 - Durable projection includes loop start, complete messages, approvals, tool execution start,
   iteration completion, and terminal events. Telemetry projection includes supported LLM start,
   text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit

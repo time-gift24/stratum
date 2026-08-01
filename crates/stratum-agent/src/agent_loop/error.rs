@@ -121,6 +121,10 @@ pub enum ResumeError {
         "committed tool results do not form the exact ordered prefix of the preceding assistant tool calls"
     )]
     ToolResultMismatch,
+    /// A `TranscriptCompacted` cut point is zero or exceeds the context
+    /// rebuilt so far; the kernel never writes such an event.
+    #[error("transcript compaction cut does not match the rebuilt context")]
+    CorruptedCompaction,
     /// Two pending records share one hook invocation address, or one
     /// invocation was completed twice.
     #[error("hook journal contains a duplicate invocation")]

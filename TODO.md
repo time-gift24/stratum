@@ -193,18 +193,18 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **依赖：** H2.5、H3。
 
-- [ ] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
-- [ ] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"，不触碰历史，写回由 kernel 代执行。
-- [ ] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记，不得伪装成用户或助手消息。
-- [ ] 压缩后的 transcript 成为新的 durable 基线（新增 transcript 改写类耐久事件），resume 从压缩基线恢复。
-- [ ] 决定摘要算力归属：kernel 注入的 summarizer 边界（版本可固定在 runtime snapshot）还是 handler 自带 provider。
-- [ ] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
+- [x] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
+- [x] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"并携带摘要，写回由 kernel 代执行。
+- [x] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记（`COMPACTION_MARKER_PREFIX`），不得伪装成用户或助手消息。
+- [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume 从压缩基线恢复；派生检查点索引 `compact.jsonl` 提供快速路径（可重建、损坏回退全量）。
+- [x] 摘要算力归属：handler 自带（决策记录含摘要，journal 固化非确定性；kernel 不引入 summarizer 组件）。
+- [x] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
 
 **验收条件：**
 
-- [ ] 压缩后 resume 重建的历史与压缩基线一致。
-- [ ] 任何压缩结果都不切断 tool_call/tool_result 配对，切割点只在迭代边界。
-- [ ] 崩溃于压缩提交前时恢复为未压缩基线（fail-safe），不重复执行已完成的工作。
+- [x] 压缩后 resume 重建的历史与压缩基线一致。
+- [x] 任何压缩结果都不切断 tool_call/tool_result 配对，切割点只在迭代边界。
+- [x] 崩溃于压缩提交前时恢复为未压缩基线（fail-safe），不重复执行已完成的工作。
 
 ### S1：第一档运行时 Skill
 

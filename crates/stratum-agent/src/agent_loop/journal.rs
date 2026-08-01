@@ -317,6 +317,10 @@ impl JournalDecision for PrepareNextTurnDecision {
             Self::Inject { messages } => PrepareNextTurnDecisionRecord::Inject {
                 messages: messages.clone(),
             },
+            Self::Compact { upto, summary } => PrepareNextTurnDecisionRecord::Compact {
+                upto: *upto,
+                summary: summary.clone(),
+            },
         };
         HookDecisionRecord::PrepareNextTurn(record)
     }
@@ -333,6 +337,13 @@ impl JournalDecision for PrepareNextTurnDecision {
                 messages,
             }) => Some(Self::Inject {
                 messages: messages.clone(),
+            }),
+            HookDecisionRecord::PrepareNextTurn(PrepareNextTurnDecisionRecord::Compact {
+                upto,
+                summary,
+            }) => Some(Self::Compact {
+                upto: *upto,
+                summary: summary.clone(),
             }),
             _ => None,
         }
@@ -425,6 +436,10 @@ mod tests {
         let prepare = PrepareNextTurnDecision::Inject {
             messages: vec![ChatMessage::user("note")],
         };
+        let compact = PrepareNextTurnDecision::Compact {
+            upto: 2,
+            summary: ChatMessage::system("summary so far"),
+        };
 
         assert_eq!(
             TransformContextDecision::from_record(&transform.to_record()),
@@ -445,6 +460,10 @@ mod tests {
         assert_eq!(
             PrepareNextTurnDecision::from_record(&prepare.to_record()),
             Some(prepare)
+        );
+        assert_eq!(
+            PrepareNextTurnDecision::from_record(&compact.to_record()),
+            Some(compact)
         );
     }
 

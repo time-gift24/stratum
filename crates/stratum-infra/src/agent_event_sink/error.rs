@@ -58,6 +58,15 @@ pub enum FilesystemEventSinkError {
         #[source]
         source: std::io::Error,
     },
+    /// A compaction checkpoint line could not be appended or fsynced.
+    #[error("failed to append compaction checkpoint to {}", path.display())]
+    AppendCheckpoint {
+        /// Checkpoint index file that could not be written.
+        path: PathBuf,
+        /// Underlying IO failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// The run directory could not be fsynced after an append.
     #[error("failed to sync run directory {}", path.display())]
     SyncRunDir {
