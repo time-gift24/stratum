@@ -67,7 +67,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{LoopContext, ToolHookTarget};
+    use crate::{HookSnapshot, LoopContext, ToolHookTarget};
 
     fn control() -> HookControl {
         HookControl::new(CancellationToken::new(), None)
@@ -77,6 +77,11 @@ mod tests {
     async fn noop_runtime_keeps_every_boundary_unchanged() {
         let runtime = NoopHookRuntime;
         let context = LoopContext::new("be precise");
+        let snapshot = HookSnapshot {
+            iteration: 0,
+            context: &context,
+            usage: None,
+        };
         let tool_call = ToolCall {
             call_id: CallId::from("call-1"),
             name: "echo".to_owned(),
@@ -95,13 +100,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .transform_context(
-                    TransformContextInput {
-                        iteration: 0,
-                        context: &context,
-                    },
-                    control(),
-                )
+                .transform_context(TransformContextInput { snapshot }, control())
                 .await,
             Ok(TransformContextDecision::Unchanged)
         );
@@ -109,7 +108,7 @@ mod tests {
             runtime
                 .transform_tool_call(
                     TransformToolCallInput {
-                        iteration: 0,
+                        snapshot,
                         tool_call: &tool_call,
                         tool: &target,
                     },
@@ -122,7 +121,7 @@ mod tests {
             runtime
                 .decide_tool_call(
                     DecideToolCallInput {
-                        iteration: 0,
+                        snapshot,
                         tool_call: &tool_call,
                         tool: &target,
                     },
@@ -135,7 +134,7 @@ mod tests {
             runtime
                 .after_tool_call(
                     AfterToolCallInput {
-                        iteration: 0,
+                        snapshot,
                         tool_call: &tool_call,
                         tool: &target,
                         result: &result,
@@ -147,13 +146,7 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .prepare_next_turn(
-                    PrepareNextTurnInput {
-                        iteration: 0,
-                        context: &context,
-                    },
-                    control(),
-                )
+                .prepare_next_turn(PrepareNextTurnInput { snapshot }, control())
                 .await,
             Ok(PrepareNextTurnDecision::Continue)
         );

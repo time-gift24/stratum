@@ -123,16 +123,16 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **依赖：** H1。**阻塞：** H3 输入摘要冻结、S1 handler 编写、S2 协议冻结（破坏性合同修订，越晚越贵）。
 
-- [ ] 定义借用公共信封 `HookSnapshot`（`iteration`、`&LoopContext`、`Option<TokenUsage>`，未来可扩展工具列表与预算），嵌入全部五个 Hook 输入。
-- [ ] 逐点钉死 `snapshot.context` 语义：该 Hook 边界时刻的 committed context；`transform_context` 含待消费 Inject；`after_tool_call` 不含未提交的当前 result。
-- [ ] 保持宽读窄写：decision 词汇不变，公共信息只读。
-- [ ] `after_tool_call` 经由信封获得完整历史，使结果级压缩等内容感知决策可行。
-- [ ] 同步 No-op、公共导出、recording 测试基建与全部 hook 测试。
+- [x] 定义借用公共信封 `HookSnapshot`（`iteration`、`&LoopContext`、`Option<TokenUsage>`，未来可扩展工具列表与预算），嵌入全部五个 Hook 输入。
+- [x] 逐点钉死 `snapshot.context` 语义：该 Hook 边界时刻的 committed context；`transform_context` 含待消费 Inject；`after_tool_call` 不含未提交的当前 result。
+- [x] 保持宽读窄写：decision 词汇不变，公共信息只读。
+- [x] `after_tool_call` 经由信封获得完整历史，使结果级压缩等内容感知决策可行。
+- [x] 同步 No-op、公共导出、recording 测试基建与全部 hook 测试。
 
 **验收条件：**
 
-- [ ] 新增公共字段只改 `HookSnapshot` 一处即可被全部 Hook 点继承（以一次模拟新增字段验证）。
-- [ ] 信封化后所有既有 hook 行为测试保持不变。
+- [x] 新增公共字段只改 `HookSnapshot` 一处即可被全部 Hook 点继承（以一次模拟新增字段验证）。
+- [x] 信封化后所有既有 hook 行为测试保持不变。
 
 ### H3：Hook 存储与恢复
 

@@ -5,7 +5,9 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use stratum_core::{ChatMessage, ChatRole, DangerLevel, HookFailure, ToolCall, ToolKind, ToolSpec};
+use stratum_core::{
+    ChatMessage, ChatRole, DangerLevel, HookFailure, TokenUsage, ToolCall, ToolKind, ToolSpec,
+};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -47,13 +49,63 @@ impl HookControl {
     }
 }
 
+/// Borrowed read-side snapshot shared by every hook input.
+///
+/// The kernel builds snapshots at hook boundaries with zero allocation: it
+/// borrows the committed context and copies the small usage accumulator. The
+/// snapshot is read-only; point-specific payloads (the tool call, the tool
+/// target, the produced result) stay in the individual input structures and
+/// never enter the snapshot.
+///
+/// `context` semantics are pinned per hook point:
+///
+/// - `transform_context`: the request view basis — committed context plus any
+///   one-shot injected messages waiting to be consumed by this request.
+/// - `transform_tool_call` / `decide_tool_call`: the committed context at that
+///   boundary, including the current assistant message and this cycle's
+///   already-committed tool results.
+/// - `after_tool_call`: the same committed context, excluding the current
+///   not-yet-committed result; that result only appears in the input's
+///   `result` payload.
+/// - `prepare_next_turn`: the committed context including all of this cycle's
+///   committed results.
+///
+/// Read-side state shared by all hooks is added here only; the five hook
+/// inputs embed the snapshot and inherit new fields unchanged. Note that
+/// adding a non-`Copy` field (for example an owned tool list) will require
+/// dropping the `Copy` implementation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct HookSnapshot<'a> {
+    /// Zero-based model iteration the hook boundary belongs to.
+    pub iteration: u64,
+    /// Borrowed committed context at this hook boundary; see the type-level
+    /// docs for the exact per-point semantics.
+    pub context: &'a LoopContext,
+    /// Token usage accumulated from provider reports in this run up to this
+    /// boundary, or `None` when no provider response has reported usage yet.
+    pub usage: Option<TokenUsage>,
+}
+
+impl<'a> HookSnapshot<'a> {
+    /// Creates a snapshot from its parts, for handler tests and compositions
+    /// outside the kernel.
+    #[must_use]
+    pub const fn new(iteration: u64, context: &'a LoopContext, usage: Option<TokenUsage>) -> Self {
+        Self {
+            iteration,
+            context,
+            usage,
+        }
+    }
+}
+
 /// Borrowed input to [`HookRuntime::transform_context`].
 #[derive(Debug)]
 pub struct TransformContextInput<'a> {
-    /// Zero-based model iteration the request belongs to.
-    pub iteration: u64,
-    /// Committed context plus any one-shot injected messages for this request.
-    pub context: &'a LoopContext,
+    /// Shared read-side snapshot whose context is the request view basis
+    /// (committed context plus pending one-shot injections).
+    pub snapshot: HookSnapshot<'a>,
 }
 
 /// Decision returned by [`HookRuntime::transform_context`].
@@ -74,13 +126,14 @@ pub enum TransformContextDecision {
 ///
 /// The kernel resolves the target before any tool hook runs; handlers must
 /// treat it as display and decision context and must not query the tool
-/// registry themselves. `None` authorization means the tool is pre-authorized
+/// registry themselves. `None` authorization means the call is pre-authorized
 /// and carries no approval metadata.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ToolHookTarget<'a> {
-    /// Authorization metadata (`ToolKind`, `DangerLevel`) from the registry,
-    /// or `None` when the tool is pre-authorized.
+    /// Effective authorization metadata (`ToolKind`, `DangerLevel`) for this
+    /// call: the registry-declared default unless `transform_tool_call`
+    /// overrode it. The kernel carries this value without interpreting it.
     pub authorization: Option<(ToolKind, DangerLevel)>,
     /// Provider-visible specification of the tool being called.
     pub spec: &'a ToolSpec,
@@ -89,8 +142,10 @@ pub struct ToolHookTarget<'a> {
 /// Borrowed input to [`HookRuntime::transform_tool_call`].
 #[derive(Debug)]
 pub struct TransformToolCallInput<'a> {
-    /// Zero-based model iteration that produced the tool call.
-    pub iteration: u64,
+    /// Shared read-side snapshot whose context is the committed context at
+    /// this boundary (current assistant message plus this cycle's committed
+    /// tool results).
+    pub snapshot: HookSnapshot<'a>,
     /// Provider tool call authorized by a `tool_calls` finish reason, carrying
     /// the original validated arguments.
     pub tool_call: &'a ToolCall,
@@ -100,26 +155,92 @@ pub struct TransformToolCallInput<'a> {
 
 /// Decision returned by [`HookRuntime::transform_tool_call`].
 ///
-/// The transform phase may only continue or replace arguments; it can neither
+/// The transform phase may only continue or modify the call; it can neither
 /// block the call nor change its identity. Replacement arguments are
-/// re-validated by the kernel before the decide phase.
+/// re-validated by the kernel before the decide phase, and an authorization
+/// override becomes the effective authorization the decide and after phases
+/// observe.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TransformToolCallDecision {
-    /// Keep the original arguments.
+    /// Keep the original arguments and the registry-declared authorization.
     Continue,
-    /// Execute the same call identity and tool name with new arguments.
-    ModifyArguments {
-        /// Replacement JSON arguments.
-        arguments: Value,
+    /// Modify the arguments and/or the effective authorization of the call.
+    Modify(TransformToolCallModification),
+}
+
+impl TransformToolCallDecision {
+    /// Enforces the decision contract before the loop applies it.
+    pub(crate) fn validate(self) -> Result<Self, HookFailure> {
+        match &self {
+            Self::Modify(modification)
+                if modification.arguments.is_none() && modification.authorization.is_none() =>
+            {
+                Err(HookFailure::InvalidOutput)
+            }
+            _ => Ok(self),
+        }
+    }
+}
+
+/// Per-call modifications returned by [`HookRuntime::transform_tool_call`].
+///
+/// Fields left as `None` keep their original values; a modification with
+/// every field set to `None` is invalid output (use
+/// [`TransformToolCallDecision::Continue`] instead).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct TransformToolCallModification {
+    /// Replacement arguments; `None` keeps the original arguments.
+    pub arguments: Option<Value>,
+    /// Overrides the effective authorization for this call; `None` keeps the
+    /// registry-declared default.
+    pub authorization: Option<AuthorizationOverride>,
+}
+
+impl TransformToolCallModification {
+    /// Creates a modification from optional replacement arguments and an
+    /// optional authorization override; `None` fields keep the original
+    /// values.
+    #[must_use]
+    pub const fn new(
+        arguments: Option<Value>,
+        authorization: Option<AuthorizationOverride>,
+    ) -> Self {
+        Self {
+            arguments,
+            authorization,
+        }
+    }
+}
+
+/// Per-call authorization override returned by
+/// [`HookRuntime::transform_tool_call`].
+///
+/// Overriding authorization is the handler's explicit responsibility: the
+/// kernel carries the override to the decide and after phases without any
+/// sanity checks, including checks against downgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthorizationOverride {
+    /// Mark this call pre-authorized regardless of the registry declaration.
+    PreAuthorize,
+    /// Replace the declared authorization metadata for this call.
+    Set {
+        /// Replacement tool kind.
+        kind: ToolKind,
+        /// Replacement danger level.
+        danger: DangerLevel,
     },
 }
 
 /// Borrowed input to [`HookRuntime::decide_tool_call`].
 #[derive(Debug)]
 pub struct DecideToolCallInput<'a> {
-    /// Zero-based model iteration that produced the tool call.
-    pub iteration: u64,
+    /// Shared read-side snapshot whose context is the committed context at
+    /// this boundary (current assistant message plus this cycle's committed
+    /// tool results).
+    pub snapshot: HookSnapshot<'a>,
     /// Tool call carrying the final re-validated arguments exactly as they
     /// would be executed.
     pub tool_call: &'a ToolCall,
@@ -158,8 +279,9 @@ impl DecideToolCallDecision {
 /// Borrowed input to [`HookRuntime::after_tool_call`].
 #[derive(Debug)]
 pub struct AfterToolCallInput<'a> {
-    /// Zero-based model iteration that produced the tool call.
-    pub iteration: u64,
+    /// Shared read-side snapshot whose context is the committed context at
+    /// this boundary, excluding the current not-yet-committed `result`.
+    pub snapshot: HookSnapshot<'a>,
     /// Tool call as it was executed, including hook-modified arguments.
     pub tool_call: &'a ToolCall,
     /// Resolved tool target with authorization metadata and specification.
@@ -184,10 +306,10 @@ pub enum AfterToolCallDecision {
 /// Borrowed input to [`HookRuntime::prepare_next_turn`].
 #[derive(Debug)]
 pub struct PrepareNextTurnInput<'a> {
-    /// Zero-based model iteration whose tool cycle just committed.
-    pub iteration: u64,
-    /// Committed context including this iteration's assistant and tool results.
-    pub context: &'a LoopContext,
+    /// Shared read-side snapshot whose context is the committed context
+    /// including this iteration's assistant message and all committed tool
+    /// results of the cycle.
+    pub snapshot: HookSnapshot<'a>,
 }
 
 /// Decision returned by [`HookRuntime::prepare_next_turn`].
@@ -252,10 +374,12 @@ pub trait HookRuntime: Send + Sync {
         control: HookControl,
     ) -> Result<TransformContextDecision, HookFailure>;
 
-    /// Transforms the arguments of one authorized tool call.
+    /// Transforms the arguments and optionally the effective authorization of
+    /// one authorized tool call.
     ///
     /// Runs after the original arguments validate and before the final
-    /// re-validation and the decide phase.
+    /// re-validation and the decide phase. The kernel carries an authorization
+    /// override to the later phases without interpreting it.
     ///
     /// # Errors
     ///
@@ -340,6 +464,30 @@ mod tests {
     }
 
     #[test]
+    fn modify_decisions_require_at_least_one_change() {
+        let no_change = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: None,
+            authorization: None,
+        });
+        assert_eq!(no_change.validate(), Err(HookFailure::InvalidOutput));
+
+        let arguments_only = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: Some(json!({"value": 1})),
+            authorization: None,
+        });
+        assert!(arguments_only.validate().is_ok());
+        let authorization_only = TransformToolCallDecision::Modify(TransformToolCallModification {
+            arguments: None,
+            authorization: Some(AuthorizationOverride::PreAuthorize),
+        });
+        assert!(authorization_only.validate().is_ok());
+        assert_eq!(
+            TransformToolCallDecision::Continue.validate(),
+            Ok(TransformToolCallDecision::Continue)
+        );
+    }
+
+    #[test]
     fn inject_decisions_require_plain_user_messages() {
         let valid = ChatMessage::user("hook note");
         let cases: Vec<(Vec<ChatMessage>, bool)> = vec![
@@ -396,5 +544,72 @@ mod tests {
 
         let control = HookControl::new(CancellationToken::new(), None);
         assert_eq!(control.deadline(), None);
+    }
+
+    #[test]
+    fn snapshot_is_the_shared_envelope_of_all_five_inputs() {
+        let context = LoopContext::new("be precise").with_messages(vec![ChatMessage::user("hi")]);
+        let usage = TokenUsage {
+            input_tokens: 3,
+            output_tokens: 2,
+            total_tokens: 5,
+        };
+        let snapshot = HookSnapshot {
+            iteration: 4,
+            context: &context,
+            usage: Some(usage),
+        };
+        // `Copy` lets handlers pass the snapshot on without borrow constraints.
+        let copied = snapshot;
+
+        let tool_call = ToolCall {
+            call_id: CallId::from("call-1"),
+            name: "echo".to_owned(),
+            arguments: json!({}),
+        };
+        let spec = ToolSpec::builder()
+            .name("echo")
+            .description("records calls")
+            .input_schema(json!({"type": "object"}))
+            .build();
+        let target = ToolHookTarget {
+            authorization: None,
+            spec: &spec,
+        };
+        let result = ChatMessage::tool(tool_call.call_id.clone(), json!({"ok": true}));
+
+        // One snapshot value constructs every hook input unchanged: a new
+        // shared field on `HookSnapshot` is inherited by all five inputs.
+        let transform = TransformContextInput { snapshot };
+        let transform_tool = TransformToolCallInput {
+            snapshot,
+            tool_call: &tool_call,
+            tool: &target,
+        };
+        let decide = DecideToolCallInput {
+            snapshot,
+            tool_call: &tool_call,
+            tool: &target,
+        };
+        let after = AfterToolCallInput {
+            snapshot,
+            tool_call: &tool_call,
+            tool: &target,
+            result: &result,
+        };
+        let prepare = PrepareNextTurnInput { snapshot };
+
+        let embedded = [
+            transform.snapshot,
+            transform_tool.snapshot,
+            decide.snapshot,
+            after.snapshot,
+            prepare.snapshot,
+        ];
+        for snapshot in embedded {
+            assert_eq!(snapshot.iteration, copied.iteration);
+            assert_eq!(snapshot.usage, copied.usage);
+            assert!(std::ptr::eq(snapshot.context, copied.context));
+        }
     }
 }

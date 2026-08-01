@@ -8,14 +8,16 @@ use stratum_core::{
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
+use stratum_tools::Tool;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AfterToolCallDecision, AfterToolCallInput, DecideToolCallDecision, DecideToolCallInput,
-    HookControl, HookRuntime, NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput,
-    ToolExecutor, ToolExecutorError, ToolHookTarget, TransformContextDecision,
-    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
+    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, DecideToolCallDecision,
+    DecideToolCallInput, HookControl, HookRuntime, HookSnapshot, NoopHookRuntime,
+    PrepareNextTurnDecision, PrepareNextTurnInput, ToolExecutor, ToolExecutorError, ToolHookTarget,
+    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    TransformToolCallInput,
 };
 
 use super::{
@@ -78,7 +80,9 @@ impl AgentLoop {
         self.durable_events
             .append(DurableAgentEvent::LoopStarted)
             .await?;
-        let mut usage = TokenUsage::default();
+        // `None` until a provider response reports usage; durable events and
+        // the loop outcome project it back to a zero-filled `TokenUsage`.
+        let mut usage: Option<TokenUsage> = None;
         let result = self
             .run_started(context, prompts, &cancellation, &mut usage)
             .await;
@@ -89,13 +93,18 @@ impl AgentLoop {
                 | AgentLoopError::TerminalDurability { .. }),
             ) => Err(error),
             Err(error @ AgentLoopError::Cancelled) => Err(self
-                .append_terminal(DurableAgentEvent::LoopCancelled { usage }, error)
+                .append_terminal(
+                    DurableAgentEvent::LoopCancelled {
+                        usage: usage.unwrap_or_default(),
+                    },
+                    error,
+                )
                 .await),
             Err(error) => Err(self
                 .append_terminal(
                     DurableAgentEvent::LoopFailed {
                         error_text: error.to_string(),
-                        usage,
+                        usage: usage.unwrap_or_default(),
                     },
                     error,
                 )
@@ -187,11 +196,15 @@ impl AgentLoop {
     /// transform hook, final-argument re-validation, the decide hook, then the
     /// durable start and the call. A missing tool or a failed validation
     /// produces the executor's structured error result without entering any
-    /// tool hook.
+    /// tool hook. The transform hook may override the effective authorization;
+    /// the kernel carries the effective value to the decide and after phases
+    /// without interpreting it.
     async fn execute_authorized_tool_call(
         &self,
         iteration: u64,
         tool_call: &ToolCall,
+        context: &LoopContext,
+        usage: Option<TokenUsage>,
         cancellation: &CancellationToken,
     ) -> Result<ChatMessage, AgentLoopError> {
         let tool_name = ToolName::new(tool_call.name.clone());
@@ -203,6 +216,14 @@ impl AgentLoop {
             authorization,
             spec: tool.spec(),
         };
+        // One snapshot serves all three tool hooks of this call: the borrowed
+        // context only gains the current result after this function returns,
+        // so `after_tool_call` still excludes the uncommitted result.
+        let snapshot = HookSnapshot {
+            iteration,
+            context,
+            usage,
+        };
 
         if let Err(error) = self.tool_executor.validate_call(&tool_name, tool_call) {
             return Ok(crate::tool_executor::tool_error_result(tool_call, &error));
@@ -212,7 +233,7 @@ impl AgentLoop {
             .execute_hook(HookPoint::TransformToolCall, cancellation, |control| {
                 self.hook_runtime.transform_tool_call(
                     TransformToolCallInput {
-                        iteration,
+                        snapshot,
                         tool_call,
                         tool: &target,
                     },
@@ -223,13 +244,37 @@ impl AgentLoop {
         else {
             return Err(AgentLoopError::Cancelled);
         };
-        let final_call = match transform {
-            TransformToolCallDecision::Continue => Cow::Borrowed(tool_call),
-            TransformToolCallDecision::ModifyArguments { arguments } => {
-                let mut modified = tool_call.clone();
-                modified.arguments = arguments;
-                Cow::Owned(modified)
+        let transform = transform
+            .validate()
+            .map_err(|failure| AgentLoopError::Hook {
+                point: HookPoint::TransformToolCall,
+                failure,
+            })?;
+        // The kernel only transports the effective authorization: no override
+        // keeps the registry default, overrides apply verbatim, and the kernel
+        // never branches on or interprets the value.
+        let (final_call, effective_authorization) = match transform {
+            TransformToolCallDecision::Continue => (Cow::Borrowed(tool_call), authorization),
+            TransformToolCallDecision::Modify(modification) => {
+                let effective_authorization = match modification.authorization {
+                    None => authorization,
+                    Some(AuthorizationOverride::PreAuthorize) => None,
+                    Some(AuthorizationOverride::Set { kind, danger }) => Some((kind, danger)),
+                };
+                let final_call = match modification.arguments {
+                    Some(arguments) => {
+                        let mut modified = tool_call.clone();
+                        modified.arguments = arguments;
+                        Cow::Owned(modified)
+                    }
+                    None => Cow::Borrowed(tool_call),
+                };
+                (final_call, effective_authorization)
             }
+        };
+        let effective_target = ToolHookTarget {
+            authorization: effective_authorization,
+            spec: target.spec,
         };
 
         // The decide phase only sees arguments that passed the final
@@ -243,9 +288,9 @@ impl AgentLoop {
             .execute_hook(HookPoint::DecideToolCall, cancellation, |control| {
                 self.hook_runtime.decide_tool_call(
                     DecideToolCallInput {
-                        iteration,
+                        snapshot,
                         tool_call: &final_call,
-                        tool: &target,
+                        tool: &effective_target,
                     },
                     control,
                 )
@@ -260,7 +305,9 @@ impl AgentLoop {
         })?;
 
         let mut message = match decide {
-            DecideToolCallDecision::Execute => self.execute_tool(&final_call, cancellation).await?,
+            DecideToolCallDecision::Execute => {
+                self.execute_tool(&tool, &final_call, cancellation).await?
+            }
             DecideToolCallDecision::Block { reason } => hook_blocked_result(tool_call, &reason),
         };
 
@@ -271,9 +318,9 @@ impl AgentLoop {
             .execute_hook(HookPoint::AfterToolCall, cancellation, |control| {
                 self.hook_runtime.after_tool_call(
                     AfterToolCallInput {
-                        iteration,
+                        snapshot,
                         tool_call: &final_call,
-                        tool: &target,
+                        tool: &effective_target,
                         result: &message,
                     },
                     control,
@@ -292,10 +339,15 @@ impl AgentLoop {
 
     async fn execute_tool(
         &self,
+        tool: &Arc<dyn Tool>,
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
     ) -> Result<ChatMessage, AgentLoopError> {
-        match self.tool_executor.execute(tool_call, cancellation).await {
+        match self
+            .tool_executor
+            .execute(tool, tool_call, cancellation)
+            .await
+        {
             Ok(message) => Ok(message),
             Err(ToolExecutorError::Durability { source }) => {
                 Err(AgentLoopError::Durability { source })
@@ -309,7 +361,7 @@ impl AgentLoop {
         mut context: LoopContext,
         prompts: Vec<ChatMessage>,
         cancellation: &CancellationToken,
-        usage: &mut TokenUsage,
+        usage: &mut Option<TokenUsage>,
     ) -> Result<LoopOutcome, AgentLoopError> {
         let mut seen_tool_call_ids = committed_tool_call_ids(&context.messages);
         if cancellation.is_cancelled() {
@@ -344,8 +396,11 @@ impl AgentLoop {
                 .execute_hook(HookPoint::TransformContext, cancellation, |control| {
                     self.hook_runtime.transform_context(
                         TransformContextInput {
-                            iteration: iteration_index,
-                            context: &request_view,
+                            snapshot: HookSnapshot {
+                                iteration: iteration_index,
+                                context: &request_view,
+                                usage: *usage,
+                            },
                         },
                         control,
                     )
@@ -408,8 +463,14 @@ impl AgentLoop {
                     let message = if finish_reason != FinishReason::ToolCalls {
                         unexecutable_tool_result(tool_call, finish_reason)
                     } else {
-                        self.execute_authorized_tool_call(iteration_index, tool_call, cancellation)
-                            .await?
+                        self.execute_authorized_tool_call(
+                            iteration_index,
+                            tool_call,
+                            &context,
+                            *usage,
+                            cancellation,
+                        )
+                        .await?
                     };
                     self.durable_events
                         .append(DurableAgentEvent::MessageAppended {
@@ -427,8 +488,11 @@ impl AgentLoop {
                     .execute_hook(HookPoint::PrepareNextTurn, cancellation, |control| {
                         self.hook_runtime.prepare_next_turn(
                             PrepareNextTurnInput {
-                                iteration: iteration_index,
-                                context: &context,
+                                snapshot: HookSnapshot {
+                                    iteration: iteration_index,
+                                    context: &context,
+                                    usage: *usage,
+                                },
                             },
                             control,
                         )
@@ -449,7 +513,7 @@ impl AgentLoop {
                 self.durable_events
                     .append(DurableAgentEvent::IterationCompleted {
                         iteration: iteration_index,
-                        usage: *usage,
+                        usage: usage.unwrap_or_default(),
                     })
                     .await?;
 
@@ -464,13 +528,13 @@ impl AgentLoop {
                                 finish_reason: LoopCompletionReason::HookStopped
                                     .as_str()
                                     .to_owned(),
-                                usage: *usage,
+                                usage: usage.unwrap_or_default(),
                             })
                             .await?;
                         return Ok(LoopOutcome {
                             new_messages,
                             completion: LoopCompletionReason::HookStopped,
-                            usage: *usage,
+                            usage: usage.unwrap_or_default(),
                         });
                     }
                 }
@@ -480,20 +544,20 @@ impl AgentLoop {
             self.durable_events
                 .append(DurableAgentEvent::IterationCompleted {
                     iteration: iteration_index,
-                    usage: *usage,
+                    usage: usage.unwrap_or_default(),
                 })
                 .await?;
 
             self.durable_events
                 .append(DurableAgentEvent::LoopFinished {
                     finish_reason: finish_reason.as_str().to_owned(),
-                    usage: *usage,
+                    usage: usage.unwrap_or_default(),
                 })
                 .await?;
             return Ok(LoopOutcome {
                 new_messages,
                 completion: LoopCompletionReason::Model(finish_reason),
-                usage: *usage,
+                usage: usage.unwrap_or_default(),
             });
         }
 

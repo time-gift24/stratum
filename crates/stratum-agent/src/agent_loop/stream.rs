@@ -30,7 +30,7 @@ pub(super) async fn consume_assistant_stream(
     telemetry: &dyn TelemetryEventSink,
     cancellation: &CancellationToken,
     limits: LoopLimits,
-    total_usage: &mut TokenUsage,
+    total_usage: &mut Option<TokenUsage>,
 ) -> Result<AssistantStreamResult, AgentLoopError> {
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -216,7 +216,8 @@ fn finalize_tool_calls(
     Ok(tool_calls)
 }
 
-fn add_usage(total: &mut TokenUsage, usage: TokenUsage) {
+fn add_usage(total: &mut Option<TokenUsage>, usage: TokenUsage) {
+    let total = total.get_or_insert_with(TokenUsage::default);
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
     total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);

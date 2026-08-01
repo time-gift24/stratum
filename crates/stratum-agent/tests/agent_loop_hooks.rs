@@ -9,16 +9,17 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::{Value, json};
 use stratum_agent::{
-    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, DecideToolCallDecision,
-    DecideToolCallInput, HookControl, HookRuntime, HookTimeouts, LoopCompletionReason, LoopContext,
-    LoopLimits, PrepareNextTurnDecision, PrepareNextTurnInput, ToolExecutor, ToolHookTarget,
-    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
-    TransformToolCallInput,
+    AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, AuthorizationOverride,
+    DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime, HookSnapshot,
+    HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits, PrepareNextTurnDecision,
+    PrepareNextTurnInput, ToolExecutor, ToolHookTarget, TransformContextDecision,
+    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
+    TransformToolCallModification,
 };
 use stratum_core::{
     AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
-    DurableAgentEvent, HookFailure, HookPoint, ModelId, ToolCall, ToolCallDelta, ToolKind,
-    ToolName, ToolSpec,
+    DurableAgentEvent, HookFailure, HookPoint, ModelId, TokenUsage, ToolCall, ToolCallDelta,
+    ToolKind, ToolName, ToolSpec,
 };
 use stratum_infra::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use stratum_llm::{
@@ -35,7 +36,7 @@ enum Operation {
     Durable(DurableAgentEvent),
     ChatStream(ChatRequest),
     ToolCall { name: ToolName, input: ToolInput },
-    Hook(HookCall),
+    Hook(Box<HookCall>),
 }
 
 /// Owned snapshot of the borrowed [`ToolHookTarget`] one hook received.
@@ -54,31 +55,60 @@ impl RecordedTarget {
     }
 }
 
+/// Owned snapshot of the borrowed [`HookSnapshot`] one hook received.
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedSnapshot {
+    iteration: u64,
+    context: LoopContext,
+    usage: Option<TokenUsage>,
+}
+
+impl RecordedSnapshot {
+    fn of(snapshot: HookSnapshot<'_>) -> Self {
+        Self {
+            iteration: snapshot.iteration,
+            context: snapshot.context.clone(),
+            usage: snapshot.usage,
+        }
+    }
+}
+
+/// Builds an expected [`RecordedSnapshot`] for the standard `run_once` prompt.
+fn recorded_snapshot(
+    iteration: u64,
+    messages: Vec<ChatMessage>,
+    usage: Option<TokenUsage>,
+) -> RecordedSnapshot {
+    RecordedSnapshot {
+        iteration,
+        context: LoopContext::new("be precise").with_messages(messages),
+        usage,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum HookCall {
     TransformContext {
-        iteration: u64,
-        context: LoopContext,
+        snapshot: RecordedSnapshot,
     },
     TransformToolCall {
-        iteration: u64,
+        snapshot: RecordedSnapshot,
         tool_call: ToolCall,
         target: RecordedTarget,
     },
     DecideToolCall {
-        iteration: u64,
+        snapshot: RecordedSnapshot,
         tool_call: ToolCall,
         target: RecordedTarget,
     },
     AfterToolCall {
-        iteration: u64,
+        snapshot: RecordedSnapshot,
         tool_call: ToolCall,
         target: RecordedTarget,
         result: ChatMessage,
     },
     PrepareNextTurn {
-        iteration: u64,
-        committed_messages: usize,
+        snapshot: RecordedSnapshot,
     },
 }
 
@@ -94,10 +124,15 @@ enum TransformBehavior {
 #[derive(Debug, Clone)]
 enum ToolTransformBehavior {
     Continue,
-    Modify(Value),
+    Modify(TransformToolCallModification),
     Fail(HookFailure),
     Pending,
     CancelThenPending,
+}
+
+/// Builds an arguments-only tool transform behavior.
+fn modify_arguments(arguments: Value) -> ToolTransformBehavior {
+    ToolTransformBehavior::Modify(TransformToolCallModification::new(Some(arguments), None))
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +257,7 @@ impl RecordingHookRuntime {
         self.operations
             .lock()
             .expect("operation lock should not be poisoned")
-            .push(Operation::Hook(call));
+            .push(Operation::Hook(Box::new(call)));
     }
 }
 
@@ -235,8 +270,7 @@ impl HookRuntime for RecordingHookRuntime {
     ) -> Result<TransformContextDecision, HookFailure> {
         self.record_control(HookPoint::TransformContext, &control);
         self.record(HookCall::TransformContext {
-            iteration: input.iteration,
-            context: input.context.clone(),
+            snapshot: RecordedSnapshot::of(input.snapshot),
         });
         let behavior = self
             .transforms
@@ -265,7 +299,7 @@ impl HookRuntime for RecordingHookRuntime {
     ) -> Result<TransformToolCallDecision, HookFailure> {
         self.record_control(HookPoint::TransformToolCall, &control);
         self.record(HookCall::TransformToolCall {
-            iteration: input.iteration,
+            snapshot: RecordedSnapshot::of(input.snapshot),
             tool_call: input.tool_call.clone(),
             target: RecordedTarget::of(input.tool),
         });
@@ -277,8 +311,8 @@ impl HookRuntime for RecordingHookRuntime {
             .unwrap_or(ToolTransformBehavior::Continue);
         match behavior {
             ToolTransformBehavior::Continue => Ok(TransformToolCallDecision::Continue),
-            ToolTransformBehavior::Modify(arguments) => {
-                Ok(TransformToolCallDecision::ModifyArguments { arguments })
+            ToolTransformBehavior::Modify(modification) => {
+                Ok(TransformToolCallDecision::Modify(modification))
             }
             ToolTransformBehavior::Fail(failure) => Err(failure),
             ToolTransformBehavior::Pending => pending().await,
@@ -296,7 +330,7 @@ impl HookRuntime for RecordingHookRuntime {
     ) -> Result<DecideToolCallDecision, HookFailure> {
         self.record_control(HookPoint::DecideToolCall, &control);
         self.record(HookCall::DecideToolCall {
-            iteration: input.iteration,
+            snapshot: RecordedSnapshot::of(input.snapshot),
             tool_call: input.tool_call.clone(),
             target: RecordedTarget::of(input.tool),
         });
@@ -325,7 +359,7 @@ impl HookRuntime for RecordingHookRuntime {
     ) -> Result<AfterToolCallDecision, HookFailure> {
         self.record_control(HookPoint::AfterToolCall, &control);
         self.record(HookCall::AfterToolCall {
-            iteration: input.iteration,
+            snapshot: RecordedSnapshot::of(input.snapshot),
             tool_call: input.tool_call.clone(),
             target: RecordedTarget::of(input.tool),
             result: input.result.clone(),
@@ -355,8 +389,7 @@ impl HookRuntime for RecordingHookRuntime {
     ) -> Result<PrepareNextTurnDecision, HookFailure> {
         self.record_control(HookPoint::PrepareNextTurn, &control);
         self.record(HookCall::PrepareNextTurn {
-            iteration: input.iteration,
-            committed_messages: input.context.messages.len(),
+            snapshot: RecordedSnapshot::of(input.snapshot),
         });
         let behavior = self
             .prepares
@@ -633,7 +666,7 @@ fn hook_calls(operations: &[Operation]) -> Vec<HookCall> {
     operations
         .iter()
         .filter_map(|operation| match operation {
-            Operation::Hook(call) => Some(call.clone()),
+            Operation::Hook(call) => Some(call.as_ref().clone()),
             _ => None,
         })
         .collect()
@@ -796,44 +829,52 @@ async fn custom_runtime_is_invoked_at_all_five_points_in_order() {
         authorization: None,
         spec: echo_spec(),
     };
+    let assistant = ChatMessage::assistant("").with_tool_calls(vec![expected_call.clone()]);
+    let result = ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}}));
+    let tool_boundary = recorded_snapshot(
+        0,
+        vec![ChatMessage::user("use echo"), assistant.clone()],
+        None,
+    );
     assert_eq!(
         hook_calls(&recorded),
         vec![
             HookCall::TransformContext {
-                iteration: 0,
-                context: LoopContext::new("be precise")
-                    .with_messages(vec![ChatMessage::user("use echo")]),
+                snapshot: recorded_snapshot(0, vec![ChatMessage::user("use echo")], None),
             },
             HookCall::TransformToolCall {
-                iteration: 0,
+                snapshot: tool_boundary.clone(),
                 tool_call: expected_call.clone(),
                 target: expected_target.clone(),
             },
             HookCall::DecideToolCall {
-                iteration: 0,
+                snapshot: tool_boundary.clone(),
                 tool_call: expected_call.clone(),
                 target: expected_target.clone(),
             },
             HookCall::AfterToolCall {
-                iteration: 0,
+                snapshot: tool_boundary,
                 tool_call: expected_call.clone(),
                 target: expected_target,
-                result: ChatMessage::tool(
-                    CallId::from("call-1"),
-                    json!({"echo": {"value": "one"}}),
-                ),
+                result: result.clone(),
             },
             HookCall::PrepareNextTurn {
-                iteration: 0,
-                committed_messages: 3,
+                snapshot: recorded_snapshot(
+                    0,
+                    vec![
+                        ChatMessage::user("use echo"),
+                        assistant.clone(),
+                        result.clone(),
+                    ],
+                    None,
+                ),
             },
             HookCall::TransformContext {
-                iteration: 1,
-                context: LoopContext::new("be precise").with_messages(vec![
-                    ChatMessage::user("use echo"),
-                    ChatMessage::assistant("").with_tool_calls(vec![expected_call]),
-                    ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}})),
-                ]),
+                snapshot: recorded_snapshot(
+                    1,
+                    vec![ChatMessage::user("use echo"), assistant, result],
+                    None,
+                ),
             },
         ]
     );
@@ -926,7 +967,7 @@ async fn transform_replace_is_request_scoped_and_never_committed() {
 async fn transform_modify_arguments_preserves_call_identity() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
+        .with_tool_transforms([modify_arguments(json!({"value": "modified"}))]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -979,8 +1020,8 @@ async fn transform_modify_arguments_preserves_call_identity() {
 #[tokio::test]
 async fn transform_modify_failing_revalidation_never_reaches_decide() {
     let operations = Arc::new(Mutex::new(Vec::new()));
-    let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!(42))]);
+    let runtime =
+        RecordingHookRuntime::new(&operations).with_tool_transforms([modify_arguments(json!(42))]);
     let agent_loop = build_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -1039,7 +1080,7 @@ async fn transform_modify_failing_revalidation_never_reaches_decide() {
 async fn decide_sees_the_revalidated_final_arguments() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_tool_transforms([ToolTransformBehavior::Modify(json!({"value": "modified"}))]);
+        .with_tool_transforms([modify_arguments(json!({"value": "modified"}))]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "original"})),
@@ -1068,6 +1109,222 @@ async fn decide_sees_the_revalidated_final_arguments() {
             name: "echo".to_owned(),
             arguments: json!({"value": "modified"}),
         }]
+    );
+}
+
+// 4.2: a Set authorization override becomes the effective authorization the
+// decide and after phases observe, while the transform phase still sees the
+// registry-declared default.
+#[tokio::test]
+async fn transform_set_authorization_override_reaches_decide_and_after() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            None,
+            Some(AuthorizationOverride::Set {
+                kind: ToolKind::Write,
+                danger: DangerLevel::High,
+            }),
+        )),
+    ]);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let recorded = snapshot(&operations);
+    let calls = hook_calls(&recorded);
+    let effective_target = RecordedTarget {
+        authorization: Some((ToolKind::Write, DangerLevel::High)),
+        spec: echo_spec(),
+    };
+    for call in &calls {
+        match call {
+            HookCall::TransformToolCall { target, .. } => assert_eq!(
+                target.authorization,
+                Some((ToolKind::Read, DangerLevel::Low)),
+                "transform must observe the registry-declared default"
+            ),
+            HookCall::DecideToolCall { target, .. } | HookCall::AfterToolCall { target, .. } => {
+                assert_eq!(
+                    target, &effective_target,
+                    "decide and after must observe the effective authorization"
+                );
+            }
+            _ => {}
+        }
+    }
+    // The kernel transports the override without branching on it: the call
+    // still dispatches and commits its durable start.
+    assert!(
+        recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+}
+
+// 4.2: a PreAuthorize override erases the declared authorization, so the
+// decide and after phases observe a pre-authorized target.
+#[tokio::test]
+async fn transform_pre_authorize_override_erases_authorization_at_decide() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            None,
+            Some(AuthorizationOverride::PreAuthorize),
+        )),
+    ]);
+    let agent_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        LoopLimits::new(8, 4),
+        echo_registry_with(&operations, ToolPermissionMode::RequireApproval, false),
+        Arc::new(RecordingDurableSink {
+            operations: Arc::clone(&operations),
+        }),
+        Some(Arc::new(runtime)),
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let calls = hook_calls(&snapshot(&operations));
+    for call in &calls {
+        match call {
+            HookCall::TransformToolCall { target, .. } => assert_eq!(
+                target.authorization,
+                Some((ToolKind::Read, DangerLevel::Low)),
+                "transform must observe the registry-declared default"
+            ),
+            HookCall::DecideToolCall { target, .. } | HookCall::AfterToolCall { target, .. } => {
+                assert_eq!(
+                    target.authorization, None,
+                    "PreAuthorize must erase the declared authorization at decide and after"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+// 3.4: a Modify decision with every field left unchanged is invalid output
+// and fails closed before decide and execution.
+#[tokio::test]
+async fn transform_modify_without_changes_is_invalid_output() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(None, None)),
+    ]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([tool_call_turn("call-1", "echo", json!({}))]),
+        runtime,
+        &operations,
+    );
+
+    let error = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect_err("a no-op Modify should fail closed");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            point: HookPoint::TransformToolCall,
+            failure: HookFailure::InvalidOutput,
+        }
+    ));
+    let recorded = snapshot(&operations);
+    assert!(
+        !recorded
+            .iter()
+            .any(|operation| matches!(operation, Operation::ToolCall { .. }))
+    );
+    assert!(
+        !durable_events(&recorded)
+            .iter()
+            .any(|event| matches!(event, DurableAgentEvent::ToolExecutionStarted { .. }))
+    );
+}
+
+// 4.2 + 4.3: a transform that modifies arguments and authorization together
+// lets the decide phase see both the final arguments and the effective
+// authorization, and the call executes with the final arguments.
+#[tokio::test]
+async fn transform_modify_arguments_and_authorization_together() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations).with_tool_transforms([
+        ToolTransformBehavior::Modify(TransformToolCallModification::new(
+            Some(json!({"value": "modified"})),
+            Some(AuthorizationOverride::Set {
+                kind: ToolKind::Write,
+                danger: DangerLevel::Medium,
+            }),
+        )),
+    ]);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "original"})),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    let outcome = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let recorded = snapshot(&operations);
+    let decide_calls = hook_calls(&recorded)
+        .into_iter()
+        .filter_map(|call| match call {
+            HookCall::DecideToolCall {
+                tool_call, target, ..
+            } => Some((tool_call, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decide_calls,
+        vec![(
+            ToolCall {
+                call_id: CallId::from("call-1"),
+                name: "echo".to_owned(),
+                arguments: json!({"value": "modified"}),
+            },
+            RecordedTarget {
+                authorization: Some((ToolKind::Write, DangerLevel::Medium)),
+                spec: echo_spec(),
+            },
+        )]
+    );
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool(
+            CallId::from("call-1"),
+            json!({"echo": {"value": "modified"}})
+        )
     );
 }
 
@@ -1274,15 +1531,29 @@ async fn prepare_inject_is_consumed_once_by_the_next_request_only() {
     let transform_views = hook_calls(&recorded)
         .into_iter()
         .filter_map(|call| match call {
-            HookCall::TransformContext {
-                iteration: 1,
-                context,
-            } => Some(context),
+            HookCall::TransformContext { snapshot } if snapshot.iteration == 1 => {
+                Some(snapshot.context)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(transform_views.len(), 1);
     assert_eq!(transform_views[0].messages.last(), Some(&injected));
+    // The transform snapshot context is the full request view basis: committed
+    // context plus the pending one-shot inject.
+    assert_eq!(
+        transform_views[0],
+        LoopContext::new("be precise").with_messages(vec![
+            ChatMessage::user("use echo"),
+            ChatMessage::assistant("").with_tool_calls(vec![ToolCall {
+                call_id: CallId::from("call-1"),
+                name: "echo".to_owned(),
+                arguments: json!({"value": "one"}),
+            }]),
+            ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}})),
+            injected.clone(),
+        ])
+    );
 }
 
 // 4.1 + 4.5: runtime failures fail closed at every hook point.
@@ -1609,8 +1880,8 @@ async fn pre_cancelled_hooks_never_reach_the_runtime() {
     let calls = hook_calls(&snapshot(&operations));
     assert_eq!(calls.len(), 1);
     assert!(matches!(
-        calls[0],
-        HookCall::TransformContext { iteration: 0, .. }
+        &calls[0],
+        HookCall::TransformContext { snapshot } if snapshot.iteration == 0
     ));
 
     // Cancellation committed after the tool result prevents prepare_next_turn
@@ -2004,7 +2275,7 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let runtime = RecordingHookRuntime::new(&operations)
         .with_transforms([TransformBehavior::Replace(replacement)])
         .with_tool_transforms([
-            ToolTransformBehavior::Modify(json!({"value": "modified"})),
+            modify_arguments(json!({"value": "modified"})),
             ToolTransformBehavior::Continue,
         ])
         .with_decides([DecideBehavior::Execute, DecideBehavior::Execute])
@@ -2100,11 +2371,11 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let hook_order = hook_calls(&recorded)
         .into_iter()
         .map(|call| match call {
-            HookCall::TransformContext { iteration, .. } => ("transform", iteration),
-            HookCall::TransformToolCall { iteration, .. } => ("tool_transform", iteration),
-            HookCall::DecideToolCall { iteration, .. } => ("decide", iteration),
-            HookCall::AfterToolCall { iteration, .. } => ("after", iteration),
-            HookCall::PrepareNextTurn { iteration, .. } => ("prepare", iteration),
+            HookCall::TransformContext { snapshot } => ("transform", snapshot.iteration),
+            HookCall::TransformToolCall { snapshot, .. } => ("tool_transform", snapshot.iteration),
+            HookCall::DecideToolCall { snapshot, .. } => ("decide", snapshot.iteration),
+            HookCall::AfterToolCall { snapshot, .. } => ("after", snapshot.iteration),
+            HookCall::PrepareNextTurn { snapshot } => ("prepare", snapshot.iteration),
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2365,4 +2636,270 @@ async fn approval_handler_pending_cancel_ends_in_loop_cancellation() {
         1
     );
     assert!(!has_approval_events(&recorded));
+}
+
+// ---- HookSnapshot boundary semantics (add-hook-input-envelope tasks 3.2/3.3) ----
+
+/// Returns the recorded snapshot of any hook call variant.
+fn hook_snapshot(call: &HookCall) -> &RecordedSnapshot {
+    match call {
+        HookCall::TransformContext { snapshot }
+        | HookCall::TransformToolCall { snapshot, .. }
+        | HookCall::DecideToolCall { snapshot, .. }
+        | HookCall::AfterToolCall { snapshot, .. }
+        | HookCall::PrepareNextTurn { snapshot } => snapshot,
+    }
+}
+
+fn two_tool_call_turn(
+    first_call_id: &str,
+    first_arguments: Value,
+    second_call_id: &str,
+    second_arguments: Value,
+) -> Vec<ChatStreamEvent> {
+    vec![
+        tool_delta(0, first_call_id, "echo", &first_arguments),
+        tool_delta(1, second_call_id, "echo", &second_arguments),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        },
+    ]
+}
+
+fn tool_call_turn_with_usage(
+    call_id: &str,
+    name: &str,
+    arguments: Value,
+    usage: TokenUsage,
+) -> Vec<ChatStreamEvent> {
+    vec![
+        tool_delta(0, call_id, name, &arguments),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::ToolCalls,
+            usage: Some(usage),
+        },
+    ]
+}
+
+// 3.2: each hook boundary observes exactly the committed context defined for
+// its point; `after_tool_call` never sees the current uncommitted result.
+#[tokio::test]
+async fn snapshot_context_matches_each_hook_boundary() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            two_tool_call_turn(
+                "call-1",
+                json!({"value": "one"}),
+                "call-2",
+                json!({"value": "two"}),
+            ),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let first_call = ToolCall {
+        call_id: CallId::from("call-1"),
+        name: "echo".to_owned(),
+        arguments: json!({"value": "one"}),
+    };
+    let second_call = ToolCall {
+        call_id: CallId::from("call-2"),
+        name: "echo".to_owned(),
+        arguments: json!({"value": "two"}),
+    };
+    let assistant =
+        ChatMessage::assistant("").with_tool_calls(vec![first_call.clone(), second_call.clone()]);
+    let first_result = ChatMessage::tool(CallId::from("call-1"), json!({"echo": {"value": "one"}}));
+    let second_result =
+        ChatMessage::tool(CallId::from("call-2"), json!({"echo": {"value": "two"}}));
+    let calls = hook_calls(&snapshot(&operations));
+
+    // transform_context sees the request view basis before the assistant
+    // message is committed.
+    let transform = calls
+        .iter()
+        .find_map(|call| match call {
+            HookCall::TransformContext { snapshot } if snapshot.iteration == 0 => Some(snapshot),
+            _ => None,
+        })
+        .expect("the iteration-0 transform hook should run");
+    assert_eq!(
+        transform,
+        &recorded_snapshot(0, vec![ChatMessage::user("use echo")], None)
+    );
+
+    let first_boundary = recorded_snapshot(
+        0,
+        vec![ChatMessage::user("use echo"), assistant.clone()],
+        None,
+    );
+    let second_boundary = recorded_snapshot(
+        0,
+        vec![
+            ChatMessage::user("use echo"),
+            assistant.clone(),
+            first_result.clone(),
+        ],
+        None,
+    );
+    for call in &calls {
+        let (tool_call, snapshot) = match call {
+            HookCall::TransformToolCall {
+                tool_call,
+                snapshot,
+                ..
+            }
+            | HookCall::DecideToolCall {
+                tool_call,
+                snapshot,
+                ..
+            }
+            | HookCall::AfterToolCall {
+                tool_call,
+                snapshot,
+                ..
+            } => (tool_call, snapshot),
+            _ => continue,
+        };
+        let expected = if tool_call.call_id == CallId::from("call-1") {
+            &first_boundary
+        } else {
+            &second_boundary
+        };
+        assert_eq!(
+            snapshot, expected,
+            "tool hook boundary for {tool_call:?} should be the committed context"
+        );
+    }
+
+    // after_tool_call excludes the current uncommitted result; the result only
+    // appears in the point-specific payload.
+    let afters = calls
+        .iter()
+        .filter_map(|call| match call {
+            HookCall::AfterToolCall {
+                snapshot, result, ..
+            } => Some((snapshot, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(afters.len(), 2);
+    for (snapshot, result) in afters {
+        assert!(
+            !snapshot.context.messages.contains(result),
+            "the after snapshot must not contain the uncommitted result {result:?}"
+        );
+    }
+
+    // prepare_next_turn sees every committed result of the cycle.
+    let prepare = calls
+        .iter()
+        .find_map(|call| match call {
+            HookCall::PrepareNextTurn { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("the prepare hook should run");
+    assert_eq!(
+        prepare,
+        &recorded_snapshot(
+            0,
+            vec![
+                ChatMessage::user("use echo"),
+                assistant,
+                first_result,
+                second_result,
+            ],
+            None,
+        )
+    );
+}
+
+// 3.3: snapshot usage is the run-level accumulation of provider reports up to
+// each hook boundary.
+#[tokio::test]
+async fn snapshot_usage_accumulates_provider_reports() {
+    let first = TokenUsage {
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+    };
+    let second = TokenUsage {
+        input_tokens: 20,
+        output_tokens: 10,
+        total_tokens: 30,
+    };
+    let accumulated = TokenUsage {
+        input_tokens: 30,
+        output_tokens: 15,
+        total_tokens: 45,
+    };
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn_with_usage("call-1", "echo", json!({}), first),
+            tool_call_turn_with_usage("call-2", "echo", json!({}), second),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    let outcome = run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    assert_eq!(outcome.usage, accumulated);
+    for call in hook_calls(&snapshot(&operations)) {
+        let snapshot = hook_snapshot(&call);
+        let expected = match &call {
+            // Nothing has been reported before the first model response.
+            HookCall::TransformContext { .. } if snapshot.iteration == 0 => None,
+            // Later transform hooks see everything reported so far; the final
+            // stop response reported no usage, so the total stays unchanged.
+            HookCall::TransformContext { .. } if snapshot.iteration == 1 => Some(first),
+            HookCall::TransformContext { .. } => Some(accumulated),
+            _ if snapshot.iteration == 0 => Some(first),
+            _ => Some(accumulated),
+        };
+        assert_eq!(
+            snapshot.usage, expected,
+            "usage at {call:?} should be the accumulation up to that boundary"
+        );
+    }
+}
+
+// 3.3: snapshot usage stays `None` when no provider response reports usage.
+#[tokio::test]
+async fn snapshot_usage_is_none_when_providers_never_report() {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let runtime = RecordingHookRuntime::new(&operations);
+    let (agent_loop, _) = hooked_loop(
+        VecDeque::from([
+            tool_call_turn("call-1", "echo", json!({"value": "one"})),
+            stop_turn("done"),
+        ]),
+        runtime,
+        &operations,
+    );
+
+    run_once(&agent_loop, CancellationToken::new())
+        .await
+        .expect("loop should finish");
+
+    let calls = hook_calls(&snapshot(&operations));
+    assert!(!calls.is_empty());
+    assert!(
+        calls.iter().all(|call| hook_snapshot(call).usage.is_none()),
+        "no provider reported usage, so every snapshot must carry None"
+    );
 }
