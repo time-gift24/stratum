@@ -12,11 +12,7 @@ use crate::EventStreamBusError;
 pub enum DurableEventSinkError {
     /// The configured event stream bus rejected the durable event.
     #[error("durable agent event publish failed")]
-    EventStreamBus(
-        #[from]
-        #[source]
-        EventStreamBusError,
-    ),
+    EventStreamBus(#[from] EventStreamBusError),
     /// The sink does not know how to project a newer durable event variant.
     #[error("unsupported durable agent event type {event_type}")]
     UnsupportedEvent {
@@ -28,11 +24,7 @@ pub enum DurableEventSinkError {
     PublisherUnavailable,
     /// The filesystem sink could not durably persist the event.
     #[error("filesystem durable event sink failed")]
-    Filesystem(
-        #[from]
-        #[source]
-        FilesystemEventSinkError,
-    ),
+    Filesystem(#[from] FilesystemEventSinkError),
 }
 
 /// Error returned by filesystem durable event persistence or replay.
@@ -94,5 +86,12 @@ pub enum FilesystemEventSinkError {
         /// Underlying JSON parse failure.
         #[source]
         source: serde_json::Error,
+    },
+    /// The blocking append task failed to join.
+    #[error("durable event append task failed to join")]
+    Join {
+        /// Join failure of the blocking append task.
+        #[source]
+        source: tokio::task::JoinError,
     },
 }

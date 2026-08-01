@@ -169,10 +169,10 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **来源：** PR #40 的 constitution-review 报告。
 
-- [ ] 补齐 §4 tracing：journal 写入、resume 重放、filesystem sink append/read 等新增关键路径加 `#[tracing::instrument]`，fail-closed 拒绝至少 `warn!`。
-- [ ] CI 增加 `cargo audit` 与 `cargo deny check`（§6 强制项，存量缺失）。
-- [ ] 修正 CONSTITUTION.md 条文矛盾与空白：§2 expect 不变量豁免 vs 附录一票否决；§5 文件网关 vs §1 分层（耐久后端允许落 stratum-infra 并直接用 std::fs）；Mutex 条款区分 std 与 tokio::Mutex；metrics 强制项需先引入 facade 基础设施；journal 载荷敏感度与保留策略条款；持久层读回的 non_exhaustive 枚举 `_` 分支必须 fail-closed。
-- [ ] 顺带处理 review suggestions：filesystem.rs 的 JoinError 来源保留、`#[from]`/`#[source]` 冗余、resume.rs 显式列出 legacy 审批事件变体、`index as u64` 改 try_from。
+- [x] 补齐 §4 tracing：journal 写入、resume 重放、filesystem sink append/read 等新增关键路径加 `#[tracing::instrument]`，fail-closed 拒绝至少 `warn!`。
+- [x] CI 增加 `cargo audit` 与 `cargo deny check`（§6 强制项，存量缺失）。
+- [x] 修正 CONSTITUTION.md 条文矛盾与空白：§2 expect 不变量豁免 vs 附录一票否决；§5 文件网关 vs §1 分层（耐久后端允许落 stratum-infra 并直接用 std::fs）；Mutex 条款区分 std 与 tokio::Mutex；metrics 强制项需先引入 facade 基础设施；journal 载荷敏感度与保留策略条款；持久层读回的 non_exhaustive 枚举 `_` 分支必须 fail-closed。
+- [x] 顺带处理 review suggestions：filesystem.rs 的 JoinError 来源保留、`#[from]`/`#[source]` 冗余、resume.rs 显式列出 legacy 审批事件变体、`index as u64` 改 try_from。
 
 ### H4：Tool 幂等与恢复
 

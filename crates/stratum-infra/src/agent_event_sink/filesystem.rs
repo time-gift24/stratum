@@ -53,9 +53,14 @@ impl DurableEventSink for FilesystemDurableEventSink {
         // Hold the async-aware lock across the blocking write so concurrent
         // appends stay serialized; never hold a std mutex guard here.
         let _permit = self.append_lock.lock().await;
+        tracing::debug!(
+            event_type,
+            run_dir = %self.run_dir.display(),
+            "appending durable event"
+        );
         tokio::task::spawn_blocking(move || append_line(&run_dir, &line))
             .await
-            .map_err(|_| DurableEventSinkError::PublisherUnavailable)??;
+            .map_err(|source| FilesystemEventSinkError::Join { source })??;
         Ok(())
     }
 }
@@ -114,6 +119,7 @@ fn append_line(run_dir: &Path, line: &str) -> Result<(), FilesystemEventSinkErro
 /// Returns [`FilesystemEventSinkError::Read`] when the log cannot be read and
 /// [`FilesystemEventSinkError::MalformedEvent`] when a non-tail line fails to
 /// parse.
+#[tracing::instrument(level = "debug", skip_all, fields(run_dir = %run_dir.display()))]
 pub fn read_events(run_dir: &Path) -> Result<Vec<DurableAgentEvent>, FilesystemEventSinkError> {
     let path = run_dir.join(EVENTS_FILE_NAME);
     let bytes = match std::fs::read(&path) {
@@ -128,14 +134,20 @@ pub fn read_events(run_dir: &Path) -> Result<Vec<DurableAgentEvent>, FilesystemE
         .split(|byte| *byte == b'\n')
         .enumerate()
         .filter(|(_, line)| line.iter().any(|byte| !byte.is_ascii_whitespace()))
-        .map(|(index, line)| (index as u64 + 1, line))
+        .map(|(index, line)| (u64::try_from(index + 1).unwrap_or(u64::MAX), line))
         .collect();
     let mut events = Vec::with_capacity(lines.len());
     for (position, (line_number, line)) in lines.iter().enumerate() {
         match serde_json::from_slice(line) {
             Ok(event) => events.push(event),
             Err(_) if position + 1 == lines.len() => {
-                // Truncated tail line left by a crash mid-append.
+                // Truncated tail line left by a crash mid-append: observable
+                // crash evidence, so it is worth a warning.
+                tracing::warn!(
+                    path = %path.display(),
+                    line = *line_number,
+                    "ignoring truncated tail line of the durable event log"
+                );
                 break;
             }
             Err(source) => {
@@ -300,7 +312,10 @@ mod tests {
         }
 
         let events = read_events(run.path()).expect("all lines must parse as complete events");
-        assert_eq!(events.len() as u64, TASKS * APPENDS_PER_TASK);
+        assert_eq!(
+            u64::try_from(events.len()).unwrap_or(u64::MAX),
+            TASKS * APPENDS_PER_TASK
+        );
         // Each task's events must appear in its own append order.
         for task in 0..TASKS {
             let mut expected_index = 0;

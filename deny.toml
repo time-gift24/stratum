@@ -1,0 +1,33 @@
+# cargo-deny configuration: dependency advisories, licenses, bans, sources.
+# See https://embarkstudios.github.io/cargo-deny/.
+
+# Advisories: defaults check the RustSec advisory database and deny
+# vulnerabilities, unmaintained crates only warn.
+[advisories]
+
+# Licenses: allow list derived from the licenses actually present in the
+# current workspace dependency graph (`cargo metadata`). `OR` expressions only
+# need one allowed branch, so LGPL-2.1-or-later (only ever an `OR` alternative)
+# and the LLVM-exception are intentionally absent. Extend this list when a new
+# dependency introduces a new license.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "0BSD",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+]
+
+# Bans: defaults; no crate is banned and duplicate versions only warn.
+[bans]
+
+# Sources: defaults; only crates.io is a known source.
+[sources]

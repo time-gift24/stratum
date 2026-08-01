@@ -240,6 +240,17 @@ impl AgentLoop {
     /// closed with [`HookFailure::TimedOut`]. Runtime failures are already safe
     /// classifications, so the mapped error only keeps the hook point and the
     /// typed failure.
+    // Tracing fields stay at safe metadata: hook point, iteration, and call
+    // identity. Inputs, digests, decisions, and closures are never recorded.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            hook_point = ?site.point,
+            iteration = site.iteration,
+            call_id = site.call_id.as_ref().map(tracing::field::display),
+        )
+    )]
     async fn execute_hook<D, F>(
         &self,
         site: HookInvocationSite<'_>,
@@ -266,6 +277,10 @@ impl AgentLoop {
         let invocation_id = match journal.lookup(&address) {
             Some(entry) => {
                 if entry.input_digest != input_digest {
+                    tracing::warn!(
+                        invocation_id = %entry.invocation_id,
+                        "refusing resume: journaled hook input digest does not match the rebuilt input"
+                    );
                     return Err(ResumeError::HookDigestMismatch { point }.into());
                 }
                 match &entry.state {
@@ -275,6 +290,10 @@ impl AgentLoop {
                         // A journaled decision already validated once; a
                         // mismatch against the rebuilt state is corruption.
                         validate(&decision).map_err(|_| ResumeError::HookRecordMismatch)?;
+                        tracing::debug!(
+                            invocation_id = %entry.invocation_id,
+                            "reusing journaled hook decision without calling the runtime"
+                        );
                         return Ok(HookInvocation::Decision(decision));
                     }
                     JournalState::Failed(failure) => {
@@ -286,6 +305,10 @@ impl AgentLoop {
                     // A pending entry is retried under its original identity;
                     // the pending record is already durable.
                     JournalState::Pending => {
+                        tracing::debug!(
+                            invocation_id = %entry.invocation_id,
+                            "retrying journaled pending hook invocation under its original identity"
+                        );
                         pending_required = false;
                         entry.invocation_id
                     }
