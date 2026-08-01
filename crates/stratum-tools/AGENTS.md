@@ -62,4 +62,8 @@
 - Dependency rationale: `jsonschema` (MIT) is the de-facto standard JSON Schema validator;
   handwriting draft-compliant validation is not realistic. It is used with
   `default-features = false` so tool schemas never trigger network or filesystem reference
-  resolution at registration time.
+  resolution at registration time. Its `pattern` keyword compiles to the backtracking
+  `fancy-regex` engine, which carries a theoretical ReDoS surface for untrusted patterns;
+  schemas here come from trusted tool authors, so this is accepted. Schema rejection messages
+  keep only the instance path and violation category: the failing instance value is masked
+  because it may carry file contents or credentials back to the model and into logs.

@@ -58,8 +58,9 @@ pub(crate) enum ResumeContinuation {
 /// # Errors
 ///
 /// Returns a typed [`ResumeError`] for a missing or duplicated `LoopStarted`,
-/// a terminal event, corrupted tool-result history, or a corrupted hook
-/// journal; every failure refuses the resume closed.
+/// a terminal event, corrupted tool-result history, a corrupted hook
+/// journal, or an event variant this kernel does not understand; every
+/// failure refuses the resume closed.
 #[tracing::instrument(level = "debug", skip_all, fields(event_count = events.len()))]
 pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayState, ResumeError> {
     let mut messages = Vec::new();
@@ -168,10 +169,20 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 activity_after_frontier = true;
             }
             // Approval events are legacy-only and carry no kernel resume
-            // state; unknown future variants are ignored the same way.
+            // state, so they are safe to skip.
             DurableAgentEvent::ToolApprovalRequested { .. }
             | DurableAgentEvent::ToolApprovalResolved { .. } => {}
-            _ => {}
+            // An unknown future variant may carry resume state this kernel
+            // cannot rebuild; refuse the resume closed instead of silently
+            // dropping it.
+            _ => {
+                tracing::warn!(
+                    event_index,
+                    event_type,
+                    "refusing resume: stream contains an unsupported event type"
+                );
+                return Err(ResumeError::UnsupportedEvent { event_type });
+            }
         }
     }
     if !seen_loop_started {
@@ -260,7 +271,9 @@ fn reconcile_tool_results(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use stratum_core::{CallId, TokenUsage};
+    use stratum_core::{
+        ApprovalDecision, ApprovalId, CallId, DangerLevel, TokenUsage, ToolKind, ToolName,
+    };
 
     use super::*;
 
@@ -355,6 +368,28 @@ mod tests {
             replay_events(duplicated).expect_err("a duplicated start must refuse resume"),
             ResumeError::UnexpectedLoopStarted
         );
+    }
+
+    #[test]
+    fn legacy_approval_events_are_skipped_without_resume_state() {
+        let mut events = stream(vec![ChatMessage::user("question")]);
+        events.push(DurableAgentEvent::ToolApprovalRequested {
+            approval_id: ApprovalId::new(),
+            call_id: CallId::from("call-1"),
+            tool_name: ToolName::from("echo"),
+            arguments: json!({}),
+            tool_kind: ToolKind::Read,
+            danger_level: DangerLevel::Low,
+        });
+        events.push(DurableAgentEvent::ToolApprovalResolved {
+            approval_id: ApprovalId::new(),
+            decision: ApprovalDecision::Approve,
+        });
+
+        let replay = replay_events(events).expect("legacy approval events should replay");
+
+        assert_eq!(replay.messages, vec![ChatMessage::user("question")]);
+        assert!(replay.continuation.is_none());
     }
 
     #[test]

@@ -113,10 +113,14 @@ legacy stateful `Agent` compatibility path.
   emit durable messages, and never appear in `LoopOutcome.new_messages`.
   A `transform_context` decision is `Unchanged` or `Patch(ContextPatch)`
   (`ReplaceSystemPrompt` / `DropHistory { upto }` / `RewriteHistory { upto,
-  summary }`); the kernel validates `upto` as a zero-based,
+  summary }` / `Composite`); the kernel validates `upto` as a zero-based,
   left-closed/right-open prefix end into the committed `messages` that must
   stay in bounds and must not cut a tool_call/tool_result pair, rejecting
-  invalid patches as `HookFailure::InvalidOutput`. Injected user messages are
+  invalid patches as `HookFailure::InvalidOutput`. A `Composite` validates its
+  sub-patches in order against the evolving view each one produces; empty and
+  nested compositions are rejected as `HookFailure::InvalidOutput` (a nested
+  composition cannot advance the validation view and could otherwise panic at
+  apply time). Injected user messages are
   consumed exactly once by the next model request; empty or non-user-role
   injections are rejected as `HookFailure::InvalidOutput`.
 - Every hook invocation is journaled into the same `DurableEventSink` stream:
@@ -131,7 +135,11 @@ legacy stateful `Agent` compatibility path.
 - `AgentLoop::resume` re-runs a run from its durable event stream: the
   composing side re-supplies the system prompt and configuration, replay
   rebuilds committed context from `MessageAppended`, fixes the frontier at one
-  past the maximum `IterationCompleted`, and refuses terminal runs. Committed
+  past the maximum `IterationCompleted`, and refuses terminal runs. Event
+  variants the kernel does not understand fail closed as
+  `ResumeError::UnsupportedEvent`; only the legacy approval events
+  (`ToolApprovalRequested`/`ToolApprovalResolved`) are explicitly skipped
+  because they carry no kernel resume state. Committed
   tool results must be the exact ordered prefix of the preceding assistant
   `tool_calls` (unknown, duplicate, sparse, or out-of-order results fail
   closed); the missing suffix re-executes under the at-least-once stance.

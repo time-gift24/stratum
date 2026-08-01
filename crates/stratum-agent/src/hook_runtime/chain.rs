@@ -83,14 +83,20 @@ impl HookRuntime for ChainHookRuntime {
     ) -> Result<TransformContextDecision, HookFailure> {
         let mut view: Cow<'_, LoopContext> = Cow::Borrowed(input.snapshot.context);
         let mut patches: Vec<ContextPatch> = Vec::new();
-        for handler in &self.handlers {
+        for (handler_index, handler) in self.handlers.iter().enumerate() {
             let snapshot = HookSnapshot {
                 context: &view,
                 ..input.snapshot
             };
             let decision = handler
                 .transform_context(TransformContextInput { snapshot }, control.clone())
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        handler_index,
+                        "hook chain handler failed; failing the hook point closed"
+                    );
+                })?;
             if let TransformContextDecision::Patch(patch) = decision {
                 // Each patch must apply cleanly to the view the next handler
                 // observes; the kernel re-validates the composed patch against
@@ -103,7 +109,7 @@ impl HookRuntime for ChainHookRuntime {
         Ok(match patches.len() {
             0 => TransformContextDecision::Unchanged,
             // A single-handler chain reports its patch unwrapped.
-            1 => TransformContextDecision::Patch(patches.pop().expect("one patch collected")),
+            1 => TransformContextDecision::Patch(patches.pop().expect("len == 1 by the match arm")),
             _ => TransformContextDecision::Patch(ContextPatch::Composite(patches)),
         })
     }
@@ -117,7 +123,7 @@ impl HookRuntime for ChainHookRuntime {
         let original_authorization = input.tool.authorization;
         let mut authorization = original_authorization;
         let mut arguments_modified = false;
-        for handler in &self.handlers {
+        for (handler_index, handler) in self.handlers.iter().enumerate() {
             let target = ToolHookTarget {
                 authorization,
                 spec: input.tool.spec,
@@ -131,7 +137,13 @@ impl HookRuntime for ChainHookRuntime {
                     },
                     control.clone(),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        handler_index,
+                        "hook chain handler failed; failing the hook point closed"
+                    );
+                })?;
             decision.check()?;
             if let TransformToolCallDecision::Modify(modification) = decision {
                 if let Some(arguments) = modification.arguments {
@@ -166,7 +178,7 @@ impl HookRuntime for ChainHookRuntime {
         input: DecideToolCallInput<'a>,
         control: HookControl,
     ) -> Result<DecideToolCallDecision, HookFailure> {
-        for handler in &self.handlers {
+        for (handler_index, handler) in self.handlers.iter().enumerate() {
             let decision = handler
                 .decide_tool_call(
                     DecideToolCallInput {
@@ -176,11 +188,21 @@ impl HookRuntime for ChainHookRuntime {
                     },
                     control.clone(),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        handler_index,
+                        "hook chain handler failed; failing the hook point closed"
+                    );
+                })?;
             decision.check()?;
             // The first block settles the call; approval-style handlers may
             // have side effects, so later handlers are never asked.
             if matches!(decision, DecideToolCallDecision::Block { .. }) {
+                tracing::debug!(
+                    handler_index,
+                    "hook chain short-circuits on the first block"
+                );
                 return Ok(decision);
             }
         }
@@ -194,7 +216,7 @@ impl HookRuntime for ChainHookRuntime {
     ) -> Result<AfterToolCallDecision, HookFailure> {
         let mut current: Cow<'_, ChatMessage> = Cow::Borrowed(input.result);
         let mut replacement = None;
-        for handler in &self.handlers {
+        for (handler_index, handler) in self.handlers.iter().enumerate() {
             let decision = handler
                 .after_tool_call(
                     AfterToolCallInput {
@@ -205,7 +227,13 @@ impl HookRuntime for ChainHookRuntime {
                     },
                     control.clone(),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        handler_index,
+                        "hook chain handler failed; failing the hook point closed"
+                    );
+                })?;
             if let AfterToolCallDecision::ReplaceResult { result } = decision {
                 current = Cow::Owned(ChatMessage::tool(
                     input.tool_call.call_id.clone(),
@@ -226,7 +254,7 @@ impl HookRuntime for ChainHookRuntime {
         control: HookControl,
     ) -> Result<PrepareNextTurnDecision, HookFailure> {
         let mut injected = Vec::new();
-        for handler in &self.handlers {
+        for (handler_index, handler) in self.handlers.iter().enumerate() {
             let decision = handler
                 .prepare_next_turn(
                     PrepareNextTurnInput {
@@ -234,13 +262,22 @@ impl HookRuntime for ChainHookRuntime {
                     },
                     control.clone(),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        handler_index,
+                        "hook chain handler failed; failing the hook point closed"
+                    );
+                })?;
             decision.check()?;
             match decision {
                 PrepareNextTurnDecision::Continue => {}
                 // A stopped loop has no next turn, so injections collected so
                 // far are discarded with the short-circuit.
-                PrepareNextTurnDecision::Stop => return Ok(PrepareNextTurnDecision::Stop),
+                PrepareNextTurnDecision::Stop => {
+                    tracing::debug!(handler_index, "hook chain short-circuits on the first stop");
+                    return Ok(PrepareNextTurnDecision::Stop);
+                }
                 PrepareNextTurnDecision::Inject { messages } => injected.extend(messages),
             }
         }
@@ -778,6 +815,29 @@ mod tests {
             )))]);
         let later = handler("later", HookHandlerVersionId::new(), &log);
         let chain = build_chain(vec![Arc::new(invalid), later]);
+        let context = test_context();
+        let snapshot = HookSnapshot::new(0, &context, None);
+
+        let result = chain
+            .transform_context(TransformContextInput { snapshot }, test_control())
+            .await;
+
+        assert_eq!(result, Err(HookFailure::InvalidOutput));
+        assert_eq!(calls(&log).len(), 1, "the later handler must not run");
+    }
+
+    #[tokio::test]
+    async fn transform_context_nested_composite_patch_fails_closed_and_stops_the_chain() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let nested = ScriptableHandler::new("nested", HookHandlerVersionId::new(), &log)
+            .with_transforms([Action::Return(Ok(TransformContextDecision::Patch(
+                ContextPatch::Composite(vec![
+                    ContextPatch::Composite(vec![ContextPatch::DropHistory { upto: 1 }]),
+                    ContextPatch::DropHistory { upto: 1 },
+                ]),
+            )))]);
+        let later = handler("later", HookHandlerVersionId::new(), &log);
+        let chain = build_chain(vec![Arc::new(nested), later]);
         let context = test_context();
         let snapshot = HookSnapshot::new(0, &context, None);
 

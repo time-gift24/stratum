@@ -17,7 +17,6 @@ stratum-core.workspace = true
 stratum-filesystem = { path = "../stratum-filesystem" }
 
 [dev-dependencies]
-async-trait.workspace = true
 tokio.workspace = true
 
 [lints]

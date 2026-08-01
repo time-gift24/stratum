@@ -172,6 +172,41 @@ async fn schema_rejects_constraint_violation_without_calling_custom_validate() {
 }
 
 #[tokio::test]
+async fn schema_error_does_not_embed_the_rejected_instance_value() {
+    let (registry, _) = counting_registry(
+        "counting_echo",
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {"message": {"type": "string", "maxLength": 4}}
+        }),
+        Arc::new(EchoTool::new()),
+    );
+    // Stands in for a payload carrying file contents or credentials.
+    let sensitive = "s3cr3t-api-key-payload";
+
+    let error = registry
+        .validate(
+            &ToolName::from("counting_echo"),
+            &ToolInput::new(
+                CallId::from("call-sensitive"),
+                json!({"message": sensitive}),
+            ),
+        )
+        .expect_err("schema must reject the maxLength violation");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains(sensitive),
+        "schema error must not embed the rejected instance value, got {message}"
+    );
+    assert!(
+        message.contains("/message"),
+        "schema error must still name the failing field path, got {message}"
+    );
+}
+
+#[tokio::test]
 async fn custom_validate_still_runs_after_schema_passes() {
     let root = std::env::temp_dir().join(format!(
         "stratum-tools-schema-validation-{}",

@@ -358,7 +358,8 @@ pub enum ContextPatch {
     ///
     /// Hook handler chains produce a composition when more than one handler
     /// patches the same request; a single-handler patch stays unwrapped. An
-    /// empty composition is rejected as [`HookFailure::InvalidOutput`].
+    /// empty composition is rejected as [`HookFailure::InvalidOutput`], and so
+    /// is a nested composition: a sub-patch must not itself be a `Composite`.
     Composite(Vec<ContextPatch>),
 }
 

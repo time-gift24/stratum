@@ -165,6 +165,11 @@ impl AgentLoop {
             self.hook_runtime.extension_set_version(),
         ) && recorded != current
         {
+            tracing::warn!(
+                recorded = %recorded,
+                current = %current,
+                "refusing resume: hook extension set version mismatch"
+            );
             return Err(ResumeError::ExtensionSetVersionMismatch { recorded, current }.into());
         }
         let start = RunStart {
@@ -1042,7 +1047,8 @@ impl AgentLoopBuilder {
 /// must not cut a tool_call/tool_result pair (a dropped assistant message's
 /// results must be dropped with it). A rewrite summary must not itself open a
 /// tool-call pair or pose as a tool result. A `Composite` validates its
-/// sub-patches in order against the evolving view each one produces.
+/// sub-patches in order against the evolving view each one produces; a
+/// sub-patch that is itself a `Composite` is rejected.
 pub(crate) fn validate_context_patch(
     committed: &[ChatMessage],
     patch: &ContextPatch,
@@ -1076,7 +1082,9 @@ pub(crate) fn validate_context_patch(
 }
 
 /// Validates a non-empty patch composition sequentially: every sub-patch must
-/// be valid against the view produced by the sub-patches before it.
+/// be valid against the view produced by the sub-patches before it. A nested
+/// composition is rejected: its inner message rewrites would not advance the
+/// scratch view, so later `upto` checks would run against a stale view.
 fn validate_composite_patch(
     committed: &[ChatMessage],
     patches: &[ContextPatch],
@@ -1086,14 +1094,16 @@ fn validate_composite_patch(
     }
     let mut scratch = committed.to_vec();
     for patch in patches {
+        if matches!(patch, ContextPatch::Composite(_)) {
+            return Err(HookFailure::InvalidOutput);
+        }
         validate_context_patch(&scratch, patch)?;
         apply_messages_patch(&mut scratch, patch);
     }
     Ok(())
 }
 
-/// Applies one validated patch's message rewrite to a scratch message list;
-/// system-prompt replacements do not touch messages.
+/// Applies one validated patch's message rewrite to a scratch message list.
 fn apply_messages_patch(messages: &mut Vec<ChatMessage>, patch: &ContextPatch) {
     match patch {
         ContextPatch::DropHistory { upto } => {
@@ -1102,6 +1112,14 @@ fn apply_messages_patch(messages: &mut Vec<ChatMessage>, patch: &ContextPatch) {
         ContextPatch::RewriteHistory { upto, summary } => {
             messages.splice(..*upto, std::iter::once(summary.clone()));
         }
+        // System-prompt replacements do not touch messages.
+        ContextPatch::ReplaceSystemPrompt(_) => {}
+        // Validation rejects nested compositions, so one never reaches the
+        // scratch view.
+        ContextPatch::Composite(_) => {
+            debug_assert!(false, "validation rejects nested composite patches");
+        }
+        // Unknown future variants were already rejected by validation.
         _ => {}
     }
 }

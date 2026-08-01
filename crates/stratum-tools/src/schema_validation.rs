@@ -47,10 +47,14 @@ pub(crate) fn validate_against_schema(
         Err(error) => error,
     };
     let instance_path = error.instance_path().to_string();
+    // The default `Display` embeds the full failing instance, which can carry
+    // entire file contents or credentials back to the model and into logs.
+    // Mask it and keep only the instance path plus the violation category.
+    let category = error.masked().to_string();
     let reason = if instance_path.is_empty() {
-        error.to_string()
+        category
     } else {
-        format!("{instance_path}: {error}")
+        format!("{instance_path}: {category}")
     };
     Err(ToolError::InvalidArgument {
         name: "arguments",

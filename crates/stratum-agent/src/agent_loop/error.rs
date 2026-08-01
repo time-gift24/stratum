@@ -107,6 +107,13 @@ pub enum ResumeError {
     /// The stream contained a terminal event; finished runs cannot resume.
     #[error("event stream contains a terminal loop event")]
     TerminalEvent,
+    /// The stream contained an event variant this kernel does not understand;
+    /// ignoring it could silently drop resume-relevant state.
+    #[error("event stream contains an unsupported event type {event_type}")]
+    UnsupportedEvent {
+        /// Serialized type name of the unrecognized event.
+        event_type: &'static str,
+    },
     /// Committed tool results are not the exact ordered prefix of the
     /// immediately preceding assistant `tool_calls` (unknown, duplicated,
     /// sparse, or out-of-order results).
