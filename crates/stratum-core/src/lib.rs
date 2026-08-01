@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stratum_macros::{sha256_fingerprint, string_id, uuid_identity};
+use utoipa::ToSchema;
 
 pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
 pub use error::{FingerprintParseError, HookFailure, ModelIdParseError};
@@ -47,7 +48,7 @@ uuid_identity!(
 uuid_identity!(ApprovalId, "Identity of one tool approval request.");
 
 /// Whether a tool observes or mutates state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ToolKind {
@@ -58,7 +59,7 @@ pub enum ToolKind {
 }
 
 /// Declared danger of one tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DangerLevel {
@@ -71,7 +72,7 @@ pub enum DangerLevel {
 }
 
 /// User decision for one tool approval request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ApprovalDecision {
@@ -99,7 +100,7 @@ sha256_fingerprint!(
 );
 
 /// Canonical identity of a provider model.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(try_from = "String", into = "String")]
 pub struct ModelId(String);
 
@@ -183,7 +184,7 @@ impl From<ModelId> for String {
 }
 
 /// Stable model selection and provider parameters for an agent turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 pub struct ModelConfig {
     /// Canonical provider-scoped model identity.
@@ -201,7 +202,7 @@ impl ModelConfig {
 }
 
 /// Location where an agent is executing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "type",
     content = "data",
@@ -573,7 +574,7 @@ impl ExtensionForm {
 }
 
 /// Token usage reported by a model provider.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct TokenUsage {
     /// Input tokens consumed.
     pub input_tokens: u64,
@@ -584,7 +585,7 @@ pub struct TokenUsage {
 }
 
 /// Complete tool call emitted by a model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ToolCall {
     /// Provider call identity.
     pub call_id: CallId,
@@ -608,7 +609,7 @@ pub struct ToolCallDelta {
 }
 
 /// Role of a chat message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ChatRole {
@@ -623,7 +624,7 @@ pub enum ChatRole {
 }
 
 /// Content carried by a chat message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "type",
     content = "data",
@@ -639,7 +640,7 @@ pub enum ChatContent {
 }
 
 /// Message exchanged with an LLM provider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ChatMessage {
     /// Message role.
     pub role: ChatRole,
@@ -729,7 +730,7 @@ pub struct ToolSpec {
 }
 
 /// Role of one normal text delta in an LLM call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LlmCallRole {
@@ -744,7 +745,7 @@ pub enum LlmCallRole {
 }
 
 /// Event emitted inside one LLM call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LlmEvent {
@@ -807,7 +808,7 @@ pub enum LlmEvent {
 }
 
 /// Event emitted by an agent runtime.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEvent {
@@ -927,6 +928,31 @@ pub enum SessionEvent {
     Created,
 }
 
+// Hand-written schema: the derive generates unparsable tokens for a
+// unit-only adjacently tagged enum (serde `tag` + `content`).
+impl utoipa::PartialSchema for SessionEvent {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::ObjectBuilder::new()
+            .property(
+                "type",
+                utoipa::openapi::schema::ObjectBuilder::new()
+                    .schema_type(utoipa::openapi::schema::SchemaType::Type(
+                        utoipa::openapi::schema::Type::String,
+                    ))
+                    .enum_values(Some(["created"])),
+            )
+            .required("type")
+            .build()
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for SessionEvent {
+    fn name() -> std::borrow::Cow<'static, str> {
+        "SessionEvent".into()
+    }
+}
+
 impl SessionEvent {
     /// Returns the serialized event type name.
     #[must_use]
@@ -938,7 +964,7 @@ impl SessionEvent {
 }
 
 /// Event emitted by one ordinary workflow node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "type",
     content = "data",
@@ -977,7 +1003,7 @@ impl NodeEvent {
 }
 
 /// Runtime event payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "type",
     content = "data",
@@ -1026,7 +1052,7 @@ impl RuntimeEvent {
 }
 
 /// Opaque position in a transport event stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(transparent)]
 pub struct EventCursor(u64);
 
@@ -1057,7 +1083,7 @@ pub enum ReplayStart {
 }
 
 /// One event in a session-scoped runtime stream.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StreamEnvelope {
     /// Long-lived session containing the event.
@@ -1168,7 +1194,7 @@ pub struct HistoryQuery {
 }
 
 /// One page of complete agent-message history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct HistoryPage {
     /// Inclusive upper agent-message-sequence bound used for this page.
     pub through_seq: u64,

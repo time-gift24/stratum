@@ -22,3 +22,4 @@
 - `POST /v1/agents/{agent_id}/messages` also accepts an optional `model_config`. A valid override is
   committed only with an accepted new Turn and becomes that Agent's persisted default; omission
   reuses the persisted value, and any rejected start leaves it unchanged.
+- API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个 handler 必须有 `#[utoipa::path]`，DTO 与 wire 类型必须有 `ToSchema`；错误响应只声明该 handler 经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` + `StreamEnvelope` body 描述，帧语义（id=cursor、event=内层事件名、data=envelope JSON）写在 path description。`docs/PROTOCOL.md` 已废弃。

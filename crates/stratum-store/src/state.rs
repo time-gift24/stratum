@@ -6,6 +6,7 @@ use stratum_core::{
     AgentId, AgentLocation, AgentVersionId, ExtensionSetVersionId, HookHandlerVersionId,
     ModelConfig, SessionId, SkillSetVersionId, TokenUsage, TurnId, TurnRuntimeSnapshot,
 };
+use utoipa::ToSchema;
 
 /// Current serialized agent-state schema version.
 pub const AGENT_STATE_VERSION: u32 = 3;
@@ -14,7 +15,7 @@ pub const AGENT_STATE_VERSION: u32 = 3;
 pub const MAX_HISTORY_PAGE_SIZE: usize = 256;
 
 /// Persisted runtime status of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     /// The agent is ready for work.

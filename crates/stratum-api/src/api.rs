@@ -24,7 +24,7 @@ use stratum_config::{AgentName, ConfigError};
 use stratum_core::{
     AgentEvent, AgentId, AgentLocation, ApprovalDecision, ApprovalId, EventCursor, EventRecord,
     HistoryPage, HistoryQuery, ModelConfig, ModelId, ReplayStart, RuntimeEvent, SessionId,
-    TokenUsage, TurnId,
+    StreamEnvelope, TokenUsage, TurnId,
 };
 use stratum_infra::EventStreamBusError;
 use stratum_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -33,11 +33,13 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::{Span, field, info_span};
+use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{HostError, HostState};
 
 /// Response returned after an agent and its initial Turn are durably accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 pub struct AgentCreated {
     /// New agent identity.
@@ -51,7 +53,7 @@ pub struct AgentCreated {
 }
 
 /// Public projection of one persisted agent state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 pub struct AgentView {
     /// Agent identity.
@@ -77,7 +79,7 @@ pub struct AgentView {
 }
 
 /// Public projection of a resolved agent template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 #[non_exhaustive]
 pub struct AgentTemplateView {
     /// Template name.
@@ -87,7 +89,7 @@ pub struct AgentTemplateView {
 }
 
 /// Response returned after a Turn is durably accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 pub struct TurnAccepted {
     /// Session containing the accepted Turn.
@@ -98,7 +100,7 @@ pub struct TurnAccepted {
     pub turn_id: TurnId,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateAgentRequest {
     agent_name: String,
@@ -109,7 +111,7 @@ struct CreateAgentRequest {
     model_config: Option<MessageModelConfig>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct MessageRequest {
     text: String,
@@ -117,7 +119,7 @@ struct MessageRequest {
     model_config: Option<MessageModelConfig>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct MessageModelConfig {
     model: ModelId,
@@ -130,23 +132,24 @@ impl From<MessageModelConfig> for ModelConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 struct ModelsResponse {
     models: Vec<stratum_llm::ModelDescriptor>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct AgentTemplatesResponse {
     agents: Vec<AgentTemplateView>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct ApprovalRequest {
     decision: ApprovalDecision,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct HistoryParams {
     #[serde(default)]
     after_seq: u64,
@@ -159,6 +162,42 @@ const fn default_history_limit() -> usize {
     100
 }
 
+/// OpenAPI document covering every `/v1` endpoint of the API host.
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "Stratum API", description = "Stratum agent runtime HTTP API"),
+    paths(
+        create_agent,
+        get_agent,
+        get_models,
+        get_agent_templates,
+        get_messages,
+        get_events,
+        get_session_events,
+        post_message,
+        resume_agent,
+        cancel_agent,
+        resolve_approval,
+    ),
+    components(schemas(
+        AgentCreated,
+        AgentView,
+        AgentTemplateView,
+        TurnAccepted,
+        CreateAgentRequest,
+        MessageRequest,
+        MessageModelConfig,
+        ModelsResponse,
+        AgentTemplatesResponse,
+        ApprovalRequest,
+        HistoryPage,
+        StreamEnvelope,
+        ErrorResponse,
+        ErrorBody,
+    ))
+)]
+struct ApiDoc;
+
 /// Builds the HTTP API router for one host state.
 pub fn router(state: Arc<HostState>) -> Router {
     let origins = state
@@ -169,6 +208,7 @@ pub fn router(state: Arc<HostState>) -> Router {
         })
         .collect::<Vec<_>>();
     let router = Router::new()
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/v1/models", get(get_models))
         .route("/v1/agent/templates", get(get_agent_templates))
         .route("/v1/agents", post(create_agent))
@@ -236,6 +276,23 @@ fn json_request<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, HostErr
     })
 }
 
+/// Creates an agent from a template and durably accepts its initial Turn.
+#[utoipa::path(
+    post,
+    path = "/v1/agents",
+    request_body = CreateAgentRequest,
+    responses(
+        (status = 201, description = "agent created and initial turn accepted", body = AgentCreated,
+            headers(("Location" = String, description = "canonical URI of the created agent"))),
+        (status = 400, description = "request body, agent name, or initial text is invalid", body = ErrorResponse),
+        (status = 404, description = "agent template was not found", body = ErrorResponse),
+        (status = 409, description = "session already has an active operation or an unfinished persisted turn", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "model parameters, tools, or template configuration are invalid", body = ErrorResponse),
+        (status = 500, description = "agent initialization or persistence failed", body = ErrorResponse),
+        (status = 503, description = "host is shutting down or a backing store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn create_agent(
     State(state): State<Arc<HostState>>,
     request: Result<Json<CreateAgentRequest>, JsonRejection>,
@@ -261,6 +318,19 @@ async fn create_agent(
     Ok(response)
 }
 
+/// Returns the public projection of one hosted agent.
+#[utoipa::path(
+    get,
+    path = "/v1/agents/{agent_id}",
+    params(("agent_id" = AgentId, Path, description = "agent identity")),
+    responses(
+        (status = 200, description = "current agent state projection", body = AgentView),
+        (status = 400, description = "path parameter is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 500, description = "persisted agent state could not be projected", body = ErrorResponse),
+        (status = 503, description = "agent store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_agent(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -272,12 +342,32 @@ async fn get_agent(
     Ok(Json(AgentView::try_from(persisted)?))
 }
 
+/// Lists every configured provider model.
+#[utoipa::path(
+    get,
+    path = "/v1/models",
+    responses(
+        (status = 200, description = "configured provider models", body = ModelsResponse),
+    )
+)]
 async fn get_models(State(state): State<Arc<HostState>>) -> Json<ModelsResponse> {
     Json(ModelsResponse {
         models: state.models(),
     })
 }
 
+/// Lists every resolved agent template and its provider default model configuration.
+#[utoipa::path(
+    get,
+    path = "/v1/agent/templates",
+    responses(
+        (status = 200, description = "resolved agent templates", body = AgentTemplatesResponse),
+        (status = 400, description = "a persisted template name is invalid", body = ErrorResponse),
+        (status = 422, description = "a template or its model configuration is invalid", body = ErrorResponse),
+        (status = 500, description = "template discovery or decoding failed", body = ErrorResponse),
+        (status = 503, description = "template storage is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_agent_templates(
     State(state): State<Arc<HostState>>,
 ) -> Result<Json<AgentTemplatesResponse>, HostError> {
@@ -286,6 +376,22 @@ async fn get_agent_templates(
     }))
 }
 
+/// Returns one page of an agent's committed complete-message history.
+#[utoipa::path(
+    get,
+    path = "/v1/agents/{agent_id}/messages",
+    params(
+        ("agent_id" = AgentId, Path, description = "agent identity"),
+        HistoryParams,
+    ),
+    responses(
+        (status = 200, description = "one history page", body = HistoryPage),
+        (status = 400, description = "path parameter or history query is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 500, description = "history could not be loaded", body = ErrorResponse),
+        (status = 503, description = "agent store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_messages(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -306,6 +412,31 @@ async fn get_messages(
     Ok(Json(page))
 }
 
+/// Streams runtime events of the agent's current session as Server-Sent Events.
+///
+/// Frame semantics: SSE `id` carries the cursor (transport sequence), `event` carries the
+/// inner event type name, and `data` carries the [`StreamEnvelope`] JSON. Replay is selected
+/// by the `Last-Event-ID` header or the `after_cursor` query parameter (mutually exclusive),
+/// or by `replay=new|all` (default `all`). On a stream-level failure a synthetic
+/// `stream_error` event is sent and the stream ends.
+#[utoipa::path(
+    get,
+    path = "/v1/agents/{agent_id}/events",
+    params(
+        ("agent_id" = AgentId, Path, description = "agent identity"),
+        ("Last-Event-ID" = Option<String>, Header, description = "replay cursor; mutually exclusive with the after_cursor query parameter"),
+        ("after_cursor" = Option<String>, Query, description = "replay cursor; mutually exclusive with the Last-Event-ID header"),
+        ("replay" = Option<String>, Query, description = "replay mode: `new` or `all` (default `all`)"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream of session events; data frames are StreamEnvelope JSON", body = StreamEnvelope, content_type = "text/event-stream"),
+        (status = 400, description = "path parameter, cursor, or replay parameter is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 410, description = "event cursor is no longer retained", body = ErrorResponse),
+        (status = 500, description = "agent session state could not be loaded", body = ErrorResponse),
+        (status = 503, description = "event stream or agent store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_events(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -324,6 +455,29 @@ async fn get_events(
     session_events_response(state, session_id, headers, uri).await
 }
 
+/// Streams runtime events of one session as Server-Sent Events.
+///
+/// Frame semantics: SSE `id` carries the cursor (transport sequence), `event` carries the
+/// inner event type name, and `data` carries the [`StreamEnvelope`] JSON. Replay is selected
+/// by the `Last-Event-ID` header or the `after_cursor` query parameter (mutually exclusive),
+/// or by `replay=new|all` (default `all`). On a stream-level failure a synthetic
+/// `stream_error` event is sent and the stream ends.
+#[utoipa::path(
+    get,
+    path = "/v1/sessions/{session_id}/events",
+    params(
+        ("session_id" = SessionId, Path, description = "session identity"),
+        ("Last-Event-ID" = Option<String>, Header, description = "replay cursor; mutually exclusive with the after_cursor query parameter"),
+        ("after_cursor" = Option<String>, Query, description = "replay cursor; mutually exclusive with the Last-Event-ID header"),
+        ("replay" = Option<String>, Query, description = "replay mode: `new` or `all` (default `all`)"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream of session events; data frames are StreamEnvelope JSON", body = StreamEnvelope, content_type = "text/event-stream"),
+        (status = 400, description = "path parameter, cursor, or replay parameter is invalid", body = ErrorResponse),
+        (status = 410, description = "event cursor is no longer retained", body = ErrorResponse),
+        (status = 503, description = "event stream is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_session_events(
     State(state): State<Arc<HostState>>,
     path: Result<Path<SessionId>, PathRejection>,
@@ -424,6 +578,23 @@ fn stream_error_event() -> SseEvent {
     )
 }
 
+/// Accepts a follow-up user message as a new durable Turn.
+#[utoipa::path(
+    post,
+    path = "/v1/agents/{agent_id}/messages",
+    params(("agent_id" = AgentId, Path, description = "agent identity")),
+    request_body = MessageRequest,
+    responses(
+        (status = 202, description = "turn durably accepted", body = TurnAccepted),
+        (status = 400, description = "path parameter, request body, or message text is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 409, description = "agent has an unfinished persisted turn or an active operation", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "model parameters are invalid", body = ErrorResponse),
+        (status = 500, description = "turn could not be persisted", body = ErrorResponse),
+        (status = 503, description = "host is shutting down or agent store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn post_message(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -451,6 +622,20 @@ async fn post_message(
     ))
 }
 
+/// Resumes an agent's persisted running Turn after an interruption.
+#[utoipa::path(
+    post,
+    path = "/v1/agents/{agent_id}/resume",
+    params(("agent_id" = AgentId, Path, description = "agent identity")),
+    responses(
+        (status = 202, description = "persisted turn resumed", body = TurnAccepted),
+        (status = 400, description = "path parameter is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 409, description = "agent has no persisted running turn or another operation is active", body = ErrorResponse),
+        (status = 500, description = "resume history is invalid or resume failed", body = ErrorResponse),
+        (status = 503, description = "host is shutting down or agent store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn resume_agent(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -572,6 +757,18 @@ async fn reconcile_started_only(
     .into())
 }
 
+/// Cancels the agent's active operation.
+#[utoipa::path(
+    post,
+    path = "/v1/agents/{agent_id}/cancel",
+    params(("agent_id" = AgentId, Path, description = "agent identity")),
+    responses(
+        (status = 202, description = "cancellation accepted"),
+        (status = 400, description = "path parameter is invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 409, description = "agent has an unfinished persisted turn or another operation is active", body = ErrorResponse),
+    )
+)]
 async fn cancel_agent(
     State(state): State<Arc<HostState>>,
     path: Result<Path<AgentId>, PathRejection>,
@@ -587,6 +784,23 @@ async fn cancel_agent(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// Resolves one pending tool approval of the agent's active Turn.
+#[utoipa::path(
+    post,
+    path = "/v1/agents/{agent_id}/approvals/{approval_id}",
+    params(
+        ("agent_id" = AgentId, Path, description = "agent identity"),
+        ("approval_id" = ApprovalId, Path, description = "tool approval identity"),
+    ),
+    request_body = ApprovalRequest,
+    responses(
+        (status = 204, description = "approval resolved"),
+        (status = 400, description = "path parameters or request body are invalid", body = ErrorResponse),
+        (status = 404, description = "agent was not found", body = ErrorResponse),
+        (status = 409, description = "tool approval is not active", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+    )
+)]
 async fn resolve_approval(
     State(state): State<Arc<HostState>>,
     path: Result<Path<(AgentId, ApprovalId)>, PathRejection>,
@@ -633,12 +847,12 @@ impl TryFrom<AgentState> for AgentView {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ErrorResponse {
     error: ErrorBody,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ErrorBody {
     code: &'static str,
     message: &'static str,
@@ -830,4 +1044,57 @@ fn internal_error_response() -> (StatusCode, &'static str, &'static str) {
         "internal_error",
         "internal server error",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn openapi_document_covers_every_v1_endpoint() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("openapi serializes");
+        let paths = document["paths"].as_object().expect("paths is an object");
+        let expected = [
+            ("/v1/models", &["get"][..]),
+            ("/v1/agent/templates", &["get"][..]),
+            ("/v1/agents", &["post"][..]),
+            ("/v1/agents/{agent_id}", &["get"][..]),
+            ("/v1/agents/{agent_id}/messages", &["get", "post"][..]),
+            ("/v1/agents/{agent_id}/resume", &["post"][..]),
+            ("/v1/agents/{agent_id}/cancel", &["post"][..]),
+            (
+                "/v1/agents/{agent_id}/approvals/{approval_id}",
+                &["post"][..],
+            ),
+            ("/v1/agents/{agent_id}/events", &["get"][..]),
+            ("/v1/sessions/{session_id}/events", &["get"][..]),
+        ];
+        for (path, methods) in expected {
+            let operations = paths
+                .get(path)
+                .unwrap_or_else(|| panic!("missing path {path}"));
+            for method in methods {
+                assert!(
+                    operations.get(method).is_some(),
+                    "missing {method} operation for {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openapi_document_describes_sse_endpoints_as_event_streams() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("openapi serializes");
+        for path in [
+            "/v1/agents/{agent_id}/events",
+            "/v1/sessions/{session_id}/events",
+        ] {
+            let content = &document["paths"][path]["get"]["responses"]["200"]["content"];
+            assert!(
+                content.get("text/event-stream").is_some(),
+                "missing text/event-stream response for {path}"
+            );
+        }
+    }
 }
