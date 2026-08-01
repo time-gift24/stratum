@@ -386,11 +386,23 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
     ));
     assert!(matches!(
         operations.get(3),
+        Some(Operation::Durable(
+            DurableAgentEvent::HookInvocationPending { .. }
+        ))
+    ));
+    assert!(matches!(
+        operations.get(4),
+        Some(Operation::Durable(
+            DurableAgentEvent::HookInvocationCompleted { .. }
+        ))
+    ));
+    assert!(matches!(
+        operations.get(5),
         Some(Operation::Telemetry(AgentTelemetryEvent::LlmStarted { .. }))
     ));
     let Operation::ChatStream(request) = operations
-        .get(4)
-        .expect("chat stream should follow durable prompts")
+        .get(6)
+        .expect("chat stream should follow the journaled transform hook")
     else {
         panic!("expected chat stream operation");
     };
@@ -453,8 +465,20 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
             Operation::Telemetry(_) | Operation::ChatStream(_) | Operation::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>();
+    let transcript = durable
+        .iter()
+        .copied()
+        .filter(|event| {
+            !matches!(
+                event,
+                DurableAgentEvent::HookInvocationPending { .. }
+                    | DurableAgentEvent::HookInvocationCompleted { .. }
+                    | DurableAgentEvent::HookInvocationFailed { .. }
+            )
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        durable,
+        transcript,
         vec![
             &DurableAgentEvent::LoopStarted,
             &DurableAgentEvent::MessageAppended {
@@ -463,7 +487,9 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
             &DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("second new question"),
             },
-            &DurableAgentEvent::MessageAppended { message: assistant },
+            &DurableAgentEvent::MessageAppended {
+                message: assistant.clone()
+            },
             &DurableAgentEvent::IterationCompleted {
                 iteration: 0,
                 usage,
@@ -474,6 +500,38 @@ async fn no_tool_stream_commits_complete_messages_and_preserves_event_order() {
             },
         ]
     );
+    // The transform-context invocation is journaled as one pending/completed
+    // pair under a shared invocation identity.
+    let journal = durable
+        .iter()
+        .copied()
+        .filter(|event| {
+            matches!(
+                event,
+                DurableAgentEvent::HookInvocationPending { .. }
+                    | DurableAgentEvent::HookInvocationCompleted { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let [
+        DurableAgentEvent::HookInvocationPending {
+            invocation_id,
+            point,
+            iteration,
+            call_id: None,
+            ..
+        },
+        DurableAgentEvent::HookInvocationCompleted {
+            invocation_id: completed_id,
+            ..
+        },
+    ] = journal.as_slice()
+    else {
+        panic!("expected one pending/completed journal pair, got {journal:?}");
+    };
+    assert_eq!(*point, stratum_core::HookPoint::TransformContext);
+    assert_eq!(*iteration, 0);
+    assert_eq!(invocation_id, completed_id);
 }
 
 #[tokio::test]
@@ -1084,7 +1142,9 @@ async fn failed_terminal_append_preserves_llm_error_and_durability_source() {
     let (agent_loop, operations) = test_agent_loop_with(
         ProviderBehavior::Items(vec![Err(LlmError::MockExhausted)]),
         LoopLimits::new(1, 1),
-        Some(2),
+        // loop_started, the prompt, and the transform journal pair commit
+        // before the failed loop_failed append.
+        Some(4),
     );
 
     let error = agent_loop
@@ -1177,28 +1237,60 @@ fn successful_no_tool_events() -> Vec<ChatStreamEvent> {
 
 #[tokio::test]
 async fn durable_failures_stop_at_the_failed_boundary() {
+    // The durable sequence of one no-tool run is: loop_started, the prompt,
+    // the transform journal pair, the assistant message, iteration_completed,
+    // loop_finished. Each failure ordinal stops at its boundary.
     let cases: &[(usize, &[&str], bool)] = &[
         (1, &["loop_started", "message_appended"], false),
         (
             2,
-            &["loop_started", "message_appended", "message_appended"],
-            true,
+            &[
+                "loop_started",
+                "message_appended",
+                "hook_invocation_pending",
+            ],
+            false,
         ),
         (
             3,
             &[
                 "loop_started",
                 "message_appended",
-                "message_appended",
-                "iteration_completed",
+                "hook_invocation_pending",
+                "hook_invocation_completed",
             ],
-            true,
+            false,
         ),
         (
             4,
             &[
                 "loop_started",
                 "message_appended",
+                "hook_invocation_pending",
+                "hook_invocation_completed",
+                "message_appended",
+            ],
+            true,
+        ),
+        (
+            5,
+            &[
+                "loop_started",
+                "message_appended",
+                "hook_invocation_pending",
+                "hook_invocation_completed",
+                "message_appended",
+                "iteration_completed",
+            ],
+            true,
+        ),
+        (
+            6,
+            &[
+                "loop_started",
+                "message_appended",
+                "hook_invocation_pending",
+                "hook_invocation_completed",
                 "message_appended",
                 "iteration_completed",
                 "loop_finished",
@@ -1368,7 +1460,7 @@ async fn cancellation_during_stream_discards_partial_assistant_and_commits_cance
 #[tokio::test]
 async fn cancelled_terminal_append_failure_preserves_both_errors_once() {
     let (agent_loop, operations) =
-        test_agent_loop_with(ProviderBehavior::Pending, LoopLimits::new(1, 1), Some(2));
+        test_agent_loop_with(ProviderBehavior::Pending, LoopLimits::new(1, 1), Some(4));
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
     let task = tokio::spawn(async move {
@@ -1541,10 +1633,20 @@ fn recording_registry(
     Arc::new(registry)
 }
 
-fn without_telemetry(operations: &[Operation]) -> Vec<Operation> {
+fn control_flow_operations(operations: &[Operation]) -> Vec<Operation> {
     operations
         .iter()
-        .filter(|operation| !matches!(operation, Operation::Telemetry(_)))
+        .filter(|operation| {
+            !matches!(
+                operation,
+                Operation::Telemetry(_)
+                    | Operation::Durable(
+                        DurableAgentEvent::HookInvocationPending { .. }
+                            | DurableAgentEvent::HookInvocationCompleted { .. }
+                            | DurableAgentEvent::HookInvocationFailed { .. }
+                    )
+            )
+        })
         .cloned()
         .collect()
 }
@@ -1600,11 +1702,6 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
     let assistant = ChatMessage::assistant("").with_tool_calls(vec![call.clone()]);
     let result = ChatMessage::tool(call.call_id.clone(), call.arguments.clone());
     let final_assistant = ChatMessage::assistant("done");
-    let usage = TokenUsage {
-        input_tokens: u64::MAX,
-        output_tokens: u64::MAX,
-        total_tokens: u64::MAX,
-    };
     assert_eq!(
         outcome.new_messages,
         vec![
@@ -1614,7 +1711,9 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
             final_assistant.clone(),
         ]
     );
-    assert_eq!(outcome.usage, usage);
+    // Usage is the latest response report, not an accumulation: the final
+    // stop response carried `second_usage`.
+    assert_eq!(outcome.usage, second_usage);
 
     let tool_spec = ToolSpec::builder()
         .name("echo")
@@ -1641,7 +1740,7 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
         structured_output: None,
     };
     assert_eq!(
-        without_telemetry(
+        control_flow_operations(
             &recorded
                 .lock()
                 .expect("operation lock should not be poisoned")
@@ -1670,11 +1769,11 @@ async fn tool_cycle_commits_each_boundary_before_the_next_model_request() {
             }),
             Operation::Durable(DurableAgentEvent::IterationCompleted {
                 iteration: 1,
-                usage,
+                usage: second_usage,
             }),
             Operation::Durable(DurableAgentEvent::LoopFinished {
                 finish_reason: "stop".to_owned(),
-                usage,
+                usage: second_usage,
             }),
         ]
     );
@@ -2148,7 +2247,9 @@ async fn tool_executor_durability_failure_is_fail_closed_without_terminal_retry(
             None,
         )]),
         LoopLimits::new(2, 1),
-        Some(3),
+        // The transform and decide journal pairs commit before the failed
+        // tool_execution_started append.
+        Some(9),
         registry,
         Arc::clone(&operations),
     );
@@ -2330,12 +2431,24 @@ async fn call_id_from_initial_context_cannot_be_reused_by_a_new_assistant() {
 
 #[tokio::test]
 async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
+    // One tool cycle journals every hook invocation into the same durable
+    // stream: each boundary ordinal stops everything after it.
     let boundaries = [
         "loop_started",
         "message_appended",
+        "hook_invocation_pending",
+        "hook_invocation_completed",
         "message_appended",
+        "hook_invocation_pending",
+        "hook_invocation_completed",
+        "hook_invocation_pending",
+        "hook_invocation_completed",
         "tool_execution_started",
+        "hook_invocation_pending",
+        "hook_invocation_completed",
         "message_appended",
+        "hook_invocation_pending",
+        "hook_invocation_completed",
         "iteration_completed",
     ];
 
@@ -2394,7 +2507,7 @@ async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
                 .iter()
                 .filter(|operation| matches!(operation, Operation::ChatStream(_)))
                 .count(),
-            usize::from(fail_at >= 2),
+            usize::from(fail_at >= 4),
             "model activity crossed {}",
             boundaries[fail_at]
         );
@@ -2403,7 +2516,7 @@ async fn fail_closed_durable_ordinals_stop_all_later_tool_actions() {
                 .iter()
                 .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
                 .count(),
-            usize::from(fail_at >= 4),
+            usize::from(fail_at >= 10),
             "tool activity crossed {}",
             boundaries[fail_at]
         );
@@ -2639,32 +2752,34 @@ async fn wait_for_tool_calls(operations: &Arc<Mutex<Vec<Operation>>>, expected: 
 }
 
 #[tokio::test]
-async fn failed_terminal_usage_saturates_completed_frames_and_excludes_failed_stream() {
+async fn failed_terminal_usage_is_the_latest_completed_report() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let registry = recording_registry(
         &operations,
         &[("echo", RecordingToolBehavior::Echo)],
         ToolPermissionMode::Allow,
     );
+    let first = TokenUsage {
+        input_tokens: 11,
+        output_tokens: 2,
+        total_tokens: 13,
+    };
+    let second = TokenUsage {
+        input_tokens: 4,
+        output_tokens: 7,
+        total_tokens: 11,
+    };
     let (agent_loop, recorded) = build_agent_loop(
         VecDeque::from([
             tool_call_turn(
                 &[("call-usage-a", "echo", json!({}))],
                 FinishReason::ToolCalls,
-                Some(TokenUsage {
-                    input_tokens: u64::MAX - 1,
-                    output_tokens: 2,
-                    total_tokens: u64::MAX - 2,
-                }),
+                Some(first),
             ),
             tool_call_turn(
                 &[("call-usage-b", "echo", json!({}))],
                 FinishReason::ToolCalls,
-                Some(TokenUsage {
-                    input_tokens: 4,
-                    output_tokens: u64::MAX,
-                    total_tokens: 8,
-                }),
+                Some(second),
             ),
             ProviderBehavior::Items(vec![Err(LlmError::MockExhausted)]),
         ]),
@@ -2677,7 +2792,7 @@ async fn failed_terminal_usage_saturates_completed_frames_and_excludes_failed_st
     let error = agent_loop
         .run(
             LoopContext::new("be precise"),
-            vec![ChatMessage::user("accumulate usage")],
+            vec![ChatMessage::user("report usage")],
             CancellationToken::new(),
         )
         .await
@@ -2692,17 +2807,14 @@ async fn failed_terminal_usage_saturates_completed_frames_and_excludes_failed_st
             .any(|operation| matches!(
                 operation,
                 Operation::Durable(DurableAgentEvent::LoopFailed { usage, .. })
-                    if *usage == TokenUsage {
-                        input_tokens: u64::MAX,
-                        output_tokens: u64::MAX,
-                        total_tokens: u64::MAX,
-                    }
-            ))
+                    if *usage == second
+            )),
+        "the failed terminal carries the latest report, not an accumulation"
     );
 }
 
 #[tokio::test]
-async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
+async fn cancelled_terminal_usage_is_the_latest_completed_report() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let cancellation = CancellationToken::new();
     let durable: Arc<dyn DurableEventSink> = Arc::new(TriggeredCancellationSink {
@@ -2715,25 +2827,27 @@ async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
         &[("echo", RecordingToolBehavior::Echo)],
         ToolPermissionMode::Allow,
     );
+    let first = TokenUsage {
+        input_tokens: 9,
+        output_tokens: 2,
+        total_tokens: 11,
+    };
+    let second = TokenUsage {
+        input_tokens: 4,
+        output_tokens: 6,
+        total_tokens: 10,
+    };
     let agent_loop = assemble_agent_loop(
         VecDeque::from([
             tool_call_turn(
                 &[("call-cancel-usage-a", "echo", json!({}))],
                 FinishReason::ToolCalls,
-                Some(TokenUsage {
-                    input_tokens: u64::MAX - 1,
-                    output_tokens: 2,
-                    total_tokens: u64::MAX - 2,
-                }),
+                Some(first),
             ),
             tool_call_turn(
                 &[("call-cancel-usage-b", "echo", json!({}))],
                 FinishReason::ToolCalls,
-                Some(TokenUsage {
-                    input_tokens: 4,
-                    output_tokens: u64::MAX,
-                    total_tokens: 8,
-                }),
+                Some(second),
             ),
         ]),
         LoopLimits::new(3, 1),
@@ -2745,7 +2859,7 @@ async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
     let error = agent_loop
         .run(
             LoopContext::new("be precise"),
-            vec![ChatMessage::user("cancel with accumulated usage")],
+            vec![ChatMessage::user("cancel after reported usage")],
             cancellation,
         )
         .await
@@ -2760,11 +2874,8 @@ async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
             .any(|operation| matches!(
                 operation,
                 Operation::Durable(DurableAgentEvent::LoopCancelled { usage })
-                    if *usage == TokenUsage {
-                        input_tokens: u64::MAX,
-                        output_tokens: u64::MAX,
-                        total_tokens: u64::MAX,
-                    }
-            ))
+                    if *usage == second
+            )),
+        "the cancelled terminal carries the latest report, not an accumulation"
     );
 }

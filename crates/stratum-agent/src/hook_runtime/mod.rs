@@ -14,3 +14,4 @@ pub use runtime::{
     PrepareNextTurnInput, ToolHookTarget, TransformContextDecision, TransformContextInput,
     TransformToolCallDecision, TransformToolCallInput, TransformToolCallModification,
 };
+pub use stratum_core::ContextPatch;

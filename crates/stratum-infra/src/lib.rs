@@ -6,7 +6,8 @@ pub mod agent_event_sink;
 pub mod event_stream_bus;
 
 pub use agent_event_sink::{
-    DurableEventSink, DurableEventSinkError, ScopedAgentEventSink, TelemetryEventSink,
+    DurableEventSink, DurableEventSinkError, FilesystemDurableEventSink, FilesystemEventSinkError,
+    ScopedAgentEventSink, TelemetryEventSink,
 };
 pub use event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig,

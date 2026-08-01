@@ -67,7 +67,7 @@
 - 敏感数据（LLM API key、token、用户凭据）绝对禁止进入 span 字段和日志消息。
 - 错误只在真正处理它的边界记录一次，禁止逐层重复 log。
 - 禁止 `println!` / `eprintln!`（CLI 输出场景除外）。
-- **Metrics（强制）**：关键业务操作（turn 执行、LLM 调用、hook 调用、store 读写失败）必须记录 counter / histogram，使用 `metrics` facade；指标名 snake_case，label 禁止高基数值（如 session_id、用户输入）。
+- **Metrics（强制，分阶段落地）**：`metrics` facade 尚未引入仓库（平台任务，见 TODO.md）。facade 落地前，新增关键路径必须（SHALL）先以 tracing 事件覆盖；facade 就绪后，关键业务操作（turn 执行、LLM 调用、hook 调用、store 读写失败）必须记录 counter / histogram；指标名 snake_case，label 禁止高基数值（如 session_id、用户输入）。
 - **OpenTelemetry（强制）**：`stratum-api` 必须接入 OTLP exporter，trace 须贯通 HTTP 请求 → turn 执行 → LLM 调用链路。
 
 ---
@@ -75,10 +75,12 @@
 ## 5. 存储与事件总线（强制）
 
 - 状态/定义持久化必须经 `stratum-store`，业务 crate 禁止直接读写存储介质。
-- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。
+- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；耐久存储后端（`stratum-infra` / `stratum-store`）作为基础设施可以直接使用 `std::fs` / `tokio::fs`，并自行保证崩溃一致性。
 - 事件发布/订阅必须经 `stratum-infra` 的 event bus 抽象，业务代码禁止直连 `async-nats`。
 - 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`、`stratum-agent-builtin`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
-- 文件写操作必须崩溃一致：临时文件 + 原子 rename，或 store 层提供的等效保证。
+- 文件写操作必须崩溃一致：临时文件 + 原子 rename，或 store 层提供的等效保证。append-only 日志在同时满足以下条件时视为等效：写入后做文件与目录双 fsync，读取器容忍截断尾行（含落在多字节 UTF-8 字符中间的撕裂写，按字节解析并丢弃尾部残缺行）。
+- 持久化载荷（事件流、Hook journal decision 等）按对话级敏感数据处理：secret、token、用户凭据永远不得写入持久流；保留时间与清理策略由存储后端定义并在其 crate 文档归档。
+- 从持久层读回的 `#[non_exhaustive]` 枚举，`_` 分支必须返回错误（fail closed），禁止提供默认值——尤其禁止向放宽权限的方向默认。
 - NATS subject / bucket 命名集中定义，禁止散落字符串字面量。
 - 持久化 shape 变更必须与协议兼容策略一致：不支持的旧 shape 显式报错，禁止静默吞掉或猜测性迁移。
 
@@ -146,7 +148,7 @@
 ## 11. Async 与并发（强制）
 
 - async runtime 统一使用 Tokio。
-- 禁止在 `.await` 期间持有 `Mutex` / `RwLock` guard。
+- 禁止在 `.await` 期间持有 std `Mutex` / `RwLock` guard；确需跨 `.await` 串行化时使用 `tokio::sync::Mutex`（其 guard 为跨 await 持有而设计）。
 - 队列和背压使用 bounded channels。
 - 运行取消和优雅关闭使用 `CancellationToken`；动态任务集合使用 `JoinSet` 管理。
 - CPU-heavy 或 blocking 工作使用 `spawn_blocking`。
@@ -180,13 +182,13 @@
 
 以下代码在 Review 中必须一票否决：
 
-- [ ] `unwrap()` / `expect()` 出现在非测试代码中
+- [ ] `unwrap()` 出现在非测试代码中；`expect()` 仅限 §2 允许的程序员错误不变量，且必须附不变量注释
 - [ ] `println!` / `eprintln!` 出现在非 CLI 生产代码中（测试代码豁免）
 - [ ] 密钥、token、用户凭据进入日志、span 字段或错误消息
 - [ ] 领域 ID 以裸字符串（stringly typed）穿越 crate 或 HTTP 边界
-- [ ] 业务 crate 直连 `std::fs` / `tokio::fs` 或 `async-nats`
+- [ ] 业务 crate 直连 `std::fs` / `tokio::fs` 或 `async-nats`（耐久存储后端 crate——`stratum-infra` / `stratum-store`——的文件 IO 除外，见 §5）
 - [ ] 在宿主机直接执行 agent 生成的命令
-- [ ] `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点
+- [ ] std `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点（为跨 await 串行化而持有 `tokio::sync::Mutex` guard 是允许的，见 §11）
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）
 - [ ] `unsafe` block 无 `// SAFETY:` 注释，或 `unsafe fn` 无 `# Safety` 文档
 - [ ] crate `Cargo.toml` 中写裸版本号依赖（不走 workspace inheritance）

@@ -44,6 +44,14 @@
   AgentStore state transitions.
 - Scoped envelopes carry identity through
   `RuntimeEvent::Agent { agent_id, turn_id, location, event }`; there is no separate `EventSource`.
+- `FilesystemDurableEventSink` writes one run per directory (`<root>/<run_id>/events.jsonl`),
+  one JSON line per event, and acknowledges an append only after fsyncing both the file and the
+  run directory. Appends are serialized through an internal async lock, so concurrent writers
+  never interleave lines. `read_events(run_dir)` replays the log: a missing log is an empty event
+  stream, an unreadable/invalid run directory is a typed error, a malformed non-tail line is a
+  typed error, and a malformed tail line is ignored as crash truncation. The reader does blocking
+  IO; async callers with large logs should offload it with `spawn_blocking`. No retention or
+  cleanup policy exists yet; that decision belongs to the future sqlite backend.
 - Durable projection includes loop start, complete messages, approvals, tool execution start,
   iteration completion, and terminal events. Telemetry projection includes supported LLM start,
   text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit

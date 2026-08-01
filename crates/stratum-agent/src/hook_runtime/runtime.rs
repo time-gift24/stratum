@@ -6,7 +6,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use stratum_core::{
-    ChatMessage, ChatRole, DangerLevel, HookFailure, TokenUsage, ToolCall, ToolKind, ToolSpec,
+    ChatMessage, ChatRole, ContextPatch, DangerLevel, HookFailure, TokenUsage, ToolCall, ToolKind,
+    ToolSpec,
 };
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -52,7 +53,7 @@ impl HookControl {
 /// Borrowed read-side snapshot shared by every hook input.
 ///
 /// The kernel builds snapshots at hook boundaries with zero allocation: it
-/// borrows the committed context and copies the small usage accumulator. The
+/// borrows the committed context and copies the small usage observation. The
 /// snapshot is read-only; point-specific payloads (the tool call, the tool
 /// target, the produced result) stay in the individual input structures and
 /// never enter the snapshot.
@@ -82,8 +83,11 @@ pub struct HookSnapshot<'a> {
     /// Borrowed committed context at this hook boundary; see the type-level
     /// docs for the exact per-point semantics.
     pub context: &'a LoopContext,
-    /// Token usage accumulated from provider reports in this run up to this
-    /// boundary, or `None` when no provider response has reported usage yet.
+    /// Token usage reported by the most recent model response in this run up
+    /// to this boundary, or `None` when no provider response has reported
+    /// usage yet. The kernel passes the value through without accumulating
+    /// across calls; handlers needing cumulative semantics maintain their own
+    /// totals.
     pub usage: Option<TokenUsage>,
 }
 
@@ -114,12 +118,13 @@ pub struct TransformContextInput<'a> {
 pub enum TransformContextDecision {
     /// Use the supplied context view unchanged.
     Unchanged,
-    /// Replace the context for the current model request only. The replacement
-    /// is never committed back to the transcript or the loop outcome.
-    Replace {
-        /// Request-scoped replacement context.
-        context: LoopContext,
-    },
+    /// Apply an incremental [`ContextPatch`] to the context of the current
+    /// model request only. The kernel validates the patch against the
+    /// committed messages (`upto` bounds and tool_call/tool_result pairing),
+    /// rejecting invalid patches as [`HookFailure::InvalidOutput`]. A patch
+    /// never writes back to the committed transcript, never becomes a durable
+    /// message, and never appears in the loop outcome.
+    Patch(ContextPatch),
 }
 
 /// Borrowed view of the tool one tool hook invocation applies to.
@@ -171,14 +176,14 @@ pub enum TransformToolCallDecision {
 
 impl TransformToolCallDecision {
     /// Enforces the decision contract before the loop applies it.
-    pub(crate) fn validate(self) -> Result<Self, HookFailure> {
-        match &self {
+    pub(crate) fn check(&self) -> Result<(), HookFailure> {
+        match self {
             Self::Modify(modification)
                 if modification.arguments.is_none() && modification.authorization.is_none() =>
             {
                 Err(HookFailure::InvalidOutput)
             }
-            _ => Ok(self),
+            _ => Ok(()),
         }
     }
 }
@@ -268,10 +273,10 @@ pub enum DecideToolCallDecision {
 
 impl DecideToolCallDecision {
     /// Enforces the decision contract before the loop applies it.
-    pub(crate) fn validate(self) -> Result<Self, HookFailure> {
-        match &self {
+    pub(crate) fn check(&self) -> Result<(), HookFailure> {
+        match self {
             Self::Block { reason } if reason.trim().is_empty() => Err(HookFailure::InvalidOutput),
-            _ => Ok(self),
+            _ => Ok(()),
         }
     }
 }
@@ -330,14 +335,14 @@ pub enum PrepareNextTurnDecision {
 
 impl PrepareNextTurnDecision {
     /// Enforces the decision contract before the loop applies it.
-    pub(crate) fn validate(self) -> Result<Self, HookFailure> {
-        match &self {
+    pub(crate) fn check(&self) -> Result<(), HookFailure> {
+        match self {
             Self::Inject { messages }
                 if messages.is_empty() || !messages.iter().all(is_plain_user_message) =>
             {
                 Err(HookFailure::InvalidOutput)
             }
-            _ => Ok(self),
+            _ => Ok(()),
         }
     }
 }
@@ -446,21 +451,13 @@ mod tests {
             let decision = DecideToolCallDecision::Block {
                 reason: reason.to_owned(),
             };
-            assert_eq!(decision.validate(), Err(HookFailure::InvalidOutput));
+            assert_eq!(decision.check(), Err(HookFailure::InvalidOutput));
         }
         let decision = DecideToolCallDecision::Block {
             reason: "policy denied".to_owned(),
         };
-        assert_eq!(
-            decision.validate(),
-            Ok(DecideToolCallDecision::Block {
-                reason: "policy denied".to_owned(),
-            })
-        );
-        assert_eq!(
-            DecideToolCallDecision::Execute.validate(),
-            Ok(DecideToolCallDecision::Execute)
-        );
+        assert_eq!(decision.check(), Ok(()));
+        assert_eq!(DecideToolCallDecision::Execute.check(), Ok(()));
     }
 
     #[test]
@@ -469,22 +466,19 @@ mod tests {
             arguments: None,
             authorization: None,
         });
-        assert_eq!(no_change.validate(), Err(HookFailure::InvalidOutput));
+        assert_eq!(no_change.check(), Err(HookFailure::InvalidOutput));
 
         let arguments_only = TransformToolCallDecision::Modify(TransformToolCallModification {
             arguments: Some(json!({"value": 1})),
             authorization: None,
         });
-        assert!(arguments_only.validate().is_ok());
+        assert_eq!(arguments_only.check(), Ok(()));
         let authorization_only = TransformToolCallDecision::Modify(TransformToolCallModification {
             arguments: None,
             authorization: Some(AuthorizationOverride::PreAuthorize),
         });
-        assert!(authorization_only.validate().is_ok());
-        assert_eq!(
-            TransformToolCallDecision::Continue.validate(),
-            Ok(TransformToolCallDecision::Continue)
-        );
+        assert_eq!(authorization_only.check(), Ok(()));
+        assert_eq!(TransformToolCallDecision::Continue.check(), Ok(()));
     }
 
     #[test]
@@ -523,12 +517,12 @@ mod tests {
         ];
         for (messages, expected) in cases {
             let decision = PrepareNextTurnDecision::Inject { messages };
-            assert_eq!(decision.validate().is_ok(), expected);
+            assert_eq!(decision.check().is_ok(), expected);
         }
         let decision = PrepareNextTurnDecision::Continue;
-        assert!(decision.validate().is_ok());
+        assert!(decision.check().is_ok());
         let decision = PrepareNextTurnDecision::Stop;
-        assert!(decision.validate().is_ok());
+        assert!(decision.check().is_ok());
     }
 
     #[test]

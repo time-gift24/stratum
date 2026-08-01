@@ -12,7 +12,12 @@ use serde_json::{Map, Value};
 use stratum_macros::{sha256_fingerprint, string_id, uuid_identity};
 use utoipa::ToSchema;
 
-pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
+pub use agent_loop_event::{
+    AfterToolCallDecisionRecord, AgentTelemetryEvent, AuthorizationOverrideRecord, ContextPatch,
+    DecideToolCallDecisionRecord, DurableAgentEvent, HookDecisionRecord,
+    PrepareNextTurnDecisionRecord, TransformContextDecisionRecord, TransformToolCallDecisionRecord,
+    TransformToolCallModificationRecord,
+};
 pub use error::{FingerprintParseError, HookFailure, ModelIdParseError};
 
 uuid_identity!(SessionId, "Identity of one long-lived runtime session.");

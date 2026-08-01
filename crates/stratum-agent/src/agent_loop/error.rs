@@ -91,6 +91,49 @@ pub enum ProtocolError {
     },
 }
 
+/// Failure to rebuild a resumable run state from a durable event stream.
+///
+/// Every variant fails closed: the resume is refused before any model, tool,
+/// or hook action starts.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ResumeError {
+    /// The stream did not contain its initial `LoopStarted` event.
+    #[error("event stream is missing loop_started")]
+    MissingLoopStarted,
+    /// The stream contained a second `LoopStarted` event.
+    #[error("event stream contains a duplicate loop_started")]
+    UnexpectedLoopStarted,
+    /// The stream contained a terminal event; finished runs cannot resume.
+    #[error("event stream contains a terminal loop event")]
+    TerminalEvent,
+    /// Committed tool results are not the exact ordered prefix of the
+    /// immediately preceding assistant `tool_calls` (unknown, duplicated,
+    /// sparse, or out-of-order results).
+    #[error(
+        "committed tool results do not form the exact ordered prefix of the preceding assistant tool calls"
+    )]
+    ToolResultMismatch,
+    /// Two pending records share one hook invocation address, or one
+    /// invocation was completed twice.
+    #[error("hook journal contains a duplicate invocation")]
+    DuplicateHookInvocation,
+    /// A completion or failure record references an unknown invocation.
+    #[error("hook journal references an unknown invocation")]
+    UnknownHookInvocation,
+    /// A journaled decision does not belong to its hook point or fails
+    /// re-validation against the rebuilt run state.
+    #[error("hook journal record does not match the rebuilt invocation")]
+    HookRecordMismatch,
+    /// A journaled hook address matches the current invocation but its input
+    /// digest does not.
+    #[error("hook journal input digest mismatch at {}", hook_point_name(*point))]
+    HookDigestMismatch {
+        /// Decision point whose input changed across the crash boundary.
+        point: HookPoint,
+    },
+}
+
 /// Failure that prevents the agent loop from preserving its invariants.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -143,6 +186,14 @@ pub enum AgentLoopError {
         /// Safe typed failure classification.
         failure: HookFailure,
     },
+    /// A durable event stream could not be rebuilt into a consistent run
+    /// state, or a journaled hook invocation contradicts the rebuilt state.
+    #[error("agent loop resume failed: {reason}")]
+    Resume {
+        /// Typed resume failure.
+        #[source]
+        reason: ResumeError,
+    },
     /// The caller cancelled the loop before a terminal outcome was committed.
     #[error("agent loop cancelled")]
     Cancelled,
@@ -193,6 +244,12 @@ impl From<LlmError> for AgentLoopError {
 impl From<ProtocolError> for AgentLoopError {
     fn from(reason: ProtocolError) -> Self {
         Self::InvalidProtocol { reason }
+    }
+}
+
+impl From<ResumeError> for AgentLoopError {
+    fn from(reason: ResumeError) -> Self {
+        Self::Resume { reason }
     }
 }
 

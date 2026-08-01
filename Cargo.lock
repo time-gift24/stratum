@@ -1871,6 +1871,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "serde_json",
+ "sha2 0.10.9",
  "stratum-core",
  "stratum-infra",
  "stratum-llm",

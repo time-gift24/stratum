@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, LlmCallId, TokenUsage,
-    ToolKind, ToolName,
+    ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, HookFailure, HookInputDigest,
+    HookInvocationId, HookPoint, LlmCallId, TokenUsage, ToolKind, ToolName,
 };
 
 /// Durable agent-loop events that require persistence acknowledgement.
@@ -49,30 +49,69 @@ pub enum DurableAgentEvent {
         /// Provider-visible tool name.
         tool_name: ToolName,
     },
+    /// A hook invocation was journaled before calling the hook runtime.
+    ///
+    /// The address is the kernel-minimal `(iteration, HookPoint, Option<CallId>)`
+    /// shape: tool hooks distinguish same-iteration calls by `call_id`, while
+    /// `transform_context` and `prepare_next_turn` are uniquely identified by
+    /// `(iteration, point)`.
+    HookInvocationPending {
+        /// Logical invocation identity; retries of the same logical invocation
+        /// reuse this id instead of creating a second record.
+        invocation_id: HookInvocationId,
+        /// Decision point being invoked.
+        point: HookPoint,
+        /// Zero-based model iteration the invocation belongs to.
+        iteration: u64,
+        /// Tool call identity for tool hooks; `None` for context hooks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<CallId>,
+        /// Payload-level digest of the hook input.
+        input_digest: HookInputDigest,
+    },
+    /// A hook invocation produced a validated decision, journaled before the
+    /// decision's affected action is applied.
+    HookInvocationCompleted {
+        /// Identity of the pending invocation this decision completes.
+        invocation_id: HookInvocationId,
+        /// Typed decision record; the payload is the decision itself.
+        decision: HookDecisionRecord,
+    },
+    /// A hook invocation reached a typed terminal failure.
+    HookInvocationFailed {
+        /// Identity of the pending invocation this failure terminates.
+        invocation_id: HookInvocationId,
+        /// Safe typed failure classification.
+        failure: HookFailure,
+    },
     /// One loop iteration reached its durable boundary.
     IterationCompleted {
         /// Iteration number.
         iteration: u64,
-        /// Token usage accumulated through this iteration.
+        /// Token usage reported by the most recent model response up to this
+        /// boundary, zero-filled when no response reported usage.
         usage: TokenUsage,
     },
     /// Agent loop finished successfully.
     LoopFinished {
         /// Why the loop finished.
         finish_reason: String,
-        /// Token usage accumulated by the loop.
+        /// Token usage reported by the most recent model response, zero-filled
+        /// when no response reported usage.
         usage: TokenUsage,
     },
     /// Agent loop failed.
     LoopFailed {
         /// Error text safe to expose to callers.
         error_text: String,
-        /// Token usage accumulated by the loop.
+        /// Token usage reported by the most recent model response, zero-filled
+        /// when no response reported usage.
         usage: TokenUsage,
     },
     /// Agent loop was cancelled.
     LoopCancelled {
-        /// Token usage accumulated by the loop.
+        /// Token usage reported by the most recent model response, zero-filled
+        /// when no response reported usage.
         usage: TokenUsage,
     },
 }
@@ -87,12 +126,178 @@ impl DurableAgentEvent {
             Self::ToolApprovalRequested { .. } => "tool_approval_requested",
             Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
             Self::ToolExecutionStarted { .. } => "tool_execution_started",
+            Self::HookInvocationPending { .. } => "hook_invocation_pending",
+            Self::HookInvocationCompleted { .. } => "hook_invocation_completed",
+            Self::HookInvocationFailed { .. } => "hook_invocation_failed",
             Self::IterationCompleted { .. } => "iteration_completed",
             Self::LoopFinished { .. } => "loop_finished",
             Self::LoopFailed { .. } => "loop_failed",
             Self::LoopCancelled { .. } => "loop_cancelled",
         }
     }
+}
+
+/// Incremental patch a `transform_context` hook decision applies to the
+/// current model request view.
+///
+/// Patches are request-scoped view adjustments: they never write back to the
+/// committed transcript, never become durable messages, and never appear in
+/// the loop outcome. `upto` indexes the committed `messages` with a zero-based,
+/// left-closed/right-open interval: the patch rewrites the prefix
+/// `messages[..upto]`. The kernel rejects a patch whose `upto` is out of bounds
+/// or cuts a tool_call/tool_result pair (an assistant message's `tool_calls`
+/// and their results must stay on the same side of the cut) as
+/// [`HookFailure::InvalidOutput`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ContextPatch {
+    /// Replace the system prompt of the current request view.
+    ReplaceSystemPrompt(String),
+    /// Drop the committed history prefix `messages[..upto]` from the current
+    /// request view.
+    DropHistory {
+        /// Exclusive end index into the committed `messages`.
+        upto: usize,
+    },
+    /// Replace the committed history prefix `messages[..upto]` with one
+    /// summary message in the current request view.
+    RewriteHistory {
+        /// Exclusive end index into the committed `messages`.
+        upto: usize,
+        /// Summary message taking the place of the dropped prefix.
+        summary: ChatMessage,
+    },
+}
+
+/// Journaled representation of one hook decision at one hook point.
+///
+/// Every payload is the small inline decision itself; there is no overflow or
+/// blob storage form. Resume replays a matching record instead of calling the
+/// hook runtime again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "point", content = "decision", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookDecisionRecord {
+    /// Decision of a `transform_context` invocation.
+    TransformContext(TransformContextDecisionRecord),
+    /// Decision of a `transform_tool_call` invocation.
+    TransformToolCall(TransformToolCallDecisionRecord),
+    /// Decision of a `decide_tool_call` invocation.
+    DecideToolCall(DecideToolCallDecisionRecord),
+    /// Decision of an `after_tool_call` invocation.
+    AfterToolCall(AfterToolCallDecisionRecord),
+    /// Decision of a `prepare_next_turn` invocation.
+    PrepareNextTurn(PrepareNextTurnDecisionRecord),
+}
+
+/// Journaled `transform_context` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TransformContextDecisionRecord {
+    /// The request view was used unchanged.
+    Unchanged,
+    /// An incremental patch was applied to the request view.
+    Patch(ContextPatch),
+}
+
+/// Journaled `transform_tool_call` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TransformToolCallDecisionRecord {
+    /// The original arguments and authorization were kept.
+    Continue,
+    /// Arguments and/or the effective authorization were modified.
+    Modify(TransformToolCallModificationRecord),
+}
+
+/// Journaled per-call modification; `None` fields kept their original values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TransformToolCallModificationRecord {
+    /// Replacement arguments, when modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
+    /// Effective authorization override, when modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<AuthorizationOverrideRecord>,
+}
+
+impl TransformToolCallModificationRecord {
+    /// Creates a modification record from optional replacement arguments and an
+    /// optional authorization override.
+    #[must_use]
+    pub const fn new(
+        arguments: Option<Value>,
+        authorization: Option<AuthorizationOverrideRecord>,
+    ) -> Self {
+        Self {
+            arguments,
+            authorization,
+        }
+    }
+}
+
+/// Journaled per-call authorization override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuthorizationOverrideRecord {
+    /// The call was marked pre-authorized.
+    PreAuthorize,
+    /// The declared authorization metadata was replaced.
+    Set {
+        /// Replacement tool kind.
+        kind: ToolKind,
+        /// Replacement danger level.
+        danger: DangerLevel,
+    },
+}
+
+/// Journaled `decide_tool_call` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DecideToolCallDecisionRecord {
+    /// The call was committed and executed.
+    Execute,
+    /// The call was blocked with a model-visible reason.
+    Block {
+        /// Model-visible block reason.
+        reason: String,
+    },
+}
+
+/// Journaled `after_tool_call` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AfterToolCallDecisionRecord {
+    /// The produced tool result was committed unchanged.
+    Keep,
+    /// A replacement JSON result was committed under the same call identity.
+    ReplaceResult {
+        /// Replacement JSON tool result.
+        result: Value,
+    },
+}
+
+/// Journaled `prepare_next_turn` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PrepareNextTurnDecisionRecord {
+    /// The iteration boundary was committed and the next iteration started.
+    Continue,
+    /// The iteration boundary was committed and the loop finished hook-stopped.
+    Stop,
+    /// Plain user messages were injected into the next request view only.
+    Inject {
+        /// Non-empty plain user messages for the next request view.
+        messages: Vec<ChatMessage>,
+    },
 }
 
 /// Best-effort agent-loop telemetry that does not control loop progress.
@@ -159,10 +364,12 @@ impl AgentTelemetryEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentTelemetryEvent, DurableAgentEvent};
+    use super::{
+        AgentTelemetryEvent, DecideToolCallDecisionRecord, DurableAgentEvent, HookDecisionRecord,
+    };
     use crate::{
-        ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, LlmCallId, TokenUsage,
-        ToolKind, ToolName,
+        ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, HookFailure,
+        HookInvocationId, HookPoint, LlmCallId, TokenUsage, ToolKind, ToolName,
     };
     use serde_json::json;
 
@@ -192,6 +399,68 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DurableAgentEvent>(serialized)?,
             event
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn hook_journal_events_serialize_with_stable_snake_case_type() -> serde_json::Result<()> {
+        let invocation_id = HookInvocationId::new();
+        let digest = "b".repeat(64).parse().expect("valid digest");
+        let pending = DurableAgentEvent::HookInvocationPending {
+            invocation_id,
+            point: HookPoint::TransformContext,
+            iteration: 3,
+            call_id: None,
+            input_digest: digest,
+        };
+
+        assert_eq!(pending.event_type(), "hook_invocation_pending");
+        let serialized = serde_json::to_value(&pending)?;
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "hook_invocation_pending",
+                "data": {
+                    "invocation_id": invocation_id.to_string(),
+                    "point": "transform_context",
+                    "iteration": 3,
+                    "input_digest": "b".repeat(64),
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DurableAgentEvent>(serialized)?,
+            pending
+        );
+
+        let completed = DurableAgentEvent::HookInvocationCompleted {
+            invocation_id,
+            decision: HookDecisionRecord::TransformContext(
+                super::TransformContextDecisionRecord::Patch(super::ContextPatch::DropHistory {
+                    upto: 2,
+                }),
+            ),
+        };
+        assert_eq!(completed.event_type(), "hook_invocation_completed");
+        let serialized = serde_json::to_value(&completed)?;
+        assert_eq!(
+            serialized["data"]["decision"],
+            json!({
+                "point": "transform_context",
+                "decision": {
+                    "type": "patch",
+                    "data": {
+                        "type": "drop_history",
+                        "data": { "upto": 2 }
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DurableAgentEvent>(serialized)?,
+            completed
         );
 
         Ok(())
@@ -271,6 +540,21 @@ mod tests {
             DurableAgentEvent::ToolExecutionStarted {
                 call_id: CallId::from("tool-call-1"),
                 tool_name: ToolName::from("echo"),
+            },
+            DurableAgentEvent::HookInvocationPending {
+                invocation_id: HookInvocationId::new(),
+                point: HookPoint::DecideToolCall,
+                iteration: 0,
+                call_id: Some(CallId::from("tool-call-1")),
+                input_digest: "a".repeat(64).parse().expect("valid digest"),
+            },
+            DurableAgentEvent::HookInvocationCompleted {
+                invocation_id: HookInvocationId::new(),
+                decision: HookDecisionRecord::DecideToolCall(DecideToolCallDecisionRecord::Execute),
+            },
+            DurableAgentEvent::HookInvocationFailed {
+                invocation_id: HookInvocationId::new(),
+                failure: HookFailure::TimedOut,
             },
             DurableAgentEvent::IterationCompleted {
                 iteration: 1,
