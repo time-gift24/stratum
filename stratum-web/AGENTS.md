@@ -38,7 +38,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 ## 设计上下文
 
 - 修改界面前必须阅读本目录 `PRODUCT.md` 与 `DESIGN.md`（均来自 front-playground）。
-- 除 `/conversation` 外，其余页面（首页、canvas、markdown）是 showcase，跑 mock 数据；不要把它们当产品功能接线。
+- 产品是单对话页应用：`/` 重定向到 `/conversation`（`app/(site)/page.tsx` 调 `redirect`），`/conversation` 是唯一页面、接真实后端；showcase 页面（首页、canvas、markdown）及其专用组件已全部删除。
 - 禁止用主题化文案、无功能小字、伪技术参数制造产品感。
 
 ## 动效
