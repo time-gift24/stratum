@@ -75,7 +75,13 @@ legacy stateful `Agent` compatibility path.
   `authorization` is the effective per-call value: the registry-declared
   default at `transform_tool_call`, and the transform-overridden value (when
   any) at `decide_tool_call` and `after_tool_call`. The kernel transports the
-  value without interpreting it.
+  value without interpreting it. The registry declaration is only a default
+  basis derived from the tool's registered `ToolKind`/`DangerLevel` and the
+  registry's `ToolPermissionMode` (`stratum-tools`) — never a verdict: the
+  judgment of whether a call needs approval lives in the hook chain.
+  `ToolExecutor::hook_lookup` is the kernel's single isolation point over the
+  registry: it resolves the missing-tool gate, the tool handle for dispatch,
+  and this default declaration in one lookup.
 - Identity is kernel-owned: hooks may never change `CallId` or tool names.
   `transform_tool_call` may only continue or return a `Modify` carrying
   optional replacement arguments and/or an optional authorization override
