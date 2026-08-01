@@ -16,6 +16,7 @@ macro_rules! uuid_identity {
             Ord,
             ::serde::Serialize,
             ::serde::Deserialize,
+            ::utoipa::ToSchema,
         )]
         #[serde(transparent)]
         pub struct $name(::uuid::Uuid);
@@ -83,6 +84,7 @@ macro_rules! string_id {
             Ord,
             ::serde::Serialize,
             ::serde::Deserialize,
+            ::utoipa::ToSchema,
         )]
         #[serde(transparent)]
         pub struct $name(::std::string::String);
@@ -136,6 +138,7 @@ macro_rules! sha256_fingerprint {
             Ord,
             ::serde::Serialize,
             ::serde::Deserialize,
+            ::utoipa::ToSchema,
         )]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(::std::string::String);

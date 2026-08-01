@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use stratum_core::{ModelConfig, ModelId, TokenUsage};
+use utoipa::ToSchema;
 
 use crate::{ChatMessage, LlmError, StructuredOutput, ToolCallDelta, ToolSpec};
 
@@ -57,7 +58,7 @@ pub trait ConfigurableLlmProvider: LlmProvider {
 }
 
 /// A registered model and the schema for its provider-specific parameters.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[non_exhaustive]
 pub struct ModelDescriptor {
     /// Canonical provider-scoped model identity.
