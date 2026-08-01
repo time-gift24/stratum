@@ -3,6 +3,8 @@
 > 本文件为项目级 AI 编码与审查规范，是 `constitution-review` skill 的审查依据。
 > 技术栈：Rust workspace（edition 2024, rust 1.88）+ Axum（仅 stratum-api）+ Tokio + tracing + NATS/文件存储。
 > 前端（stratum-web）规范不在本文件范围，见 `PRODUCT.md` 与 `stratum-web/DESIGN.md`。
+> Rust 编码的深度规则（265 条）以 `.agents/skills/rust-skills/` 为参考；本宪法收录其中必须强制执行的子集。
+> 审查时遇到本文件未覆盖的 Rust 细节问题，参照 rust-skills 检视并归入 `suggestion` 或 `constitution-gap`。
 
 ---
 
@@ -122,12 +124,26 @@
 - 提交前必须 `cargo fmt`；CI 运行 `cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets -- -D warnings`。
 - 禁止无理由 silence lint；确需 `#[allow]` 必须附简短原因注释。
 - 命名规范：模块/文件 snake_case，类型 PascalCase，函数 snake_case，常量 SCREAMING_SNAKE_CASE，错误类型 `XxxError`。
+- 转换方法前缀：`as_` 为免费借用转换、`to_` 为昂贵转换、`into_` 消耗所有权；布尔方法用 `is_` / `has_` / `can_` 前缀；简单 getter 省略 `get_` 前缀；缩写按单词处理（`HttpServer` 而非 `HTTPServer`）。
 - 公共类型在合适时实现 `Debug` / `Clone` / `PartialEq` / `Eq` / `Hash` / `Serialize` / `Deserialize`；转换优先 `From` / `TryFrom` / `FromStr`；可能扩展的公共 struct/enum 使用 `#[non_exhaustive]`；builder 方法加 `#[must_use]`。
 - serde 命名匹配外部 payload（通常 `rename_all = "snake_case"`）；可选字段 `#[serde(default)]`；空 optional 用 `skip_serializing_if`；严格配置格式拒绝未知字段。
+- 窄化整数转换禁止使用 `as`，使用 `TryFrom`；算术溢出行为必须显式（`checked_` / `saturating_` / `wrapping_`），禁止依赖默认 panic 或静默环绕。
+- 关键领域 enum 的 `match` 必须穷尽全部变体，禁止用 `_` 吞掉未来新增变体（匹配外部 `#[non_exhaustive]` 枚举除外）。
 
 ---
 
-## 10. Async 与并发（强制）
+## 10. Ownership 与内存（强制）
+
+- 优先借用，避免不必要的 `clone`；参数接收 `&str` 而非 `&String`，接收 `&[T]` 而非 `&Vec<T>`。
+- 已知容量时使用 `with_capacity` 预分配。
+- 热路径中复用 collection（clear 后重用），避免重复分配。
+- 热路径中避免不必要的 `format!`，能直接写入或使用字面量就直接使用。
+- enum 的大变体明显增大整体尺寸时，考虑用 `Box` 装箱大变体。
+- 跨线程共享所有权使用 `Arc<T>`（并发规则见 §11）。
+
+---
+
+## 11. Async 与并发（强制）
 
 - async runtime 统一使用 Tokio。
 - 禁止在 `.await` 期间持有 `Mutex` / `RwLock` guard。
@@ -139,7 +155,17 @@
 
 ---
 
-## 11. 克制设计与依赖纪律（强制）
+## 12. Unsafe 代码（强制）
+
+- 除非有清晰且可衡量的必要性，否则禁止使用 `unsafe`。
+- 每个 `unsafe` block 前必须有 `// SAFETY:` 注释说明不变量。
+- 每个 `unsafe fn` 必须有 `# Safety` 文档。
+- `unsafe` 作用域越小越好，只标记必须 unsafe 的操作。
+- 禁止使用 `mem::uninitialized()`；禁止对有有效性约束的类型使用无效的 `mem::zeroed()`。
+
+---
+
+## 13. 克制设计与依赖纪律（强制）
 
 - 默认选择能工作的最小设计；禁止为"以后可能需要"提前增加 wrapper / adapter / facade / manager 层或 snapshot 机制。
 - 一个 trait 至少要有真实的多实现需求，单实现优先具体类型；配置项必须有真实使用场景，不会被改变的值不配置化。
@@ -162,6 +188,7 @@
 - [ ] 在宿主机直接执行 agent 生成的命令
 - [ ] `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）
+- [ ] `unsafe` block 无 `// SAFETY:` 注释，或 `unsafe fn` 无 `# Safety` 文档
 - [ ] crate `Cargo.toml` 中写裸版本号依赖（不走 workspace inheritance）
 - [ ] 生产环境 `allow_any_origin()`
 - [ ] 真实密钥 / 凭据提交入库
