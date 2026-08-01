@@ -128,6 +128,7 @@ fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), ToolExec
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -212,7 +213,7 @@ mod tests {
                 ToolCallResult::Success(result) => Ok(ToolOutput::new(result.clone())),
                 ToolCallResult::Failure => Err(ToolError::InvalidArgument {
                     name: "value",
-                    reason: "test failure",
+                    reason: Cow::Borrowed("test failure"),
                 }),
                 ToolCallResult::Cancelled => Err(ToolError::Cancelled),
             }

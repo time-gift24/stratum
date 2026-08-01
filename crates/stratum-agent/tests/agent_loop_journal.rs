@@ -733,6 +733,21 @@ async fn invalid_patches_fail_closed_before_the_model_request() {
                 }]),
             },
         ),
+        // A nested composition: each drop is individually in bounds for the
+        // committed history, but the trailing drop would overrun the view the
+        // inner composition produces. Validation must reject the nesting
+        // closed instead of letting a stale view through to a panicking drain.
+        (
+            vec![
+                ChatMessage::user("one"),
+                ChatMessage::user("two"),
+                ChatMessage::user("three"),
+            ],
+            ContextPatch::Composite(vec![
+                ContextPatch::Composite(vec![ContextPatch::DropHistory { upto: 2 }]),
+                ContextPatch::DropHistory { upto: 2 },
+            ]),
+        ),
     ];
     for (history, patch) in cases {
         let operations = Arc::new(Mutex::new(Vec::new()));

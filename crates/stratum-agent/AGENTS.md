@@ -113,10 +113,14 @@ legacy stateful `Agent` compatibility path.
   emit durable messages, and never appear in `LoopOutcome.new_messages`.
   A `transform_context` decision is `Unchanged` or `Patch(ContextPatch)`
   (`ReplaceSystemPrompt` / `DropHistory { upto }` / `RewriteHistory { upto,
-  summary }`); the kernel validates `upto` as a zero-based,
+  summary }` / `Composite`); the kernel validates `upto` as a zero-based,
   left-closed/right-open prefix end into the committed `messages` that must
   stay in bounds and must not cut a tool_call/tool_result pair, rejecting
-  invalid patches as `HookFailure::InvalidOutput`. Injected user messages are
+  invalid patches as `HookFailure::InvalidOutput`. A `Composite` validates its
+  sub-patches in order against the evolving view each one produces; empty and
+  nested compositions are rejected as `HookFailure::InvalidOutput` (a nested
+  composition cannot advance the validation view and could otherwise panic at
+  apply time). Injected user messages are
   consumed exactly once by the next model request; empty or non-user-role
   injections are rejected as `HookFailure::InvalidOutput`.
 - Every hook invocation is journaled into the same `DurableEventSink` stream:
@@ -131,7 +135,11 @@ legacy stateful `Agent` compatibility path.
 - `AgentLoop::resume` re-runs a run from its durable event stream: the
   composing side re-supplies the system prompt and configuration, replay
   rebuilds committed context from `MessageAppended`, fixes the frontier at one
-  past the maximum `IterationCompleted`, and refuses terminal runs. Committed
+  past the maximum `IterationCompleted`, and refuses terminal runs. Event
+  variants the kernel does not understand fail closed as
+  `ResumeError::UnsupportedEvent`; only the legacy approval events
+  (`ToolApprovalRequested`/`ToolApprovalResolved`) are explicitly skipped
+  because they carry no kernel resume state. Committed
   tool results must be the exact ordered prefix of the preceding assistant
   `tool_calls` (unknown, duplicate, sparse, or out-of-order results fail
   closed); the missing suffix re-executes under the at-least-once stance.
@@ -152,10 +160,38 @@ legacy stateful `Agent` compatibility path.
   `Model(FinishReason)` from `HookStopped`; the durable `LoopFinished` reason
   projects to stable strings such as `hook_stopped`. A hook stop must never be
   disguised as a provider finish reason.
-- Deferred to later milestones (do not add here): multi-handler ordering and
-  short-circuiting (H2), the unified `stratum-tools` validation boundary (H2),
-  kernel-durable history compaction (H5), Skill/Script/service adapters, and
-  hook telemetry or EventBus payloads.
+- `ChainHookRuntime` (`hook_runtime/chain.rs`) is the ordered handler-chain
+  `HookRuntime`; the kernel still sees one runtime, so cancellation, deadline,
+  and hook-point journal semantics are unchanged. `HookHandler`
+  (`hook_runtime/handler.rs`) mirrors the five hook methods with no-op
+  defaults plus an immutable `HookHandlerVersionId` descriptor. Chain
+  semantics per point: transform/after thread the evolving view through
+  handlers in order (Cow, zero-copy when unmodified); decide short-circuits
+  on the first `Block`; prepare short-circuits on `Stop` (dropping collected
+  injects) and merges multiple `Inject` payloads in handler order. Any handler
+  failure or invalid decision fails the whole point closed.
+- Chain order is pinned data, not private code: a `ChainHookRuntime` computes
+  its `ExtensionSetVersionId` from the ordered handler versions at
+  construction, the kernel commits it with `LoopStarted`, and `resume` fails
+  closed when the injected runtime reports a different version. Runtimes
+  reporting no version skip the check.
+- Handler version identity is self-declared by the handler author via
+  `HookHandler::descriptor()`; the kernel and chain only consume it. The
+  contract has two halves: the id must be *stable* for one handler version
+  (create it once at construction or derive it deterministically — never call
+  `HookHandlerVersionId::new()` inside `descriptor()` per invocation, which
+  would change the chain version every call and make every resume fail), and
+  any change to decision behavior must come with a new id. The kernel can
+  detect "the id changed" but not "behavior changed while the id stayed" —
+  that gap closes when handlers become distributable artifacts whose version
+  derives from a content digest (S1/S2) or a pinned service identity (R3).
+- Deferred to later milestones (do not add here): per-handler journal
+  granularity (H3b evaluation), kernel-durable history compaction (H5),
+  Skill/Script/service adapters, and hook telemetry or EventBus payloads.
+  Also recorded for evaluation: the resume chain-version check passes when
+  the event stream recorded a version but the injected runtime reports none
+  (replacing the chain with a version-less runtime bypasses the guard) —
+  decide whether that combination should fail closed.
 
 ## Legacy Agent Compatibility
 

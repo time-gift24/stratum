@@ -94,7 +94,7 @@ fn parse_input(arguments: Value) -> Result<(SearchTextInput, VirtualPath, usize)
     if raw.query.is_empty() {
         return Err(ToolError::InvalidArgument {
             name: "query",
-            reason: "must not be empty",
+            reason: "must not be empty".into(),
         });
     }
     let path = normalize_path(&raw.path)?;

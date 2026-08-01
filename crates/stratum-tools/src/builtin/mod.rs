@@ -14,6 +14,7 @@ use serde_json::json;
 use stratum_core::{DangerLevel, ToolKind, ToolName, ToolSpec};
 use tokio_util::sync::CancellationToken;
 
+use crate::schema_validation;
 use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 
 pub use apply_patch::ApplyPatchTool;
@@ -27,6 +28,7 @@ struct RegisteredTool {
     tool: Arc<dyn Tool>,
     tool_kind: ToolKind,
     danger_level: DangerLevel,
+    input_schema: jsonschema::Validator,
 }
 
 pub struct BuiltinToolRegistry {
@@ -63,6 +65,8 @@ impl ToolRegistry for BuiltinToolRegistry {
         if self.tools.contains_key(&name) {
             return Err(ToolError::DuplicateTool { name });
         }
+        let input_schema =
+            schema_validation::compile_input_schema(&name, &tool.spec().input_schema)?;
 
         self.tools.insert(
             name,
@@ -70,6 +74,7 @@ impl ToolRegistry for BuiltinToolRegistry {
                 tool,
                 tool_kind,
                 danger_level,
+                input_schema,
             },
         );
         Ok(())
@@ -92,10 +97,12 @@ impl ToolRegistry for BuiltinToolRegistry {
     }
 
     fn validate(&self, name: &ToolName, input: &ToolInput) -> Result<(), ToolError> {
-        let tool = self
+        let registered = self
+            .tools
             .get(name)
             .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
-        tool.validate(input)
+        schema_validation::validate_against_schema(&registered.input_schema, input)?;
+        registered.tool.validate(input)
     }
 
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>> {
@@ -117,9 +124,12 @@ impl ToolRegistry for BuiltinToolRegistry {
         input: ToolInput,
         cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
-        let tool = self
+        let registered = self
+            .tools
             .get(name)
             .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
+        schema_validation::validate_against_schema(&registered.input_schema, &input)?;
+        let tool = Arc::clone(&registered.tool);
 
         tool.call(input, cancellation).await
     }
@@ -162,7 +172,7 @@ impl Tool for EchoTool {
         } else {
             Err(ToolError::InvalidArgument {
                 name: "arguments",
-                reason: "must be an object",
+                reason: "must be an object".into(),
             })
         }
     }

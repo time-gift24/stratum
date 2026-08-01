@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use stratum_core::{
-    ChatMessage, ChatRole, ContextPatch, DangerLevel, HookFailure, TokenUsage, ToolCall, ToolKind,
-    ToolSpec,
+    ChatMessage, ChatRole, ContextPatch, DangerLevel, ExtensionSetVersionId, HookFailure,
+    TokenUsage, ToolCall, ToolKind, ToolSpec,
 };
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -436,6 +436,18 @@ pub trait HookRuntime: Send + Sync {
         input: PrepareNextTurnInput<'a>,
         control: HookControl,
     ) -> Result<PrepareNextTurnDecision, HookFailure>;
+
+    /// Reports the immutable ordered extension set version this runtime pins,
+    /// or `None` when the runtime is not a versioned handler chain.
+    ///
+    /// The loop durably commits a reported version with `LoopStarted`; resume
+    /// compares the recorded version against the version the re-injected
+    /// runtime reports and fails closed on a mismatch. The default `None`
+    /// marks the runtime as unpinned and skips the check.
+    #[must_use]
+    fn extension_set_version(&self) -> Option<ExtensionSetVersionId> {
+        None
+    }
 }
 
 #[cfg(test)]

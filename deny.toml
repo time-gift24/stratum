@@ -24,6 +24,7 @@ allow = [
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
     "Unlicense",
+    "MIT-0",
 ]
 
 # Bans: defaults; no crate is banned and duplicate versions only warn.

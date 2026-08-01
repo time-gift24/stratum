@@ -1,5 +1,6 @@
 //! Error types for tool operations.
 
+use std::borrow::Cow;
 use std::string::FromUtf8Error;
 
 use stratum_core::ToolName;
@@ -60,7 +61,15 @@ pub enum ToolError {
         /// Argument name.
         name: &'static str,
         /// Rejection reason.
-        reason: &'static str,
+        reason: Cow<'static, str>,
+    },
+    /// Tool input schema is not a valid or compilable JSON Schema document.
+    #[error("invalid input schema for tool {name}: {reason}")]
+    InvalidInputSchema {
+        /// Tool carrying the invalid schema.
+        name: ToolName,
+        /// Schema rejection reason.
+        reason: String,
     },
     /// File content is not valid UTF-8.
     #[error("file is not valid utf-8: {path}")]

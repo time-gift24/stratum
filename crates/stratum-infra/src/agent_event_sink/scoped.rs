@@ -136,7 +136,7 @@ impl ScopedAgentEventSink {
     ) -> Result<AgentEvent, DurableEventSinkError> {
         let event_type = event.event_type();
         let event = match event {
-            DurableAgentEvent::LoopStarted => AgentEvent::Started,
+            DurableAgentEvent::LoopStarted { .. } => AgentEvent::Started,
             DurableAgentEvent::MessageAppended { .. } => {
                 return Err(DurableEventSinkError::UnsupportedEvent { event_type });
             }
@@ -719,7 +719,9 @@ mod tests {
         );
 
         let error = sink
-            .append(DurableAgentEvent::LoopStarted)
+            .append(DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            })
             .await
             .expect_err("durable publish failure must reach the caller");
 
@@ -916,8 +918,13 @@ mod tests {
         });
         recorder.first_publish_started.notified().await;
         let durable_sink = Arc::clone(&sink);
-        let append =
-            tokio::spawn(async move { durable_sink.append(DurableAgentEvent::LoopStarted).await });
+        let append = tokio::spawn(async move {
+            durable_sink
+                .append(DurableAgentEvent::LoopStarted {
+                    extension_set_version_id: None,
+                })
+                .await
+        });
         tokio::task::yield_now().await;
         assert!(!append.is_finished());
 
@@ -972,7 +979,9 @@ mod tests {
 
         tokio::time::timeout(
             TELEMETRY_PUBLISH_TIMEOUT * 3,
-            sink.append(DurableAgentEvent::LoopStarted),
+            sink.append(DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            }),
         )
         .await
         .expect("durable publish should wait for at most the in-flight telemetry timeout")
@@ -1019,9 +1028,11 @@ mod tests {
             .expect("agent event enqueue lock should not be poisoned")
             .take_sequence();
 
-        sink.append(DurableAgentEvent::LoopStarted)
-            .await
-            .expect("durable event should publish");
+        sink.append(DurableAgentEvent::LoopStarted {
+            extension_set_version_id: None,
+        })
+        .await
+        .expect("durable event should publish");
         let old_event = AgentTelemetryEvent::LlmStarted {
             llm_call_id: LlmCallId::from("old"),
         };
