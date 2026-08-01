@@ -216,7 +216,8 @@ pub struct LoopOutcome {
     pub new_messages: Vec<ChatMessage>,
     /// Why the loop reached its terminal boundary.
     pub completion: LoopCompletionReason,
-    /// Aggregate model token usage for this loop run.
+    /// Token usage reported by the most recent model response in this run,
+    /// zero-filled when no response reported usage.
     pub usage: TokenUsage,
 }
 

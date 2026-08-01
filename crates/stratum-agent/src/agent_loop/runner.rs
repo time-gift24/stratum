@@ -3,8 +3,8 @@
 use std::{borrow::Cow, collections::HashSet, future::Future, sync::Arc};
 
 use stratum_core::{
-    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, HookFailure, HookPoint,
-    LlmCallId, TokenUsage, ToolCall, ToolName,
+    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, ContextPatch, DurableAgentEvent,
+    HookFailure, HookInvocationId, HookPoint, LlmCallId, TokenUsage, ToolCall, ToolName,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
@@ -22,7 +22,10 @@ use crate::{
 
 use super::{
     AgentLoopBuildError, AgentLoopError, LoopCompletionReason, LoopContext, LoopLimits,
-    LoopOutcome, stream::consume_assistant_stream,
+    LoopOutcome, ResumeError,
+    journal::{HookAddress, HookInvocationSite, HookJournal, JournalDecision, JournalState},
+    resume::{ResumeContinuation, replay_events},
+    stream::consume_assistant_stream,
 };
 
 /// Executes the foundational LLM and tool control flow without owning session state.
@@ -33,6 +36,22 @@ pub struct AgentLoop {
     durable_events: Arc<dyn DurableEventSink>,
     telemetry: Arc<dyn TelemetryEventSink>,
     limits: LoopLimits,
+}
+
+/// Starting state of one loop run: fresh or replayed from a durable stream.
+struct RunStart {
+    context: LoopContext,
+    prompts: Vec<ChatMessage>,
+    first_iteration: usize,
+    continuation: Option<ResumeContinuation>,
+    journal: HookJournal,
+}
+
+/// Loop-carried state of one run: messages committed during the run and the
+/// one-shot injection waiting for the next request view.
+struct IterationState {
+    new_messages: Vec<ChatMessage>,
+    pending_inject: Option<Vec<ChatMessage>>,
 }
 
 impl AgentLoop {
@@ -83,9 +102,75 @@ impl AgentLoop {
         // `None` until a provider response reports usage; durable events and
         // the loop outcome project it back to a zero-filled `TokenUsage`.
         let mut usage: Option<TokenUsage> = None;
-        let result = self
-            .run_started(context, prompts, &cancellation, &mut usage)
-            .await;
+        let start = RunStart {
+            context,
+            prompts,
+            first_iteration: 0,
+            continuation: None,
+            journal: HookJournal::default(),
+        };
+        let result = self.run_started(start, &cancellation, &mut usage).await;
+        self.finish_run(result, usage).await
+    }
+
+    /// Resumes one run from its durable event stream.
+    ///
+    /// The composing side reads the run's events and re-supplies the system
+    /// prompt and run configuration (provider, tool executor, hook runtime,
+    /// limits stay on this loop); the kernel never reads storage itself. The
+    /// stream must start with [`DurableAgentEvent::LoopStarted`] and must not
+    /// contain a terminal event. Replay rebuilds the committed context, fixes
+    /// the iteration frontier at one past the maximum committed
+    /// [`DurableAgentEvent::IterationCompleted`], reconciles committed tool
+    /// results, and consults the journaled hook invocations before calling
+    /// the hook runtime again: digest-matching completed decisions are reused,
+    /// pending invocations are retried under their original identity, and
+    /// failures are reproduced. The resumed run keeps appending to the same
+    /// durable sink and does not record a second `LoopStarted`.
+    ///
+    /// Tool execution stays at-least-once: a call started before the crash
+    /// without a committed result re-executes as part of the missing result
+    /// suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ResumeError`] through [`AgentLoopError::Resume`] when
+    /// the stream cannot be rebuilt into a consistent run state, and the same
+    /// errors as [`AgentLoop::run`] once the continuation starts.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Same contract as [`AgentLoop::run`].
+    pub async fn resume(
+        &self,
+        system_prompt: impl Into<String>,
+        events: Vec<DurableAgentEvent>,
+        cancellation: CancellationToken,
+    ) -> Result<LoopOutcome, AgentLoopError> {
+        if self.limits.max_iterations == 0 {
+            return Err(AgentLoopError::IterationLimitExceeded { maximum: 0 });
+        }
+        let replay = replay_events(events)?;
+        let start = RunStart {
+            context: LoopContext::new(system_prompt).with_messages(replay.messages),
+            prompts: Vec::new(),
+            first_iteration: usize::try_from(replay.frontier).unwrap_or(usize::MAX),
+            continuation: replay.continuation,
+            journal: replay.journal,
+        };
+        // Usage is a volatile observation, not resume state: the first hook
+        // boundary after a resume observes `None` until the next model
+        // response reports usage.
+        let mut usage: Option<TokenUsage> = None;
+        let result = self.run_started(start, &cancellation, &mut usage).await;
+        self.finish_run(result, usage).await
+    }
+
+    async fn finish_run(
+        &self,
+        result: Result<LoopOutcome, AgentLoopError>,
+        usage: Option<TokenUsage>,
+    ) -> Result<LoopOutcome, AgentLoopError> {
         match result {
             Ok(outcome) => Ok(outcome),
             Err(
@@ -126,16 +211,30 @@ impl AgentLoop {
         }
     }
 
-    /// Runs one hook invocation under the shared cancellation and deadline contract.
+    /// Runs one hook invocation under the shared cancellation, deadline, and
+    /// journal contract.
     ///
-    /// Cancellation wins over every decision: a token cancelled before the call
-    /// never reaches the runtime, and cancellation while waiting stops the wait.
-    /// Hooks that gate a new external action (context transform, tool-call
-    /// transform, tool-call decide) treat cancellation as loop cancellation;
-    /// hooks on the recording path of an already-started tool cycle
-    /// (after-tool, prepare-next-turn) degrade to their no-op decision so the
-    /// loop can finish recording the outcome and then reach its regular
-    /// cancellation boundary. The deadline is configured per hook point through
+    /// Cancellation wins over every decision: a token cancelled before the
+    /// call never reaches the runtime and is never journaled, and cancellation
+    /// while waiting stops the wait. Hooks that gate a new external action
+    /// (context transform, tool-call transform, tool-call decide) treat
+    /// cancellation as loop cancellation; hooks on the recording path of an
+    /// already-started tool cycle (after-tool, prepare-next-turn) degrade to
+    /// their no-op decision so the loop can finish recording the outcome and
+    /// then reach its regular cancellation boundary.
+    ///
+    /// Journaling orders every invocation as: consult the replayed journal
+    /// first (a digest-matching completed decision is reused without calling
+    /// the runtime, a pending entry is retried under its original invocation
+    /// identity, a failed entry reproduces its typed failure, and a digest
+    /// mismatch fails closed), then commit `HookInvocationPending` before
+    /// calling the runtime, commit `HookInvocationCompleted` after the
+    /// decision validates and before its affected action, or commit
+    /// `HookInvocationFailed` for a typed failure, a missed deadline, or an
+    /// invalid decision. Journal appends are durable boundaries: their
+    /// failure fails closed like every other durable append.
+    ///
+    /// The deadline is configured per hook point through
     /// [`LoopLimits::hook_timeouts`]; a point without a deadline (the default
     /// for decide) is bounded by cancellation only. A missed deadline fails
     /// closed with [`HookFailure::TimedOut`]. Runtime failures are already safe
@@ -143,16 +242,69 @@ impl AgentLoop {
     /// typed failure.
     async fn execute_hook<D, F>(
         &self,
-        point: HookPoint,
+        site: HookInvocationSite<'_>,
         cancellation: &CancellationToken,
         invoke: impl FnOnce(HookControl) -> F,
+        validate: impl FnOnce(&D) -> Result<(), HookFailure>,
     ) -> Result<HookInvocation<D>, AgentLoopError>
     where
         F: Future<Output = Result<D, HookFailure>>,
+        D: JournalDecision,
     {
         if cancellation.is_cancelled() {
             return Ok(HookInvocation::Cancelled);
         }
+        let HookInvocationSite {
+            journal,
+            point,
+            iteration,
+            call_id,
+            input_digest,
+        } = site;
+        let address = HookAddress::new(iteration, point, call_id.clone());
+        let mut pending_required = true;
+        let invocation_id = match journal.lookup(&address) {
+            Some(entry) => {
+                if entry.input_digest != input_digest {
+                    return Err(ResumeError::HookDigestMismatch { point }.into());
+                }
+                match &entry.state {
+                    JournalState::Completed(record) => {
+                        let decision =
+                            D::from_record(record).ok_or(ResumeError::HookRecordMismatch)?;
+                        // A journaled decision already validated once; a
+                        // mismatch against the rebuilt state is corruption.
+                        validate(&decision).map_err(|_| ResumeError::HookRecordMismatch)?;
+                        return Ok(HookInvocation::Decision(decision));
+                    }
+                    JournalState::Failed(failure) => {
+                        return Err(AgentLoopError::Hook {
+                            point,
+                            failure: *failure,
+                        });
+                    }
+                    // A pending entry is retried under its original identity;
+                    // the pending record is already durable.
+                    JournalState::Pending => {
+                        pending_required = false;
+                        entry.invocation_id
+                    }
+                }
+            }
+            None => HookInvocationId::new(),
+        };
+        if pending_required {
+            self.durable_events
+                .append(DurableAgentEvent::HookInvocationPending {
+                    invocation_id,
+                    point,
+                    iteration,
+                    call_id,
+                    input_digest,
+                })
+                .await?;
+        }
+
         let deadline = self
             .limits
             .hook_timeouts
@@ -160,29 +312,51 @@ impl AgentLoop {
             .map(|timeout| Instant::now() + timeout);
         let control = HookControl::new(cancellation.clone(), deadline);
         let invocation = invoke(control);
-        let map_decision = |decision: Result<D, HookFailure>| {
-            decision
-                .map(HookInvocation::Decision)
-                .map_err(|failure| AgentLoopError::Hook { point, failure })
-        };
-        match deadline {
+        let outcome = match deadline {
             Some(deadline) => {
                 tokio::select! {
                     biased;
-                    () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
-                    () = tokio::time::sleep_until(deadline) => Err(AgentLoopError::Hook {
-                        point,
-                        failure: HookFailure::TimedOut,
-                    }),
-                    decision = invocation => map_decision(decision),
+                    () = cancellation.cancelled() => HookOutcome::Cancelled,
+                    () = tokio::time::sleep_until(deadline) => HookOutcome::Failed(HookFailure::TimedOut),
+                    decision = invocation => HookOutcome::from(decision),
                 }
             }
             None => {
                 tokio::select! {
                     biased;
-                    () = cancellation.cancelled() => Ok(HookInvocation::Cancelled),
-                    decision = invocation => map_decision(decision),
+                    () = cancellation.cancelled() => HookOutcome::Cancelled,
+                    decision = invocation => HookOutcome::from(decision),
                 }
+            }
+        };
+        match outcome {
+            HookOutcome::Cancelled => Ok(HookInvocation::Cancelled),
+            HookOutcome::Failed(failure) => {
+                self.durable_events
+                    .append(DurableAgentEvent::HookInvocationFailed {
+                        invocation_id,
+                        failure,
+                    })
+                    .await?;
+                Err(AgentLoopError::Hook { point, failure })
+            }
+            HookOutcome::Decision(decision) => {
+                if let Err(failure) = validate(&decision) {
+                    self.durable_events
+                        .append(DurableAgentEvent::HookInvocationFailed {
+                            invocation_id,
+                            failure,
+                        })
+                        .await?;
+                    return Err(AgentLoopError::Hook { point, failure });
+                }
+                self.durable_events
+                    .append(DurableAgentEvent::HookInvocationCompleted {
+                        invocation_id,
+                        decision: decision.to_record(),
+                    })
+                    .await?;
+                Ok(HookInvocation::Decision(decision))
             }
         }
     }
@@ -198,13 +372,16 @@ impl AgentLoop {
     /// produces the executor's structured error result without entering any
     /// tool hook. The transform hook may override the effective authorization;
     /// the kernel carries the effective value to the decide and after phases
-    /// without interpreting it.
+    /// without interpreting it. Each hook observes a payload digest of the
+    /// exact call it sees: the original call at transform, the final
+    /// re-validated call at decide and after.
     async fn execute_authorized_tool_call(
         &self,
         iteration: u64,
         tool_call: &ToolCall,
         context: &LoopContext,
         usage: Option<TokenUsage>,
+        journal: &HookJournal,
         cancellation: &CancellationToken,
     ) -> Result<ChatMessage, AgentLoopError> {
         let tool_name = ToolName::new(tool_call.name.clone());
@@ -230,26 +407,31 @@ impl AgentLoop {
         }
 
         let HookInvocation::Decision(transform) = self
-            .execute_hook(HookPoint::TransformToolCall, cancellation, |control| {
-                self.hook_runtime.transform_tool_call(
-                    TransformToolCallInput {
-                        snapshot,
-                        tool_call,
-                        tool: &target,
-                    },
-                    control,
-                )
-            })
+            .execute_hook(
+                HookInvocationSite {
+                    journal,
+                    point: HookPoint::TransformToolCall,
+                    iteration,
+                    call_id: Some(tool_call.call_id.clone()),
+                    input_digest: super::journal::tool_call_digest(tool_call),
+                },
+                cancellation,
+                |control| {
+                    self.hook_runtime.transform_tool_call(
+                        TransformToolCallInput {
+                            snapshot,
+                            tool_call,
+                            tool: &target,
+                        },
+                        control,
+                    )
+                },
+                TransformToolCallDecision::check,
+            )
             .await?
         else {
             return Err(AgentLoopError::Cancelled);
         };
-        let transform = transform
-            .validate()
-            .map_err(|failure| AgentLoopError::Hook {
-                point: HookPoint::TransformToolCall,
-                failure,
-            })?;
         // The kernel only transports the effective authorization: no override
         // keeps the registry default, overrides apply verbatim, and the kernel
         // never branches on or interprets the value.
@@ -285,24 +467,31 @@ impl AgentLoop {
         }
 
         let HookInvocation::Decision(decide) = self
-            .execute_hook(HookPoint::DecideToolCall, cancellation, |control| {
-                self.hook_runtime.decide_tool_call(
-                    DecideToolCallInput {
-                        snapshot,
-                        tool_call: &final_call,
-                        tool: &effective_target,
-                    },
-                    control,
-                )
-            })
+            .execute_hook(
+                HookInvocationSite {
+                    journal,
+                    point: HookPoint::DecideToolCall,
+                    iteration,
+                    call_id: Some(tool_call.call_id.clone()),
+                    input_digest: super::journal::tool_call_digest(&final_call),
+                },
+                cancellation,
+                |control| {
+                    self.hook_runtime.decide_tool_call(
+                        DecideToolCallInput {
+                            snapshot,
+                            tool_call: &final_call,
+                            tool: &effective_target,
+                        },
+                        control,
+                    )
+                },
+                DecideToolCallDecision::check,
+            )
             .await?
         else {
             return Err(AgentLoopError::Cancelled);
         };
-        let decide = decide.validate().map_err(|failure| AgentLoopError::Hook {
-            point: HookPoint::DecideToolCall,
-            failure,
-        })?;
 
         let mut message = match decide {
             DecideToolCallDecision::Execute => {
@@ -315,17 +504,28 @@ impl AgentLoop {
         // recorded: the after hook degrades to Keep and the loop reaches its
         // regular cancellation boundary after the durable commits.
         let after = match self
-            .execute_hook(HookPoint::AfterToolCall, cancellation, |control| {
-                self.hook_runtime.after_tool_call(
-                    AfterToolCallInput {
-                        snapshot,
-                        tool_call: &final_call,
-                        tool: &effective_target,
-                        result: &message,
-                    },
-                    control,
-                )
-            })
+            .execute_hook(
+                HookInvocationSite {
+                    journal,
+                    point: HookPoint::AfterToolCall,
+                    iteration,
+                    call_id: Some(tool_call.call_id.clone()),
+                    input_digest: super::journal::tool_call_digest(&final_call),
+                },
+                cancellation,
+                |control| {
+                    self.hook_runtime.after_tool_call(
+                        AfterToolCallInput {
+                            snapshot,
+                            tool_call: &final_call,
+                            tool: &effective_target,
+                            result: &message,
+                        },
+                        control,
+                    )
+                },
+                |_| Ok(()),
+            )
             .await?
         {
             HookInvocation::Decision(decision) => decision,
@@ -356,18 +556,107 @@ impl AgentLoop {
         }
     }
 
+    /// Runs the prepare-next-turn hook and commits the iteration boundary of
+    /// one completed tool cycle, applying the hook decision.
+    ///
+    /// The journaled `HookInvocationCompleted` always precedes the durable
+    /// `IterationCompleted` boundary. Returns the finished outcome when the
+    /// hook stopped the loop.
+    async fn close_tool_cycle(
+        &self,
+        iteration_index: u64,
+        context: &LoopContext,
+        usage: Option<TokenUsage>,
+        state: &mut IterationState,
+        journal: &HookJournal,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<LoopOutcome>, AgentLoopError> {
+        // Cancellation degrades the decision to Continue so the iteration
+        // boundary is committed before the loop reaches its regular
+        // cancellation check.
+        let prepare = match self
+            .execute_hook(
+                HookInvocationSite {
+                    journal,
+                    point: HookPoint::PrepareNextTurn,
+                    iteration: iteration_index,
+                    call_id: None,
+                    input_digest: super::journal::hook_address_digest(
+                        iteration_index,
+                        HookPoint::PrepareNextTurn,
+                    ),
+                },
+                cancellation,
+                |control| {
+                    self.hook_runtime.prepare_next_turn(
+                        PrepareNextTurnInput {
+                            snapshot: HookSnapshot {
+                                iteration: iteration_index,
+                                context,
+                                usage,
+                            },
+                        },
+                        control,
+                    )
+                },
+                PrepareNextTurnDecision::check,
+            )
+            .await?
+        {
+            HookInvocation::Decision(decision) => decision,
+            HookInvocation::Cancelled => PrepareNextTurnDecision::Continue,
+        };
+
+        self.durable_events
+            .append(DurableAgentEvent::IterationCompleted {
+                iteration: iteration_index,
+                usage: usage.unwrap_or_default(),
+            })
+            .await?;
+
+        match prepare {
+            PrepareNextTurnDecision::Continue => Ok(None),
+            PrepareNextTurnDecision::Inject { messages } => {
+                state.pending_inject = Some(messages);
+                Ok(None)
+            }
+            PrepareNextTurnDecision::Stop => {
+                self.durable_events
+                    .append(DurableAgentEvent::LoopFinished {
+                        finish_reason: LoopCompletionReason::HookStopped.as_str().to_owned(),
+                        usage: usage.unwrap_or_default(),
+                    })
+                    .await?;
+                Ok(Some(LoopOutcome {
+                    new_messages: std::mem::take(&mut state.new_messages),
+                    completion: LoopCompletionReason::HookStopped,
+                    usage: usage.unwrap_or_default(),
+                }))
+            }
+        }
+    }
+
     async fn run_started(
         &self,
-        mut context: LoopContext,
-        prompts: Vec<ChatMessage>,
+        start: RunStart,
         cancellation: &CancellationToken,
         usage: &mut Option<TokenUsage>,
     ) -> Result<LoopOutcome, AgentLoopError> {
+        let RunStart {
+            mut context,
+            prompts,
+            first_iteration,
+            continuation,
+            journal,
+        } = start;
         let mut seen_tool_call_ids = committed_tool_call_ids(&context.messages);
         if cancellation.is_cancelled() {
             return Err(AgentLoopError::Cancelled);
         }
-        let mut new_messages = Vec::with_capacity(prompts.len() + 1);
+        let mut state = IterationState {
+            new_messages: Vec::with_capacity(prompts.len() + 1),
+            pending_inject: None,
+        };
         for prompt in prompts {
             self.durable_events
                 .append(DurableAgentEvent::MessageAppended {
@@ -375,16 +664,102 @@ impl AgentLoop {
                 })
                 .await?;
             context.messages.push(prompt.clone());
-            new_messages.push(prompt);
+            state.new_messages.push(prompt);
         }
 
-        let mut pending_inject: Option<Vec<ChatMessage>> = None;
-        for iteration in 0..self.limits.max_iterations {
+        let mut next_iteration = first_iteration;
+        // A resumed run first finishes the work its frontier iteration had
+        // already started: the missing tool-result suffix and/or the iteration
+        // boundary. No transform-context hook or model request belongs to this
+        // iteration; its hooks are resolved through the replayed journal.
+        if let Some(continuation) = continuation {
+            let iteration_index = u64::try_from(next_iteration).unwrap_or(u64::MAX);
+            match continuation {
+                ResumeContinuation::ToolSuffix(tool_calls) => {
+                    context.messages.reserve(tool_calls.len());
+                    state.new_messages.reserve(tool_calls.len());
+                    for tool_call in &tool_calls {
+                        if cancellation.is_cancelled() {
+                            return Err(AgentLoopError::Cancelled);
+                        }
+                        let message = self
+                            .execute_authorized_tool_call(
+                                iteration_index,
+                                tool_call,
+                                &context,
+                                *usage,
+                                &journal,
+                                cancellation,
+                            )
+                            .await?;
+                        self.durable_events
+                            .append(DurableAgentEvent::MessageAppended {
+                                message: message.clone(),
+                            })
+                            .await?;
+                        context.messages.push(message.clone());
+                        state.new_messages.push(message);
+                    }
+                    if let Some(outcome) = self
+                        .close_tool_cycle(
+                            iteration_index,
+                            &context,
+                            *usage,
+                            &mut state,
+                            &journal,
+                            cancellation,
+                        )
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+                ResumeContinuation::CloseIteration => {
+                    if let Some(outcome) = self
+                        .close_tool_cycle(
+                            iteration_index,
+                            &context,
+                            *usage,
+                            &mut state,
+                            &journal,
+                            cancellation,
+                        )
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+                ResumeContinuation::FinishLoop => {
+                    self.durable_events
+                        .append(DurableAgentEvent::IterationCompleted {
+                            iteration: iteration_index,
+                            usage: usage.unwrap_or_default(),
+                        })
+                        .await?;
+                    // The finish reason of the committed final response is not
+                    // part of the durable stream; it is projected as `stop`.
+                    self.durable_events
+                        .append(DurableAgentEvent::LoopFinished {
+                            finish_reason: FinishReason::Stop.as_str().to_owned(),
+                            usage: usage.unwrap_or_default(),
+                        })
+                        .await?;
+                    return Ok(LoopOutcome {
+                        new_messages: state.new_messages,
+                        completion: LoopCompletionReason::Model(FinishReason::Stop),
+                        usage: usage.unwrap_or_default(),
+                    });
+                }
+            }
+            next_iteration = next_iteration.saturating_add(1);
+        }
+
+        for iteration in next_iteration..self.limits.max_iterations {
             if cancellation.is_cancelled() {
                 return Err(AgentLoopError::Cancelled);
             }
             let iteration_index = u64::try_from(iteration).unwrap_or(u64::MAX);
-            let request_view = match pending_inject.take() {
+            let request_view = match state.pending_inject.take() {
                 Some(injected) => {
                     let mut view = context.clone();
                     view.messages.extend(injected);
@@ -393,27 +768,48 @@ impl AgentLoop {
                 None => Cow::Borrowed(&context),
             };
             let HookInvocation::Decision(transform) = self
-                .execute_hook(HookPoint::TransformContext, cancellation, |control| {
-                    self.hook_runtime.transform_context(
-                        TransformContextInput {
-                            snapshot: HookSnapshot {
-                                iteration: iteration_index,
-                                context: &request_view,
-                                usage: *usage,
+                .execute_hook(
+                    HookInvocationSite {
+                        journal: &journal,
+                        point: HookPoint::TransformContext,
+                        iteration: iteration_index,
+                        call_id: None,
+                        input_digest: super::journal::hook_address_digest(
+                            iteration_index,
+                            HookPoint::TransformContext,
+                        ),
+                    },
+                    cancellation,
+                    |control| {
+                        self.hook_runtime.transform_context(
+                            TransformContextInput {
+                                snapshot: HookSnapshot {
+                                    iteration: iteration_index,
+                                    context: &request_view,
+                                    usage: *usage,
+                                },
                             },
-                        },
-                        control,
-                    )
-                })
+                            control,
+                        )
+                    },
+                    |decision| match decision {
+                        TransformContextDecision::Unchanged => Ok(()),
+                        TransformContextDecision::Patch(patch) => {
+                            validate_context_patch(&context.messages, patch)
+                        }
+                    },
+                )
                 .await?
             else {
                 return Err(AgentLoopError::Cancelled);
             };
             let request_view = match transform {
                 TransformContextDecision::Unchanged => request_view,
-                TransformContextDecision::Replace {
-                    context: replacement,
-                } => Cow::Owned(replacement),
+                TransformContextDecision::Patch(patch) => {
+                    let mut view = request_view.into_owned();
+                    apply_context_patch(&mut view, &patch);
+                    Cow::Owned(view)
+                }
             };
 
             let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
@@ -451,11 +847,11 @@ impl AgentLoop {
                 .await?;
             seen_tool_call_ids.extend(new_tool_call_ids);
             context.messages.push(assistant.message.clone());
-            new_messages.push(assistant.message);
+            state.new_messages.push(assistant.message);
 
             if !tool_calls.is_empty() {
                 context.messages.reserve(tool_calls.len());
-                new_messages.reserve(tool_calls.len());
+                state.new_messages.reserve(tool_calls.len());
                 for tool_call in &tool_calls {
                     if cancellation.is_cancelled() {
                         return Err(AgentLoopError::Cancelled);
@@ -468,6 +864,7 @@ impl AgentLoop {
                             tool_call,
                             &context,
                             *usage,
+                            &journal,
                             cancellation,
                         )
                         .await?
@@ -478,65 +875,21 @@ impl AgentLoop {
                         })
                         .await?;
                     context.messages.push(message.clone());
-                    new_messages.push(message);
+                    state.new_messages.push(message);
                 }
 
-                // Cancellation degrades the decision to Continue so the
-                // iteration boundary is committed before the loop reaches its
-                // regular cancellation check.
-                let prepare = match self
-                    .execute_hook(HookPoint::PrepareNextTurn, cancellation, |control| {
-                        self.hook_runtime.prepare_next_turn(
-                            PrepareNextTurnInput {
-                                snapshot: HookSnapshot {
-                                    iteration: iteration_index,
-                                    context: &context,
-                                    usage: *usage,
-                                },
-                            },
-                            control,
-                        )
-                    })
+                if let Some(outcome) = self
+                    .close_tool_cycle(
+                        iteration_index,
+                        &context,
+                        *usage,
+                        &mut state,
+                        &journal,
+                        cancellation,
+                    )
                     .await?
                 {
-                    HookInvocation::Decision(decision) => {
-                        decision
-                            .validate()
-                            .map_err(|failure| AgentLoopError::Hook {
-                                point: HookPoint::PrepareNextTurn,
-                                failure,
-                            })?
-                    }
-                    HookInvocation::Cancelled => PrepareNextTurnDecision::Continue,
-                };
-
-                self.durable_events
-                    .append(DurableAgentEvent::IterationCompleted {
-                        iteration: iteration_index,
-                        usage: usage.unwrap_or_default(),
-                    })
-                    .await?;
-
-                match prepare {
-                    PrepareNextTurnDecision::Continue => {}
-                    PrepareNextTurnDecision::Inject { messages } => {
-                        pending_inject = Some(messages);
-                    }
-                    PrepareNextTurnDecision::Stop => {
-                        self.durable_events
-                            .append(DurableAgentEvent::LoopFinished {
-                                finish_reason: LoopCompletionReason::HookStopped
-                                    .as_str()
-                                    .to_owned(),
-                                usage: usage.unwrap_or_default(),
-                            })
-                            .await?;
-                        return Ok(LoopOutcome {
-                            new_messages,
-                            completion: LoopCompletionReason::HookStopped,
-                            usage: usage.unwrap_or_default(),
-                        });
-                    }
+                    return Ok(outcome);
                 }
                 continue;
             }
@@ -555,7 +908,7 @@ impl AgentLoop {
                 })
                 .await?;
             return Ok(LoopOutcome {
-                new_messages,
+                new_messages: state.new_messages,
                 completion: LoopCompletionReason::Model(finish_reason),
                 usage: usage.unwrap_or_default(),
             });
@@ -645,6 +998,60 @@ impl AgentLoopBuilder {
     }
 }
 
+/// Validates a context patch against the committed messages: `upto` is a
+/// zero-based, left-closed/right-open prefix end that must stay in bounds and
+/// must not cut a tool_call/tool_result pair (a dropped assistant message's
+/// results must be dropped with it). A rewrite summary must not itself open a
+/// tool-call pair or pose as a tool result.
+fn validate_context_patch(
+    committed: &[ChatMessage],
+    patch: &ContextPatch,
+) -> Result<(), HookFailure> {
+    let upto = match patch {
+        ContextPatch::ReplaceSystemPrompt(_) => return Ok(()),
+        ContextPatch::DropHistory { upto } => *upto,
+        ContextPatch::RewriteHistory { upto, summary } => {
+            if !summary.tool_calls.is_empty() || summary.tool_call_id.is_some() {
+                return Err(HookFailure::InvalidOutput);
+            }
+            *upto
+        }
+        _ => return Err(HookFailure::InvalidOutput),
+    };
+    if upto > committed.len() {
+        return Err(HookFailure::InvalidOutput);
+    }
+    for (index, message) in committed.iter().enumerate().take(upto) {
+        if message.role == ChatRole::Assistant && !message.tool_calls.is_empty() {
+            let results_end = index + 1 + message.tool_calls.len();
+            if results_end > upto {
+                return Err(HookFailure::InvalidOutput);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Applies a validated context patch to the request view. The patch only ever
+/// rewrites the view: the committed transcript, durable messages, and the loop
+/// outcome never observe it.
+fn apply_context_patch(view: &mut LoopContext, patch: &ContextPatch) {
+    match patch {
+        ContextPatch::ReplaceSystemPrompt(prompt) => {
+            view.system_prompt.clone_from(prompt);
+        }
+        ContextPatch::DropHistory { upto } => {
+            view.messages.drain(..*upto);
+        }
+        ContextPatch::RewriteHistory { upto, summary } => {
+            view.messages
+                .splice(..*upto, std::iter::once(summary.clone()));
+        }
+        // Unknown future variants were already rejected by validation.
+        _ => {}
+    }
+}
+
 fn request_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<ChatMessage> {
     let mut messages = Vec::with_capacity(history.len() + 1);
     messages.push(ChatMessage::system(system_prompt));
@@ -682,6 +1089,25 @@ enum HookInvocation<D> {
     /// Cancellation won before or during the invocation; the hook has no
     /// decision and the loop follows its regular cancellation path.
     Cancelled,
+}
+
+/// Terminal outcome of one awaited hook invocation.
+enum HookOutcome<D> {
+    /// The runtime returned a decision in time.
+    Decision(D),
+    /// The invocation failed typed or missed its deadline.
+    Failed(HookFailure),
+    /// Cancellation won before or during the invocation.
+    Cancelled,
+}
+
+impl<D> From<Result<D, HookFailure>> for HookOutcome<D> {
+    fn from(decision: Result<D, HookFailure>) -> Self {
+        match decision {
+            Ok(decision) => Self::Decision(decision),
+            Err(failure) => Self::Failed(failure),
+        }
+    }
 }
 
 fn hook_blocked_result(tool_call: &ToolCall, reason: &str) -> ChatMessage {

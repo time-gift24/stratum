@@ -10,11 +10,11 @@ use futures_util::stream;
 use serde_json::{Value, json};
 use stratum_agent::{
     AfterToolCallDecision, AfterToolCallInput, AgentLoop, AgentLoopError, AuthorizationOverride,
-    DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime, HookSnapshot,
-    HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits, PrepareNextTurnDecision,
-    PrepareNextTurnInput, ToolExecutor, ToolHookTarget, TransformContextDecision,
-    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
-    TransformToolCallModification,
+    ContextPatch, DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime,
+    HookSnapshot, HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits,
+    PrepareNextTurnDecision, PrepareNextTurnInput, ToolExecutor, ToolHookTarget,
+    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    TransformToolCallInput, TransformToolCallModification,
 };
 use stratum_core::{
     AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -115,7 +115,7 @@ enum HookCall {
 #[derive(Debug, Clone)]
 enum TransformBehavior {
     Unchanged,
-    Replace(LoopContext),
+    Patch(ContextPatch),
     Fail(HookFailure),
     Pending,
     CancelThenPending,
@@ -280,9 +280,7 @@ impl HookRuntime for RecordingHookRuntime {
             .unwrap_or(TransformBehavior::Unchanged);
         match behavior {
             TransformBehavior::Unchanged => Ok(TransformContextDecision::Unchanged),
-            TransformBehavior::Replace(context) => {
-                Ok(TransformContextDecision::Replace { context })
-            }
+            TransformBehavior::Patch(patch) => Ok(TransformContextDecision::Patch(patch)),
             TransformBehavior::Fail(failure) => Err(failure),
             TransformBehavior::Pending => pending().await,
             TransformBehavior::CancelThenPending => {
@@ -772,6 +770,8 @@ async fn default_noop_runtime_preserves_pre_hook_behavior() {
         ]
     );
     let durable = durable_events(&recorded);
+    // The no-op runtime changes no message flow; the only additions to the
+    // pre-hook durable stream are the per-invocation journal records.
     assert_eq!(
         durable
             .iter()
@@ -780,10 +780,22 @@ async fn default_noop_runtime_preserves_pre_hook_behavior() {
         vec![
             "loop_started",
             "message_appended",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
             "message_appended",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
             "tool_execution_started",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
             "message_appended",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
             "iteration_completed",
+            "hook_invocation_pending",
+            "hook_invocation_completed",
             "message_appended",
             "iteration_completed",
             "loop_finished",
@@ -909,14 +921,14 @@ async fn custom_runtime_is_invoked_at_all_five_points_in_order() {
     }
 }
 
-// 3.2 (H1): a replaced context is used for the current request only.
+// 3.2 (H1): a patched context is used for the current request only.
 #[tokio::test]
-async fn transform_replace_is_request_scoped_and_never_committed() {
+async fn transform_patch_is_request_scoped_and_never_committed() {
     let operations = Arc::new(Mutex::new(Vec::new()));
-    let replacement = LoopContext::new("replaced system")
-        .with_messages(vec![ChatMessage::user("replaced history")]);
-    let runtime = RecordingHookRuntime::new(&operations)
-        .with_transforms([TransformBehavior::Replace(replacement.clone())]);
+    let runtime =
+        RecordingHookRuntime::new(&operations).with_transforms([TransformBehavior::Patch(
+            ContextPatch::ReplaceSystemPrompt("replaced system".to_owned()),
+        )]);
     let (agent_loop, _) = hooked_loop(
         VecDeque::from([
             tool_call_turn("call-1", "echo", json!({"value": "one"})),
@@ -937,28 +949,24 @@ async fn transform_replace_is_request_scoped_and_never_committed() {
         requests[0].messages,
         vec![
             ChatMessage::system("replaced system"),
-            ChatMessage::user("replaced history"),
+            ChatMessage::user("use echo"),
         ]
     );
     assert_eq!(
         requests[1].messages.first(),
-        Some(&ChatMessage::system("be precise"))
+        Some(&ChatMessage::system("be precise")),
+        "the patch must not leak into the next committed view"
     );
     assert!(
-        !requests[1]
-            .messages
-            .contains(&ChatMessage::user("replaced history")),
-        "the replacement must not leak into the next committed view"
-    );
-    assert!(
-        !outcome
+        outcome
             .new_messages
-            .contains(&ChatMessage::user("replaced history"))
+            .iter()
+            .all(|message| message.role != ChatRole::System)
     );
     assert!(durable_events(&recorded).iter().all(|event| !matches!(
         event,
         DurableAgentEvent::MessageAppended { message }
-            if message == &ChatMessage::user("replaced history")
+            if message.role == ChatRole::System
     )));
 }
 
@@ -2269,11 +2277,11 @@ async fn hook_failure_terminal_event_is_redacted() {
 #[tokio::test]
 async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
     let operations = Arc::new(Mutex::new(Vec::new()));
-    let replacement = LoopContext::new("replaced system")
-        .with_messages(vec![ChatMessage::user("replaced question")]);
     let injected = ChatMessage::user("one more constraint");
     let runtime = RecordingHookRuntime::new(&operations)
-        .with_transforms([TransformBehavior::Replace(replacement)])
+        .with_transforms([TransformBehavior::Patch(ContextPatch::ReplaceSystemPrompt(
+            "replaced system".to_owned(),
+        ))])
         .with_tool_transforms([
             modify_arguments(json!({"value": "modified"})),
             ToolTransformBehavior::Continue,
@@ -2345,15 +2353,16 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
         ]
     );
 
-    // Model requests: the first uses the replaced context, the second uses the
-    // committed context plus the replaced result and the one-shot inject.
+    // Model requests: the first uses the patched system prompt, the second
+    // uses the committed context plus the replaced result and the one-shot
+    // inject.
     let requests = chat_requests(&recorded);
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0].messages,
         vec![
             ChatMessage::system("replaced system"),
-            ChatMessage::user("replaced question"),
+            ChatMessage::user("use echo"),
         ]
     );
     assert_eq!(
@@ -2394,13 +2403,13 @@ async fn end_to_end_hook_flow_transform_modify_replace_inject_stop() {
         ]
     );
 
-    // Durable truth: no replacement or inject messages, the tool result is the
+    // Durable truth: no patch or inject messages, the tool result is the
     // replaced one, and the loop finishes as hook_stopped.
     let durable = durable_events(&recorded);
     assert!(!durable.iter().any(|event| matches!(
         event,
         DurableAgentEvent::MessageAppended { message }
-            if message == &ChatMessage::user("replaced question") || message == &injected
+            if message.role == ChatRole::System || message == &injected
     )));
     assert!(durable.contains(&DurableAgentEvent::MessageAppended {
         message: first_result,
@@ -2823,10 +2832,10 @@ async fn snapshot_context_matches_each_hook_boundary() {
     );
 }
 
-// 3.3: snapshot usage is the run-level accumulation of provider reports up to
-// each hook boundary.
+// 3.3: snapshot usage is the most recent provider report up to each hook
+// boundary; the kernel never accumulates across calls.
 #[tokio::test]
-async fn snapshot_usage_accumulates_provider_reports() {
+async fn snapshot_usage_carries_the_latest_provider_report() {
     let first = TokenUsage {
         input_tokens: 10,
         output_tokens: 5,
@@ -2836,11 +2845,6 @@ async fn snapshot_usage_accumulates_provider_reports() {
         input_tokens: 20,
         output_tokens: 10,
         total_tokens: 30,
-    };
-    let accumulated = TokenUsage {
-        input_tokens: 30,
-        output_tokens: 15,
-        total_tokens: 45,
     };
     let operations = Arc::new(Mutex::new(Vec::new()));
     let runtime = RecordingHookRuntime::new(&operations);
@@ -2858,22 +2862,24 @@ async fn snapshot_usage_accumulates_provider_reports() {
         .await
         .expect("loop should finish");
 
-    assert_eq!(outcome.usage, accumulated);
+    assert_eq!(
+        outcome.usage, second,
+        "the outcome usage is the latest report, not an accumulation"
+    );
     for call in hook_calls(&snapshot(&operations)) {
         let snapshot = hook_snapshot(&call);
+        // Nothing has been reported before the first model response; the
+        // final stop response reported no usage, so the latest report stays
+        // the second one.
         let expected = match &call {
-            // Nothing has been reported before the first model response.
             HookCall::TransformContext { .. } if snapshot.iteration == 0 => None,
-            // Later transform hooks see everything reported so far; the final
-            // stop response reported no usage, so the total stays unchanged.
             HookCall::TransformContext { .. } if snapshot.iteration == 1 => Some(first),
-            HookCall::TransformContext { .. } => Some(accumulated),
             _ if snapshot.iteration == 0 => Some(first),
-            _ => Some(accumulated),
+            _ => Some(second),
         };
         assert_eq!(
             snapshot.usage, expected,
-            "usage at {call:?} should be the accumulation up to that boundary"
+            "usage at {call:?} should be the latest report up to that boundary"
         );
     }
 }

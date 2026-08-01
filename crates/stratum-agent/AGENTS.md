@@ -55,7 +55,8 @@ legacy stateful `Agent` compatibility path.
   `prepare_next_turn` — taking borrowed inputs and returning owned decisions.
   `AgentLoop` holds one `Arc<dyn HookRuntime>` injected via
   `AgentLoopBuilder::hook_runtime`; without injection the no-op runtime keeps
-  pre-hook kernel behavior byte-identical.
+  the pre-hook message flow unchanged (journal records are still appended for
+  every invocation).
 - Every hook input embeds the same borrowed `HookSnapshot` (`iteration`,
   `&LoopContext`, `Option<TokenUsage>`). This is the wide-read/narrow-write
   principle: handlers may read ambient loop state, but their effects stay
@@ -67,8 +68,10 @@ legacy stateful `Agent` compatibility path.
   tool hooks see the committed context including already-committed results of
   the current cycle; `after_tool_call` never sees its own uncommitted result
   (that lives in the `result` payload); `prepare_next_turn` sees the cycle's
-  full committed results. `snapshot.usage` is the run's accumulated
-  `TokenUsage` up to the boundary, or `None` when the provider never reported.
+  full committed results. `snapshot.usage` is the token usage reported by the
+  most recent model response, or `None` when the provider never reported; the
+  kernel passes it through without accumulating, and handlers needing
+  cumulative semantics maintain their own totals.
 - The three tool hooks receive a borrowed `ToolHookTarget` (effective
   authorization metadata `ToolKind`/`DangerLevel` plus `ToolSpec`) looked up by
   the kernel before the call; handlers never query the registry themselves.
@@ -102,13 +105,40 @@ legacy stateful `Agent` compatibility path.
   the handler implementation. The kernel has no approval concept and the new
   kernel path emits no `ToolApprovalRequested`/`ToolApprovalResolved` events
   (the legacy Agent keeps its own approval path). A crash after approval but
-  before dispatch is fail-safe: the decide hook simply re-runs and asks again;
-  deduplication is deferred to the H3 hook journal.
-- `transform_context` replacement and `prepare_next_turn` injection are
+  before dispatch is fail-safe: resume either reuses the journaled completed
+  decision (the handler is not asked again) or retries the pending invocation
+  under its original identity.
+- `transform_context` patches and `prepare_next_turn` injection are
   request-only views: they never write back to the committed context, never
   emit durable messages, and never appear in `LoopOutcome.new_messages`.
-  Injected user messages are consumed exactly once by the next model request;
-  empty or non-user-role injections are rejected as `HookFailure::InvalidOutput`.
+  A `transform_context` decision is `Unchanged` or `Patch(ContextPatch)`
+  (`ReplaceSystemPrompt` / `DropHistory { upto }` / `RewriteHistory { upto,
+  summary }`); the kernel validates `upto` as a zero-based,
+  left-closed/right-open prefix end into the committed `messages` that must
+  stay in bounds and must not cut a tool_call/tool_result pair, rejecting
+  invalid patches as `HookFailure::InvalidOutput`. Injected user messages are
+  consumed exactly once by the next model request; empty or non-user-role
+  injections are rejected as `HookFailure::InvalidOutput`.
+- Every hook invocation is journaled into the same `DurableEventSink` stream:
+  `HookInvocationPending` (address `(iteration, HookPoint, Option<CallId>)`
+  plus a payload-level input digest) commits before the runtime call,
+  `HookInvocationCompleted` commits after decision validation and before the
+  affected action (model request, `ToolExecutionStarted`, result commit, or
+  iteration boundary), and `HookInvocationFailed` commits for typed failures,
+  deadlines, and invalid decisions. Tool-hook digests hash the canonical JSON
+  of the exact `ToolCall` the hook observes; context hooks digest their
+  `(iteration, point)` address. Usage and history never participate.
+- `AgentLoop::resume` re-runs a run from its durable event stream: the
+  composing side re-supplies the system prompt and configuration, replay
+  rebuilds committed context from `MessageAppended`, fixes the frontier at one
+  past the maximum `IterationCompleted`, and refuses terminal runs. Committed
+  tool results must be the exact ordered prefix of the preceding assistant
+  `tool_calls` (unknown, duplicate, sparse, or out-of-order results fail
+  closed); the missing suffix re-executes under the at-least-once stance.
+  Hook invocations consult the journal first: digest-matching completed
+  decisions are reused without calling the runtime, pending invocations retry
+  under their original identity, failures are reproduced, and digest
+  mismatches fail closed.
 - Every hook call goes through the kernel's shared execution helper: pre-call
   cancellation and in-flight cancellation resolve to loop cancellation, the
   absolute deadline maps to `HookFailure::TimedOut`, and runtime failures are
@@ -124,8 +154,8 @@ legacy stateful `Agent` compatibility path.
   disguised as a provider finish reason.
 - Deferred to later milestones (do not add here): multi-handler ordering and
   short-circuiting (H2), the unified `stratum-tools` validation boundary (H2),
-  hook invocation journal and crash recovery of decisions (H3),
-  Skill/Script/service adapters, and hook telemetry or EventBus payloads.
+  kernel-durable history compaction (H5), Skill/Script/service adapters, and
+  hook telemetry or EventBus payloads.
 
 ## Legacy Agent Compatibility
 

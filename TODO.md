@@ -23,7 +23,8 @@ flowchart LR
     M0["M0：身份与协议基线"] --> H1["H1：Hook 核心合同"]
     H1 --> H2["H2：有序 Runner 与工具校验"]
     H2 --> H25["H2.5：Hook 输入公共信封"]
-    H25 --> H3["H3：Hook 存储与恢复"]
+    H25 --> H3["H3a：Hook 存储与恢复"]
+    H3 --> H3B["H3b：sqlite 与保留策略"]
     H3 --> H4["H4：Tool 幂等与恢复"]
     H3 --> H5["H5：上下文压缩"]
     H3 --> S2["S2：Deno / Python 扩展宿主"]
@@ -134,27 +135,35 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 新增公共字段只改 `HookSnapshot` 一处即可被全部 Hook 点继承（以一次模拟新增字段验证）。
 - [x] 信封化后所有既有 hook 行为测试保持不变。
 
-### H3：Hook 存储与恢复
+### H3a：Hook 存储与恢复（filesystem 与内核 resume）
 
 **依赖：** H2、P1。
 
-- [ ] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构。
-- [ ] Hook 记录归 Session/Turn，不写进 Agent 消息或 EventBus。
-- [ ] 固定 ExtensionSet 和 Handler 版本与顺序。
-- [ ] 保存每次 Hook 的 ID、输入摘要、决定和最终状态。
-- [ ] 调用 Handler 前先保存 Pending，应用决定前先保存 Completed。
-- [ ] Resume 时复用已经保存的决定；记录不匹配时停止。
-- [ ] 重试 Pending Hook 时复用原来的 `HookInvocationId`。
-- [ ] Tool 执行前保存最终参数或 Block 决定。
-- [ ] Tool Message 提交前保存 `after_tool_call` 结果。
-- [ ] 进入下一次迭代前保存 Stop/Inject 决定。
-- [ ] 定义记录大小、保留时间和清理方式。
+- [x] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构（filesystem per-run 目录，sqlite 见 H3b）。
+- [x] Hook 记录归 Session/Turn 执行状态，不写进 Agent 消息或 EventBus（经 `DurableAgentEvent` 的 invocation 变体，作为执行状态而非观测）。
+- [ ] 固定 ExtensionSet 和 Handler 版本与顺序（依赖 H2 的链式 Runner）。
+- [x] 保存每次 Hook 的 ID、输入摘要、决定和最终状态。
+- [x] 调用 Handler 前先保存 Pending，应用决定前先保存 Completed。
+- [x] Resume 时复用已经保存的决定；记录不匹配时停止。
+- [x] 重试 Pending Hook 时复用原来的 `HookInvocationId`。
+- [x] Tool 执行前保存最终参数或 Block 决定。
+- [x] Tool Message 提交前保存 `after_tool_call` 结果。
+- [x] 进入下一次迭代前保存 Stop/Inject 决定。
+- [ ] 定义记录大小、保留时间和清理方式（H3b）。
 
 **验收条件：**
 
-- [ ] 在每个保存边界模拟崩溃后都能正确恢复。
-- [ ] 恢复时不会重新执行已经完成的 Hook。
-- [ ] Extension 更新不会改变正在运行或恢复的 Turn。
+- [x] 在每个保存边界模拟崩溃后都能正确恢复。
+- [x] 恢复时不会重新执行已经完成的 Hook。
+- [ ] Extension 更新不会改变正在运行或恢复的 Turn（依赖 H2 链与 ExtensionSet）。
+
+### H3b：sqlite per-session 与保留策略
+
+**依赖：** H3a。
+
+- [ ] 用 sqlite per-session 实现 Hook 记录与事件存储，替代或归纳 filesystem 后端。
+- [ ] 定义记录大小、保留时间和清理方式。
+- [ ] 评估 per-handler 粒度 journal（依赖 H2 链式 Runner 落地）。
 
 ### H4：Tool 幂等与恢复
 

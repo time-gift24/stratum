@@ -10,15 +10,15 @@ pub(crate) mod r#loop;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, HookTimeouts,
-    LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome, ProtocolError,
+    LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome, ProtocolError, ResumeError,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
 pub use hook_runtime::{
-    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, DecideToolCallDecision,
-    DecideToolCallInput, HookControl, HookRuntime, HookSnapshot, NoopHookRuntime,
-    PrepareNextTurnDecision, PrepareNextTurnInput, ToolHookTarget, TransformContextDecision,
-    TransformContextInput, TransformToolCallDecision, TransformToolCallInput,
-    TransformToolCallModification,
+    AfterToolCallDecision, AfterToolCallInput, AuthorizationOverride, ContextPatch,
+    DecideToolCallDecision, DecideToolCallInput, HookControl, HookRuntime, HookSnapshot,
+    NoopHookRuntime, PrepareNextTurnDecision, PrepareNextTurnInput, ToolHookTarget,
+    TransformContextDecision, TransformContextInput, TransformToolCallDecision,
+    TransformToolCallInput, TransformToolCallModification,
 };
 pub use tool_executor::{ToolExecutor, ToolExecutorError};
