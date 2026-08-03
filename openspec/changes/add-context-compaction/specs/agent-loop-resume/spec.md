@@ -22,7 +22,7 @@
 - **THEN** 重放按事件顺序应用压缩，恢复后的 committed context 是以摘要标记消息为前缀的压缩基线
 
 ### Requirement: 压缩检查点索引加速恢复
-filesystem 后端必须（SHALL）在该次压缩的 `IterationCompleted` 落盘后向 `compact.jsonl` 追加检查点（含压缩迭代号、窗口起始行、upto 与摘要 digest），窗口起始行必须（SHALL）是第一条保留消息的物理行，使窗口自带完整保留后缀、该迭代 prepare 的 journal 记录与迭代边界。resume 必须（SHALL）优先使用最新匹配的检查点从事件流中部开始重放；检查点索引必须（SHALL）是派生物——缺失、损坏或校验失败时回退全量重放，不得（SHALL NOT）因索引问题 fail closed。
+filesystem 后端必须（SHALL）在该次压缩的 `IterationCompleted` 落盘后向 `compact.jsonl` 追加检查点（含压缩迭代号、窗口起始行、upto 与摘要 digest），窗口起始行必须（SHALL）是第一条保留消息的物理行，使窗口自带完整保留后缀、该迭代 prepare 的 journal 记录与迭代边界。resume 必须（SHALL）优先使用最新匹配的检查点从事件流中部开始重放；检查点索引必须（SHALL）是派生物——缺失、损坏或校验失败时回退全量重放，不得（SHALL NOT）因索引问题 fail closed；检查点写入失败必须（SHALL）降级为索引落后并告警，不得（SHALL NOT）使边界已提交的 run 失败。
 
 #### Scenario: 从最近检查点快速恢复
 - **WHEN** compact.jsonl 存在有效检查点且窗口起始行与 TranscriptCompacted 三项（iteration/upto/digest）校验匹配
@@ -37,5 +37,5 @@ filesystem 后端必须（SHALL）在该次压缩的 `IterationCompleted` 落盘
 - **THEN** 不新增检查点，resume 走全量重放或更早检查点，prepare 的 journal 记录完整可用，handler 不被重复调用，事件流不被污染
 
 #### Scenario: 索引写入落后于事件不致死
-- **WHEN** 进程在 IterationCompleted 落盘后、检查点追加前崩溃
-- **THEN** 索引保持落后状态，resume 或全量重放或从更早检查点开始，结果仍然正确
+- **WHEN** 进程在 IterationCompleted 落盘后、检查点追加前崩溃，或检查点写入本身失败
+- **THEN** 索引保持落后状态，run 不失败，resume 或全量重放或从更早检查点开始，结果仍然正确

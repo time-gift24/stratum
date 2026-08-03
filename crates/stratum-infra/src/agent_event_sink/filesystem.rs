@@ -143,9 +143,23 @@ impl DurableEventSink for FilesystemDurableEventSink {
                     // readers tolerate by falling back to a full replay or an
                     // earlier checkpoint.
                     let run_dir = self.run_dir.clone();
-                    tokio::task::spawn_blocking(move || append_checkpoint(&run_dir, &pending))
-                        .await
-                        .map_err(|source| FilesystemEventSinkError::Join { source })??;
+                    // The index is derived data: a failed checkpoint write
+                    // must degrade to a lagging index, never kill the run
+                    // whose boundary is already durable.
+                    let outcome =
+                        tokio::task::spawn_blocking(move || append_checkpoint(&run_dir, &pending))
+                            .await;
+                    let flush_result = match outcome {
+                        Ok(result) => result,
+                        Err(source) => Err(FilesystemEventSinkError::Join { source }),
+                    };
+                    if let Err(error) = flush_result {
+                        tracing::warn!(
+                            run_dir = %self.run_dir.display(),
+                            %error,
+                            "checkpoint index write failed; the index lags behind and resume falls back to a full replay"
+                        );
+                    }
                 }
             }
             _ => {}
@@ -834,6 +848,33 @@ mod tests {
             FilesystemEventSinkError::MalformedEvent { line, .. } => assert_eq!(line, 2),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_flush_failure_degrades_without_failing_the_boundary_append() {
+        let run = TestRunDir::new("checkpoint-flush-failure");
+        // Make the index path a directory so every checkpoint append fails.
+        std::fs::create_dir(compact_index_path(&run))
+            .expect("index path should be creatable as a directory");
+
+        let sink = FilesystemDurableEventSink::new(run.path());
+        sink.append(DurableAgentEvent::LoopStarted {
+            extension_set_version_id: None,
+        })
+        .await
+        .expect("append should succeed");
+        sink.append(compacted_event(1, 1, "summary"))
+            .await
+            .expect("compaction append should succeed");
+        sink.append(DurableAgentEvent::IterationCompleted {
+            iteration: 1,
+            usage: usage(),
+        })
+        .await
+        .expect("boundary append must tolerate a failed checkpoint flush");
+
+        let events = read_events(run.path()).expect("event log should be readable");
+        assert_eq!(events.len(), 3);
     }
 
     fn compacted_event(

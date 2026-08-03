@@ -67,7 +67,7 @@ filesystem 后端维护派生检查点索引 `compact.jsonl`（可完全由事�
 
 1. **边界后写**：检查点在该次压缩的 `IterationCompleted` 落盘后才追加（sink 记一笔待落压缩，边界落盘时 flush）。有检查点 ⟹ 边界已提交 ⟹ "压缩已提交而边界未提交"的崩溃窗口不存在检查点，只能走全量重放——该窗口的 journal 记录永远安全。
 2. **窗口自足**：`window_start_line` 是**第一条保留消息的物理行**（按 `upto` 定位第 upto 个 `message_appended`，写检查点时扫文件一次，压缩低频可接受），不是 `TranscriptCompacted` 行。窗口 `[LoopStarted] + 自 window_start_line 起` 自带完整保留后缀、该迭代 prepare 的 journal 记录、压缩事件与迭代边界——resume 所需的一切都不在窗口之前。
-3. **重放双模式**：replay 应用 `TranscriptCompacted` 时，`upto <= 当前 messages 长度`走绝对坐标 splice（全量流）；`upto > 当前长度`说明处于检查点窗口（当前 messages 已是保留后缀本身），直接前置 summary。窗口分支的正确性由规则 1/2 与检查点的三项校验（iteration/upto/digest）在 infra 边界保证；全量流中 `upto` 越界仍 `CorruptedCompaction` fail closed。
+3. **重放双模式**：replay 应用 `TranscriptCompacted` 时，`upto <= 当前 messages 长度`走绝对坐标 splice（全量流）；`upto > 当前长度`说明处于检查点窗口（当前 messages 已是保留后缀本身），直接前置 summary。replay 无法区分"损坏的全量流"与"合法的检查点窗口"——**越界损坏的检测责任在 infra 检查点校验边界**（窗口经三项校验通过后才交给 replay），replay 统一将越界视为窗口模式，仅对 `upto == 0` 以 `CorruptedCompaction` fail closed。
 
 resume 快速路径：读 `LoopStarted`（链版本校验）→ 读最新检查点 → 校验 `window_start_line` 指向的行确为 `message_appended`、且窗口内能找到与检查点三项一致的 `TranscriptCompacted` → 匹配则从该行起重放，否则回退全量。
 
