@@ -117,6 +117,7 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 ## 测试
 
 - 单元测试放在 `#[cfg(test)] mod tests` 中。
+- Rust 后端（`crates/`）变更默认走 TDD：openspec change 在 tasks.md 中为涉及新逻辑的任务显式标注 `/tdd`；执行实现时先声明使用 TDD（先写失败测试、再实现、后重构），双重防护。
 - 跨 crate 集成测试放在 `tests/` 目录。
 - 测试命名要描述被验证的行为。
 - 测试结构保持 arrange、act、assert 清晰。
