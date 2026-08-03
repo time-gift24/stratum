@@ -21,6 +21,8 @@
 - **WHEN** 事件流在 MessageAppended 序列中包含 TranscriptCompacted
 - **THEN** 重放按事件顺序应用压缩，恢复后的 committed context 是以摘要标记消息为前缀的压缩基线
 
+## ADDED Requirements
+
 ### Requirement: 压缩检查点索引加速恢复
 filesystem 后端必须（SHALL）在该次压缩的 `IterationCompleted` 落盘后向 `compact.jsonl` 追加检查点（含压缩迭代号、窗口起始行、upto 与摘要 digest），窗口起始行必须（SHALL）是第一条保留消息的物理行，使窗口自带完整保留后缀、该迭代 prepare 的 journal 记录与迭代边界。resume 必须（SHALL）优先使用最新匹配的检查点从事件流中部开始重放；检查点索引必须（SHALL）是派生物——缺失、损坏或校验失败时回退全量重放，不得（SHALL NOT）因索引问题 fail closed；检查点写入失败必须（SHALL）降级为索引落后并告警，不得（SHALL NOT）使边界已提交的 run 失败。
 
