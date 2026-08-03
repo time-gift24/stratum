@@ -102,6 +102,7 @@ After completing all artifacts, summarize:
 - The schema defines what each artifact should contain - follow it
 - Read dependency artifacts for context before creating new ones
 - Use `template` as the structure for your output file - fill in its sections
+- When writing `tasks.md`: for any task that adds or changes Rust backend logic under `crates/`, annotate the task text explicitly with `/tdd` (e.g. `- [ ] 2.1 (/tdd) Add checkpoint validation ...`). Pure spec/doc/config tasks do not need the marker
 - **IMPORTANT**: `context` and `rules` are constraints for YOU, not content for the file
   - Do NOT copy `<context>`, `<rules>`, `<project_context>` blocks into the artifact
   - These guide what you write, but should never appear in the output

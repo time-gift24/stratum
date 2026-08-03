@@ -72,6 +72,7 @@ Implement tasks from an OpenSpec change.
 
    For each pending task:
    - Show which task is being worked on
+   - For tasks annotated with `/tdd` (or any task touching Rust backend logic under `crates/`): announce that TDD is in effect for this task, then work red-green-refactor — write the failing test first, watch it fail, implement the minimum to pass, then refactor
    - Make the code changes required
    - Keep changes minimal and focused
    - Mark task complete in the tasks file: `- [ ]` → `- [x]`
