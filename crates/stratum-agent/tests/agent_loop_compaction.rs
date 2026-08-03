@@ -953,3 +953,135 @@ async fn resume_after_a_committed_compaction_does_not_compact_twice() {
         "the resumed request runs from the compacted baseline"
     );
 }
+
+// V1: resume from a checkpoint window — `LoopStarted` plus the stream from
+// the first retained message's line — rebuilds the context byte-identically
+// to a full replay, and the window's journaled compact decision is reused
+// without calling the handler again.
+#[tokio::test]
+async fn resume_from_a_checkpoint_window_matches_full_replay_and_reuses_the_journal() {
+    // Phase 1 compacts at iteration 0 (dropping the four prompts), decides a
+    // second compaction at iteration 1, and crashes before that second
+    // compaction commits: the surviving stream ends at the journaled compact
+    // decision.
+    let phase1_operations = Arc::new(Mutex::new(Vec::new()));
+    let phase1_loop = build_loop(
+        VecDeque::from([
+            tool_call_turn("call-1"),
+            tool_call_turn("call-2"),
+            stop_turn("unreachable"),
+        ]),
+        Arc::new(CompactionRuntime::new(
+            &phase1_operations,
+            vec![
+                PrepareNextTurnDecision::Compact {
+                    upto: 4,
+                    summary: ChatMessage::system("summary one"),
+                },
+                PrepareNextTurnDecision::Compact {
+                    upto: 3,
+                    summary: ChatMessage::system("summary two"),
+                },
+            ],
+        )),
+        Arc::new(CrashDurableSink {
+            operations: Arc::clone(&phase1_operations),
+            crash_on: |event| {
+                matches!(
+                    event,
+                    DurableAgentEvent::TranscriptCompacted {
+                        compacted_iteration: 1,
+                        ..
+                    }
+                )
+            },
+        }),
+        &phase1_operations,
+    );
+    phase1_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![
+                ChatMessage::user("question one"),
+                ChatMessage::user("question two"),
+                ChatMessage::user("question three"),
+                ChatMessage::user("question four"),
+            ],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the simulated crash should stop phase 1");
+    let full_events = durable_events(&snapshot(&phase1_operations));
+
+    // The checkpoint window: `LoopStarted` plus everything from the first
+    // retained message's line (the first compaction dropped four messages).
+    let window_start = full_events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, DurableAgentEvent::MessageAppended { .. }))
+        .nth(4)
+        .map(|(index, _)| index)
+        .expect("the stream has a fifth message line");
+    let mut window_events = vec![full_events[0].clone()];
+    window_events.extend_from_slice(&full_events[window_start..]);
+    assert!(
+        matches!(
+            &window_events[1],
+            DurableAgentEvent::MessageAppended { message } if !message.tool_calls.is_empty()
+        ),
+        "the window starts at the retained assistant message's line"
+    );
+
+    // Resume once from the full stream and once from the window.
+    let mut reports = Vec::new();
+    for events in [full_events, window_events] {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let agent_loop = recording_loop(
+            VecDeque::from([stop_turn("done")]),
+            Arc::new(CompactionRuntime::new(&operations, Vec::new())),
+            &operations,
+        );
+        let outcome = agent_loop
+            .resume("be precise", events, CancellationToken::new())
+            .await
+            .expect("resume should close the crash window and finish");
+        reports.push((snapshot(&operations), outcome));
+    }
+    let (full_phase2, full_outcome) = &reports[0];
+    let (window_phase2, window_outcome) = &reports[1];
+
+    // The journaled compact decision inside the window is reused: the handler
+    // is never called and the compaction executes exactly once, from the
+    // journaled summary.
+    assert!(
+        !hook_points(window_phase2).contains(&HookPoint::PrepareNextTurn),
+        "the window's journaled compact decision must be reused"
+    );
+    let compactions = durable_events(window_phase2)
+        .into_iter()
+        .filter(|event| matches!(event, DurableAgentEvent::TranscriptCompacted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compactions,
+        vec![DurableAgentEvent::TranscriptCompacted {
+            upto: 3,
+            summary: marker("summary two"),
+            compacted_iteration: 1,
+        }],
+        "the pending compaction executes exactly once from the journal"
+    );
+
+    // Byte identity: both resumes rebuild the same context, issue the same
+    // model request, and return the same outcome.
+    assert_eq!(requests(window_phase2), requests(full_phase2));
+    assert_eq!(window_outcome, full_outcome);
+    assert_eq!(
+        requests(window_phase2)[0].messages,
+        vec![
+            ChatMessage::system("be precise"),
+            marker("summary two"),
+            assistant_with_call("call-2"),
+            ChatMessage::tool(CallId::from("call-2"), json!({"echo": {}})),
+        ]
+    );
+}

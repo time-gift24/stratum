@@ -63,9 +63,15 @@ Hook 地址是 `(iteration, HookPoint, Option<CallId>)`，与消息内容无关�
 
 ### 4b. compact.jsonl 是派生检查点索引，不是第二真相
 
-filesystem 后端在 `TranscriptCompacted` 落盘（append + fsync）之后，向同目录的 `compact.jsonl` 追加一行检查点：`{ compacted_iteration, event_line, upto, summary_digest }`，`event_line` 指向事件流中该行（append-only，行号稳定）。**写入顺序不可逆**：先事件流后索引；崩溃在两者之间只导致索引落后（多重放、不出错）。
+filesystem 后端维护派生检查点索引 `compact.jsonl`（可完全由事件流重建；缺失、损坏或校验失败一律回退全量重放，索引问题永不 fail closed）。检查点记录：`{ compacted_iteration, window_start_line, upto, summary_digest }`。三条不变量：
 
-resume 快速路径：读 `LoopStarted`（首行，链版本校验仍需要）→ 读最新检查点 → 跳到 `event_line` 校验该行确为匹配的 `TranscriptCompacted`（iteration/upto/digest）→ 匹配则从该行起重放（摘要为前缀，后续 MessageAppended 依次应用；压缩点恰在迭代边界，在飞迭代所需的 journal 记录都在尾部）；**索引缺失、损坏或校验失败一律回退全量重放**——索引内容可由事件流完全重建，是派生物，其损坏不触发 fail closed。fail closed 只留给真相流本身的损坏。
+1. **边界后写**：检查点在该次压缩的 `IterationCompleted` 落盘后才追加（sink 记一笔待落压缩，边界落盘时 flush）。有检查点 ⟹ 边界已提交 ⟹ "压缩已提交而边界未提交"的崩溃窗口不存在检查点，只能走全量重放——该窗口的 journal 记录永远安全。
+2. **窗口自足**：`window_start_line` 是**第一条保留消息的物理行**（按 `upto` 定位第 upto 个 `message_appended`，写检查点时扫文件一次，压缩低频可接受），不是 `TranscriptCompacted` 行。窗口 `[LoopStarted] + 自 window_start_line 起` 自带完整保留后缀、该迭代 prepare 的 journal 记录、压缩事件与迭代边界——resume 所需的一切都不在窗口之前。
+3. **重放双模式**：replay 应用 `TranscriptCompacted` 时，`upto <= 当前 messages 长度`走绝对坐标 splice（全量流）；`upto > 当前长度`说明处于检查点窗口（当前 messages 已是保留后缀本身），直接前置 summary。窗口分支的正确性由规则 1/2 与检查点的三项校验（iteration/upto/digest）在 infra 边界保证；全量流中 `upto` 越界仍 `CorruptedCompaction` fail closed。
+
+resume 快速路径：读 `LoopStarted`（链版本校验）→ 读最新检查点 → 校验 `window_start_line` 指向的行确为 `message_appended`、且窗口内能找到与检查点三项一致的 `TranscriptCompacted` → 匹配则从该行起重放，否则回退全量。
+
+**否决方案：检查点指向 `TranscriptCompacted` 行。** 窗口丢失保留后缀（其物理位置在压缩事件之前）与 prepare 的 journal 记录——resume 上下文残缺、handler 被重复调用、追加同地址 Pending 污染事件流使后续全量重放永久 fail closed。窗口必须自足。
 
 **否决方案：compact.jsonl 作为压缩历史的权威记录。** 压缩历史已经以 `TranscriptCompacted` 事件存在于真相流；再写一份权威历史制造双真相，正是单 sink 原则要消灭的。索引只加速，不承载真相。
 

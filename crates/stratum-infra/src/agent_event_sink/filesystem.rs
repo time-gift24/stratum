@@ -6,9 +6,10 @@
 //! crash. [`read_events`] replays the log and tolerates a truncated tail
 //! line left by a crash mid-append.
 //!
-//! A `TranscriptCompacted` append additionally records one checkpoint line in
-//! `<root>/<run_id>/compact.jsonl` after the event is durable. The index is a
-//! rebuildable derivative of the event log, never a second source of truth:
+//! A `TranscriptCompacted` append records a pending compaction in memory; the
+//! following `IterationCompleted` flushes one checkpoint line to
+//! `<root>/<run_id>/compact.jsonl` after the boundary is durable. The index is
+//! a rebuildable derivative of the event log, never a second source of truth:
 //! [`read_events_from_checkpoint`] uses the newest matching checkpoint to skip
 //! the compacted prefix, and any index problem falls back to a full replay.
 
@@ -31,7 +32,9 @@ pub const COMPACT_INDEX_FILE_NAME: &str = "compact.jsonl";
 /// One derived compaction checkpoint recorded in `compact.jsonl`.
 ///
 /// The index only accelerates resume; it is a rebuildable derivative of the
-/// event log, never the truth. Every field can be recomputed from
+/// event log, never the truth. A checkpoint is appended only after the
+/// compaction's `IterationCompleted` is durable, so a checkpoint implies the
+/// iteration boundary is committed. Every field can be recomputed from
 /// `events.jsonl`, and a missing, corrupt, or mismatching index must degrade
 /// to a full replay rather than fail closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,13 +43,31 @@ pub const COMPACT_INDEX_FILE_NAME: &str = "compact.jsonl";
 pub struct CompactionCheckpoint {
     /// Iteration whose prepare boundary executed the compaction.
     pub compacted_iteration: u64,
-    /// 1-based line number of the matching `TranscriptCompacted` event in
-    /// `events.jsonl` (the log is append-only, so line numbers are stable).
-    pub event_line: u64,
+    /// 1-based physical line of the first retained message — the
+    /// committed-context message at index `upto` — in `events.jsonl`. The
+    /// replay window starting here is self-contained: it carries the full
+    /// retained suffix, the iteration's prepare journal records, the
+    /// `TranscriptCompacted` event, and the iteration boundary.
+    pub window_start_line: u64,
     /// Exclusive end index of the replaced committed-context prefix.
     pub upto: u64,
     /// Lowercase hex SHA-256 of the canonical JSON of the summary message.
     pub summary_digest: String,
+}
+
+/// A compaction whose `TranscriptCompacted` is durable but whose iteration
+/// boundary has not landed yet; its checkpoint is flushed when the next
+/// `IterationCompleted` becomes durable.
+struct PendingCompaction {
+    compacted_iteration: u64,
+    upto: u64,
+    summary: ChatMessage,
+}
+
+/// Append state serialized by the sink's internal async lock.
+#[derive(Default)]
+struct AppendState {
+    pending_compaction: Option<PendingCompaction>,
 }
 
 /// Durable event sink appending one JSON line per event to a run directory.
@@ -55,7 +76,7 @@ pub struct CompactionCheckpoint {
 /// partial lines. The run directory is created lazily on the first append.
 pub struct FilesystemDurableEventSink {
     run_dir: PathBuf,
-    append_lock: Mutex<()>,
+    append_state: Mutex<AppendState>,
 }
 
 impl FilesystemDurableEventSink {
@@ -64,7 +85,7 @@ impl FilesystemDurableEventSink {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
             run_dir: run_dir.into(),
-            append_lock: Mutex::new(()),
+            append_state: Mutex::new(AppendState::default()),
         }
     }
 
@@ -81,18 +102,10 @@ impl DurableEventSink for FilesystemDurableEventSink {
         let event_type = event.event_type();
         let line = serde_json::to_string(&event)
             .map_err(|source| FilesystemEventSinkError::Serialize { event_type, source })?;
-        let checkpoint = match &event {
-            DurableAgentEvent::TranscriptCompacted {
-                upto,
-                summary,
-                compacted_iteration,
-            } => Some((*compacted_iteration, *upto, summary.clone())),
-            _ => None,
-        };
         let run_dir = self.run_dir.clone();
         // Hold the async-aware lock across the blocking writes so concurrent
         // appends stay serialized; never hold a std mutex guard here.
-        let _permit = self.append_lock.lock().await;
+        let mut state = self.append_state.lock().await;
         tracing::debug!(
             event_type,
             run_dir = %self.run_dir.display(),
@@ -101,17 +114,41 @@ impl DurableEventSink for FilesystemDurableEventSink {
         tokio::task::spawn_blocking(move || append_line(&run_dir, &line))
             .await
             .map_err(|source| FilesystemEventSinkError::Join { source })??;
-        if let Some((compacted_iteration, upto, summary)) = checkpoint {
-            // Write order is irreversible: the event line is durable before
-            // its checkpoint is appended. A crash between the two only leaves
-            // the index behind, which readers tolerate by falling back to a
-            // full replay or an earlier checkpoint.
-            let run_dir = self.run_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                append_checkpoint(&run_dir, compacted_iteration, upto, &summary)
-            })
-            .await
-            .map_err(|source| FilesystemEventSinkError::Join { source })??;
+        match &event {
+            DurableAgentEvent::TranscriptCompacted {
+                upto,
+                summary,
+                compacted_iteration,
+            } => {
+                // Record the compaction in memory only. Its checkpoint is
+                // flushed after this compaction's IterationCompleted is
+                // durable, so the crash window between the two never has a
+                // checkpoint and can only take the full-replay path.
+                let pending = PendingCompaction {
+                    compacted_iteration: *compacted_iteration,
+                    upto: *upto,
+                    summary: summary.clone(),
+                };
+                if state.pending_compaction.replace(pending).is_some() {
+                    tracing::warn!(
+                        "compaction superseded before its iteration boundary; dropping the earlier pending checkpoint"
+                    );
+                }
+            }
+            DurableAgentEvent::IterationCompleted { .. } => {
+                if let Some(pending) = state.pending_compaction.take() {
+                    // Write order is irreversible: the boundary event is
+                    // durable before the checkpoint is appended. A crash
+                    // between the two only leaves the index behind, which
+                    // readers tolerate by falling back to a full replay or an
+                    // earlier checkpoint.
+                    let run_dir = self.run_dir.clone();
+                    tokio::task::spawn_blocking(move || append_checkpoint(&run_dir, &pending))
+                        .await
+                        .map_err(|source| FilesystemEventSinkError::Join { source })??;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -161,13 +198,11 @@ fn append_durable_line(
     Ok(())
 }
 
-/// Appends one derived checkpoint for a `TranscriptCompacted` event that has
-/// already been durably appended to the event log.
+/// Appends one derived checkpoint for a pending compaction whose iteration
+/// boundary has just become durable.
 fn append_checkpoint(
     run_dir: &Path,
-    compacted_iteration: u64,
-    upto: u64,
-    summary: &ChatMessage,
+    pending: &PendingCompaction,
 ) -> Result<(), FilesystemEventSinkError> {
     let log_path = run_dir.join(EVENTS_FILE_NAME);
     let bytes = std::fs::read(&log_path).map_err(|source| FilesystemEventSinkError::Read {
@@ -175,12 +210,10 @@ fn append_checkpoint(
         source,
     })?;
     let checkpoint = CompactionCheckpoint {
-        compacted_iteration,
-        // The event was just appended at the tail, so the current line count
-        // is its 1-based line number.
-        event_line: count_log_lines(&bytes),
-        upto,
-        summary_digest: summary_digest(summary),
+        compacted_iteration: pending.compacted_iteration,
+        window_start_line: locate_window_start(&log_path, &bytes, pending.upto)?,
+        upto: pending.upto,
+        summary_digest: summary_digest(&pending.summary),
     };
     let line = serde_json::to_string(&checkpoint).map_err(|source| {
         FilesystemEventSinkError::Serialize {
@@ -191,13 +224,52 @@ fn append_checkpoint(
     append_checkpoint_line(run_dir, &line)
 }
 
-/// Counts the physical lines of an append-only log: newline-terminated lines
-/// plus a possible unterminated tail line left by a crash mid-append.
-fn count_log_lines(bytes: &[u8]) -> u64 {
-    let terminated =
-        u64::try_from(bytes.iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u64::MAX);
-    let unterminated_tail = u64::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
-    terminated + unterminated_tail
+/// Finds the 1-based physical line of the first retained message: the
+/// committed-context message at index `upto`.
+///
+/// The scan replays committed-message ordinals over the log: every
+/// `message_appended` takes the next committed index, and every earlier
+/// `TranscriptCompacted` collapses `upto` committed messages into one summary
+/// that has no `message_appended` line of its own, shifting later messages
+/// back by `upto - 1`. Compaction is rare, so one O(log) scan per checkpoint
+/// is acceptable.
+fn locate_window_start(
+    log_path: &Path,
+    bytes: &[u8],
+    upto: u64,
+) -> Result<u64, FilesystemEventSinkError> {
+    let lines = split_log_lines(bytes);
+    let mut committed_index = 0_u64;
+    for (position, (line_number, line)) in lines.iter().enumerate() {
+        let event = match serde_json::from_slice::<DurableAgentEvent>(line) {
+            Ok(event) => event,
+            // A crash-torn tail line is tolerated exactly as in `read_events`.
+            Err(_) if position + 1 == lines.len() => break,
+            Err(source) => {
+                return Err(FilesystemEventSinkError::MalformedEvent {
+                    path: log_path.to_path_buf(),
+                    line: *line_number,
+                    source,
+                });
+            }
+        };
+        match event {
+            DurableAgentEvent::MessageAppended { .. } => {
+                if committed_index == upto {
+                    return Ok(*line_number);
+                }
+                committed_index += 1;
+            }
+            DurableAgentEvent::TranscriptCompacted { upto, .. } => {
+                committed_index = committed_index.saturating_sub(upto.saturating_sub(1));
+            }
+            _ => {}
+        }
+    }
+    Err(FilesystemEventSinkError::MissingRetainedMessage {
+        path: log_path.to_path_buf(),
+        upto,
+    })
 }
 
 /// Computes the lowercase hex SHA-256 of the canonical JSON of a summary
@@ -255,15 +327,21 @@ pub fn read_events(run_dir: &Path) -> Result<Vec<DurableAgentEvent>, FilesystemE
 ///
 /// The index is a rebuildable derivative of the event log, never a second
 /// source of truth. Any index problem — a missing or empty `compact.jsonl`,
-/// a truncated tail line, corrupt JSON, or a checkpoint whose target line is
-/// not the matching `TranscriptCompacted` event — falls back to
-/// [`read_events`] instead of failing closed; only corruption of the event
-/// log itself is a typed error, exactly as in [`read_events`].
+/// a truncated tail line, corrupt JSON, or a checkpoint that fails validation
+/// against the event log — falls back to [`read_events`] instead of failing
+/// closed; only corruption of the event log itself is a typed error, exactly
+/// as in [`read_events`].
 ///
 /// On the fast path the returned sequence is the `LoopStarted` head event —
 /// resume still needs it for chain version validation — followed by the event
-/// window starting at the checkpoint's `TranscriptCompacted` line, which
-/// replay treats as equivalent to the full stream.
+/// window starting at the checkpoint's `window_start_line`. Validation
+/// requires the head line to be `LoopStarted`, the window's first line to be
+/// a `message_appended` (the first retained message), and the window to
+/// contain a `TranscriptCompacted` matching the checkpoint's
+/// `compacted_iteration`, `upto`, and `summary_digest`. A valid window is
+/// self-contained — retained suffix, prepare journal records, compaction
+/// event, and iteration boundary — so replay treats it as equivalent to the
+/// full stream.
 ///
 /// This performs blocking file IO; async callers handling large logs should
 /// offload it with `tokio::task::spawn_blocking`.
@@ -300,31 +378,44 @@ pub fn read_events_from_checkpoint(
     }
     let Some(window_start) = lines
         .iter()
-        .position(|(line_number, _)| *line_number == checkpoint.event_line)
+        .position(|(line_number, _)| *line_number == checkpoint.window_start_line)
     else {
         tracing::warn!(
             path = %path.display(),
-            event_line = checkpoint.event_line,
+            window_start_line = checkpoint.window_start_line,
             "compaction checkpoint points past the event log; falling back to full replay"
         );
         return read_events(run_dir);
     };
     let window = parse_log_lines(&path, &lines[window_start..])?;
-    let matches_checkpoint = matches!(
+    if !matches!(
         window.first(),
-        Some(DurableAgentEvent::TranscriptCompacted {
-            upto,
-            summary,
-            compacted_iteration,
-        }) if *upto == checkpoint.upto
-            && *compacted_iteration == checkpoint.compacted_iteration
-            && summary_digest(summary) == checkpoint.summary_digest
-    );
+        Some(DurableAgentEvent::MessageAppended { .. })
+    ) {
+        tracing::warn!(
+            path = %path.display(),
+            window_start_line = checkpoint.window_start_line,
+            "compaction checkpoint window does not start at a retained message; falling back to full replay"
+        );
+        return read_events(run_dir);
+    }
+    let matches_checkpoint = window.iter().any(|event| {
+        matches!(
+            event,
+            DurableAgentEvent::TranscriptCompacted {
+                upto,
+                summary,
+                compacted_iteration,
+            } if *upto == checkpoint.upto
+                && *compacted_iteration == checkpoint.compacted_iteration
+                && summary_digest(summary) == checkpoint.summary_digest
+        )
+    });
     if !matches_checkpoint {
         tracing::warn!(
             path = %path.display(),
-            event_line = checkpoint.event_line,
-            "compaction checkpoint does not match the event log; falling back to full replay"
+            compacted_iteration = checkpoint.compacted_iteration,
+            "compaction checkpoint matches no compaction event in the window; falling back to full replay"
         );
         return read_events(run_dir);
     }
@@ -440,7 +531,8 @@ mod tests {
     use serde_json::json;
     use stratum_core::{
         ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, DurableAgentEvent,
-        TokenUsage, ToolKind, ToolName,
+        HookDecisionRecord, HookInvocationId, HookPoint, PrepareNextTurnDecisionRecord, TokenUsage,
+        ToolKind, ToolName,
     };
 
     use super::{
@@ -756,8 +848,44 @@ mod tests {
         }
     }
 
-    /// A run compacted at event line 4 and again at event line 7.
+    fn prepare_pending(iteration: u64) -> DurableAgentEvent {
+        DurableAgentEvent::HookInvocationPending {
+            invocation_id: HookInvocationId::new(),
+            point: HookPoint::PrepareNextTurn,
+            iteration,
+            call_id: None,
+            input_digest: "b".repeat(64).parse().expect("valid digest"),
+        }
+    }
+
+    fn prepare_completed_compact(upto: usize, summary_text: &str) -> DurableAgentEvent {
+        DurableAgentEvent::HookInvocationCompleted {
+            invocation_id: HookInvocationId::new(),
+            decision: HookDecisionRecord::PrepareNextTurn(PrepareNextTurnDecisionRecord::Compact {
+                upto,
+                summary: ChatMessage::system(summary_text),
+            }),
+        }
+    }
+
+    /// A run compacted twice, each compaction committed right before its own
+    /// iteration boundary. Line numbers (1-based):
+    ///
+    /// ```text
+    ///  1 LoopStarted
+    ///  2 m1  (committed idx 0)      3 m2  (committed idx 1)
+    ///  4 IterationCompleted{0}
+    ///  5 m3  (committed idx 2, retained by compaction 1)
+    ///  6 prepare Pending            7 prepare Completed(Compact upto=2)
+    ///  8 TranscriptCompacted#1      9 IterationCompleted{1}  → checkpoint 1 (window line 5)
+    /// 10 m4  (committed idx 2 after compaction 1)
+    /// 11 m5  (committed idx 3, retained by compaction 2)
+    /// 12 prepare Pending           13 prepare Completed(Compact upto=3)
+    /// 14 TranscriptCompacted#2     15 IterationCompleted{2}  → checkpoint 2 (window line 11)
+    /// ```
     fn compacted_run_events() -> Vec<DurableAgentEvent> {
+        const SUMMARY_1: &str = "[stratum:transcript-compacted]\nfirst summary";
+        const SUMMARY_2: &str = "[stratum:transcript-compacted]\nsecond summary";
         vec![
             DurableAgentEvent::LoopStarted {
                 extension_set_version_id: None,
@@ -768,14 +896,29 @@ mod tests {
             DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("m2"),
             },
-            compacted_event(2, 1, "[stratum:transcript-compacted]\nfirst summary"),
+            DurableAgentEvent::IterationCompleted {
+                iteration: 0,
+                usage: usage(),
+            },
             DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("m3"),
+            },
+            prepare_pending(1),
+            prepare_completed_compact(2, SUMMARY_1),
+            compacted_event(2, 1, SUMMARY_1),
+            DurableAgentEvent::IterationCompleted {
+                iteration: 1,
+                usage: usage(),
             },
             DurableAgentEvent::MessageAppended {
                 message: ChatMessage::user("m4"),
             },
-            compacted_event(3, 2, "[stratum:transcript-compacted]\nsecond summary"),
+            DurableAgentEvent::MessageAppended {
+                message: ChatMessage::user("m5"),
+            },
+            prepare_pending(2),
+            prepare_completed_compact(3, SUMMARY_2),
+            compacted_event(3, 2, SUMMARY_2),
             DurableAgentEvent::IterationCompleted {
                 iteration: 2,
                 usage: usage(),
@@ -813,31 +956,65 @@ mod tests {
         std::fs::write(compact_index_path(run), raw).expect("checkpoint index should be writable");
     }
 
-    #[tokio::test]
-    async fn compaction_append_writes_matching_checkpoint() {
-        let run = TestRunDir::new("checkpoint-write");
-        let events = compacted_run_events();
-        write_events(&run, &events).await;
-
-        let checkpoints = read_checkpoints(&run);
-        assert_eq!(checkpoints.len(), 2);
-        assert_eq!(checkpoints[0].compacted_iteration, 1);
-        assert_eq!(checkpoints[0].event_line, 4);
-        assert_eq!(checkpoints[0].upto, 2);
-        let latest = &checkpoints[1];
-        assert_eq!(latest.compacted_iteration, 2);
-        assert_eq!(latest.event_line, 7);
-        assert_eq!(latest.upto, 3);
+    fn assert_canonical_digest(digest: &str) {
         assert!(
-            latest.summary_digest.len() == 64
-                && latest
-                    .summary_digest
+            digest.len() == 64
+                && digest
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "digest must be lowercase hex sha-256"
         );
-        let DurableAgentEvent::TranscriptCompacted { summary, .. } = &events[6] else {
-            panic!("event at line 7 must be the second compaction");
+    }
+
+    #[tokio::test]
+    async fn compaction_checkpoint_is_written_only_after_iteration_boundary() {
+        let run = TestRunDir::new("checkpoint-write-after-boundary");
+        let sink = FilesystemDurableEventSink::new(run.path());
+        let events = compacted_run_events();
+
+        // Through the first TranscriptCompacted, before its IterationCompleted:
+        // the compaction is durable but no checkpoint may exist yet.
+        for event in &events[..8] {
+            sink.append(event.clone())
+                .await
+                .expect("append should succeed");
+        }
+        assert!(
+            !compact_index_path(&run).exists(),
+            "no checkpoint before the compaction's iteration boundary"
+        );
+
+        // The boundary landing flushes the pending checkpoint.
+        sink.append(events[8].clone())
+            .await
+            .expect("append should succeed");
+        let checkpoints = read_checkpoints(&run);
+        assert_eq!(checkpoints.len(), 1);
+        let first = &checkpoints[0];
+        assert_eq!(first.compacted_iteration, 1);
+        assert_eq!(first.window_start_line, 5, "first retained message is m3");
+        assert_eq!(first.upto, 2);
+        assert_canonical_digest(&first.summary_digest);
+        let DurableAgentEvent::TranscriptCompacted { summary, .. } = &events[7] else {
+            panic!("event at line 8 must be the first compaction");
+        };
+        assert_eq!(first.summary_digest, summary_digest(summary));
+
+        // The second compaction flushes its own checkpoint at its own
+        // boundary; its window start accounts for the first compaction.
+        for event in &events[9..] {
+            sink.append(event.clone())
+                .await
+                .expect("append should succeed");
+        }
+        let checkpoints = read_checkpoints(&run);
+        assert_eq!(checkpoints.len(), 2);
+        let latest = &checkpoints[1];
+        assert_eq!(latest.compacted_iteration, 2);
+        assert_eq!(latest.window_start_line, 11, "first retained message is m5");
+        assert_eq!(latest.upto, 3);
+        let DurableAgentEvent::TranscriptCompacted { summary, .. } = &events[13] else {
+            panic!("event at line 14 must be the second compaction");
         };
         assert_eq!(latest.summary_digest, summary_digest(summary));
     }
@@ -851,7 +1028,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_read_returns_loop_started_plus_compacted_window() {
+    async fn checkpoint_read_returns_loop_started_plus_self_contained_window() {
         let run = TestRunDir::new("checkpoint-fast-path");
         let events = compacted_run_events();
         write_events(&run, &events).await;
@@ -859,15 +1036,36 @@ mod tests {
         let fast = read_events_from_checkpoint(run.path()).expect("checkpoint read should succeed");
 
         // The fast path returns LoopStarted followed by the window starting
-        // at the latest TranscriptCompacted; replaying that sequence is
-        // equivalent to replaying the full stream.
+        // at the first retained message of the latest compaction.
         let mut expected = vec![events[0].clone()];
-        expected.extend(events[6..].iter().cloned());
+        expected.extend(events[10..].iter().cloned());
         assert_eq!(fast, expected);
+        // The window is self-contained: it starts at a message and carries
+        // the prepare journal records, the compaction, and the boundary.
+        assert!(
+            matches!(&fast[1], DurableAgentEvent::MessageAppended { .. }),
+            "window must start at the first retained message"
+        );
+        assert!(
+            fast.iter()
+                .any(|event| matches!(event, DurableAgentEvent::HookInvocationCompleted { .. }))
+        );
+        assert!(fast.iter().any(|event| matches!(
+            event,
+            DurableAgentEvent::TranscriptCompacted {
+                compacted_iteration: 2,
+                ..
+            }
+        )));
+        assert!(fast.iter().any(|event| matches!(
+            event,
+            DurableAgentEvent::IterationCompleted { iteration: 2, .. }
+        )));
+        // The window matches the full stream's tail event for event.
         let full = read_events(run.path()).expect("full replay should succeed");
         assert_eq!(full, events);
         assert_eq!(fast[0], full[0]);
-        assert_eq!(fast[1..], full[6..]);
+        assert_eq!(fast[1..], full[10..]);
     }
 
     #[tokio::test]
@@ -906,13 +1104,13 @@ mod tests {
         let checkpoints = read_checkpoints(&run);
         let mut raw = serde_json::to_string(&checkpoints[0]).expect("checkpoint should serialize");
         raw.push('\n');
-        raw.push_str("{\"compacted_iteration\":2,\"event_line\":7");
+        raw.push_str("{\"compacted_iteration\":2,\"window_start_line\":11");
         std::fs::write(compact_index_path(&run), raw).expect("index should be writable");
 
         let fast = read_events_from_checkpoint(run.path()).expect("checkpoint read should succeed");
 
         let mut expected = vec![events[0].clone()];
-        expected.extend(events[3..].iter().cloned());
+        expected.extend(events[4..].iter().cloned());
         assert_eq!(fast, expected);
     }
 
@@ -936,13 +1134,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_with_mismatched_event_line_falls_back_to_full_replay() {
+    async fn checkpoint_with_mismatched_window_start_line_falls_back_to_full_replay() {
         let run = TestRunDir::new("checkpoint-tampered-line");
         let events = compacted_run_events();
         write_events(&run, &events).await;
         let mut checkpoints = read_checkpoints(&run);
-        // Tamper: point the latest checkpoint at a MessageAppended line.
-        checkpoints[1].event_line = 5;
+        // Tamper: point the window start at the prepare journal line, which
+        // is not a message event.
+        checkpoints[1].window_start_line = 12;
         rewrite_checkpoint_index(&run, &checkpoints);
 
         assert_eq!(
@@ -973,7 +1172,7 @@ mod tests {
         let run = TestRunDir::new("checkpoint-lagging");
         let events = compacted_run_events();
         write_events(&run, &events).await;
-        // Simulate a crash after the second TranscriptCompacted landed but
+        // Simulate a crash after the second IterationCompleted landed but
         // before its checkpoint was appended: drop the last index line.
         let checkpoints = read_checkpoints(&run);
         rewrite_checkpoint_index(&run, &checkpoints[..1]);
@@ -981,7 +1180,25 @@ mod tests {
         let fast = read_events_from_checkpoint(run.path()).expect("checkpoint read should succeed");
 
         let mut expected = vec![events[0].clone()];
-        expected.extend(events[3..].iter().cloned());
+        expected.extend(events[4..].iter().cloned());
         assert_eq!(fast, expected);
+    }
+
+    #[tokio::test]
+    async fn uncommitted_boundary_leaves_no_checkpoint_and_falls_back_to_full_replay() {
+        let run = TestRunDir::new("checkpoint-uncommitted-boundary");
+        let events = compacted_run_events();
+        // Simulate a crash after the first TranscriptCompacted landed but
+        // before its IterationCompleted: stop right after the compaction.
+        write_events(&run, &events[..8]).await;
+
+        assert!(
+            !compact_index_path(&run).exists(),
+            "the crash window must not produce a checkpoint"
+        );
+        assert_eq!(
+            read_events_from_checkpoint(run.path()).expect("read should succeed"),
+            events[..8]
+        );
     }
 }

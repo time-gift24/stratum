@@ -11,9 +11,16 @@
 //! preceding assistant `tool_calls`, and reconstructs the hook invocation
 //! journal.
 //!
-//! A replay window may start at a `TranscriptCompacted` line (a derived
-//! checkpoint index can skip the compacted prefix): when no `MessageAppended`
-//! preceded it in the window, the summary marker becomes the rebuild start.
+//! A replay window from a derived checkpoint index starts at the first
+//! retained message's line — `LoopStarted`, then the retained suffix, the
+//! compacted iteration's prepare journal records, the `TranscriptCompacted`
+//! line, and its iteration boundary. Replay applies compactions dual-mode:
+//! an `upto` within the rebuilt context is an absolute full-stream cut,
+//! while an overshooting `upto` marks a checkpoint window whose rebuilt
+//! messages are already the retained suffix, so the summary marker is
+//! prepended at index 0. Window legitimacy is the composing side's contract
+//! (checkpoint iteration/upto/digest verification at the storage boundary);
+//! replay accepts both modes uniformly.
 //!
 //! Tool execution stays at-least-once: a call whose `ToolExecutionStarted`
 //! committed without a result has an unknown outcome and simply re-executes as
@@ -83,9 +90,12 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
     let mut frontier = 0_u64;
     let mut iteration_start = 0_usize;
     // The kernel commits every prompt right after `LoopStarted`, before any
-    // hook, tool, or model activity: the leading `MessageAppended` run is
-    // exactly the prompt block, which belongs to the first iteration and
-    // seeds its start index.
+    // hook, tool, or model activity: in a full stream the leading
+    // `MessageAppended` run is exactly the prompt block, which belongs to the
+    // first iteration and seeds its start index. A checkpoint window has no
+    // prompt block — its leading messages are the retained suffix — so the
+    // seed is polluted there; the window-mode compaction branch discards it
+    // and derives the start from the window structure instead.
     let mut prompts_open = true;
     let mut compacted_iterations = HashSet::new();
     let mut seen_loop_started = false;
@@ -133,24 +143,46 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 compacted_iteration,
             } => {
                 let upto = usize::try_from(upto).unwrap_or(usize::MAX);
-                if messages.is_empty() {
-                    // A replay window starting at the compaction line (derived
-                    // checkpoint fast path) has no compacted prefix; the
-                    // summary marker becomes the rebuild start.
-                    messages.push(summary);
-                } else if upto == 0 || upto > messages.len() {
+                if upto > 0 && upto <= messages.len() {
+                    // Full-stream mode: `upto` is an absolute cut into the
+                    // context rebuilt so far. Compaction never cuts the
+                    // frontier iteration, so its start index shifts down by
+                    // the removed prefix length minus the one marker message.
+                    messages.splice(..upto, std::iter::once(summary));
+                    iteration_start = iteration_start.saturating_sub(upto.saturating_sub(1));
+                } else if upto > 0 {
+                    // Checkpoint window mode: the composing side started the
+                    // window at the first retained message's line, so the
+                    // rebuilt messages are exactly the retained suffix and
+                    // `upto` — an absolute coordinate of the pre-compaction
+                    // stream — overshoots it. The summary marker takes index
+                    // 0 and the retained suffix shifts right behind it; the
+                    // in-flight iteration then starts at index 1. The window
+                    // always carries its iteration boundary (checkpoints are
+                    // written only after it), which refreshes
+                    // `iteration_start` to `messages.len()` below; before
+                    // that the value is never consumed, because this
+                    // iteration's journaled compact decision skips the cut
+                    // check via `compacted_iterations`.
+                    //
+                    // Contract: window legitimacy is verified at the
+                    // composing side's storage boundary (the checkpoint's
+                    // iteration/upto/digest checks) before the window reaches
+                    // replay, so replay accepts both modes uniformly. A
+                    // corrupt full stream whose `upto` overshoots the rebuilt
+                    // context is indistinguishable from a window here; only a
+                    // zero cut remains detectably corrupt.
+                    messages.insert(0, summary);
+                    iteration_start = 1;
+                } else {
+                    // A zero cut with a non-empty rebuilt context is
+                    // corruption the kernel never writes.
                     tracing::warn!(
                         event_index,
                         event_type,
                         "refusing resume: compaction cut exceeds the rebuilt context"
                     );
                     return Err(ResumeError::CorruptedCompaction);
-                } else {
-                    messages.splice(..upto, std::iter::once(summary));
-                    // Compaction never cuts the frontier iteration, so its
-                    // start index shifts down by the removed prefix length
-                    // minus the one marker message.
-                    iteration_start = iteration_start.saturating_sub(upto.saturating_sub(1));
                 }
                 compacted_iterations.insert(compacted_iteration);
                 activity_after_frontier = true;
@@ -335,9 +367,11 @@ fn reconcile_tool_results(
 mod tests {
     use serde_json::json;
     use stratum_core::{
-        ApprovalDecision, ApprovalId, CallId, DangerLevel, TokenUsage, ToolKind, ToolName,
+        ApprovalDecision, ApprovalId, CallId, DangerLevel, HookDecisionRecord, HookInvocationId,
+        HookPoint, PrepareNextTurnDecisionRecord, TokenUsage, ToolKind, ToolName,
     };
 
+    use super::super::journal::hook_address_digest;
     use super::*;
 
     fn assistant_with_calls(call_ids: &[&str]) -> ChatMessage {
@@ -586,15 +620,21 @@ mod tests {
     }
 
     #[test]
-    fn replay_window_starting_at_a_compaction_uses_the_summary_as_start() {
-        // A derived checkpoint index lets replay skip the compacted prefix;
-        // the window then starts at the compaction line itself and the
-        // summary marker becomes the rebuild start.
+    fn replay_checkpoint_window_prepends_the_summary_marker() {
+        // The window starts at the first retained message's line: the rebuilt
+        // messages are the retained suffix when the compaction line arrives,
+        // so its absolute `upto` overshoots and the marker prepends.
         let events = vec![
             DurableAgentEvent::LoopStarted {
                 extension_set_version_id: None,
             },
-            compaction(7, "checkpoint summary", 3),
+            DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("retained answer"),
+            },
+            DurableAgentEvent::MessageAppended {
+                message: tool_result("call-1"),
+            },
+            compaction(5, "checkpoint summary", 3),
             DurableAgentEvent::MessageAppended {
                 message: ChatMessage::assistant("later answer"),
             },
@@ -610,23 +650,91 @@ mod tests {
             replay.messages,
             vec![
                 ChatMessage::system("checkpoint summary"),
+                ChatMessage::assistant("retained answer"),
+                tool_result("call-1"),
                 ChatMessage::assistant("later answer"),
             ]
         );
         assert_eq!(replay.frontier, 5);
-        assert_eq!(replay.iteration_start, 2);
+        assert_eq!(replay.iteration_start, 4);
         assert!(replay.compacted_iterations.contains(&3));
     }
 
     #[test]
-    fn replay_rejects_a_compaction_cut_outside_the_rebuilt_context() {
-        let mut beyond = stream(vec![ChatMessage::user("one")]);
-        beyond.push(compaction(3, "summary", 0));
-        assert_eq!(
-            replay_events(beyond).expect_err("a cut past the context must fail closed"),
-            ResumeError::CorruptedCompaction,
-        );
+    fn checkpoint_window_replays_byte_identically_to_the_full_stream() {
+        // Full stream: four prompts, one assistant answer, the prepare
+        // journal records, the compaction, and the boundary.
+        let invocation_id = HookInvocationId::new();
+        let prepare_digest = hook_address_digest(0, HookPoint::PrepareNextTurn);
+        let prepare_records = vec![
+            DurableAgentEvent::HookInvocationPending {
+                invocation_id,
+                point: HookPoint::PrepareNextTurn,
+                iteration: 0,
+                call_id: None,
+                input_digest: prepare_digest,
+            },
+            DurableAgentEvent::HookInvocationCompleted {
+                invocation_id,
+                decision: HookDecisionRecord::PrepareNextTurn(
+                    PrepareNextTurnDecisionRecord::Compact {
+                        upto: 4,
+                        summary: ChatMessage::system("summary so far"),
+                    },
+                ),
+            },
+        ];
+        let marker = compaction(4, "[stratum:transcript-compacted]\nsummary so far", 0);
+        let boundary = DurableAgentEvent::IterationCompleted {
+            iteration: 0,
+            usage: TokenUsage::default(),
+        };
+        let mut full = stream(vec![
+            ChatMessage::user("one"),
+            ChatMessage::user("two"),
+            ChatMessage::user("three"),
+            ChatMessage::user("four"),
+            ChatMessage::assistant("answer"),
+        ]);
+        full.extend(prepare_records.iter().cloned());
+        full.push(marker.clone());
+        full.push(boundary.clone());
 
+        // Window: LoopStarted plus everything from the first retained
+        // message's line — the retained suffix, the prepare journal records,
+        // the compaction, and the boundary.
+        let window = vec![
+            DurableAgentEvent::LoopStarted {
+                extension_set_version_id: None,
+            },
+            DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("answer"),
+            },
+        ]
+        .into_iter()
+        .chain(prepare_records)
+        .chain([marker, boundary])
+        .collect();
+
+        let full_replay = replay_events(full).expect("the full stream should replay");
+        let window_replay = replay_events(window).expect("the window should replay");
+
+        assert_eq!(window_replay.messages, full_replay.messages);
+        assert_eq!(window_replay.frontier, full_replay.frontier);
+        assert_eq!(window_replay.iteration_start, full_replay.iteration_start);
+        assert_eq!(
+            window_replay.compacted_iterations, full_replay.compacted_iterations,
+            "the window must rebuild the same compacted-iteration set"
+        );
+        let address = HookAddress::new(0, HookPoint::PrepareNextTurn, None);
+        assert!(
+            window_replay.journal.lookup(&address).is_some(),
+            "the window carries the prepare journal records"
+        );
+    }
+
+    #[test]
+    fn replay_rejects_a_zero_compaction_cut() {
         let mut zero = stream(vec![ChatMessage::user("one")]);
         zero.push(compaction(0, "summary", 0));
         assert_eq!(

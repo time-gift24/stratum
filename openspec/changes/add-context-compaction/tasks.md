@@ -17,8 +17,8 @@
 
 ## 3b. stratum-infra：压缩检查点索引
 
-- [x] 3.3 `FilesystemDurableEventSink` 在 `TranscriptCompacted` 落盘后向 `compact.jsonl` 追加检查点（`compacted_iteration`、`event_line`、`upto`、`summary_digest`），写入顺序不可逆（先事件流后索引）
-- [x] 3.4 resume 快速路径：读取 `LoopStarted` 与最新检查点，校验事件流对应行后从该行起重放；索引缺失/损坏/不匹配回退全量重放（不 fail closed）
+- [x] 3.3 `FilesystemDurableEventSink` 在压缩的 `IterationCompleted` 落盘后向 `compact.jsonl` 追加检查点（`compacted_iteration`、`window_start_line`、`upto`、`summary_digest`）；`window_start_line` 为第一条保留消息的物理行（写时扫文件定位第 upto 个 `message_appended`）；写入顺序不可逆（先事件与边界后索引）
+- [x] 3.4 resume 快速路径：读取 `LoopStarted` 与最新检查点，校验窗口起始行为 `message_appended` 且窗口内存在三项一致的 `TranscriptCompacted` 后从该行起重放；索引缺失/损坏/不匹配回退全量（不 fail closed）；stratum-agent replay 支持窗口模式（`upto` 超当前长度时当前 messages 即保留后缀，直接前置 summary）
 
 ## 4. 测试
 
@@ -26,8 +26,8 @@
 - [x] 4.2 压缩执行：TranscriptCompacted 先于迭代边界提交；压缩后下一次模型请求的 context 是压缩基线；new_messages 含摘要标记；transform 快照首条为 kernel 标记消息（handler 可识别已压缩）
 - [x] 4.3 链语义：Compact 短路、与 Inject/Stop 的组合矩阵
 - [x] 4.4 resume：重放应用单次/多次压缩；崩溃窗口回放（摘要不二次生成、Handler 不被调用）；压缩前 journal 记录压缩后仍可匹配
-- [x] 4.5 检查点索引：快速路径与全量重放结果一致；索引缺失/截断/校验不匹配回退全量；事件已落盘而索引未写的崩溃窗口行为正确
-- [ ] 4.6 constitution-review：对照根 CONSTITUTION.md 派发子代理分条款审查本 change 完整 diff，修复全部 red-flag 与 violation
+- [x] 4.5 检查点索引：快速路径与全量重放结果逐字节一致（含窗口自带保留后缀与边界）；压缩后立即崩溃（边界未提交）无检查点、走全量且 journal 完整；索引缺失/截断/校验不匹配回退全量；窗口模式 replay（`upto` 超当前长度时前置 summary）
+- [x] 4.6 constitution-review：对照根 CONSTITUTION.md 派发子代理分条款审查本 change 完整 diff，修复全部 red-flag 与 violation
 
 ## 5. 文档、质量门禁与校验
 

@@ -67,6 +67,18 @@ pub enum FilesystemEventSinkError {
         #[source]
         source: std::io::Error,
     },
+    /// The first retained message of a compaction could not be located in the
+    /// event log.
+    #[error(
+        "event log {} contains no retained message at committed index {upto}",
+        path.display()
+    )]
+    MissingRetainedMessage {
+        /// Event log that was scanned.
+        path: PathBuf,
+        /// Committed-context index of the retained message that was not found.
+        upto: u64,
+    },
     /// The run directory could not be fsynced after an append.
     #[error("failed to sync run directory {}", path.display())]
     SyncRunDir {
