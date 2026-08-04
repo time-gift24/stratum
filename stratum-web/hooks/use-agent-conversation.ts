@@ -71,7 +71,7 @@ export type AgentConversation = {
   resolveApproval(
     approvalId: string,
     decision: "approve" | "reject"
-  ): Promise<void>
+  ): Promise<boolean>
   reconnect(): void
   removeRecentAgent(agentId: string): void
 }
@@ -399,13 +399,15 @@ export function useAgentConversation(): AgentConversation {
   const resolveApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject") => {
       const client = selectedClient()
-      if (!client) return
+      if (!client) return false
 
       try {
         await client.api.resolveApproval(client.agentId, approvalId, decision)
+        return true
       } catch (error) {
         if (client.generation === selectionGeneration.current)
           reportError(error)
+        return false
       }
     },
     [reportError, selectedClient]

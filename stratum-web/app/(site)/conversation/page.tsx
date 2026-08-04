@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 
 import { ApprovalDock } from "@/components/stratum/conversation/approval-dock"
 import { ConversationThread } from "@/components/stratum/conversation/conversation-thread"
@@ -108,6 +108,9 @@ export default function ConversationPage() {
   const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(
     new Set()
   )
+  // 双击竞态的同步守卫（state 闭包读不到同帧最新值）。agent 切换无需重置：
+  // 旧 id 必然不在新会话的 state.approvals 里，前置 guard 已挡
+  const submittingRef = useRef<Set<string>>(new Set())
   const [approvalOutcomes, setApprovalOutcomes] = useState<
     Record<string, { approval: ApprovalRequest; decision: "approve" | "reject" }>
   >({})
@@ -166,32 +169,34 @@ export default function ConversationPage() {
   const handleResolveApproval = useCallback(
     (approvalId: string, decision: "approve" | "reject") => {
       const approval = state.approvals[approvalId]
-      if (!approval || submittingApprovals.has(approvalId)) return
+      // ref 同步 check-and-add：同帧双击必被挡（state 闭包读不到最新值）
+      if (!approval || submittingRef.current.has(approvalId)) return
+      submittingRef.current.add(approvalId)
       setSubmittingApprovals((prev) => new Set(prev).add(approvalId))
-      // hook 内部负责错误上报；失败时审批留在 state.approvals，自动回退待决
-      void resolveApproval(approvalId, decision).finally(() => {
+      // hook 返回 boolean：失败不记 outcome，审批留在 state.approvals 回退待决
+      void resolveApproval(approvalId, decision).then((ok) => {
+        submittingRef.current.delete(approvalId)
         setSubmittingApprovals((prev) => {
           const next = new Set(prev)
           next.delete(approvalId)
           return next
         })
-        setApprovalOutcomes((prev) => ({
-          ...prev,
-          [approvalId]: { approval, decision },
-        }))
+        if (ok)
+          setApprovalOutcomes((prev) => ({
+            ...prev,
+            [approvalId]: { approval, decision },
+          }))
       })
     },
-    [resolveApproval, state.approvals, submittingApprovals]
+    [resolveApproval, state.approvals]
   )
 
   // 冷段：已落成消息 → 视图对象（只在消息落成/工具结果/审批/历史标记变化时
   // 重跑；WeakMap 缓存保证未变消息复用旧对象引用）
-  const settledMessages = useMemo<ConversationMessage[]>(() => {
-    return state.messages
+  const settled = useMemo(() => {
+    const views: ConversationMessage[] = state.messages
       .filter(
-        (message) =>
-          (message.role === "user" || message.role === "assistant") &&
-          message.text !== null
+        (message) => message.role === "user" || message.role === "assistant"
       )
       .map((message) => {
         const id = `${message.agentId}:${message.messageSeq}`
@@ -251,18 +256,20 @@ export default function ConversationPage() {
         settledViewCache.set(message, { inputs, view })
         return view
       })
+    // 已落成消息里的工具 callId（用于把已提交的调用从实时 tools 中排除）
+    const callIds = new Set(
+      views.flatMap((message) =>
+        (message.toolCalls ?? []).map((toolCall) => toolCall.callId)
+      )
+    )
+    return { messages: views, callIds }
   }, [state.messages, state.tools, approvalEntries, historical])
 
   // 热段：draft/实时 tools/连接错误（流式 token 每帧重跑，但只追加新对象，
   // settled 部分整体复用）
   const messages = useMemo<ConversationMessage[]>(() => {
-    const result: ConversationMessage[] = [...settledMessages]
-    // 已落成消息里的工具 callId（用于把已提交的调用从实时 tools 中排除）
-    const stableCallIds = new Set(
-      settledMessages.flatMap((message) =>
-        (message.toolCalls ?? []).map((toolCall) => toolCall.callId)
-      )
-    )
+    const result: ConversationMessage[] = [...settled.messages]
+    const stableCallIds = settled.callIds
     const attachApproval = (call: ConversationToolCall): ConversationToolCall => {
       const entry = approvalEntries.get(call.callId)
       return entry ? { ...call, approval: entry.view } : call
@@ -299,13 +306,13 @@ export default function ConversationPage() {
       }
     }
 
-    const draftText = Object.values(state.drafts)
-      .map((draft) => draft.text)
-      .join("")
-    // 流式 reasoning：各 draft 的 reasoning 按到达顺序拼接（不分段）
-    const draftReasoning = Object.values(state.drafts)
-      .map((draft) => draft.reasoning)
-      .join("")
+    // 流式 text/reasoning：各 draft 按到达顺序拼接（不分段，单趟循环）
+    let draftText = ""
+    let draftReasoning = ""
+    for (const draft of Object.values(state.drafts)) {
+      draftText += draft.text
+      draftReasoning += draft.reasoning
+    }
     const status = state.view?.status
     if (status === "running") {
       result.push({
@@ -355,7 +362,7 @@ export default function ConversationPage() {
 
     return result
   }, [
-    settledMessages,
+    settled,
     state.drafts,
     state.tools,
     state.view?.status,
@@ -381,7 +388,10 @@ export default function ConversationPage() {
       ? null
       : currentThinkingLevel(selectedModelConfig.parameters)
 
+  const [sendVersion, setSendVersion] = useState(0)
   const handleSubmit = (value: string) => {
+    // 发送信号：让 thread 把随后的 null → 新 agentId 识别为同一对话的首发
+    setSendVersion((version) => version + 1)
     if (state.agentId === null) void createConversation(value)
     else void sendMessage(value)
   }
@@ -403,6 +413,9 @@ export default function ConversationPage() {
 
         <ConversationThread
           messages={messages}
+          conversationId={state.agentId}
+          sendVersion={sendVersion}
+          recovering={state.phase === "recovering"}
           welcome={WELCOME}
           composer={
             <div className="relative">

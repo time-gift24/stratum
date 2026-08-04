@@ -236,13 +236,14 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [activeVersion, setActiveVersion] = useState(0)
 
   // 版本数变化（如重新生成追加了新版本）时在渲染期派生跳到最新一版，
-  // 不写 effect（React 官方 "derive state during render" 模式）
+  // 不写 effect（React 官方 "derive state during render" 模式）；
+  // 无条件钳到最后一版，兼作 versions 缩小时 activeVersion 的越界钳位
   const [prevVersionCount, setPrevVersionCount] = useState(
     versions?.length ?? 0
   )
   if (versions && versions.length !== prevVersionCount) {
     setPrevVersionCount(versions.length)
-    if (versions.length > 1) setActiveVersion(versions.length - 1)
+    setActiveVersion(versions.length - 1)
   }
 
   const body = versions ? versions[activeVersion] : message.content

@@ -25,7 +25,7 @@
 ## Layout & Chrome
 
 - 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx`（数据来自 `components/react-bits/site-nav.tsx`，fixed 悬浮不占位），只挂对话入口。SideDockNav 双 nav 体系已删除。
-- 页面自管避让：对话页（`app/(site)/conversation/page.tsx`）整屏 `h-svh` + 顶部留白（`pt-24 sm:pt-28`）；消息列 `max-w-[44rem]` 居中；composer sticky 在消息列底部。空会话是 Gemini 式居中开场：欢迎语 + composer 整体垂直居中（同一 DOM 树，`justify-center` + 去掉 sticky/mt-auto），首发消息时 GSAP FLIP 滑回底部。
+- 页面自管避让：对话页（`app/(site)/conversation/page.tsx`）整屏 `h-svh` + 顶部留白（`pt-24 sm:pt-28`）；消息列 `max-w-[44rem]` 居中；composer sticky 在消息列底部。空会话是 Gemini 式居中开场：composer 脱离文档流绝对居中（`absolute inset-0` + flex 居中，位置与上方欢迎语/未来内容解耦，欢迎语独立锚定在中线上方），首发消息与回空态都做 GSAP FLIP（双向，composer 在中心 ⇄ 底部间滑动）。
 - 会话列表 `components/stratum/conversation/thread-list-rail.tsx`：页面内 absolute 悬浮卡片，收起为图标列（w-11）、展开 w-64，选中态 `bg-primary/15 text-primary`，Esc 收回。
 
 ## Components
