@@ -12,9 +12,13 @@
 //!   handler's output (`Cow`, so a chain that modifies nothing never copies).
 //! - `decide_tool_call` returns the first `Block`, short-circuiting the rest
 //!   of the chain.
-//! - `prepare_next_turn` short-circuits on the first `Stop` (discarding
-//!   injections collected so far — a stopped loop has no next turn) and merges
-//!   multiple `Inject` decisions into one, in handler order.
+//! - `prepare_next_turn` merges multiple `Inject` decisions into one, in
+//!   handler order, and short-circuits on the first terminal decision —
+//!   `Stop` or `Compact` — discarding injections collected so far (a stopped
+//!   loop has no next turn, and a compacted baseline has no "continue as
+//!   before" to merge into). `Stop` and `Compact` are peers: whichever a
+//!   handler returns first settles the chain, and later handlers are not
+//!   called.
 //! - Any handler failure or invalid decision fails the whole hook point
 //!   closed; later handlers are not called.
 //!
@@ -272,11 +276,20 @@ impl HookRuntime for ChainHookRuntime {
             decision.check()?;
             match decision {
                 PrepareNextTurnDecision::Continue => {}
-                // A stopped loop has no next turn, so injections collected so
-                // far are discarded with the short-circuit.
+                // Stop and Compact are peer terminal decisions: the first one
+                // settles the chain, and injections collected so far are
+                // discarded with the short-circuit (a stopped loop has no
+                // next turn; a compacted baseline absorbs the turn).
                 PrepareNextTurnDecision::Stop => {
                     tracing::debug!(handler_index, "hook chain short-circuits on the first stop");
                     return Ok(PrepareNextTurnDecision::Stop);
+                }
+                PrepareNextTurnDecision::Compact { .. } => {
+                    tracing::debug!(
+                        handler_index,
+                        "hook chain short-circuits on the first compact"
+                    );
+                    return Ok(decision);
                 }
                 PrepareNextTurnDecision::Inject { messages } => injected.extend(messages),
             }
@@ -1094,6 +1107,113 @@ mod tests {
         assert_eq!(observed.len(), 2, "the handler after a stop must not run");
         assert_eq!(observed[0].0, "injector");
         assert_eq!(observed[1].0, "stopper");
+    }
+
+    #[tokio::test]
+    async fn prepare_compact_discards_collected_injections_and_short_circuits() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let injector = ScriptableHandler::new("injector", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Inject {
+                messages: vec![ChatMessage::user("discarded")],
+            }))]);
+        let compactor = ScriptableHandler::new("compactor", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Compact {
+                upto: 1,
+                summary: ChatMessage::system("summary so far"),
+            }))]);
+        let chain = build_chain(vec![
+            Arc::new(injector),
+            Arc::new(compactor),
+            handler("never", HookHandlerVersionId::new(), &log),
+        ]);
+        let context = test_context();
+        let snapshot = HookSnapshot::new(2, &context, None);
+
+        let decision = chain
+            .prepare_next_turn(PrepareNextTurnInput { snapshot }, test_control())
+            .await
+            .expect("chain should succeed");
+
+        assert_eq!(
+            decision,
+            PrepareNextTurnDecision::Compact {
+                upto: 1,
+                summary: ChatMessage::system("summary so far"),
+            }
+        );
+        let observed = calls(&log);
+        assert_eq!(
+            observed.len(),
+            2,
+            "the handler after a compact must not run"
+        );
+        assert_eq!(observed[0].0, "injector");
+        assert_eq!(observed[1].0, "compactor");
+    }
+
+    #[tokio::test]
+    async fn prepare_first_terminal_decision_wins_between_compact_and_stop() {
+        let context = test_context();
+        let snapshot = HookSnapshot::new(2, &context, None);
+
+        // Compact before Stop: the compact settles the chain.
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let compactor = ScriptableHandler::new("compactor", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Compact {
+                upto: 1,
+                summary: ChatMessage::system("summary so far"),
+            }))]);
+        let stopper = ScriptableHandler::new("stopper", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Stop))]);
+        let chain = build_chain(vec![Arc::new(compactor), Arc::new(stopper)]);
+
+        let decision = chain
+            .prepare_next_turn(PrepareNextTurnInput { snapshot }, test_control())
+            .await
+            .expect("chain should succeed");
+
+        assert!(matches!(decision, PrepareNextTurnDecision::Compact { .. }));
+        assert_eq!(calls(&log).len(), 1, "the stopper must not run");
+
+        // Stop before Compact: the stop settles the chain.
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let stopper = ScriptableHandler::new("stopper", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Stop))]);
+        let compactor = ScriptableHandler::new("compactor", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Compact {
+                upto: 1,
+                summary: ChatMessage::system("summary so far"),
+            }))]);
+        let chain = build_chain(vec![Arc::new(stopper), Arc::new(compactor)]);
+
+        let decision = chain
+            .prepare_next_turn(PrepareNextTurnInput { snapshot }, test_control())
+            .await
+            .expect("chain should succeed");
+
+        assert_eq!(decision, PrepareNextTurnDecision::Stop);
+        assert_eq!(calls(&log).len(), 1, "the compactor must not run");
+    }
+
+    #[tokio::test]
+    async fn prepare_invalid_compact_fails_closed_and_stops_the_chain() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let invalid = ScriptableHandler::new("invalid", HookHandlerVersionId::new(), &log)
+            .with_prepares([Action::Return(Ok(PrepareNextTurnDecision::Compact {
+                upto: 1,
+                summary: ChatMessage::assistant("forged"),
+            }))]);
+        let later = handler("later", HookHandlerVersionId::new(), &log);
+        let chain = build_chain(vec![Arc::new(invalid), later]);
+        let context = test_context();
+        let snapshot = HookSnapshot::new(2, &context, None);
+
+        let result = chain
+            .prepare_next_turn(PrepareNextTurnInput { snapshot }, test_control())
+            .await;
+
+        assert_eq!(result, Err(HookFailure::InvalidOutput));
+        assert_eq!(calls(&log).len(), 1, "the later handler must not run");
     }
 
     #[tokio::test]

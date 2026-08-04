@@ -45,6 +45,11 @@ struct RunStart {
     first_iteration: usize,
     continuation: Option<ResumeContinuation>,
     journal: HookJournal,
+    /// Committed message index where the first (frontier) iteration's messages
+    /// begin; compaction cuts must not reach past it.
+    iteration_start: usize,
+    /// Iterations whose compaction the replay already applied.
+    compacted_iterations: HashSet<u64>,
 }
 
 /// Loop-carried state of one run: messages committed during the run and the
@@ -52,6 +57,12 @@ struct RunStart {
 struct IterationState {
     new_messages: Vec<ChatMessage>,
     pending_inject: Option<Vec<ChatMessage>>,
+    /// Committed message index where the current iteration's messages begin;
+    /// compaction cuts must not reach past it.
+    iteration_start: usize,
+    /// Iterations whose compaction the replay already applied; their prepare
+    /// boundary reuses the journaled decision without re-executing.
+    compacted_iterations: HashSet<u64>,
 }
 
 impl AgentLoop {
@@ -105,11 +116,13 @@ impl AgentLoop {
         // the loop outcome project it back to a zero-filled `TokenUsage`.
         let mut usage: Option<TokenUsage> = None;
         let start = RunStart {
+            iteration_start: context.messages.len() + prompts.len(),
             context,
             prompts,
             first_iteration: 0,
             continuation: None,
             journal: HookJournal::default(),
+            compacted_iterations: HashSet::new(),
         };
         let result = self.run_started(start, &cancellation, &mut usage).await;
         self.finish_run(result, usage).await
@@ -121,8 +134,10 @@ impl AgentLoop {
     /// prompt and run configuration (provider, tool executor, hook runtime,
     /// limits stay on this loop); the kernel never reads storage itself. The
     /// stream must start with [`DurableAgentEvent::LoopStarted`] and must not
-    /// contain a terminal event. Replay rebuilds the committed context, fixes
-    /// the iteration frontier at one past the maximum committed
+    /// contain a terminal event. Replay rebuilds the committed context —
+    /// applying every [`DurableAgentEvent::TranscriptCompacted`] in event
+    /// order, so the baseline resumes already compacted — fixes the iteration
+    /// frontier at one past the maximum committed
     /// [`DurableAgentEvent::IterationCompleted`], reconciles committed tool
     /// results, and consults the journaled hook invocations before calling
     /// the hook runtime again: digest-matching completed decisions are reused,
@@ -178,6 +193,8 @@ impl AgentLoop {
             first_iteration: usize::try_from(replay.frontier).unwrap_or(usize::MAX),
             continuation: replay.continuation,
             journal: replay.journal,
+            iteration_start: replay.iteration_start,
+            compacted_iterations: replay.compacted_iterations,
         };
         // Usage is a volatile observation, not resume state: the first hook
         // boundary after a resume observes `None` until the next model
@@ -604,17 +621,27 @@ impl AgentLoop {
     /// one completed tool cycle, applying the hook decision.
     ///
     /// The journaled `HookInvocationCompleted` always precedes the durable
-    /// `IterationCompleted` boundary. Returns the finished outcome when the
-    /// hook stopped the loop.
+    /// `IterationCompleted` boundary. A compact decision additionally executes
+    /// in between: the kernel validates the cut in committed-context
+    /// coordinates (see the `compaction` module), commits
+    /// `TranscriptCompacted`, and rewrites the committed prefix to the summary
+    /// marker message before the boundary commits. When replay already applied
+    /// this iteration's compaction (the boundary crash window), the journaled
+    /// decision is reused without re-executing or re-committing the
+    /// compaction. Returns the finished outcome when the hook stopped the
+    /// loop.
     async fn close_tool_cycle(
         &self,
         iteration_index: u64,
-        context: &LoopContext,
+        context: &mut LoopContext,
         usage: Option<TokenUsage>,
         state: &mut IterationState,
         journal: &HookJournal,
         cancellation: &CancellationToken,
     ) -> Result<Option<LoopOutcome>, AgentLoopError> {
+        let cut_base = state.iteration_start;
+        let already_compacted = state.compacted_iterations.contains(&iteration_index);
+        let committed = &*context;
         // Cancellation degrades the decision to Continue so the iteration
         // boundary is committed before the loop reaches its regular
         // cancellation check.
@@ -636,14 +663,21 @@ impl AgentLoop {
                         PrepareNextTurnInput {
                             snapshot: HookSnapshot {
                                 iteration: iteration_index,
-                                context,
+                                context: committed,
                                 usage,
                             },
                         },
                         control,
                     )
                 },
-                PrepareNextTurnDecision::check,
+                |decision| {
+                    validate_prepare_next_turn(
+                        decision,
+                        &committed.messages,
+                        cut_base,
+                        already_compacted,
+                    )
+                },
             )
             .await?
         {
@@ -651,15 +685,37 @@ impl AgentLoop {
             HookInvocation::Cancelled => PrepareNextTurnDecision::Continue,
         };
 
+        // A compact decision executes before the iteration boundary: the
+        // compaction must be durable first so replay never rebuilds a
+        // boundary whose baseline rewrite is missing. The summary marker is
+        // a committed message of this run, so it joins the loop outcome.
+        if let PrepareNextTurnDecision::Compact { upto, summary } = &prepare
+            && !already_compacted
+        {
+            let marker = super::compaction::compaction_marker(summary);
+            self.durable_events
+                .append(DurableAgentEvent::TranscriptCompacted {
+                    upto: u64::try_from(*upto).unwrap_or(u64::MAX),
+                    summary: marker.clone(),
+                    compacted_iteration: iteration_index,
+                })
+                .await?;
+            context
+                .messages
+                .splice(..*upto, std::iter::once(marker.clone()));
+            state.new_messages.push(marker);
+        }
+
         self.durable_events
             .append(DurableAgentEvent::IterationCompleted {
                 iteration: iteration_index,
                 usage: usage.unwrap_or_default(),
             })
             .await?;
+        state.iteration_start = context.messages.len();
 
         match prepare {
-            PrepareNextTurnDecision::Continue => Ok(None),
+            PrepareNextTurnDecision::Continue | PrepareNextTurnDecision::Compact { .. } => Ok(None),
             PrepareNextTurnDecision::Inject { messages } => {
                 state.pending_inject = Some(messages);
                 Ok(None)
@@ -692,6 +748,8 @@ impl AgentLoop {
             first_iteration,
             continuation,
             journal,
+            iteration_start,
+            compacted_iterations,
         } = start;
         let mut seen_tool_call_ids = committed_tool_call_ids(&context.messages);
         if cancellation.is_cancelled() {
@@ -700,6 +758,8 @@ impl AgentLoop {
         let mut state = IterationState {
             new_messages: Vec::with_capacity(prompts.len() + 1),
             pending_inject: None,
+            iteration_start,
+            compacted_iterations,
         };
         for prompt in prompts {
             self.durable_events
@@ -747,7 +807,7 @@ impl AgentLoop {
                     if let Some(outcome) = self
                         .close_tool_cycle(
                             iteration_index,
-                            &context,
+                            &mut context,
                             *usage,
                             &mut state,
                             &journal,
@@ -762,7 +822,7 @@ impl AgentLoop {
                     if let Some(outcome) = self
                         .close_tool_cycle(
                             iteration_index,
-                            &context,
+                            &mut context,
                             *usage,
                             &mut state,
                             &journal,
@@ -925,7 +985,7 @@ impl AgentLoop {
                 if let Some(outcome) = self
                     .close_tool_cycle(
                         iteration_index,
-                        &context,
+                        &mut context,
                         *usage,
                         &mut state,
                         &journal,
@@ -1040,6 +1100,26 @@ impl AgentLoopBuilder {
             limits: self.limits,
         })
     }
+}
+
+/// Validates a prepare-next-turn decision: the decision contract itself,
+/// plus the committed-coordinate cut check for a compaction that still needs
+/// to execute. A compaction whose `TranscriptCompacted` already replayed (the
+/// boundary crash window) skips the cut check: its prefix coordinates no
+/// longer exist in the rebuilt context.
+fn validate_prepare_next_turn(
+    decision: &PrepareNextTurnDecision,
+    committed: &[ChatMessage],
+    iteration_start: usize,
+    already_compacted: bool,
+) -> Result<(), HookFailure> {
+    decision.check()?;
+    if let PrepareNextTurnDecision::Compact { upto, .. } = decision
+        && !already_compacted
+    {
+        super::compaction::validate_compaction_cut(committed, *upto, iteration_start)?;
+    }
+    Ok(())
 }
 
 /// Validates a context patch against the committed messages: `upto` is a

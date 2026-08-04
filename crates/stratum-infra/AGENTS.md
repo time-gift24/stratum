@@ -52,6 +52,19 @@
   typed error, and a malformed tail line is ignored as crash truncation. The reader does blocking
   IO; async callers with large logs should offload it with `spawn_blocking`. No retention or
   cleanup policy exists yet; that decision belongs to the future sqlite backend.
+- A `TranscriptCompacted` append only records a pending compaction in memory; the following
+  `IterationCompleted` flushes one `CompactionCheckpoint` line to `<root>/<run_id>/compact.jsonl`
+  after the boundary is durable (write order is irreversible: boundary first, index second). The
+  index is a rebuildable derivative, never a second source of truth; it only accelerates resume.
+  `window_start_line` is the physical line of the first retained message — the committed-context
+  message at index `upto` — located by scanning the log and replaying committed-message ordinals
+  (earlier compactions shift ordinals by `upto - 1`; the summary has no `message_appended` line).
+  `read_events_from_checkpoint(run_dir)` validates the head `LoopStarted`, that the window starts
+  at a `message_appended`, and that the window contains a `TranscriptCompacted` matching the
+  checkpoint's iteration/upto/summary sha-256, then returns `LoopStarted` plus the self-contained
+  window (retained suffix, prepare journal records, compaction event, iteration boundary). A
+  missing, empty, truncated, corrupt, or mismatching index falls back to a full `read_events`
+  replay — index problems never fail closed; only event-log corruption itself is a typed error.
 - Durable projection includes loop start, complete messages, approvals, tool execution start,
   iteration completion, and terminal events. Telemetry projection includes supported LLM start,
   text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit

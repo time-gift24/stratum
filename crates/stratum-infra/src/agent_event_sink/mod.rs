@@ -7,5 +7,8 @@ mod scoped;
 
 pub use definition::{DurableEventSink, TelemetryEventSink};
 pub use error::{DurableEventSinkError, FilesystemEventSinkError};
-pub use filesystem::{EVENTS_FILE_NAME, FilesystemDurableEventSink, read_events};
+pub use filesystem::{
+    COMPACT_INDEX_FILE_NAME, CompactionCheckpoint, EVENTS_FILE_NAME, FilesystemDurableEventSink,
+    read_events, read_events_from_checkpoint,
+};
 pub use scoped::ScopedAgentEventSink;

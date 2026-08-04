@@ -53,7 +53,7 @@ AgentLoop 必须（SHALL）在每次模型请求开始前调用 `transform_conte
 - **THEN** AgentLoop 不提交伪造或未变换的 Tool result，并以类型化 Hook 错误 fail closed
 
 ### Requirement: Prepare Next Turn 控制下一次模型迭代
-当一个被授权的 Tool cycle 的全部模型可见结果已耐久提交后，AgentLoop 必须（SHALL）调用 `prepare_next_turn`。Decision 必须（SHALL）是 Continue、Stop 或 Inject 非空 User message 列表。
+当一个被授权的 Tool cycle 的全部模型可见结果已耐久提交后，AgentLoop 必须（SHALL）调用 `prepare_next_turn`。Decision 必须（SHALL）是 Continue、Stop、Inject 非空 User message 列表，或携带切割点与摘要的 Compact（其执行语义由 context-compaction 能力定义）。
 
 #### Scenario: 继续下一迭代
 - **WHEN** prepare-next-turn decision 是 Continue
@@ -70,6 +70,14 @@ AgentLoop 必须（SHALL）在每次模型请求开始前调用 `transform_conte
 #### Scenario: 拒绝非法 Inject
 - **WHEN** Inject 为空，或包含非 User role、Tool call、reasoning content 或 tool-call identity
 - **THEN** AgentLoop 返回 `HookFailure::InvalidOutput`，不开始下一次模型请求
+
+#### Scenario: Compact 触发持久压缩
+- **WHEN** prepare-next-turn decision 是携带合法切割点与 system 摘要消息的 Compact
+- **THEN** AgentLoop 先提交该 decision 的 Completed 记录，再执行 durable 基线改写，随后提交迭代边界并开始下一次模型迭代
+
+#### Scenario: 压缩后快照即为新基线
+- **WHEN** 压缩完成后的下一次迭代调用 transform_context 或 prepare_next_turn
+- **THEN** HookSnapshot 的 context 是压缩后的 committed 基线
 
 ### Requirement: 所有 Hook 共享取消、Deadline 与错误语义
 AgentLoop 必须（SHALL）为每个 Hook 提供当前 CancellationToken，并且必须（SHALL）在核心循环边界强制取消与 timeout，而不是依赖具体 Runtime 自行遵守。Hook deadline 必须（SHALL）按 HookPoint 独立配置并带有默认值；`decide_tool_call` 的默认配置必须（SHALL）是无 deadline（仅受取消约束），以容纳交互式审批的长时间等待。Decision-affecting Hook 失败必须（SHALL）阻止受影响的模型、Tool、message 或 iteration action 继续。

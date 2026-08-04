@@ -148,6 +148,7 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 - 示例中避免 `unwrap()`，优先使用 `?`。
 - 不要提交 `docs/superpowers/` 这类 superpower 过程文档；它们只用于临时协作。
 - 最终设计和实现约定要简洁、明确地归档到相关 crate 的 `AGENTS.md` 中。
+- 内核领域词汇表在根目录 `CONTEXT.md`（第一性模型 + 术语定义）；改动 kernel 前先读，术语随 change 演进时同步更新。
 - 实现完成后、PR 合入前，必须提醒用户完成 crate `AGENTS.md` 归档。
 
 ## Git 工作流

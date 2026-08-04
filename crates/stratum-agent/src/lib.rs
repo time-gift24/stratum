@@ -9,8 +9,9 @@ pub mod tool_executor;
 pub(crate) mod r#loop;
 
 pub use agent_loop::{
-    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, HookTimeouts,
-    LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome, ProtocolError, ResumeError,
+    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, COMPACTION_MARKER_PREFIX,
+    HookTimeouts, LoopCompletionReason, LoopContext, LoopLimits, LoopOutcome, ProtocolError,
+    ResumeError,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;

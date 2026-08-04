@@ -97,6 +97,23 @@ pub enum DurableAgentEvent {
         /// Safe typed failure classification.
         failure: HookFailure,
     },
+    /// The committed transcript prefix was durably compacted.
+    ///
+    /// The kernel commits this event at an iteration boundary after a
+    /// `prepare_next_turn` hook returned a validated compact decision, before
+    /// that iteration's `IterationCompleted`. The event log keeps every
+    /// original message; only the rebuilt view changes: replay replaces the
+    /// rebuilt prefix `[0, upto)` with `summary`. `upto` is a zero-based,
+    /// left-closed/right-open index into the committed context exactly as the
+    /// prepare snapshot presented it.
+    TranscriptCompacted {
+        /// Exclusive end index of the replaced committed-context prefix.
+        upto: u64,
+        /// Kernel-owned system marker message replacing the prefix.
+        summary: ChatMessage,
+        /// Iteration whose prepare boundary executed the compaction.
+        compacted_iteration: u64,
+    },
     /// One loop iteration reached its durable boundary.
     IterationCompleted {
         /// Iteration number.
@@ -178,6 +195,11 @@ enum DurableAgentEventWire {
         invocation_id: HookInvocationId,
         failure: HookFailure,
     },
+    TranscriptCompacted {
+        upto: u64,
+        summary: ChatMessage,
+        compacted_iteration: u64,
+    },
     IterationCompleted {
         iteration: u64,
         usage: TokenUsage,
@@ -256,6 +278,15 @@ impl From<DurableAgentEventWire> for DurableAgentEvent {
                 invocation_id,
                 failure,
             },
+            DurableAgentEventWire::TranscriptCompacted {
+                upto,
+                summary,
+                compacted_iteration,
+            } => Self::TranscriptCompacted {
+                upto,
+                summary,
+                compacted_iteration,
+            },
             DurableAgentEventWire::IterationCompleted { iteration, usage } => {
                 Self::IterationCompleted { iteration, usage }
             }
@@ -311,6 +342,7 @@ impl DurableAgentEvent {
             Self::HookInvocationPending { .. } => "hook_invocation_pending",
             Self::HookInvocationCompleted { .. } => "hook_invocation_completed",
             Self::HookInvocationFailed { .. } => "hook_invocation_failed",
+            Self::TranscriptCompacted { .. } => "transcript_compacted",
             Self::IterationCompleted { .. } => "iteration_completed",
             Self::LoopFinished { .. } => "loop_finished",
             Self::LoopFailed { .. } => "loop_failed",
@@ -490,6 +522,16 @@ pub enum PrepareNextTurnDecisionRecord {
     Inject {
         /// Non-empty plain user messages for the next request view.
         messages: Vec<ChatMessage>,
+    },
+    /// The committed transcript prefix `[0, upto)` was compacted into a
+    /// durable summary marker at this iteration boundary.
+    Compact {
+        /// Exclusive end index of the replaced prefix, in the committed-context
+        /// coordinates of the prepare snapshot.
+        upto: usize,
+        /// Handler-supplied summary message; validated as a plain system
+        /// message before journaling.
+        summary: ChatMessage,
     },
 }
 
@@ -712,6 +754,77 @@ mod tests {
     }
 
     #[test]
+    fn transcript_compacted_serializes_with_stable_snake_case_type() -> serde_json::Result<()> {
+        let event = DurableAgentEvent::TranscriptCompacted {
+            upto: 3,
+            summary: ChatMessage::system("[stratum:transcript-compacted]\nsummary so far"),
+            compacted_iteration: 1,
+        };
+
+        assert_eq!(event.event_type(), "transcript_compacted");
+        let serialized = serde_json::to_value(&event)?;
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "transcript_compacted",
+                "data": {
+                    "upto": 3,
+                    "summary": {
+                        "role": "system",
+                        "content": {
+                            "type": "text",
+                            "data": "[stratum:transcript-compacted]\nsummary so far"
+                        }
+                    },
+                    "compacted_iteration": 1,
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DurableAgentEvent>(serialized)?,
+            event
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_compact_record_serializes_with_stable_snake_case_type() -> serde_json::Result<()> {
+        let record =
+            HookDecisionRecord::PrepareNextTurn(super::PrepareNextTurnDecisionRecord::Compact {
+                upto: 2,
+                summary: ChatMessage::system("summary so far"),
+            });
+
+        let serialized = serde_json::to_value(&record)?;
+        assert_eq!(
+            serialized,
+            json!({
+                "point": "prepare_next_turn",
+                "decision": {
+                    "type": "compact",
+                    "data": {
+                        "upto": 2,
+                        "summary": {
+                            "role": "system",
+                            "content": {
+                                "type": "text",
+                                "data": "summary so far"
+                            }
+                        }
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<HookDecisionRecord>(serialized)?,
+            record
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn telemetry_delta_event_serializes_with_stable_snake_case_type() -> serde_json::Result<()> {
         let event = AgentTelemetryEvent::TextDelta {
             llm_call_id: LlmCallId::from("llm-call-1"),
@@ -802,6 +915,11 @@ mod tests {
             DurableAgentEvent::HookInvocationFailed {
                 invocation_id: HookInvocationId::new(),
                 failure: HookFailure::TimedOut,
+            },
+            DurableAgentEvent::TranscriptCompacted {
+                upto: 4,
+                summary: ChatMessage::system("[stratum:transcript-compacted]\nsummary so far"),
+                compacted_iteration: 1,
             },
             DurableAgentEvent::IterationCompleted {
                 iteration: 1,
