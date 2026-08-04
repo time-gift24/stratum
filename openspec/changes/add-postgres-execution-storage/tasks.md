@@ -34,6 +34,6 @@
 
 - [x] 6.1 TODO.md：H3b（sqlite per-session）改写为 Postgres 统一执行层存储；确认 H3a 遗留项"ExtensionSet/Handler 版本固定"已被 H2 覆盖并勾掉
 - [x] 6.2 归档 `crates/stratum-postgres/AGENTS.md`（schema、事务纪律、测试基建用法、投影器未来边界），更新 `crates/stratum-store`、`crates/stratum-infra`、`crates/stratum-api` 的 AGENTS.md（新定位与后端装配）
-- [ ] 6.3 运行 `cargo fmt --check`、`cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets`、`cargo test --workspace --all-targets`
-- [ ] 6.4 constitution-review：对照仓库根 CONSTITUTION.md 派发子代理分条款审查本 change 的完整 diff，修复全部 red-flag 与 violation
+- [x] 6.3 运行 `cargo fmt --check`、`cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets`、`cargo test --workspace --all-targets`
+- [x] 6.4 constitution-review：对照仓库根 CONSTITUTION.md 派发子代理分条款审查本 change 的完整 diff，修复全部 red-flag 与 violation（0 red-flag；2 violation 同源于 §1 分层未随架构演进修订——已在同 PR 修订 §1 新增合同层/存储后端层、§5 后端豁免改按职责定义；Makefile 集成测试覆盖与 design.md 依赖许可证说明两条 suggestion 一并修复）
 - [ ] 6.5 运行 `openspec validate add-postgres-execution-storage --type change --strict --no-interactive` 与 `openspec validate --all --strict`

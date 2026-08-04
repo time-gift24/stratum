@@ -13,8 +13,10 @@
 项目按能力分层，依赖方向必须保持 DAG，禁止下层依赖上层：
 
 - **核心层**：`stratum-core`（+ `stratum-macros`）——领域类型、ID newtype、事件、错误、trait 定义；不得依赖任何其他 stratum crate。
-- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，只依赖核心层。
-- **组合层**：`stratum-store`、`stratum-agent`——编排能力层，不得被能力层依赖。
+- **合同层**：`stratum-store`——持久化合同（trait、状态类型、错误定义），只依赖核心层；不含后端实现。
+- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，只依赖核心层与合同层。
+- **存储后端层**：`stratum-postgres`——实现合同层/能力层耐久合同的外部存储后端；可依赖核心层、合同层、能力层，不得被组合层及以下依赖。
+- **组合层**：`stratum-agent`——编排能力层，不得被能力层依赖。
 - **装配层**：`stratum-agent-builtin`（内置实现）、`stratum-api`（HTTP/进程入口）——最上层；`stratum-api` 是唯一含 `main.rs` 的 crate，`main.rs` 必须保持薄，可复用逻辑放 `lib.rs`。
 
 ### crate 内规则
@@ -75,7 +77,7 @@
 ## 5. 存储与事件总线（强制）
 
 - 状态/定义持久化必须经 `stratum-store`，业务 crate 禁止直接读写存储介质。
-- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；耐久存储后端（`stratum-infra` / `stratum-store`）作为基础设施可以直接使用 `std::fs` / `tokio::fs`，并自行保证崩溃一致性。
+- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；实现 `stratum-store` / `stratum-infra` 耐久合同的存储后端 crate（当前为 `stratum-infra`、`stratum-postgres`）作为基础设施可以直接使用 `std::fs` / `tokio::fs` 或相应存储驱动，并自行保证崩溃一致性。
 - 事件发布/订阅必须经 `stratum-infra` 的 event bus 抽象，业务代码禁止直连 `async-nats`。
 - 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`、`stratum-agent-builtin`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
 - 文件写操作必须崩溃一致：临时文件 + 原子 rename，或 store 层提供的等效保证。append-only 日志在同时满足以下条件时视为等效：写入后做文件与目录双 fsync，读取器容忍截断尾行（含落在多字节 UTF-8 字符中间的撕裂写，按字节解析并丢弃尾部残缺行）。
@@ -187,7 +189,7 @@
 - [ ] `println!` / `eprintln!` 出现在非 CLI 生产代码中（测试代码豁免）
 - [ ] 密钥、token、用户凭据进入日志、span 字段或错误消息
 - [ ] 领域 ID 以裸字符串（stringly typed）穿越 crate 或 HTTP 边界
-- [ ] 业务 crate 直连 `std::fs` / `tokio::fs` 或 `async-nats`（耐久存储后端 crate——`stratum-infra` / `stratum-store`——的文件 IO 除外，见 §5）
+- [ ] 业务 crate 直连 `std::fs` / `tokio::fs` 或 `async-nats`（实现耐久合同的存储后端 crate 的存储 IO 除外，见 §5）
 - [ ] 在宿主机直接执行 agent 生成的命令
 - [ ] std `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点（为跨 await 串行化而持有 `tokio::sync::Mutex` guard 是允许的，见 §11）
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）

@@ -126,7 +126,7 @@ crates/stratum-postgres/
 ```
 
 - 两个 PG 实现共享连接池、迁移与事务 helper；这些协作是 crate 内部实现细节，不泄漏成跨 crate 合同——这是单独立 crate 的核心论据。未来投影器需要跨 trait 同事务写入时，也在本 crate 内闭合。
-- 依赖收敛：workspace 只有这一个 crate 依赖 sqlx。
+- 依赖收敛：workspace 只有这一个 crate 依赖 sqlx（MIT/Apache-2.0 双许可，tokio 生态主流 PG 驱动，无已知安全顾虑）。
 - ORM 对窄写宽读的 schema 是纯负担；`sqlx::query!` 编译期校验视 schema 稳定度采用，不稳定处用运行时 `query`。
 - 测试遵循 workspace 惯例：单测用 mock/无容器；集成测试 `#[ignore]` + 自带 compose 栈 + Makefile（默认 podman compose，`COMPOSE` 可覆盖）。
 

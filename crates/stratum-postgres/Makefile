@@ -7,7 +7,7 @@ test-integration:
 	@set -eu; \
 	trap '$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v' EXIT; \
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d --wait; \
-	cargo test -p stratum-postgres --test postgres_backend -- --ignored
+	cargo test -p stratum-postgres --test postgres_backend --test dual_backend_replay -- --ignored
 
 test-up:
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d
