@@ -1014,7 +1014,9 @@ fn store_error_response(error: &StoreError) -> (StatusCode, &'static str, &'stat
             "invalid_history_query",
             "history query is invalid",
         ),
-        StoreError::Filesystem(source) => filesystem_store_error_response(source),
+        StoreError::Backend(source) => source
+            .downcast_ref::<stratum_filesystem::FilesystemError>()
+            .map_or_else(internal_error_response, filesystem_store_error_response),
         StoreError::CasTimeout | StoreError::CasRetriesExhausted => (
             StatusCode::SERVICE_UNAVAILABLE,
             "store_unavailable",

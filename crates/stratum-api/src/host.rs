@@ -24,11 +24,9 @@ use stratum_core::{
 use stratum_filesystem::{
     CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath,
 };
-use stratum_infra::EventStreamBus;
+use stratum_infra::{EventStreamBus, FilesystemAgentStore, StoreEventStreamBus};
 use stratum_llm::{LlmError, LlmProviderManager, ModelDescriptor};
-use stratum_store::{
-    AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus,
-};
+use stratum_store::{AgentStatus, AgentStore, StoreError};
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
 use crate::{AgentCleanupError, AgentTemplateView, HostError};

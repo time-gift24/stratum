@@ -2317,6 +2317,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "stratum-core",
+ "stratum-filesystem",
+ "stratum-store",
  "thiserror",
  "tokio",
  "tracing",
@@ -2350,15 +2352,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "futures-util",
  "serde",
  "serde_json",
  "stratum-core",
- "stratum-filesystem",
- "stratum-infra",
  "thiserror",
- "tokio",
- "tracing",
  "utoipa",
 ]
 

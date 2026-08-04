@@ -10,8 +10,10 @@ use stratum_core::{
     ReplayStart, RuntimeEvent, SessionId, StreamEnvelope, TurnId,
 };
 use stratum_filesystem::VirtualPath;
-use stratum_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
-use stratum_store::{AgentStore, FilesystemAgentStore};
+use stratum_infra::{
+    EventStreamBus, FilesystemAgentStore, event_stream_bus::InMemoryEventStreamBus,
+};
+use stratum_store::AgentStore;
 use support::MemoryCasFilesystem;
 
 fn test_model_config() -> ModelConfig {

@@ -5,9 +5,20 @@
 - `stratum-infra` contains external infrastructure adapters. Keep interface definitions in
   capability `definition.rs` files, errors in `error.rs`, and concrete backends/adapters in named
   modules.
-- Do not move AgentStore projection into this crate. `StoreEventStreamBus` belongs to
-  `stratum-store`; this crate owns retained transport and the adapter from foundational loop events
-  to scoped runtime envelopes.
+- Durable local backends for the `stratum-store` contract also live here (`agent_store/`), per the
+  constitution's durable-backend rule. The store contract itself (`AgentStore`, `AgentState`,
+  `StoreError`) stays in `stratum-store`; this crate depends on it, never the reverse.
+
+## AgentStore backends
+
+- `agent_store::FilesystemAgentStore` implements the `stratum-store` `AgentStore` contract on top
+  of `stratum-filesystem`. Its integrity, CAS-retry, and corruption-tracing behavior is covered by
+  the integration tests in `tests/filesystem_store.rs` and `tests/recovery_composition.rs`.
+- Backend failures (`FilesystemError`, CAS exhaustion) are wrapped into the contract error via
+  `StoreError::backend`; `stratum-store` stays backend-agnostic.
+- `agent_store::StoreEventStreamBus` is the store-backed event stream bus decorator: it applies
+  durable loop-event projections (see the "Agent Loop Event Projection" invariants in
+  `crates/stratum-store/AGENTS.md`) before forwarding to the inner `EventStreamBus`.
 
 ## EventStreamBus
 

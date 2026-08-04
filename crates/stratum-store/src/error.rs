@@ -1,7 +1,6 @@
 //! Error types for agent store persistence.
 
 use stratum_core::{AgentId, AgentLocation, ChatRole, SessionId, TurnId};
-use stratum_filesystem::{CasUpdateError, FilesystemError};
 use thiserror::Error;
 
 use crate::AgentStatus;
@@ -10,9 +9,9 @@ use crate::AgentStatus;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum StoreError {
-    /// A store filesystem operation failed.
-    #[error("store filesystem operation failed")]
-    Filesystem(#[from] FilesystemError),
+    /// A store backend operation failed.
+    #[error("store backend operation failed")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     /// The agent state file is missing.
     #[error("agent store is missing")]
     AgentMissing,
@@ -175,41 +174,9 @@ pub enum StoreError {
     Encode(#[source] serde_json::Error),
 }
 
-impl From<CasUpdateError<StoreError>> for StoreError {
-    fn from(error: CasUpdateError<StoreError>) -> Self {
-        match error {
-            CasUpdateError::CasUnsupported => Self::CasUnsupported,
-            CasUpdateError::Timeout => Self::CasTimeout,
-            CasUpdateError::RetriesExhausted => Self::CasRetriesExhausted,
-            CasUpdateError::Filesystem(source) => Self::Filesystem(source),
-            CasUpdateError::Apply(error) => error,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use stratum_filesystem::{CasUpdateError, FilesystemError};
-
-    use super::*;
-
-    #[test]
-    fn cas_update_errors_map_to_store_domain_errors() {
-        let unsupported = StoreError::from(CasUpdateError::<StoreError>::CasUnsupported);
-        let timeout = StoreError::from(CasUpdateError::<StoreError>::Timeout);
-        let exhausted = StoreError::from(CasUpdateError::<StoreError>::RetriesExhausted);
-        let filesystem = StoreError::from(CasUpdateError::<StoreError>::Filesystem(
-            FilesystemError::UnsupportedCas,
-        ));
-        let apply = StoreError::from(CasUpdateError::Apply(StoreError::SequenceOverflow));
-
-        assert!(matches!(unsupported, StoreError::CasUnsupported));
-        assert!(matches!(timeout, StoreError::CasTimeout));
-        assert!(matches!(exhausted, StoreError::CasRetriesExhausted));
-        assert!(matches!(
-            filesystem,
-            StoreError::Filesystem(FilesystemError::UnsupportedCas)
-        ));
-        assert!(matches!(apply, StoreError::SequenceOverflow));
+impl StoreError {
+    /// Wraps a store backend failure.
+    pub fn backend(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(source))
     }
 }

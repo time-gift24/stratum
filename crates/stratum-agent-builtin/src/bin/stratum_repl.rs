@@ -17,15 +17,14 @@ use stratum_filesystem::{
     VirtualPathError,
 };
 use stratum_infra::{
-    EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
+    EventStream, EventStreamBus, EventStreamBusError, FilesystemAgentStore, StoreEventStreamBus,
+    event_stream_bus::InMemoryEventStreamBus,
 };
 use stratum_llm::{
     ApiKey, ConfigurableLlmProvider, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError,
     LlmProvider, OpenAICompatibleProvider,
 };
-use stratum_store::{
-    AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus,
-};
+use stratum_store::{AgentStatus, AgentStore, StoreError};
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolPermissionMode, ToolRegistry};
 use thiserror::Error;
 
@@ -425,11 +424,12 @@ mod tests {
         StreamEnvelope, ToolCallDelta, ToolKind, ToolName,
     };
     use stratum_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
-    use stratum_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
-    use stratum_llm::{ChatStreamEvent, FinishReason, LlmProvider, MockLlmProvider};
-    use stratum_store::{
-        AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus,
+    use stratum_infra::{
+        EventStream, EventStreamBus, FilesystemAgentStore, StoreEventStreamBus,
+        event_stream_bus::InMemoryEventStreamBus,
     };
+    use stratum_llm::{ChatStreamEvent, FinishReason, LlmProvider, MockLlmProvider};
+    use stratum_store::{AgentState, AgentStatus, AgentStore};
 
     async fn test_session(
         root: &std::path::Path,

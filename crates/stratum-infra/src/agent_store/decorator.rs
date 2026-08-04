@@ -4,10 +4,10 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use stratum_core::{AgentEvent, ReplayStart, RuntimeEvent, SessionId, StreamEnvelope};
-use stratum_infra::{EventStream, EventStreamBus, EventStreamBusError};
+use stratum_store::{AgentStatus, AgentStore};
 use tokio::time::timeout;
 
-use crate::{AgentStatus, AgentStore};
+use crate::{EventStream, EventStreamBus, EventStreamBusError};
 
 const COMMITTED_FORWARD_GRACE: Duration = Duration::from_secs(1);
 

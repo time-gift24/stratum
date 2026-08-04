@@ -3,12 +3,14 @@
 use thiserror::Error;
 
 pub mod agent_event_sink;
+pub mod agent_store;
 pub mod event_stream_bus;
 
 pub use agent_event_sink::{
     DurableEventSink, DurableEventSinkError, FilesystemDurableEventSink, FilesystemEventSinkError,
     ScopedAgentEventSink, TelemetryEventSink,
 };
+pub use agent_store::{FilesystemAgentStore, StoreEventStreamBus};
 pub use event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig,
     create_nats_event_stream_bus,

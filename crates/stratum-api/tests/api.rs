@@ -38,13 +38,14 @@ use stratum_filesystem::{
     LocalFilesystemConfig, RecordVersion, VersionedEntry, VirtualPath,
 };
 use stratum_infra::{
-    EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
+    EventStream, EventStreamBus, EventStreamBusError, FilesystemAgentStore,
+    event_stream_bus::InMemoryEventStreamBus,
 };
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, FinishReason,
     LlmError, LlmProvider, LlmProviderManager,
 };
-use stratum_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
+use stratum_store::{AgentStatus, AgentStore, StoreError};
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 use tokio::time::timeout;
 use tower::ServiceExt;
@@ -3312,20 +3313,18 @@ async fn initialization_invariant_errors_use_stable_code() {
 #[tokio::test]
 async fn store_filesystem_errors_distinguish_unavailability_from_corruption() {
     let path: VirtualPath = "/history/agent/agent.json".parse().expect("path is valid");
-    let unavailable = HostError::Store(StoreError::Filesystem(FilesystemError::LocalIo {
+    let unavailable = HostError::Store(StoreError::backend(FilesystemError::LocalIo {
         operation: "read",
         path: path.clone(),
         source: io::Error::other("disk unavailable"),
     }));
-    let corrupt_layout = HostError::Store(StoreError::Filesystem(FilesystemError::NotAFile {
+    let corrupt_layout = HostError::Store(StoreError::backend(FilesystemError::NotAFile {
         path: path.clone(),
     }));
-    let invalid_path = HostError::Store(StoreError::Filesystem(
-        FilesystemError::InvalidVirtualPath {
-            path: "/history/../secret".to_owned(),
-            source: stratum_filesystem::VirtualPathError,
-        },
-    ));
+    let invalid_path = HostError::Store(StoreError::backend(FilesystemError::InvalidVirtualPath {
+        path: "/history/../secret".to_owned(),
+        source: stratum_filesystem::VirtualPathError,
+    }));
 
     let (unavailable_status, unavailable_body) = rendered_error(unavailable).await;
     assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);

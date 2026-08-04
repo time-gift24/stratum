@@ -1,5 +1,17 @@
 # stratum-store invariants
 
+## Scope
+
+- `stratum-store` is the pure persistence contract crate: the `AgentStore` trait,
+  `AgentState`/`AgentStatus`, `StoreError`, and the contract constants (`AGENT_STATE_VERSION`,
+  `MAX_HISTORY_PAGE_SIZE`). It depends only on `stratum-core`; it must not depend on
+  `stratum-infra` or `stratum-filesystem`.
+- Durable backends and the store-backed event stream bus live in `stratum-infra`
+  (`agent_store::FilesystemAgentStore`, `agent_store::StoreEventStreamBus`). Dependency direction:
+  `stratum-core ← stratum-store ← stratum-infra`.
+- `StoreError` is the contract error type of every backend. Backend-specific failures are carried
+  by `StoreError::Backend` as a boxed source; do not add backend-typed variants to this crate.
+
 ## Agent Loop Event Projection
 
 - Persistence is a durable-event consumer; it is not an `AgentLoop` dependency.
