@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { memo, useEffect, useState } from "react"
 import { ChevronsLeft, ChevronsRight, MessageCircle, SquarePen } from "lucide-react"
 
 import type { ConversationThreadMeta } from "@/components/stratum/conversation/types"
@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils"
  * 选中态用 primary 染底（与 dock 的 hover 语言一致：bg-primary/15 + text-primary），
  * 收起时也有颜色标记。无遮罩，Esc 收回。
  */
-export function ThreadListRail({
+export const ThreadListRail = memo(function ThreadListRail({
   threads,
   activeId,
   onSelect,
@@ -130,4 +130,4 @@ export function ThreadListRail({
       )}
     </div>
   )
-}
+})

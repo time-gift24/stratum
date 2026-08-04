@@ -1,6 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useReducer, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react"
 
 import {
   initialConversationState,
@@ -21,6 +28,8 @@ import {
 import {
   configForModel,
   configForTemplate,
+  currentThinkingLevel,
+  thinkingLevels,
   withThinkingLevel,
   type AgentTemplateView,
   type ModelConfig,
@@ -47,7 +56,7 @@ export type ComposerConfiguration = {
   turnRunning: boolean
   selectTemplate(template: AgentTemplateView): void
   selectModel(descriptor: ModelDescriptor): void
-  setThinkingLevel(level: "disabled" | "high" | "max"): void
+  setThinkingLevel(level: string): void
 }
 
 export type AgentConversation = {
@@ -62,7 +71,7 @@ export type AgentConversation = {
   resolveApproval(
     approvalId: string,
     decision: "approve" | "reject"
-  ): Promise<void>
+  ): Promise<boolean>
   reconnect(): void
   removeRecentAgent(agentId: string): void
 }
@@ -87,6 +96,10 @@ export function useAgentConversation(): AgentConversation {
     useState<ModelConfig | null>(null)
   const [acceptedModelConfig, setAcceptedModelConfig] =
     useState<ModelConfig | null>(null)
+  // 用户显式选过的 thinking 等级；跨模型切换时尽量保留（sticky）
+  const [preferredThinkingLevel, setPreferredThinkingLevel] = useState<
+    string | null
+  >(null)
   const selectedAgentRef = useRef<string | null>(null)
   const selectionGeneration = useRef(0)
 
@@ -170,6 +183,7 @@ export function useAgentConversation(): AgentConversation {
     setPrevConfigAgentId(state.agentId)
     setRequestedModelConfig(null)
     setAcceptedModelConfig(null)
+    setPreferredThinkingLevel(null)
   }
 
   useEffect(() => {
@@ -385,13 +399,15 @@ export function useAgentConversation(): AgentConversation {
   const resolveApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject") => {
       const client = selectedClient()
-      if (!client) return
+      if (!client) return false
 
       try {
         await client.api.resolveApproval(client.agentId, approvalId, decision)
+        return true
       } catch (error) {
         if (client.generation === selectionGeneration.current)
           reportError(error)
+        return false
       }
     },
     [reportError, selectedClient]
@@ -402,27 +418,57 @@ export function useAgentConversation(): AgentConversation {
       if (selectedAgentRef.current !== null) selectAgent(null)
       setRequestedModelConfig(null)
       setAcceptedModelConfig(null)
+      setPreferredThinkingLevel(null)
       setSelectedTemplate(template)
     },
     [selectAgent]
   )
 
+  // memo 派生：未选 agent 时 configForTemplate 每次渲染 structuredClone 会产生
+  // 新引用，级联打穿下游 useCallback/memo（selectModel、ModelSelector props）
+  const currentModelConfig = useMemo(
+    () =>
+      state.agentId === null
+        ? effectiveTemplate === null
+          ? null
+          : configForTemplate(effectiveTemplate)
+        : (acceptedModelConfig ?? state.view?.model_config ?? null),
+    [
+      state.agentId,
+      effectiveTemplate,
+      acceptedModelConfig,
+      state.view?.model_config,
+    ]
+  )
   const persistedModelConfig = state.view?.model_config ?? null
-  const currentModelConfig =
-    state.agentId === null
-      ? effectiveTemplate === null
-        ? null
-        : configForTemplate(effectiveTemplate)
-      : (acceptedModelConfig ?? persistedModelConfig)
   const selectedModelConfig = requestedModelConfig ?? currentModelConfig
 
-  const selectModel = useCallback((descriptor: ModelDescriptor) => {
-    setRequestedModelConfig(configForModel(descriptor))
-  }, [])
+  const selectModel = useCallback(
+    (descriptor: ModelDescriptor) => {
+      // Sticky 选择：尽量保留当前/偏好等级；新模型 schema 不含该等级时
+      // 省略 thinking 参数（落回 schema default），切回支持的模型时恢复。
+      const carry =
+        (selectedModelConfig === null
+          ? null
+          : currentThinkingLevel(selectedModelConfig.parameters)) ??
+        preferredThinkingLevel
+      const config = configForModel(descriptor)
+      const supported = thinkingLevels(descriptor.parameters_schema).some(
+        (level) => level.id === carry
+      )
+      setRequestedModelConfig(
+        carry !== null && supported
+          ? { ...config, parameters: withThinkingLevel(config.parameters, carry) }
+          : config
+      )
+    },
+    [preferredThinkingLevel, selectedModelConfig]
+  )
 
   const setThinkingLevel = useCallback(
-    (level: "disabled" | "high" | "max") => {
+    (level: string) => {
       if (selectedModelConfig === null) return
+      setPreferredThinkingLevel(level)
       setRequestedModelConfig({
         ...selectedModelConfig,
         parameters: withThinkingLevel(selectedModelConfig.parameters, level),

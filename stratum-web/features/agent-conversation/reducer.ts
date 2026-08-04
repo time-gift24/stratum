@@ -152,10 +152,10 @@ function projectStableMessage(
     return projectPersistedToolResult(state, turnId, message)
   }
 
-  const key = `${agentId}:${messageSeq}`
   if (
     state.messages.some(
-      (message) => `${message.agentId}:${message.messageSeq}` === key
+      (existing) =>
+        existing.agentId === agentId && existing.messageSeq === messageSeq
     )
   ) {
     return state
@@ -182,12 +182,16 @@ function projectStableMessage(
     state
   )
 
-  return {
-    ...stateWithTools,
-    messages: [...state.messages, stableMessage].sort(
-      (left, right) => left.messageSeq - right.messageSeq
-    ),
-  }
+  // 消息基本按 seq 递增到达：末位 seq 更小就直接 append，乱序才走 sort
+  const last = stateWithTools.messages.at(-1)
+  const messages =
+    last !== undefined && last.messageSeq <= messageSeq
+      ? [...stateWithTools.messages, stableMessage]
+      : [...stateWithTools.messages, stableMessage].sort(
+          (left, right) => left.messageSeq - right.messageSeq
+        )
+
+  return { ...stateWithTools, messages }
 }
 
 function projectPersistedToolCall(
@@ -305,7 +309,7 @@ function updateTool(
   const existing = state.tools[callId]
   const tool: ToolProgress = {
     callId,
-    llmCallId: update.llmCallId ?? existing?.llmCallId ?? "",
+    llmCallId: update.llmCallId ?? existing?.llmCallId ?? null,
     name: update.name ?? existing?.name ?? null,
     argumentsText:
       (existing?.argumentsText ?? "") + (update.argumentsText ?? ""),
