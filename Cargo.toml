@@ -8,6 +8,7 @@ members = [
     "crates/stratum-config",
     "crates/stratum-filesystem",
     "crates/stratum-infra",
+    "crates/stratum-postgres",
     "crates/stratum-llm",
     "crates/stratum-macros",
     "crates/stratum-tools",
@@ -35,6 +36,7 @@ reqwest = { version = "0.12.25", default-features = false, features = ["json", "
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 thiserror = "2.0.17"
 toml = "0.9.8"
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -52,6 +54,7 @@ stratum-filesystem = { path = "crates/stratum-filesystem" }
 stratum-agent = { path = "crates/stratum-agent" }
 stratum-store = { path = "crates/stratum-store" }
 stratum-infra = { path = "crates/stratum-infra" }
+stratum-postgres = { path = "crates/stratum-postgres" }
 stratum-llm = { path = "crates/stratum-llm" }
 stratum-macros = { path = "crates/stratum-macros" }
 stratum-tools = { path = "crates/stratum-tools" }

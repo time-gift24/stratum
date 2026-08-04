@@ -3,6 +3,8 @@
 - 只有在 Agent/Session/Turn 的必要状态、runtime snapshot 和输入已持久化后，创建或消息接口才能返回已接受；失败不得留下可被接受为成功的半成品。
 - hosted-agent registry 的锁只保护内存映射访问。文件系统、Store、NATS、provider 和 agent 的异步工作必须在锁外完成。
 - Store 是 agent 状态、消息历史和启动恢复的持久化真相源；NATS/JetStream 只负责事件分发与重放，不能代替 Store。
+- 执行事实存储后端由 `[storage]` 配置段显式选择（`backend = "postgres" | "filesystem"`），组合根 `host.rs` 的 `StoreBackend` 只构造配置选定的那一个，无静默回退。配置段缺失（`require_storage()`）、backend 拼错、`postgres.url` 缺失或为空、Postgres 无法连接或迁移失败都直接启动失败（fail closed），拒绝"连不上就悄悄降级 filesystem"的耐久性隐形降级。
+- postgres 是生产唯一支持路径（docker-compose 与 config.example 默认 postgres），启动即跑完 schema migrations；filesystem 后端只服务单测、嵌入式与无容器本地体验，同时是双后端 replay 对齐测试的行为参照。
 - SSE 使用传输序号 cursor：响应写入 `id`，恢复时 `Last-Event-ID` 优先于 `after_cursor`，过期 cursor 必须显式报错。
 - Session 是长期、图无关的核心身份；API 可以创建 Session 或将新 Agent 加入既有 Session，但一期每个 Session 同时只允许一个活跃操作。
 - 启动时必须从持久化 definition 和 Store 完整重建 registry；恢复失败不得返回部分 registry。

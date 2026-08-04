@@ -510,6 +510,9 @@ models = ["deepseek-v4-flash"]
 
 [api]
 bind = "127.0.0.1:0"
+
+[storage]
+backend = "filesystem"
 "#,
         root = root.to_string_lossy(),
     ))

@@ -24,7 +24,7 @@ flowchart LR
     H1 --> H2["H2：有序 Runner 与工具校验"]
     H2 --> H25["H2.5：Hook 输入公共信封"]
     H25 --> H3["H3a：Hook 存储与恢复"]
-    H3 --> H3B["H3b：sqlite 与保留策略"]
+    H3 --> H3B["H3b：Postgres 统一执行层存储"]
     H3 --> H4["H4：Tool 幂等与恢复"]
     H3 --> H5["H5：上下文压缩"]
     H3 --> S2["S2：Deno / Python 扩展宿主"]
@@ -139,9 +139,9 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 **依赖：** H2、P1。
 
-- [x] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构（filesystem per-run 目录，sqlite 见 H3b）。
+- [x] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构（filesystem per-run 目录；生产统一 Postgres，见 H3b）。
 - [x] Hook 记录归 Session/Turn 执行状态，不写进 Agent 消息或 EventBus（经 `DurableAgentEvent` 的 invocation 变体，作为执行状态而非观测）。
-- [ ] 固定 ExtensionSet 和 Handler 版本与顺序（依赖 H2 的链式 Runner）。
+- [x] 固定 ExtensionSet 和 Handler 版本与顺序（H2 已覆盖：`ChainHookRuntime` 构造即定序，`ExtensionSetVersionId` 随 `LoopStarted` 落盘，resume 比对不匹配 fail closed）。
 - [x] 保存每次 Hook 的 ID、输入摘要、决定和最终状态。
 - [x] 调用 Handler 前先保存 Pending，应用决定前先保存 Completed。
 - [x] Resume 时复用已经保存的决定；记录不匹配时停止。
@@ -155,15 +155,21 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 - [x] 在每个保存边界模拟崩溃后都能正确恢复。
 - [x] 恢复时不会重新执行已经完成的 Hook。
-- [ ] Extension 更新不会改变正在运行或恢复的 Turn（依赖 H2 链与 ExtensionSet）。
+- [x] Extension 更新不会改变正在运行或恢复的 Turn（链版本随 `LoopStarted` 固定，resume 只认落盘版本）。
 
-### H3b：sqlite per-session 与保留策略
+### H3b：Postgres 统一执行层存储与保留策略
 
-**依赖：** H3a。
+**依赖：** H3a。**变更说明：** 原方案（sqlite per-session）已否决——N 库文件迁移、无跨 session 查询、server 语境并发调优、三引擎碎片，维护成本不可接受。改为统一 Postgres 承载全部执行事实（journal、agent state、消息历史）；filesystem 保留定义层与 dev/test/嵌入后端。change：`add-postgres-execution-storage`。
 
-- [ ] 用 sqlite per-session 实现 Hook 记录与事件存储，替代或归纳 filesystem 后端。
-- [ ] 定义记录大小、保留时间和清理方式。
+- [ ] 新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。
+- [ ] `append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。
+- [ ] `stratum-store` 纯合同化；filesystem 后端迁 `stratum-infra`（独立 commit）。
+- [ ] 组合根显式 `backend = "postgres" | "filesystem"`，无静默回退；生产默认 postgres。
+- [ ] 双后端行为对齐：同一事件序列两种后端 replay，resume 结果逐事件一致。
+- [ ] 定义记录大小、保留时间和清理方式（等真实 SLO；`created_at` 列已预留，届时走 declarative partition + DROP PARTITION）。
 - [ ] 评估 per-handler 粒度 journal（依赖 H2 链式 Runner 落地）。
+
+**为后续阶段解锁的原语：** H4 幂等键 = unique constraint + 事务；W2 持久化队列 = `FOR UPDATE SKIP LOCKED`。
 
 ### H3a 收尾修正（下个 patch 处理）
 

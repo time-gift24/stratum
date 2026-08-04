@@ -16,7 +16,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use stratum_agent::{Agent, AgentError};
-use stratum_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+use stratum_config::{
+    AgentName, Config, ConfigError, ResolvedAgentDefinition, StorageBackend, StorageConfig,
+};
 use stratum_core::{
     AgentId, AgentRuntimeContext, ChatMessage, DangerLevel, ModelConfig, SessionId, ToolKind,
     TurnId,
@@ -26,6 +28,7 @@ use stratum_filesystem::{
 };
 use stratum_infra::{EventStreamBus, FilesystemAgentStore, StoreEventStreamBus};
 use stratum_llm::{LlmError, LlmProviderManager, ModelDescriptor};
+use stratum_postgres::PostgresBackend;
 use stratum_store::{AgentStatus, AgentStore, StoreError};
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
@@ -47,9 +50,77 @@ pub struct HostState {
     event_bus: Arc<dyn EventStreamBus>,
     providers: Arc<LlmProviderManager>,
     config: Arc<Config>,
+    store_backend: StoreBackend,
     shutdown: CancellationToken,
     admission: Arc<AdmissionState>,
     active_sessions: Arc<Mutex<HashSet<SessionId>>>,
+}
+
+/// Execution-fact storage backend selected by configuration. There is no
+/// fallback: the configured backend is the only one ever constructed.
+enum StoreBackend {
+    Filesystem,
+    Postgres(PostgresBackend),
+}
+
+impl StoreBackend {
+    /// Connects the configured backend, running schema migrations for Postgres.
+    async fn connect(config: &Config) -> Result<Self, HostError> {
+        let storage: &StorageConfig = config.require_storage()?;
+        match storage.backend {
+            StorageBackend::Filesystem => Ok(Self::Filesystem),
+            StorageBackend::Postgres => {
+                let url = &storage
+                    .postgres
+                    .as_ref()
+                    .ok_or(ConfigError::InvalidStorageConfig {
+                        field: "postgres.url",
+                    })?
+                    .url;
+                Ok(Self::Postgres(PostgresBackend::connect(url).await?))
+            }
+        }
+    }
+
+    /// Builds the store for one persisted agent.
+    fn agent_store(
+        &self,
+        filesystem: &Arc<dyn Filesystem>,
+        agent_id: AgentId,
+        root: VirtualPath,
+    ) -> Arc<dyn AgentStore> {
+        match self {
+            Self::Filesystem => Arc::new(FilesystemAgentStore::new(Arc::clone(filesystem), root)),
+            Self::Postgres(backend) => Arc::new(backend.agent_store(agent_id)),
+        }
+    }
+
+    /// Builds and initializes the store for one newly created agent.
+    async fn initialize_agent_store(
+        &self,
+        filesystem: &Arc<dyn Filesystem>,
+        agent_id: AgentId,
+        root: VirtualPath,
+        name: String,
+        model_config: ModelConfig,
+    ) -> Result<Arc<dyn AgentStore>, StoreError> {
+        match self {
+            Self::Filesystem => {
+                let store = FilesystemAgentStore::new(Arc::clone(filesystem), root);
+                store
+                    .initialize_with_model_config(agent_id, name, model_config)
+                    .await?;
+                Ok(Arc::new(store))
+            }
+            Self::Postgres(backend) => {
+                let store = backend.agent_store(agent_id);
+                store
+                    .initialize_with_model_config(agent_id, name, model_config)
+                    .await?;
+                Ok(Arc::new(store))
+            }
+        }
+    }
 }
 
 struct AdmissionState {
@@ -226,14 +297,16 @@ impl HostState {
     ///
     /// # Errors
     ///
-    /// Returns [`HostError`] when any directory, definition, provider, tool, store, or
-    /// complete history is invalid. No partial registry is returned.
+    /// Returns [`HostError`] when the configured storage backend cannot be connected, or any
+    /// directory, definition, provider, tool, store, or complete history is invalid. No partial
+    /// registry is returned.
     pub async fn restore(
         config: Config,
         filesystem: Arc<dyn Filesystem>,
         event_bus: Arc<dyn EventStreamBus>,
         providers: LlmProviderManager,
     ) -> Result<Arc<Self>, HostError> {
+        let store_backend = StoreBackend::connect(&config).await?;
         let history_root = VirtualPath::try_from(HISTORY_ROOT).map_err(|source| {
             stratum_filesystem::FilesystemError::InvalidVirtualPath {
                 path: HISTORY_ROOT.to_owned(),
@@ -260,8 +333,22 @@ impl HostState {
             let input = std::str::from_utf8(&bytes)
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = ResolvedAgentDefinition::parse(input)?;
-            let filesystem_store = FilesystemAgentStore::new(Arc::clone(&filesystem), root);
-            let state = filesystem_store.load_agent().await?;
+            let store = store_backend.agent_store(&filesystem, agent_id, root);
+            let state = match store.load_agent().await {
+                Ok(state) => state,
+                // Postgres starts from an empty schema by design: filesystem-era
+                // agent definitions without a state row are skipped, not migrated.
+                Err(StoreError::AgentMissing)
+                    if matches!(store_backend, StoreBackend::Postgres(_)) =>
+                {
+                    tracing::info!(
+                        %agent_id,
+                        "skipping agent without postgres state; filesystem data is not migrated"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let expected_name = definition.agent_name.as_str();
             if state.agent_id != agent_id || state.name != expected_name {
                 return Err(HostError::IdentityMismatch {
@@ -276,7 +363,6 @@ impl HostState {
                 .model_config
                 .clone()
                 .ok_or(StoreError::MissingModelConfig)?;
-            let store: Arc<dyn AgentStore> = Arc::new(filesystem_store);
             let agent = compose_agent(
                 &providers,
                 &event_bus,
@@ -304,6 +390,7 @@ impl HostState {
             event_bus,
             providers: Arc::new(providers),
             config: Arc::new(config),
+            store_backend,
             shutdown: CancellationToken::new(),
             admission: Arc::new(AdmissionState::new()),
             active_sessions: Arc::new(Mutex::new(active_sessions)),
@@ -722,21 +809,19 @@ impl HostState {
             CreationStage::Timeout => return Err(HostError::CreationStageTimeout),
         }
 
-        let store = Arc::new(FilesystemAgentStore::new(
-            Arc::clone(&self.filesystem),
-            root.clone(),
-        ));
-        match creation_stage(
+        let store = match creation_stage(
             &self.shutdown,
-            store.initialize_with_model_config(
+            self.store_backend.initialize_agent_store(
+                &self.filesystem,
                 agent_id,
+                root.clone(),
                 agent_name.as_str().to_owned(),
                 model_config.clone(),
             ),
         )
         .await
         {
-            CreationStage::Completed(Ok(_)) => {}
+            CreationStage::Completed(Ok(store)) => store,
             CreationStage::Completed(Err(error)) => {
                 return Err(creation_error_with_cleanup(
                     self.filesystem.as_ref(),
@@ -748,9 +833,8 @@ impl HostState {
             }
             CreationStage::Shutdown => return Err(HostError::HostShuttingDown),
             CreationStage::Timeout => return Err(HostError::CreationStageTimeout),
-        }
+        };
 
-        let store: Arc<dyn AgentStore> = store;
         let agent = match compose_agent(
             &self.providers,
             &self.event_bus,

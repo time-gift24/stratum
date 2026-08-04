@@ -25,6 +25,16 @@ pub enum DurableEventSinkError {
     /// The filesystem sink could not durably persist the event.
     #[error("filesystem durable event sink failed")]
     Filesystem(#[from] FilesystemEventSinkError),
+    /// A durable event sink backend failed to persist the event.
+    #[error("durable event sink backend failed")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl DurableEventSinkError {
+    /// Wraps a durable sink backend failure.
+    pub fn backend(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(source))
+    }
 }
 
 /// Error returned by filesystem durable event persistence or replay.

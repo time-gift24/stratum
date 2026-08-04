@@ -90,6 +90,9 @@ models = ["test-model"]
 [api]
 bind = "127.0.0.1:0"
 allowed_origins = ["http://localhost:5173"]
+
+[storage]
+backend = "filesystem"
 "#,
             root = root.to_string_lossy()
         ))
@@ -448,6 +451,53 @@ bind = "127.0.0.1:0"
     assert!(matches!(
         error,
         HostError::Config(stratum_config::ConfigError::MissingSection { section: "nats" })
+    ));
+    fs::remove_dir_all(root).expect("temporary directory is removed");
+}
+
+#[tokio::test]
+async fn run_from_path_rejects_missing_storage_before_startup() {
+    let root = std::env::temp_dir().join(format!("stratum-api-config-{}", AgentId::new()));
+    fs::create_dir(&root).expect("temporary directory is created");
+    let path = root.join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+[agent]
+storage_root = {root:?}
+
+[llm]
+default = "openai:test-model"
+
+[llm.openai]
+api_key = "test-key"
+models = ["test-model"]
+
+[api]
+bind = "127.0.0.1:0"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+stream_name = "SESSION_EVENTS"
+subject_prefix = "events.session"
+replicas = 1
+max_age_seconds = 604800
+max_bytes = 1073741824
+max_messages = 1000000
+"#,
+            root = root.to_string_lossy()
+        ),
+    )
+    .expect("config is written");
+
+    let error = run_from_path(&path)
+        .await
+        .expect_err("missing storage must fail");
+
+    assert!(matches!(
+        error,
+        HostError::Config(stratum_config::ConfigError::MissingSection { section: "storage" })
     ));
     fs::remove_dir_all(root).expect("temporary directory is removed");
 }
@@ -1676,6 +1726,9 @@ default = "openai:test-model"
 [llm.openai]
 api_key = "test-key"
 models = ["test-model"]
+
+[storage]
+backend = "filesystem"
 "#,
         root = root.to_string_lossy()
     ))

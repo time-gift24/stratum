@@ -26,3 +26,9 @@ replicas = 1
 max_age_seconds = 604800
 max_bytes = 1073741824
 max_messages = 1000000
+
+[storage]
+backend = "postgres"
+
+[storage.postgres]
+url = "postgres://stratum:stratum@postgres:5432/stratum"

@@ -49,6 +49,9 @@ pub enum ConfigError {
     /// A NATS field was not valid for the event stream bus.
     #[error("invalid nats configuration field `{field}`")]
     InvalidNatsConfig { field: &'static str },
+    /// A storage field was not valid for the selected backend.
+    #[error("invalid storage configuration field `{field}`")]
+    InvalidStorageConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {
