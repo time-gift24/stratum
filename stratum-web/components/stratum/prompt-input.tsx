@@ -1,30 +1,48 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { ArrowUp, Plus } from "lucide-react"
 
 import { BorderGlow } from "@/components/react-bits/border-glow"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
+/** textarea 高度上限（约 6-7 行），超过后内部滚动 */
+const MAX_TEXTAREA_HEIGHT = 160
+/** 框体圆角（多行后不再用 pill，单行/多行视觉一致） */
+const CORNER_RADIUS = 28
+/** 单行 ⇄ 多行布局判定的迟滞带（px）：进入多行 > 单行高 + 2，切回 ≤ 单行高 */
+const MULTILINE_HYSTERESIS = 2
+
+// SSR 下退化为 useEffect（layout 时机重测，避免翻转后闪一帧旧高度）
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect
+
 /**
- * PromptInput —— Gemini 式药丸提示词输入框。
- * 布局：左侧 + 按钮 / 中间输入 / 右侧模型名（静态展示）与发送（空输入禁用，
- * Enter 提交，IME 组合态除外）。激活态：聚焦时 BorderGlow 全线段点亮——
- * 整圈 mesh 渐变边框 + 全周外发光（port/primary token 配色），失焦 0.75s 淡出。
+ * PromptInput —— Gemini 式提示词输入框（多行自适应 + 双结构）。
+ * 单行：横向药丸——左侧 + 按钮 / 中间自动生长的 textarea / 右侧 trailing
+ * 插槽与发送（items-end 底部对齐）。多行（scrollHeight 超单行高 + 2px 迟滞
+ * 判定）：textarea 独占顶部整行，下方控制行（左 + 按钮，右 trailing + 发送，
+ * justify-between）；删回单行立即切回。单一 DOM 顺序 + flex-wrap 实现，
+ * textarea 不 remount、不丢焦点。multiline 的变更只来自输入事件（含窄形态
+ * 退出预判）；形态翻转后按新宽度重测高度（layout 时机，只调高度不重判）。
+ * 默认 1 行高，换行/长文本自动生长（scrollHeight 手法），超过 10rem 内部滚动。
+ * Enter 提交、Shift+Enter 换行、IME 组合态 Enter 不提交；空输入禁用发送。
+ * 激活态：聚焦时 BorderGlow 全线段点亮——整圈 mesh 渐变边框 + 全周外发光
+ *（port/primary token 配色），失焦 0.75s 淡出（popover portal 焦点判定见 onBlur）。
  * 值默认内部自管（提交后清空），也可传 value/onChange 受控。
  */
 export function PromptInput({
   placeholder = "问问 Stratum",
-  model,
+  trailing,
   value,
   onChange,
   onSubmit,
   className,
 }: {
   placeholder?: string
-  /** 当前模型名；不传则不显示模型位 */
-  model?: string
+  /** 输入框右侧、发送按钮之前的插槽（如模型选择器）；不传则不渲染 */
+  trailing?: React.ReactNode
   /** 受控值；不传则内部自管（提交后自动清空） */
   value?: string
   onChange?: (value: string) => void
@@ -35,7 +53,93 @@ export function PromptInput({
   const controlled = value !== undefined
   const currentValue = controlled ? value : innerValue
   const [focused, setFocused] = useState(false)
+  const [multiline, setMultiline] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // 单行内容高度（line-height + 上下 padding），首次测量缓存
+  const singleLineHeightRef = useRef(0)
+  // onChange 已测过的值：effect 跳过重复测量，避免每键双 reflow
+  const measuredValueRef = useRef<string | null>(null)
   const canSend = currentValue.trim().length > 0
+
+  const measureSingleLineHeight = (
+    textarea: HTMLTextAreaElement,
+    scrollHeight: number
+  ) => {
+    if (singleLineHeightRef.current !== 0) return
+    const style = getComputedStyle(textarea)
+    const lineHeight = parseFloat(style.lineHeight)
+    // computed line-height 可能是 "normal"（NaN）：回退用首次 scrollHeight 作基准
+    singleLineHeightRef.current = Number.isFinite(lineHeight)
+      ? lineHeight +
+        parseFloat(style.paddingTop) +
+        parseFloat(style.paddingBottom)
+      : scrollHeight
+  }
+
+  const syncHeight = (textarea: HTMLTextAreaElement) => {
+    textarea.style.height = "auto"
+    textarea.style.height = `${Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`
+  }
+
+  // resize + multiline 判定都在事件里做（onChange/提交校准），不在 effect 里
+  // 判 multiline——effect 依赖 multiline 时，翻转改变 textarea 宽度、scrollHeight
+  // 测量基准随之改变，边界宽度会来回翻转形成微任务死循环（页面冻结的根因）
+  const measure = (textarea: HTMLTextAreaElement) => {
+    syncHeight(textarea)
+    const scrollHeight = textarea.scrollHeight
+    measuredValueRef.current = textarea.value
+    measureSingleLineHeight(textarea, scrollHeight)
+
+    const single = singleLineHeightRef.current
+    let next = multiline
+      ? scrollHeight > single
+      : scrollHeight > single + MULTILINE_HYSTERESIS
+    if (multiline && !next) {
+      // 退出预判：宽形态一行高的文本在窄（单行）形态可能折两行——临时套用
+      // 窄形态量一次（同步在事件内，无循环），边界内容保持多行直到真正单行
+      const previousOrder = textarea.style.order
+      const previousBasis = textarea.style.flexBasis
+      textarea.style.order = "0"
+      textarea.style.flexBasis = "0%"
+      textarea.style.height = "auto"
+      next = textarea.scrollHeight > single
+      textarea.style.order = previousOrder
+      textarea.style.flexBasis = previousBasis
+      syncHeight(textarea)
+    }
+    if (next !== multiline) setMultiline(next)
+  }
+
+  // 形态翻转后按新宽度重测高度（layout 时机，不闪帧）。只调高度、不重判
+  // multiline——multiline 的变更永远只来自输入事件，因此无"测量→翻转→测量"循环
+  useIsomorphicLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (textarea) syncHeight(textarea)
+  }, [multiline])
+
+  // 轻量兜底：onChange 已测的值直接跳过；仅外部值变化（受控灌入/清空、
+  // 挂载）时对齐高度并补做迟滞判定。函数式更新：值不变返回 prev 不触发渲染；
+  // 异步调度避开 effect 内同步 setState（react-hooks/set-state-in-effect）
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea || measuredValueRef.current === currentValue) return
+    textarea.style.height = "auto"
+    const scrollHeight = textarea.scrollHeight
+    textarea.style.height = `${Math.min(scrollHeight, MAX_TEXTAREA_HEIGHT)}px`
+    measuredValueRef.current = currentValue
+    measureSingleLineHeight(textarea, scrollHeight)
+
+    const single = singleLineHeightRef.current
+    void Promise.resolve().then(() =>
+      setMultiline((prev) => {
+        const next = prev
+          ? scrollHeight > single
+          : scrollHeight > single + MULTILINE_HYSTERESIS
+        return next === prev ? prev : next
+      })
+    )
+  }, [currentValue])
 
   const updateValue = (next: string) => {
     if (controlled) {
@@ -49,6 +153,8 @@ export function PromptInput({
     if (!canSend) return
     onSubmit?.(currentValue.trim())
     if (!controlled) setInnerValue("")
+    // 提交后回到单行结构（高度由上面的 effect 回收）
+    setMultiline(false)
   }
 
   return (
@@ -56,51 +162,74 @@ export function PromptInput({
       data-slot="prompt-input"
       className={cn("w-full", className)}
       onFocus={() => setFocused(true)}
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false)
+      onBlur={() => {
+        // popover（如 ModelSelector 内容）portal 到 body，relatedTarget 判断
+        // 必然失效；延迟一帧看真实焦点落点——在组件内或任一 popover 内都保持点亮
+        requestAnimationFrame(() => {
+          const active = document.activeElement
+          if (active instanceof HTMLElement) {
+            if (rootRef.current?.contains(active)) return
+            if (active.closest('[data-slot="popover-content"]')) return
+          }
+          setFocused(false)
+        })
       }}
+      ref={rootRef}
     >
       <BorderGlow
         active={focused}
         flat
-        borderRadius={999}
+        borderRadius={CORNER_RADIUS}
         glowRadius={28}
-        className="rounded-full"
+        className="rounded-[28px]"
       >
-        <div className="flex items-center gap-1.5 rounded-full p-1.5 shadow-[0_8px_30px] shadow-black/10">
+        {/* 单一 DOM 顺序 + flex-wrap：单行 = 横向药丸（+ / textarea / trailing+send）；
+            多行 = textarea order-first basis-full 独占首行，控制行 justify-between
+            （左 + 按钮、右 trailing + 发送）。textarea 节点不 remount、不丢焦点 */}
+        <div className="flex flex-wrap items-end justify-between gap-1.5 rounded-[28px] p-1.5 shadow-[0_8px_30px] shadow-black/10">
           <Button
             variant="ghost"
             size="icon"
-            className="rounded-full"
+            className="mb-1 rounded-full"
             aria-label="添加附件"
           >
             <Plus aria-hidden />
           </Button>
-          <input
+          <textarea
+            ref={textareaRef}
+            rows={1}
             value={currentValue}
-            onChange={(e) => updateValue(e.target.value)}
+            onChange={(e) => {
+              updateValue(e.target.value)
+              measure(e.target)
+            }}
             onKeyDown={(e) => {
-              // 中文/日文输入法下 Enter 是确认候选词，不应提交
-              if (e.key === "Enter" && !e.nativeEvent.isComposing) submit()
+              // Enter 提交、Shift+Enter 换行；中文/日文输入法下 Enter 是确认候选词
+              if (e.key !== "Enter" || e.shiftKey) return
+              if (e.nativeEvent.isComposing) return
+              e.preventDefault()
+              submit()
             }}
             placeholder={placeholder}
             aria-label={placeholder}
-            className="min-w-0 flex-1 bg-transparent px-1 font-sans text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
+            className={cn(
+              "min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1 py-2.5 font-sans text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+              multiline && "order-first basis-full"
+            )}
           />
-          {model ? (
-            <span className="px-2 font-sans text-sm text-muted-foreground">
-              {model}
-            </span>
-          ) : null}
-          <Button
-            size="icon"
-            className="rounded-full"
-            aria-label="发送"
-            disabled={!canSend}
-            onClick={submit}
-          >
-            <ArrowUp aria-hidden />
-          </Button>
+          <div className="mb-1 flex items-center gap-1.5">
+            {trailing}
+            <Button
+              size="icon"
+              className="rounded-full"
+              aria-label="发送"
+              disabled={!canSend}
+              onClick={submit}
+            >
+              <ArrowUp aria-hidden />
+            </Button>
+          </div>
         </div>
       </BorderGlow>
     </div>

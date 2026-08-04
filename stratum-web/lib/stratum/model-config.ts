@@ -50,36 +50,62 @@ export function modelDisplayName(modelId: string): ModelDisplayName {
   }
 }
 
-export function supportsThinkingControls(schema: unknown): boolean {
-  if (!isRecord(schema) || !isRecord(schema.properties)) return false
+export type ThinkingLevel = { id: string; name: string }
+
+const displayLevelName = (id: string): string =>
+  id === "disabled" ? "关闭" : id.charAt(0).toUpperCase() + id.slice(1)
+
+/**
+ * 从模型的 parameters_schema 解析可用的 thinking 等级：
+ * `properties.thinking.oneOf` 里的 disabled 项 + enabled 项的 reasoning_effort enum。
+ * schema 无 thinking 配置时返回空数组（UI 应隐藏 Thinking 控件）。
+ */
+export function thinkingLevels(schema: unknown): readonly ThinkingLevel[] {
+  if (!isRecord(schema) || !isRecord(schema.properties)) return []
 
   const thinking = schema.properties.thinking
-  if (!isRecord(thinking) || !Array.isArray(thinking.oneOf)) return false
+  if (!isRecord(thinking) || !Array.isArray(thinking.oneOf)) return []
 
-  let hasDisabled = false
-  let hasEnabledWithLevels = false
+  const levels: ThinkingLevel[] = []
   for (const option of thinking.oneOf) {
     if (!isRecord(option) || !isRecord(option.properties)) continue
 
     const type = option.properties.type
     if (!isRecord(type)) continue
-    if (type.const === "disabled") hasDisabled = true
+    if (type.const === "disabled") {
+      levels.push({ id: "disabled", name: displayLevelName("disabled") })
+      continue
+    }
     if (type.const !== "enabled") continue
 
     const reasoningEffort = option.properties.reasoning_effort
-    hasEnabledWithLevels =
-      isRecord(reasoningEffort) &&
-      Array.isArray(reasoningEffort.enum) &&
-      reasoningEffort.enum.includes("high") &&
-      reasoningEffort.enum.includes("max")
+    if (!isRecord(reasoningEffort) || !Array.isArray(reasoningEffort.enum))
+      continue
+    for (const value of reasoningEffort.enum) {
+      if (typeof value === "string")
+        levels.push({ id: value, name: displayLevelName(value) })
+    }
   }
 
-  return hasDisabled && hasEnabledWithLevels
+  return levels
+}
+
+/** 读取当前 parameters 里生效的 thinking 等级 id；未配置时返回 null。 */
+export function currentThinkingLevel(
+  parameters: Record<string, unknown>
+): string | null {
+  const thinking = parameters.thinking
+  if (!isRecord(thinking)) return null
+
+  if (thinking.type === "disabled") return "disabled"
+  if (thinking.type === "enabled" && typeof thinking.reasoning_effort === "string")
+    return thinking.reasoning_effort
+  return null
 }
 
 export function withThinkingLevel(
   parameters: Record<string, unknown>,
-  level: "disabled" | "high" | "max"
+  level: string
 ): Record<string, unknown> {
   return {
     ...parameters,

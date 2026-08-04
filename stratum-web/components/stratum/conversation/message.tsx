@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { memo, useEffect, useState } from "react"
 import {
   Check,
   ChevronLeft,
@@ -16,6 +16,9 @@ import {
 import { Streamdown } from "streamdown"
 
 import type { ConversationMessage } from "@/components/stratum/conversation/types"
+import { Reasoning } from "@/components/stratum/conversation/reasoning"
+import { ToolGroup } from "@/components/stratum/conversation/tool-group"
+import { useSmoothText } from "@/hooks/use-smooth-text"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -159,7 +162,7 @@ function ActionBar({
   )
 }
 
-export function UserMessage({
+export const UserMessage = memo(function UserMessage({
   message,
   onEdit,
   onRetry,
@@ -218,9 +221,9 @@ export function UserMessage({
       </div>
     </div>
   )
-}
+})
 
-export function AssistantMessage({
+export const AssistantMessage = memo(function AssistantMessage({
   message,
   isLast,
   onReload,
@@ -233,20 +236,33 @@ export function AssistantMessage({
   const [activeVersion, setActiveVersion] = useState(0)
 
   // 版本数变化（如重新生成追加了新版本）时在渲染期派生跳到最新一版，
-  // 不写 effect（React 官方 "derive state during render" 模式）
+  // 不写 effect（React 官方 "derive state during render" 模式）；
+  // 无条件钳到最后一版，兼作 versions 缩小时 activeVersion 的越界钳位
   const [prevVersionCount, setPrevVersionCount] = useState(
     versions?.length ?? 0
   )
   if (versions && versions.length !== prevVersionCount) {
     setPrevVersionCount(versions.length)
-    if (versions.length > 1) setActiveVersion(versions.length - 1)
+    setActiveVersion(versions.length - 1)
   }
 
   const body = versions ? versions[activeVersion] : message.content
   const streaming = message.status === "streaming"
+  // streaming 正文过水流平滑（非 streaming 直接透传全文）
+  const renderedBody = useSmoothText(body, streaming)
 
   return (
     <div data-slot="assistant-message" className="group flex flex-col px-2">
+      {message.reasoning ? (
+        <Reasoning
+          text={message.reasoning}
+          streaming={streaming}
+          defaultView={message.reasoningDefaultView}
+        />
+      ) : null}
+      {message.toolCalls && message.toolCalls.length > 0 ? (
+        <ToolGroup calls={message.toolCalls} className="mb-2" />
+      ) : null}
       <div
         className={cn(
           styles.proseMedium,
@@ -258,7 +274,7 @@ export function AssistantMessage({
           mode={streaming ? "streaming" : "static"}
           caret={streaming ? "block" : undefined}
         >
-          {body}
+          {renderedBody}
         </Streamdown>
       </div>
       {message.status === "error" ? (
@@ -302,4 +318,4 @@ export function AssistantMessage({
       </div>
     </div>
   )
-}
+})

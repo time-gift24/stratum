@@ -13,7 +13,7 @@ export type StableMessage = {
 
 export type ToolProgress = {
   callId: string
-  llmCallId: string
+  llmCallId: string | null
   name: string | null
   argumentsText: string
   result: unknown | null
