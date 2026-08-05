@@ -24,6 +24,9 @@ pub struct Config {
     /// NATS configuration, when the event stream bus is enabled.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
+    /// Execution-fact storage configuration, required by the API host.
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
 }
 
 /// Agent filesystem configuration.
@@ -71,6 +74,37 @@ pub struct NatsConfig {
     pub max_bytes: i64,
     /// Maximum retained event count.
     pub max_messages: i64,
+}
+
+/// Execution-fact storage backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct StorageConfig {
+    /// Backend that persists agent execution facts.
+    pub backend: StorageBackend,
+    /// Postgres backend settings, required when `backend = "postgres"`.
+    #[serde(default)]
+    pub postgres: Option<PostgresStorageConfig>,
+}
+
+/// Execution-fact storage backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageBackend {
+    /// Postgres persists all execution facts; the production backend.
+    Postgres,
+    /// The local filesystem persists execution facts (dev/test/embedded).
+    Filesystem,
+}
+
+/// Postgres storage backend settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PostgresStorageConfig {
+    /// Postgres connection URL.
+    pub url: String,
 }
 
 /// Stable name used to identify an agent definition.
@@ -237,12 +271,31 @@ impl Config {
             .ok_or(ConfigError::MissingSection { section: "nats" })
     }
 
+    /// Returns the configured storage section.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::MissingSection`] when no storage section was provided.
+    pub fn require_storage(&self) -> Result<&StorageConfig, ConfigError> {
+        self.storage
+            .as_ref()
+            .ok_or(ConfigError::MissingSection { section: "storage" })
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.agent.storage_root.as_os_str().is_empty() {
             return Err(ConfigError::InvalidStorageRoot);
         }
         validate_provider("deepseek", self.llm.deepseek.as_ref())?;
         validate_provider("openai", self.llm.openai.as_ref())?;
+        if let Some(storage) = &self.storage
+            && storage.backend == StorageBackend::Postgres
+            && !matches!(&storage.postgres, Some(postgres) if !postgres.url.trim().is_empty())
+        {
+            return Err(ConfigError::InvalidStorageConfig {
+                field: "postgres.url",
+            });
+        }
         if let Some(api) = &self.api {
             for origin in &api.allowed_origins {
                 if origin == "*" || http::HeaderValue::from_str(origin).is_err() {
@@ -395,7 +448,7 @@ fn validate_tools(tools: &[ToolName]) -> Result<(), ConfigError> {
 mod tests {
     use std::error::Error as StdError;
 
-    use super::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+    use super::{AgentName, Config, ConfigError, ResolvedAgentDefinition, StorageBackend};
     use stratum_infra::NatsEventStreamBusConfig;
 
     const VALID_CONFIG: &str = r#"
@@ -677,6 +730,64 @@ prompt = "Use tools."
             config.require_nats(),
             Err(ConfigError::MissingSection { section: "nats" })
         ));
+        assert!(matches!(
+            config.require_storage(),
+            Err(ConfigError::MissingSection { section: "storage" })
+        ));
+    }
+
+    #[test]
+    fn parses_postgres_storage_config() {
+        let input = format!(
+            "{VALID_CONFIG}\n[storage]\nbackend = \"postgres\"\n\n[storage.postgres]\nurl = \"postgres://stratum:secret@db:5432/stratum\"\n"
+        );
+        let config = Config::parse(&input).expect("config parses");
+        let storage = config.require_storage().expect("storage exists");
+
+        assert_eq!(storage.backend, StorageBackend::Postgres);
+        assert_eq!(
+            storage
+                .postgres
+                .as_ref()
+                .expect("postgres section exists")
+                .url,
+            "postgres://stratum:secret@db:5432/stratum"
+        );
+    }
+
+    #[test]
+    fn parses_filesystem_storage_config() {
+        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"filesystem\"\n");
+        let config = Config::parse(&input).expect("config parses");
+
+        assert_eq!(
+            config.require_storage().expect("storage exists").backend,
+            StorageBackend::Filesystem
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_storage_backend() {
+        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"sqlite\"\n");
+
+        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
+    }
+
+    #[test]
+    fn rejects_postgres_backend_without_url() {
+        for storage in [
+            "[storage]\nbackend = \"postgres\"\n",
+            "[storage]\nbackend = \"postgres\"\n\n[storage.postgres]\nurl = \"  \"\n",
+        ] {
+            let input = format!("{VALID_CONFIG}\n{storage}");
+
+            assert!(matches!(
+                Config::parse(&input),
+                Err(ConfigError::InvalidStorageConfig {
+                    field: "postgres.url"
+                })
+            ));
+        }
     }
 
     #[test]

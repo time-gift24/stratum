@@ -8,6 +8,7 @@ use stratum_core::{AgentId, ModelId, ModelIdParseError, ToolName};
 use stratum_filesystem::FilesystemError;
 use stratum_infra::EventStreamBusError;
 use stratum_llm::LlmError;
+use stratum_postgres::PostgresError;
 use stratum_store::StoreError;
 use stratum_tools::ToolError;
 use thiserror::Error;
@@ -52,6 +53,9 @@ pub enum HostError {
     /// Event stream bus access failed.
     #[error("event stream bus operation failed")]
     EventStreamBus(#[from] EventStreamBusError),
+    /// The configured storage backend could not be initialized.
+    #[error("storage backend failed to initialize; check the `storage` configuration section")]
+    Storage(#[from] PostgresError),
     /// An agent is not hosted by this process.
     #[error("agent not found: {agent_id}")]
     AgentNotFound { agent_id: AgentId },

@@ -33,6 +33,7 @@ pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
     let config = Config::parse(&contents)?;
     config.require_api()?;
     config.require_nats()?;
+    config.require_storage()?;
     serve(config).await
 }
 

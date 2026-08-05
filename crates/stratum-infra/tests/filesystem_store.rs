@@ -8,9 +8,8 @@ use stratum_core::{
     TokenUsage, ToolSetFingerprint, TurnId, TurnRuntimeSnapshot, WorkflowVersionId,
 };
 use stratum_filesystem::{Entry, FILESYSTEM_CAS_RETRIES, VirtualPath};
-use stratum_store::{
-    AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreError,
-};
+use stratum_infra::FilesystemAgentStore;
+use stratum_store::{AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, StoreError};
 use support::MemoryCasFilesystem;
 
 fn test_model_config() -> ModelConfig {

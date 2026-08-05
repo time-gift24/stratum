@@ -21,13 +21,14 @@ use stratum_core::{
     StreamEnvelope, TokenUsage, ToolCall, ToolCallDelta, ToolKind, ToolName, ToolSetFingerprint,
     ToolSpec, TurnId, TurnRuntimeSnapshot,
 };
+use stratum_infra::StoreEventStreamBus;
 use stratum_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
 };
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use stratum_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
+use stratum_store::{AgentState, AgentStatus, AgentStore, StoreError};
 use stratum_tools::{
     BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
     ToolRegistry,

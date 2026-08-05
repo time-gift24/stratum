@@ -21,8 +21,7 @@ use stratum_filesystem::{
     CasExpectation, CasUpdateError, Entry, FILESYSTEM_CAS_RETRIES, FileType, Filesystem,
     FilesystemError, VirtualPath, cas_update,
 };
-
-use crate::{
+use stratum_store::{
     AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE, StoreError,
 };
 
@@ -57,14 +56,18 @@ impl FilesystemAgentStore {
         name: String,
     ) -> Result<AgentState, StoreError> {
         let state = AgentState::new(agent_id, name);
-        self.filesystem.create_dir(&self.messages_path()?).await?;
+        self.filesystem
+            .create_dir(&self.messages_path()?)
+            .await
+            .map_err(StoreError::backend)?;
         self.filesystem
             .put(
                 &self.agent_path()?,
                 encode_agent_state(&state)?,
                 CasExpectation::Absent,
             )
-            .await?;
+            .await
+            .map_err(StoreError::backend)?;
         Ok(state)
     }
 
@@ -81,14 +84,18 @@ impl FilesystemAgentStore {
         model_config: ModelConfig,
     ) -> Result<AgentState, StoreError> {
         let state = AgentState::new_configured(agent_id, name, model_config);
-        self.filesystem.create_dir(&self.messages_path()?).await?;
+        self.filesystem
+            .create_dir(&self.messages_path()?)
+            .await
+            .map_err(StoreError::backend)?;
         self.filesystem
             .put(
                 &self.agent_path()?,
                 encode_agent_state(&state)?,
                 CasExpectation::Absent,
             )
-            .await?;
+            .await
+            .map_err(StoreError::backend)?;
         Ok(state)
     }
 
@@ -111,13 +118,18 @@ impl FilesystemAgentStore {
             format!("{}/{suffix}", self.root.as_str())
         };
         VirtualPath::try_from(path.as_str()).map_err(|source| {
-            StoreError::Filesystem(FilesystemError::InvalidVirtualPath { path, source })
+            StoreError::backend(FilesystemError::InvalidVirtualPath { path, source })
         })
     }
 
     async fn read_state(&self) -> Result<AgentState, StoreError> {
         let path = self.agent_path()?;
-        let Some(record) = self.filesystem.get(&path).await? else {
+        let Some(record) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(StoreError::backend)?
+        else {
             return Err(StoreError::AgentMissing);
         };
         let state = decode_agent_state(&record.entry)?;
@@ -130,7 +142,12 @@ impl FilesystemAgentStore {
         state: &AgentState,
         seq: u64,
     ) -> Result<Option<StreamEnvelope>, StoreError> {
-        let Some(record) = self.filesystem.get(&self.message_path(seq)?).await? else {
+        let Some(record) = self
+            .filesystem
+            .get(&self.message_path(seq)?)
+            .await
+            .map_err(StoreError::backend)?
+        else {
             return Ok(None);
         };
         let envelope = decode_message(&record.entry).inspect_err(|_| {
@@ -177,7 +194,7 @@ impl FilesystemAgentStore {
                 seq: attempted,
                 frontier,
             })) if attempted == seq && frontier > seq => Ok(CommitSequenceOutcome::Advanced),
-            Err(error) => Err(StoreError::from(error)),
+            Err(error) => Err(cas_store_error(error)),
         }
     }
 
@@ -221,7 +238,11 @@ impl FilesystemAgentStore {
     }
 
     async fn list_message_sequences(&self) -> Result<BTreeSet<u64>, StoreError> {
-        let entries = self.filesystem.list_dir(&self.messages_path()?).await?;
+        let entries = self
+            .filesystem
+            .list_dir(&self.messages_path()?)
+            .await
+            .map_err(StoreError::backend)?;
         let mut sequences = BTreeSet::new();
         for entry in entries {
             let seq = parse_message_filename(&entry.file_name)?;
@@ -329,7 +350,7 @@ impl AgentStore for FilesystemAgentStore {
         )
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
-        result.map_err(StoreError::from)
+        result.map_err(cas_store_error)
     }
 
     async fn start_turn(
@@ -374,7 +395,7 @@ impl AgentStore for FilesystemAgentStore {
         )
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
-        result.map_err(StoreError::from)
+        result.map_err(cas_store_error)
     }
 
     async fn complete_iteration(
@@ -428,7 +449,7 @@ impl AgentStore for FilesystemAgentStore {
         )
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
-        result.map_err(StoreError::from)
+        result.map_err(cas_store_error)
     }
 
     async fn append_message(&self, message: NewAgentMessage) -> Result<StreamEnvelope, StoreError> {
@@ -513,7 +534,7 @@ impl AgentStore for FilesystemAgentStore {
                 Err(FilesystemError::VersionMismatch { .. }) => {
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(StoreError::backend(error)),
             }
         }
         Err(StoreError::CasRetriesExhausted)
@@ -884,4 +905,45 @@ fn trace_store_corruption(state: &AgentState, seq: u64) {
         corruption_count = 1_u64,
         "store corruption"
     );
+}
+
+fn cas_store_error(error: CasUpdateError<StoreError>) -> StoreError {
+    match error {
+        CasUpdateError::CasUnsupported => StoreError::CasUnsupported,
+        CasUpdateError::Timeout => StoreError::CasTimeout,
+        CasUpdateError::RetriesExhausted => StoreError::CasRetriesExhausted,
+        CasUpdateError::Filesystem(source) => StoreError::backend(source),
+        CasUpdateError::Apply(error) => error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stratum_filesystem::{CasUpdateError, FilesystemError};
+
+    use super::*;
+
+    #[test]
+    fn cas_update_errors_map_to_store_domain_errors() {
+        let unsupported = cas_store_error(CasUpdateError::<StoreError>::CasUnsupported);
+        let timeout = cas_store_error(CasUpdateError::<StoreError>::Timeout);
+        let exhausted = cas_store_error(CasUpdateError::<StoreError>::RetriesExhausted);
+        let filesystem = cas_store_error(CasUpdateError::<StoreError>::Filesystem(
+            FilesystemError::UnsupportedCas,
+        ));
+        let apply = cas_store_error(CasUpdateError::Apply(StoreError::SequenceOverflow));
+
+        assert!(matches!(unsupported, StoreError::CasUnsupported));
+        assert!(matches!(timeout, StoreError::CasTimeout));
+        assert!(matches!(exhausted, StoreError::CasRetriesExhausted));
+        assert!(matches!(
+            filesystem,
+            StoreError::Backend(source)
+                if matches!(
+                    source.downcast_ref::<FilesystemError>(),
+                    Some(FilesystemError::UnsupportedCas)
+                )
+        ));
+        assert!(matches!(apply, StoreError::SequenceOverflow));
+    }
 }

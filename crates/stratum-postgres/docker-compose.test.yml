@@ -1,0 +1,21 @@
+name: stratum-postgres-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum
+      POSTGRES_DB: stratum_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum -d stratum_test"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "45432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
