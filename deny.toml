@@ -4,6 +4,12 @@
 # Advisories: defaults check the RustSec advisory database and deny
 # vulnerabilities, unmaintained crates only warn.
 [advisories]
+ignore = [
+    # rsa 0.9.10 (RUSTSEC-2023-0071): lockfile-only optional dependency of
+    # sqlx-mysql; the workspace enables sqlx's postgres feature only, so rsa
+    # is never compiled. No fixed release exists. See .cargo/audit.toml.
+    "RUSTSEC-2023-0071",
+]
 
 # Licenses: allow list derived from the licenses actually present in the
 # current workspace dependency graph (`cargo metadata`). `OR` expressions only
