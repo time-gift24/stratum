@@ -24,7 +24,8 @@
 
 ## Layout & Chrome
 
-- 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx`（数据来自 `components/react-bits/site-nav.tsx`，fixed 悬浮不占位），只挂对话入口。SideDockNav 双 nav 体系已删除。
+- 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx`（数据来自 `components/react-bits/site-nav.tsx`，fixed 悬浮不占位），挂对话 / 白板两个入口。SideDockNav 双 nav 体系已删除。
+- 沉浸模式（`/excalidraw`）：SiteNavChrome 按路由把导航收起、只留画布——进入时 peek 1.6s 再滑出；顶边 8px 感应条（悬停 150ms 意图延迟）或居中阶梯两道杠手柄（w-8/5 漏斗形，点击 / 键盘聚焦，悬停微亮，Tab 第一站）唤出，离开 200ms 或 Esc 收回；GSAP 对 fixed nav 做 y/autoAlpha，展开完成 clearProps transform（避免困住内部 fixed 后代）；reduced-motion 全程瞬时。白板页因此不做顶部避让（`h-svh` 满铺），对话页保持常开导航 + `pt-24 sm:pt-28`。
 - 页面自管避让：对话页（`app/(site)/conversation/page.tsx`）整屏 `h-svh` + 顶部留白（`pt-24 sm:pt-28`）；消息列 `max-w-[44rem]` 居中；composer sticky 在消息列底部。空会话是 Gemini 式居中开场：composer 脱离文档流绝对居中（`absolute inset-0` + flex 居中，位置与上方欢迎语/未来内容解耦，欢迎语独立锚定在中线上方），首发消息与回空态都做 GSAP FLIP（双向，composer 在中心 ⇄ 底部间滑动）。
 - 会话列表 `components/stratum/conversation/thread-list-rail.tsx`：页面内 absolute 悬浮卡片，收起为图标列（w-11）、展开 w-64，选中态 `bg-primary/15 text-primary`，Esc 收回。
 
@@ -35,6 +36,7 @@
 - **渐进式透明块**（正文上方，顺序：reasoning → tools → 正文）：`reasoning.tsx` 三态（折叠/简略 3 行预览/撑开），GSAP 高度手风琴，历史默认折叠、本轮新消息默认简略；`tool-call.tsx` / `tool-group.tsx` 工具调用默认折叠（trigger = 状态图标 + 工具名，streaming 转圈 + shimmer），展开显示参数/结果/错误。审批操作入口是 composer 正上方的浮层 `approval-dock.tsx`（absolute bottom-full，不推挤消息区，GSAP 浮入/滑出，onComplete 后才移除）；内联工具块的审批区只读（待决"等待审批…"，已决终态）。卡片内容共享自 `approval-card.tsx`。dangerLevel 编码：high → destructive（边框 + 横幅），medium → port-image 蓝，low → 中性，并配中文危险度文案（不只靠颜色）。
 - **PromptInput**（`components/stratum/prompt-input.tsx`）：药丸 composer，右侧 `trailing` 插槽承载 model-selector；激活态是 BorderGlow 电弧（`components/react-bits/border-glow.tsx`——聚焦时整圈 mesh 渐变边框 + 外发光点亮，失焦淡出），这是界面里唯一的高亮度装饰，且有明确语义（输入激活）。
 - **ModelSelector**（`components/stratum/model-selector.tsx`）：触发器 pill = 模型名 + Thinking 等级 badge + chevron；popover（`rounded-xl shadow-lg`）自上而下：cmdk 搜索框 → provider chips（选中态与 rail 同语言）→ 按 provider 分组的模型列表（选中打勾）→ Thinking 分段行。Thinking 等级由模型 schema 解析传入，无等级则不渲染该行；schema 驱动是本组件的硬约束。
+- **Excalidraw（白板）**：两个承载面共享一套主题映射 `components/stratum/styles/excalidraw-theme.module.css`（无 `@layer`，把 Excalidraw 的 CSS 变量改接语义 token：紫 primary → 绿 `--primary`、浮岛 → `--popover`、字体 Geist、圆角 `--radius`，hover/选中 tint 用 color-mix 从 token 派生，亮暗同一套规则）。画布一律 `viewBackgroundColor: "transparent"` 透出容器底色（白板页 = `--background`，对话卡片 = `--card`）——Excalidraw 暗色靠 canvas invert 滤镜（透明像素不受影响），元素颜色随之翻转。Excalidraw 自带的主题切换与画布底色入口隐藏（`toggleTheme`/`changeViewBackgroundColor` false），主题只跟随站点。库与 144K 样式表走 `next/dynamic` chunk 懒加载，不进首屏。白板页 `/excalidraw`（`components/stratum/excalidraw/`，可编辑）；对话工具结果内嵌只读卡片（`conversation/excalidraw-result.tsx` + `excalidraw-canvas.tsx`，`excalidraw_render` 工具名 + scene 形状校验分发，失败回退原始 JSON）。
 
 ## Motion
 
