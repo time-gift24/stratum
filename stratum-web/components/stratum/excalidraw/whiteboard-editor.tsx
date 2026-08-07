@@ -1,10 +1,23 @@
 "use client"
 
 import { Excalidraw } from "@excalidraw/excalidraw"
+import type { ExcalidrawProps } from "@excalidraw/excalidraw/types"
 import { useTheme } from "next-themes"
 
 // Excalidraw 样式表随本模块动态 chunk 懒加载（144K，不进首屏 CSS）
 import "@excalidraw/excalidraw/index.css"
+
+/** 静态 props 提升为模块级常量，避免每次渲染新引用 */
+const INITIAL_DATA: ExcalidrawProps["initialData"] = {
+  appState: { viewBackgroundColor: "transparent" },
+}
+
+const EDITOR_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
+  canvasActions: {
+    changeViewBackgroundColor: false,
+    toggleTheme: false,
+  },
+}
 
 /**
  * WhiteboardEditor —— 白板页的完整 Excalidraw 编辑器（经
@@ -17,13 +30,8 @@ export function WhiteboardEditor() {
   return (
     <Excalidraw
       theme={resolvedTheme === "dark" ? "dark" : "light"}
-      initialData={{ appState: { viewBackgroundColor: "transparent" } }}
-      UIOptions={{
-        canvasActions: {
-          changeViewBackgroundColor: false,
-          toggleTheme: false,
-        },
-      }}
+      initialData={INITIAL_DATA}
+      UIOptions={EDITOR_UI_OPTIONS}
     />
   )
 }

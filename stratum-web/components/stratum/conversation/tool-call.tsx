@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { ChevronDown, CircleAlert, Loader2, Wrench } from "lucide-react"
 
 import { ApprovalCard } from "@/components/stratum/conversation/approval-card"
@@ -37,6 +37,11 @@ export function ToolCall({
   const approvalActive =
     approval?.status === "pending" || approval?.status === "submitting"
   const expanded = open || approvalActive
+  // JSON.parse 只在结果变化时重算（excalidraw 分发判定）
+  const excalidraw = useMemo(
+    () => (isExcalidrawScene(call) ? call.result : null),
+    [call]
+  )
 
   return (
     <div
@@ -97,8 +102,8 @@ export function ToolCall({
           {call.errorText !== null ? (
             <ToolCallSection label="错误" text={call.errorText} destructive />
           ) : call.result !== null ? (
-            isExcalidrawScene(call) ? (
-              <ExcalidrawResult sceneText={call.result} />
+            excalidraw !== null ? (
+              <ExcalidrawResult sceneText={excalidraw} />
             ) : (
               <ToolCallSection label="结果" text={call.result} />
             )
