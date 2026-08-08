@@ -336,8 +336,8 @@ export function useAgentConversation(): AgentConversation {
 
   const createConversation = useCallback(
     async (text: string) => {
-      const prompt = text.trim()
-      if (prompt === "") {
+      // 合同：trim 只用于空判定，发送与持久化一律用原文
+      if (text.trim() === "") {
         reportError(new ApiError("invalid_input", 400, "message is required"))
         return false
       }
@@ -356,6 +356,8 @@ export function useAgentConversation(): AgentConversation {
       const generation = selectionGeneration.current
       const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
       const modelConfig = requestedModelConfig ?? undefined
+      // selectAgent 会推进 generation：create 之后的失败不能按 stale 吞掉
+      let agentSelected = false
       try {
         // 同一 pending intent 复用 Idempotency-Key；只有新 intent 才生成新 key
         let pending = pendingCreateRef.current
@@ -382,21 +384,22 @@ export function useAgentConversation(): AgentConversation {
         rememberRecentAgent({
           agentId: created.agent_id,
           agentName: created.agent_name,
-          title: prompt,
+          title: text.trim(),
           lastOpenedAt: new Date().toISOString(),
         })
         selectAgent(created.agent_id)
+        agentSelected = true
 
         // 首个 Turn：idle Agent 的 CAS 是 expected_current_turn_id = null；
         // 只对同一 Agent 发送首条消息，不再 create
         await api.sendMessage(created.agent_id, {
-          text: prompt,
+          text,
           expectedCurrentTurnId: null,
           modelConfig,
         })
         if (
           modelConfig !== undefined &&
-          generation === selectionGeneration.current
+          selectedAgentRef.current === created.agent_id
         ) {
           setAcceptedModelConfig(modelConfig)
           setRequestedModelConfig((pendingConfig) =>
@@ -405,17 +408,24 @@ export function useAgentConversation(): AgentConversation {
         }
         return true
       } catch (error) {
-        if (generation !== selectionGeneration.current) return false
-        // key 命中但请求不同 = 新 intent：清掉 pending key，下次生成新 key
-        if (isApiErrorCode(error, "idempotency_key_conflict"))
-          pendingCreateRef.current = null
-        // stale_turn：首条消息可能已提交但响应丢失——只 reconcile 收敛，
+        if (!agentSelected) {
+          if (generation !== selectionGeneration.current) return false
+          // key 命中但请求不同 = 新 intent：清掉 pending key，下次生成新 key
+          if (isApiErrorCode(error, "idempotency_key_conflict"))
+            pendingCreateRef.current = null
+          reportError(error)
+          return false
+        }
+        // 首条消息失败（selectAgent 已推进 generation）：必须显式 surface，
+        // 不能静默返回。新 agent 的 recovery session 会 cold bootstrap 收敛
+        // view；stale_turn 表示消息可能已提交但响应丢失——只 reconcile，
         // 绝不重发创建第二个 Turn
         if (isApiErrorCode(error, "stale_turn")) {
           reconcileNow()
           return true
         }
         reportError(error)
+        reconcileNow()
         return false
       }
     },
@@ -447,8 +457,8 @@ export function useAgentConversation(): AgentConversation {
 
   const sendMessage = useCallback(
     async (text: string) => {
-      const message = text.trim()
-      if (message === "") {
+      // 合同：trim 只用于空判定，发送与持久化一律用原文
+      if (text.trim() === "") {
         reportError(new ApiError("invalid_input", 400, "message is required"))
         return false
       }
@@ -463,7 +473,7 @@ export function useAgentConversation(): AgentConversation {
       const selectedConfig = requestedModelConfig
       try {
         await client.api.sendMessage(client.agentId, {
-          text: message,
+          text,
           // exact current-Turn CAS：terminal 后携带最近 TurnId 才能开新 Turn
           expectedCurrentTurnId: view.current_turn_id,
           modelConfig: selectedConfig ?? undefined,

@@ -37,23 +37,39 @@ use crate::dispatcher::DispatcherHandle;
 /// notification without making the channel a truth source.
 const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+/// One registered waiter: its unique registration identity and notify half.
+type WaiterEntry = (Uuid, oneshot::Sender<()>);
+
 /// Process-local approval waiters keyed by `ApprovalId`.
 #[derive(Debug, Default)]
 pub(crate) struct ApprovalWaiters {
-    inner: Mutex<HashMap<ApprovalId, Vec<oneshot::Sender<()>>>>,
+    inner: Mutex<HashMap<ApprovalId, Vec<WaiterEntry>>>,
 }
 
 impl ApprovalWaiters {
-    /// Registers a waiter for one approval (register-then-read protocol).
-    pub(crate) fn register(&self, approval_id: ApprovalId) -> oneshot::Receiver<()> {
+    /// Registers a waiter for one approval (register-then-read protocol). The
+    /// returned guard unregisters on drop, so an early resolution hit, a read
+    /// error, or a cancelled wait never leaks the sender.
+    pub(crate) fn register(
+        &self,
+        approval_id: ApprovalId,
+    ) -> (WaiterRegistration<'_>, oneshot::Receiver<()>) {
         let (sender, receiver) = oneshot::channel();
+        let registration_id = Uuid::now_v7();
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(approval_id)
             .or_default()
-            .push(sender);
-        receiver
+            .push((registration_id, sender));
+        (
+            WaiterRegistration {
+                waiters: self,
+                approval_id,
+                registration_id,
+            },
+            receiver,
+        )
     }
 
     /// Best-effort notification after a decision commits; loss is harmless
@@ -66,10 +82,41 @@ impl ApprovalWaiters {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&approval_id);
         if let Some(senders) = senders {
-            for sender in senders {
+            for (_, sender) in senders {
                 let _ = sender.send(());
             }
         }
+    }
+
+    /// Removes one exact registration; a notification that already removed
+    /// the entry makes this a no-op.
+    fn unregister(&self, approval_id: ApprovalId, registration_id: Uuid) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(senders) = inner.get_mut(&approval_id) {
+            senders.retain(|(id, _)| *id != registration_id);
+            if senders.is_empty() {
+                inner.remove(&approval_id);
+            }
+        }
+    }
+}
+
+/// RAII half of [`ApprovalWaiters::register`]: dropping it removes only this
+/// exact registration identity.
+#[derive(Debug)]
+pub(crate) struct WaiterRegistration<'a> {
+    waiters: &'a ApprovalWaiters,
+    approval_id: ApprovalId,
+    registration_id: Uuid,
+}
+
+impl Drop for WaiterRegistration<'_> {
+    fn drop(&mut self) {
+        self.waiters
+            .unregister(self.approval_id, self.registration_id);
     }
 }
 
@@ -212,8 +259,10 @@ impl HookHandler for ApprovalHandler {
         };
 
         // Register-then-read: a decision committed before registration is
-        // observed by the immediate re-read.
-        let waiter = self.waiters.register(approval_id).fuse();
+        // observed by the immediate re-read. The registration guard lives to
+        // the end of this call, so every exit path unregisters the waiter.
+        let (_registration, waiter) = self.waiters.register(approval_id);
+        let mut waiter = waiter.fuse();
         if let Some(facts) = self
             .read_facts(ApprovalLookup::ByApprovalId(approval_id))
             .await?
@@ -222,7 +271,6 @@ impl HookHandler for ApprovalHandler {
             return Ok(Self::map_decision(resolution.decision));
         }
 
-        let mut waiter = waiter;
         loop {
             tokio::select! {
                 biased;
@@ -327,8 +375,8 @@ mod tests {
     async fn notify_wakes_every_registered_waiter() {
         let waiters = ApprovalWaiters::default();
         let approval_id = ApprovalId::new();
-        let first = waiters.register(approval_id);
-        let second = waiters.register(approval_id);
+        let (_first_guard, first) = waiters.register(approval_id);
+        let (_second_guard, second) = waiters.register(approval_id);
 
         waiters.notify(approval_id);
 
@@ -336,6 +384,29 @@ mod tests {
         assert!(second.await.is_ok());
         // A decision for an unknown approval notifies nobody and never fails.
         waiters.notify(ApprovalId::new());
+    }
+
+    #[tokio::test]
+    async fn dropped_registration_unregisters_the_waiter() {
+        let waiters = ApprovalWaiters::default();
+        let approval_id = ApprovalId::new();
+        let (_kept_guard, kept) = waiters.register(approval_id);
+        let (dropped_guard, dropped) = waiters.register(approval_id);
+        drop(dropped_guard);
+
+        // The dropped sender is gone: the waiter observes a closed channel
+        // and a notify only reaches the live registration.
+        assert!(dropped.await.is_err());
+        waiters.notify(approval_id);
+        assert!(kept.await.is_ok());
+        // The entry was consumed by the notify; nothing accumulates.
+        assert!(
+            waiters
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 
     #[test]

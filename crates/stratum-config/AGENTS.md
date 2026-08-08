@@ -7,3 +7,4 @@
 - 执行存储配置收敛为 `[agent].templates_root` 与 `[postgres].url`：没有 backend selector 或静默回退。`templates_root` 指向只读 template catalog；本 crate 只校验非空，路径存在、是目录且可读的启动校验由装配层 `stratum-api` 完成（空目录允许，服务绝不自动创建目录）。`postgres.url` 缺失（`require_postgres`）或为空即失败（fail closed）。
 - NATS 连接与 Agent 短 tail 的 age/bytes/message-count 上限继续放在 `[nats]` 能力配置中，解析边界完成字段校验（非空字符串、正数上限、replicas 1..=5）；不编码固定历史保留保证。config → infra runtime 类型的映射由 `stratum-api` 装配时完成，本 crate 不依赖 `stratum-infra`。
 - `ProviderConfig` 支持可选 `base_url` 覆盖（缺省时由装配层使用 provider 官方公开端点常量）；空串在解析边界拒绝。`api_key` 的 `Debug` 输出必须为 `[redacted]`，新增凭据字段同样不得进入 `Debug`/`Display`。
+- `ProviderConfig.api_key` 以 `secrecy::SecretString` 承载（§6）；读取方只能在构造 provider 的边界调用 `expose_secret()`。

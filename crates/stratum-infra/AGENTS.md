@@ -37,7 +37,8 @@
 - A no-cursor subscription delivers only new frames from subscription time (`DeliverPolicy::New`);
   a cursor resumes after its position while retained, and a discarded position fails with the
   typed `AgentTailError::CursorExpired` before any delivery — never a silent fallback to full
-  replay.
+  replay. A cursor ahead of the current tail (forged or from a recreated stream) and any cursor
+  on an empty stream expire the same way, forcing the caller's cold bootstrap.
 - `TailCursor` is an opaque transport position (string-encoded for SSE `id`); it must never be
   compared with `event_seq`/telemetry sequences or persisted as business state.
 

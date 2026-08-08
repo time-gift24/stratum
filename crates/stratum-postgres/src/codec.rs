@@ -132,6 +132,21 @@ pub(crate) fn encode_event(
     })
 }
 
+/// Guards one ledger row selected by a specialized derivation query before its
+/// payload decodes as v1. Specialized queries (approval/hook derivation)
+/// select payloads directly, so each row's declared `event_version` must be
+/// checked here: an unsupported version fails closed as runtime-incompatible
+/// instead of being silently read as v1.
+pub(crate) fn ensure_supported_event_version(event_version: i32) -> Result<(), PostgresError> {
+    if event_version != EVENT_VERSION_V1 {
+        return Err(PostgresError::RuntimeIncompatible {
+            kind: VersionedKind::EventPayload,
+            version: event_version,
+        });
+    }
+    Ok(())
+}
+
 /// Decodes one ledger row into a typed event with strict v1 rules.
 ///
 /// `companion` must be `Some` exactly when `event_type` is
@@ -143,12 +158,7 @@ pub(crate) fn decode_event(
     payload: Value,
     companion: Option<CompanionFacts>,
 ) -> Result<DurableAgentEvent, PostgresError> {
-    if event_version != EVENT_VERSION_V1 {
-        return Err(PostgresError::RuntimeIncompatible {
-            kind: VersionedKind::EventPayload,
-            version: event_version,
-        });
-    }
+    ensure_supported_event_version(event_version)?;
     if !KNOWN_EVENT_TYPES.contains(&event_type) {
         return Err(PostgresError::corrupt_invariant(
             "durable event_type outside the known closed set",
@@ -263,7 +273,10 @@ pub(crate) struct RequestedApprovalPayload {
 }
 
 impl RequestedApprovalPayload {
-    pub(crate) fn decode(payload: Value) -> Result<Self, PostgresError> {
+    /// Strictly decodes one selected `tool_approval_requested` row; the row's
+    /// declared version must be supported before any v1 field is read.
+    pub(crate) fn decode(event_version: i32, payload: Value) -> Result<Self, PostgresError> {
+        ensure_supported_event_version(event_version)?;
         serde_json::from_value(payload).map_err(|source| {
             PostgresError::corrupt("approval request payload failed v1 decode", source)
         })
@@ -281,7 +294,10 @@ pub(crate) struct ResolvedApprovalPayload {
 }
 
 impl ResolvedApprovalPayload {
-    pub(crate) fn decode(payload: Value) -> Result<Self, PostgresError> {
+    /// Strictly decodes one selected `tool_approval_resolved` row; the row's
+    /// declared version must be supported before any v1 field is read.
+    pub(crate) fn decode(event_version: i32, payload: Value) -> Result<Self, PostgresError> {
+        ensure_supported_event_version(event_version)?;
         serde_json::from_value(payload).map_err(|source| {
             PostgresError::corrupt("approval resolution payload failed v1 decode", source)
         })
@@ -383,7 +399,8 @@ mod tests {
         .expect("event decodes");
         assert_eq!(decoded, event);
 
-        let requested = RequestedApprovalPayload::decode(encoded.payload).expect("payload decodes");
+        let requested = RequestedApprovalPayload::decode(encoded.event_version, encoded.payload)
+            .expect("payload decodes");
         assert_eq!(requested.hook_invocation_id, hook_invocation_id);
     }
 
@@ -482,6 +499,76 @@ mod tests {
         let error = decode_event("turn_rewound", EVENT_VERSION_V1, json!({}), None)
             .expect_err("unknown type is corrupt");
         assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+    }
+
+    #[test]
+    fn specialized_approval_decodes_reject_unsupported_versions() {
+        let requested_payload = json!({
+            "approval_id": ApprovalId::new(),
+            "hook_invocation_id": HookInvocationId::new(),
+            "call_id": "call-1",
+            "tool_name": "echo",
+            "arguments": {},
+            "tool_kind": "read",
+            "danger_level": "low",
+        });
+        let error = RequestedApprovalPayload::decode(2, requested_payload.clone())
+            .expect_err("newer request version is incompatible");
+        assert!(matches!(
+            error,
+            PostgresError::RuntimeIncompatible {
+                kind: VersionedKind::EventPayload,
+                version: 2
+            }
+        ));
+
+        let resolved_payload = json!({
+            "approval_id": ApprovalId::new(),
+            "decision": "approve",
+        });
+        let error = ResolvedApprovalPayload::decode(2, resolved_payload.clone())
+            .expect_err("newer resolution version is incompatible");
+        assert!(matches!(
+            error,
+            PostgresError::RuntimeIncompatible {
+                kind: VersionedKind::EventPayload,
+                version: 2
+            }
+        ));
+
+        // A malformed payload of a supported version stays corrupt.
+        let error = RequestedApprovalPayload::decode(EVENT_VERSION_V1, json!({}))
+            .expect_err("malformed v1 request is corrupt");
+        assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+        let error = ResolvedApprovalPayload::decode(EVENT_VERSION_V1, json!({}))
+            .expect_err("malformed v1 resolution is corrupt");
+        assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+
+        // The supported shapes still decode.
+        assert!(
+            RequestedApprovalPayload::decode(EVENT_VERSION_V1, requested_payload).is_ok(),
+            "v1 request decodes"
+        );
+        assert!(
+            ResolvedApprovalPayload::decode(EVENT_VERSION_V1, resolved_payload).is_ok(),
+            "v1 resolution decodes"
+        );
+    }
+
+    #[test]
+    fn event_version_guard_accepts_only_v1() {
+        assert!(ensure_supported_event_version(EVENT_VERSION_V1).is_ok());
+        for version in [0, 2, 7] {
+            let error = ensure_supported_event_version(version)
+                .expect_err("unsupported versions fail closed");
+            assert!(matches!(
+                error,
+                PostgresError::RuntimeIncompatible {
+                    kind: VersionedKind::EventPayload,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

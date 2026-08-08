@@ -94,6 +94,11 @@ export type ConversationState = {
   appliedEventSeqs: ReadonlySet<string>
   drafts: Readonly<Record<string, DraftState>>
   activeLlmCallId: string | null
+  /**
+   * 已被 durable final 收敛或 terminal 清理关闭的 llm_call_id 集合（仅页面
+   * 内存）。closed call 的迟到 telemetry 一律忽略，不重新创建 draft。
+   */
+  closedLlmCallIds: ReadonlySet<string>
   tools: Readonly<Record<string, ToolProgress>>
   approvals: Readonly<Record<string, ApprovalRequest>>
   /** 向上分页的固定 through barrier（cold bootstrap 时确定） */

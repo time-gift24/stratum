@@ -98,7 +98,12 @@ pub(crate) async fn get_events(
     // The subscription is established before any header is sent; the pump
     // starts buffering immediately, then `stream_ready` is emitted.
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamItem>(SSE_BUFFER_CAPACITY);
-    tokio::spawn(pump_tail(agent_id, subscription, tx));
+    tokio::spawn(pump_tail(
+        agent_id,
+        subscription,
+        tx,
+        state.shutdown_token(),
+    ));
 
     let ready = AgentStreamFrameV1::stream_ready(
         agent_id,
@@ -149,15 +154,23 @@ fn frame_data(frame: &AgentStreamFrameV1) -> Result<String, ApiError> {
 
 /// Pulls the tail into the bounded per-connection buffer; on overflow the
 /// reset item is queued and the pump exits (closing the stream after the
-/// buffer drains).
+/// buffer drains). The pump also exits when the client disconnects or the
+/// process shuts down, so a quiet tail never pins the JetStream consumer.
+/// Every `select!` branch is cancellation-safe.
 async fn pump_tail(
     agent_id: stratum_core::AgentId,
     mut subscription: AgentTailStream,
     tx: tokio::sync::mpsc::Sender<StreamItem>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
-    while let Some(item) = subscription.next().await {
+    loop {
+        let item = tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tx.closed() => return,
+            item = subscription.next() => item,
+        };
         match item {
-            Ok((cursor, payload)) => {
+            Some(Ok((cursor, payload))) => {
                 if tx.try_send(StreamItem::Frame(cursor, payload)).is_err() {
                     // Bounded buffer overflow: deliver the local reset once
                     // the client drains, then close.
@@ -167,10 +180,11 @@ async fn pump_tail(
                     return;
                 }
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 tracing::warn!(agent_id = %agent_id, error = %error, "agent tail delivery ended");
                 return;
             }
+            None => return,
         }
     }
 }

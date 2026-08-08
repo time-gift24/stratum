@@ -25,3 +25,4 @@
 - Providers own validation of their parameter object; callers receive `LlmError::InvalidModelParameters`
   without duplicating provider schemas or validation rules.
 - LLM 出站必须显式限时（`protocol::openai_compatible` 的共享常量）：connect 10s；非流式 `chat` 总限时 120s；`chat_stream` 只对首响应等待限时 30s，流体本身不设总限时（由 Turn 的 CancellationToken 负责取消）。新增 provider 必须复用 `default_client()` 与同一组常量。
+- `ApiKey` 包装 `secrecy::SecretString`，`Debug` 恒为 `[redacted]`；凭据只在协议层构造请求时经 `expose_secret()` 使用。

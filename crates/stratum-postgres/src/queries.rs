@@ -172,8 +172,17 @@ async fn read_pending_approvals(
     turn_id: TurnId,
     barrier: u64,
 ) -> Result<Vec<PendingApproval>, PostgresError> {
+    // The NOT EXISTS exclusions are existence-only: a matching
+    // Resolved/Completed row of ANY event_version counts as existing. That is
+    // the fail-closed direction — treating a decision or consumption written
+    // by a newer binary as effective hides the approval and denies further
+    // action, while ignoring it could surface an already-decided approval as
+    // still open and invite a duplicate decision. No field of the matching
+    // row is decoded here; every row whose payload IS decoded (the Requested
+    // rows below, and the Resolved row decoded by `resolve_approval` /
+    // `read_approval`) is version-checked before decode.
     let rows = sqlx::query(
-        "SELECT r.event_seq, r.payload FROM durable_events r \
+        "SELECT r.event_seq, r.event_version, r.payload FROM durable_events r \
          WHERE r.agent_id = $1 AND r.turn_id = $2 \
              AND r.event_type = 'tool_approval_requested' AND r.event_seq <= $3 \
              AND NOT EXISTS ( \
@@ -198,10 +207,13 @@ async fn read_pending_approvals(
         let event_seq: i64 = row
             .try_get("event_seq")
             .map_err(PostgresError::StoreUnavailable)?;
+        let event_version: i32 = row
+            .try_get("event_version")
+            .map_err(PostgresError::StoreUnavailable)?;
         let payload: serde_json::Value = row
             .try_get("payload")
             .map_err(PostgresError::StoreUnavailable)?;
-        let requested = codec::RequestedApprovalPayload::decode(payload)?;
+        let requested = codec::RequestedApprovalPayload::decode(event_version, payload)?;
         approvals.push(PendingApproval {
             requested_event_seq: seq_from_i64(event_seq)?,
             approval_id: requested.approval_id,
@@ -559,7 +571,7 @@ pub(crate) async fn read_approval(
         ),
     };
     let statement = format!(
-        "SELECT event_seq, payload FROM durable_events \
+        "SELECT event_seq, event_version, payload FROM durable_events \
          WHERE agent_id = $1 AND turn_id = $2 AND event_type = 'tool_approval_requested' \
              AND {clause} = $3"
     );
@@ -577,13 +589,16 @@ pub(crate) async fn read_approval(
     let requested_seq: i64 = requested
         .try_get("event_seq")
         .map_err(PostgresError::StoreUnavailable)?;
+    let event_version: i32 = requested
+        .try_get("event_version")
+        .map_err(PostgresError::StoreUnavailable)?;
     let payload: serde_json::Value = requested
         .try_get("payload")
         .map_err(PostgresError::StoreUnavailable)?;
-    let requested = codec::RequestedApprovalPayload::decode(payload)?;
+    let requested = codec::RequestedApprovalPayload::decode(event_version, payload)?;
 
     let resolved = sqlx::query(
-        "SELECT event_seq, payload FROM durable_events \
+        "SELECT event_seq, event_version, payload FROM durable_events \
          WHERE agent_id = $1 AND event_type = 'tool_approval_resolved' \
              AND payload ->> 'approval_id' = $2",
     )
@@ -598,10 +613,13 @@ pub(crate) async fn read_approval(
             let resolved_seq: i64 = row
                 .try_get("event_seq")
                 .map_err(PostgresError::StoreUnavailable)?;
+            let event_version: i32 = row
+                .try_get("event_version")
+                .map_err(PostgresError::StoreUnavailable)?;
             let payload: serde_json::Value = row
                 .try_get("payload")
                 .map_err(PostgresError::StoreUnavailable)?;
-            let resolution = codec::ResolvedApprovalPayload::decode(payload)?;
+            let resolution = codec::ResolvedApprovalPayload::decode(event_version, payload)?;
             Ok(ApprovalResolution {
                 resolved_event_seq: seq_from_i64(resolved_seq)?,
                 decision: resolution.decision,
@@ -673,8 +691,16 @@ pub(crate) async fn read_open_hook_invocation(
             "hook point did not serialize to its wire name",
         ))?;
     let call_id = lookup.call_id.as_ref().map(ToString::to_string);
+    // The Pending row participates in the derivation, so its declared version
+    // is checked before its invocation identity is read. The NOT EXISTS
+    // exclusion is existence-only: a matching Completed/Failed row of ANY
+    // event_version counts as consumption. That is the fail-closed direction
+    // — an invocation consumed by a newer binary stays closed (the Handler
+    // finds no open invocation instead of re-driving a consumed one); no
+    // field of the matching row is decoded here.
     let row = sqlx::query(
-        "SELECT payload ->> 'invocation_id' AS invocation_id FROM durable_events p \
+        "SELECT p.event_version, p.payload ->> 'invocation_id' AS invocation_id \
+         FROM durable_events p \
          WHERE p.agent_id = $1 AND p.turn_id = $2 AND p.event_type = 'hook_invocation_pending' \
              AND p.payload ->> 'point' = $3 \
              AND (p.payload ->> 'iteration')::bigint = $4 \
@@ -696,6 +722,10 @@ pub(crate) async fn read_open_hook_invocation(
     .map_err(PostgresError::StoreUnavailable)?;
 
     row.map(|row| {
+        let event_version: i32 = row
+            .try_get("event_version")
+            .map_err(PostgresError::StoreUnavailable)?;
+        codec::ensure_supported_event_version(event_version)?;
         let invocation_id: String = row
             .try_get("invocation_id")
             .map_err(PostgresError::StoreUnavailable)?;

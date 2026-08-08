@@ -122,7 +122,10 @@ async fn full_replay(
     assemble(rows, None, ReplayMode::Full).map_err(corrupt)
 }
 
-/// Reads `(from, to]` verifying the truth range is gapless.
+/// Reads `(from, to]` verifying the truth range is gapless, including the
+/// tail: the last returned row must be exactly `to_event_seq`, otherwise the
+/// high-water points past the retained rows and continuing would cement a
+/// truth gap.
 async fn read_checked_range(
     pg: &PostgresBackend,
     agent_id: AgentId,
@@ -133,18 +136,32 @@ async fn read_checked_range(
         .read_events_range(agent_id, from_event_seq, to_event_seq)
         .await
         .map_err(ApiError::from_postgres)?;
+    let events: Vec<LedgerEvent> = rows
+        .into_iter()
+        .map(|row| LedgerEvent::new(row.event_seq, row.event))
+        .collect();
+    check_gapless(from_event_seq, to_event_seq, &events).map_err(corrupt)?;
+    Ok(events)
+}
+
+/// Pure continuity check of one `(from, to]` window; separated from the store
+/// read so the gap matrix is unit-testable.
+fn check_gapless(
+    from_event_seq: u64,
+    to_event_seq: u64,
+    events: &[LedgerEvent],
+) -> Result<(), BaselineCorrupt> {
     let mut expected = from_event_seq;
-    let mut events = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in events {
         expected += 1;
         if row.event_seq != expected {
-            return Err(corrupt(BaselineCorrupt(
-                "historical truth range has missing rows",
-            )));
+            return Err(BaselineCorrupt("historical truth range has missing rows"));
         }
-        events.push(LedgerEvent::new(row.event_seq, row.event));
     }
-    Ok(events)
+    if expected != to_event_seq {
+        return Err(BaselineCorrupt("historical truth range has missing rows"));
+    }
+    Ok(())
 }
 
 fn corrupt(error: BaselineCorrupt) -> ApiError {
@@ -402,6 +419,30 @@ mod tests {
                 compacted_iteration: 0,
             },
         )
+    }
+
+    #[test]
+    fn checked_range_rejects_middle_and_tail_gaps() {
+        // A contiguous window passes.
+        assert!(
+            check_gapless(
+                0,
+                3,
+                &[
+                    message(1, user("a")),
+                    message(2, user("b")),
+                    message(3, user("c"))
+                ]
+            )
+            .is_ok()
+        );
+        // A missing row in the middle is corruption.
+        assert!(check_gapless(0, 3, &[message(1, user("a")), message(3, user("c"))]).is_err());
+        // A missing tail row (high-water ahead of the retained rows) is
+        // corruption too — continuing would cement the truth gap.
+        assert!(check_gapless(0, 3, &[message(1, user("a")), message(2, user("b"))]).is_err());
+        // An empty window exactly at the frontier is valid.
+        assert!(check_gapless(3, 3, &[]).is_ok());
     }
 
     #[test]

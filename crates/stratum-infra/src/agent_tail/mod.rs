@@ -92,10 +92,8 @@ impl NatsAgentTail {
             .map_err(AgentTailError::nats)
             .map(|ack| TailCursor::from_transport_sequence(ack.sequence));
 
-        if result.is_err() {
-            tracing::warn!(agent_id = %agent_id, "agent tail publish failed");
-        }
-
+        // No logging here: the typed error travels to the handling boundary
+        // (the stratum-api dispatcher), which logs it exactly once.
         result
     }
 
@@ -136,7 +134,6 @@ impl NatsAgentTail {
             .map_err(AgentTailError::nats)?;
         let messages = consumer.messages().await.map_err(AgentTailError::nats)?;
 
-        let agent_id = *agent_id;
         let items = messages.scan(false, move |terminated, message| {
             if *terminated {
                 return future::ready(None);
@@ -152,8 +149,9 @@ impl NatsAgentTail {
                 ))
             });
             if item.is_err() {
+                // Terminate on the first error; the typed error travels to the
+                // handling boundary (stratum-api), which logs it exactly once.
                 *terminated = true;
-                tracing::warn!(agent_id = %agent_id, "agent tail delivery failed");
             }
             future::ready(Some(item))
         });
@@ -167,7 +165,8 @@ impl NatsAgentTail {
             .get_stream(&self.config.stream_name)
             .await
             .map_err(AgentTailError::nats)?;
-        check_retained(stream.cached_info().state.first_sequence, cursor)
+        let state = &stream.cached_info().state;
+        check_retained(state.first_sequence, state.last_sequence, cursor)
     }
 }
 
@@ -185,9 +184,20 @@ fn deliver_policy(after: Option<TailCursor>) -> DeliverPolicy {
         .unwrap_or(DeliverPolicy::New)
 }
 
-fn check_retained(first_sequence: u64, cursor: TailCursor) -> Result<(), AgentTailError> {
+/// A cursor is retained only while it addresses a position inside the live
+/// tail. An empty stream (`last_sequence == 0`, no message published yet)
+/// retains nothing, so every cursor is expired. A cursor ahead of
+/// `last_sequence` (forged, or issued by a since-recreated stream) would
+/// otherwise silently wait for future messages and skip the current tail, so
+/// it is expired as well; both cases force the caller's cold bootstrap.
+fn check_retained(
+    first_sequence: u64,
+    last_sequence: u64,
+    cursor: TailCursor,
+) -> Result<(), AgentTailError> {
+    let sequence = cursor.transport_sequence();
     let earliest_valid = first_sequence.saturating_sub(1);
-    if cursor.transport_sequence() < earliest_valid {
+    if last_sequence == 0 || sequence > last_sequence || sequence < earliest_valid {
         Err(AgentTailError::CursorExpired { cursor })
     } else {
         Ok(())
@@ -223,8 +233,8 @@ mod tests {
     fn cursor_at_or_after_earliest_retained_position_is_valid() {
         let cursor = TailCursor::from_transport_sequence(9);
 
-        assert!(check_retained(10, cursor).is_ok());
-        assert!(check_retained(10, TailCursor::from_transport_sequence(50)).is_ok());
+        assert!(check_retained(10, 50, cursor).is_ok());
+        assert!(check_retained(10, 50, TailCursor::from_transport_sequence(50)).is_ok());
     }
 
     #[test]
@@ -232,15 +242,35 @@ mod tests {
         let cursor = TailCursor::from_transport_sequence(8);
 
         assert!(matches!(
-            check_retained(10, cursor),
+            check_retained(10, 50, cursor),
             Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor
         ));
     }
 
     #[test]
-    fn empty_stream_retains_no_cursor_below_zero() {
-        let cursor = TailCursor::from_transport_sequence(0);
+    fn cursor_beyond_last_sequence_is_expired() {
+        let cursor = TailCursor::from_transport_sequence(51);
 
-        assert!(check_retained(0, cursor).is_ok());
+        assert!(matches!(
+            check_retained(10, 50, cursor),
+            Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor
+        ));
+        // A forged far-future cursor on a fresh stream is expired as well.
+        let forged = TailCursor::from_transport_sequence(u64::MAX);
+        assert!(matches!(
+            check_retained(1, 3, forged),
+            Err(AgentTailError::CursorExpired { cursor: expired }) if expired == forged
+        ));
+    }
+
+    #[test]
+    fn empty_stream_expires_every_cursor() {
+        for sequence in [0, 1, 42] {
+            let cursor = TailCursor::from_transport_sequence(sequence);
+            assert!(matches!(
+                check_retained(0, 0, cursor),
+                Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor
+            ));
+        }
     }
 }

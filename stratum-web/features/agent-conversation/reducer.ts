@@ -38,6 +38,7 @@ export const initialConversationState: ConversationState = {
   appliedEventSeqs: new Set<string>(),
   drafts: {},
   activeLlmCallId: null,
+  closedLlmCallIds: new Set<string>(),
   tools: {},
   approvals: {},
   historyThrough: null,
@@ -113,15 +114,17 @@ export function conversationReducer(
       return projectTelemetryFrame(state, action.frame)
     case "view_reconciled": {
       if (state.agentId !== action.view.agent_id) return state
+      // 原子应用：bundle 以 view.snapshot_event_seq 为 barrier 标签。慢
+      // reconcile 的 barrier 落后于当前已应用 barrier 时整体丢弃（含
+      // items/view/approvals），不允许 barrier=12 + view=10 的混装状态
+      if (compareEventSeq(action.view.snapshot_event_seq, state.barrier) < 0)
+        return state
       let next = state
       for (const item of action.items) next = projectHistoryItem(next, item, true)
       next = {
         ...next,
         view: action.view,
-        barrier:
-          compareEventSeq(action.view.snapshot_event_seq, next.barrier) > 0
-            ? action.view.snapshot_event_seq
-            : next.barrier,
+        barrier: action.view.snapshot_event_seq,
         approvals: approvalsFromView(action.view),
       }
       // reconcile 发现 terminal：与 terminal frame 相同的 draft/Tool 清理
@@ -314,10 +317,14 @@ function terminalCleanup(state: ConversationState): ConversationState {
     if (tools === null) tools = { ...state.tools }
     tools[callId] = { ...tool, status: "interrupted" }
   }
+  const closedLlmCallIds = new Set(state.closedLlmCallIds)
+  for (const callId of Object.keys(state.drafts)) closedLlmCallIds.add(callId)
+  if (state.activeLlmCallId !== null) closedLlmCallIds.add(state.activeLlmCallId)
   return {
     ...state,
     drafts: {},
     activeLlmCallId: null,
+    closedLlmCallIds,
     tools: tools ?? state.tools,
     approvals: {},
     cancelRequested: false,
@@ -434,9 +441,12 @@ function projectMessageAppended(
     message.role === "assistant" &&
     next.activeLlmCallId !== null
   ) {
+    const closedCallId = next.activeLlmCallId
     const drafts = { ...next.drafts }
-    delete drafts[next.activeLlmCallId]
-    next = { ...next, drafts, activeLlmCallId: null }
+    delete drafts[closedCallId]
+    const closedLlmCallIds = new Set(next.closedLlmCallIds)
+    closedLlmCallIds.add(closedCallId)
+    next = { ...next, drafts, activeLlmCallId: null, closedLlmCallIds }
   }
 
   next = stableMessage.toolCalls.reduce(
@@ -499,23 +509,24 @@ function projectTelemetryFrame(
 
   const callId = frame.llm_call_id
   const existing = state.drafts[callId]
-  // closed call 的迟到 telemetry：忽略（不重新创建 draft）
-  if (existing === undefined && frame.event.type !== "llm_started") {
-    if (state.activeLlmCallId !== callId) return state
-  }
+  // closed call（durable final 已收敛 / terminal 已清理）的迟到 telemetry：
+  // 忽略，不重新创建 draft
+  if (existing === undefined && state.closedLlmCallIds.has(callId))
+    return state
 
   const seq = frame.telemetry_seq
   const next_expected = existing?.nextTelemetrySeq ?? 0
   // 低于下一期待值 = 重复，忽略
-  if (existing !== undefined && seq < next_expected) return state
+  if (seq < next_expected) return state
 
   const draft: DraftState = existing ?? {
     llmCallId: callId,
     text: "",
     reasoning: "",
     nextTelemetrySeq: 0,
-    // 首次见到的 frame 不是该 call 的起点：prefix 不完整
-    incomplete: seq !== 0,
+    // 首次见到的 frame 不是该 call 的起点（llm_started 丢失，或 seq 越过
+    // 起点）：prefix 不完整，等待 durable final 收敛
+    incomplete: frame.event.type !== "llm_started" || seq !== 0,
   }
   // 高于下一期待值 = 出现间隔：标 incomplete，等待 durable final 收敛
   const incomplete = draft.incomplete || seq > draft.nextTelemetrySeq
@@ -526,6 +537,9 @@ function projectTelemetryFrame(
       ...state.drafts,
       [callId]: { ...draft, incomplete, nextTelemetrySeq: seq + 1 },
     },
+    // 新出现的 call（含 llm_started 丢失后的首个 delta）即当前 active call：
+    // durable final 按 activeLlmCallId 收敛 draft
+    activeLlmCallId: existing === undefined ? callId : state.activeLlmCallId,
   }
 
   const event = frame.event

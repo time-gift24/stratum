@@ -5,6 +5,7 @@ mod error;
 use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 pub use error::ConfigError;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use stratum_core::{ModelId, ToolName};
 
@@ -152,12 +153,13 @@ pub struct LlmConfig {
 }
 
 /// Credentials and allowed models for one LLM provider.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ProviderConfig {
-    /// Provider API key.
-    pub api_key: String,
+    /// Provider API key; held as a secret in memory (§6) and revealed only
+    /// through [`ExposeSecret`] at the provider construction boundary.
+    pub api_key: SecretString,
     /// Provider-local model names available to agents.
     pub models: Vec<String>,
     /// Optional base URL override; when absent the provider's well-known
@@ -165,6 +167,18 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub base_url: Option<String>,
 }
+
+// Equality compares the revealed key value in code only; the secret is never
+// Debug/Display exposed (§6).
+impl PartialEq for ProviderConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.api_key.expose_secret() == other.api_key.expose_secret()
+            && self.models == other.models
+            && self.base_url == other.base_url
+    }
+}
+
+impl Eq for ProviderConfig {}
 
 // The API key is a credential: Debug never exposes it (§6).
 impl fmt::Debug for ProviderConfig {
@@ -360,7 +374,7 @@ fn validate_provider(
     let Some(config) = config else {
         return Ok(());
     };
-    if config.api_key.trim().is_empty() {
+    if config.api_key.expose_secret().trim().is_empty() {
         return Err(ConfigError::EmptyApiKey { provider });
     }
     if config.models.is_empty() {

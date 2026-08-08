@@ -21,6 +21,7 @@ use stratum_llm::LlmProvider;
 use stratum_postgres::AgentView;
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::approval::ApprovalHandler;
@@ -35,6 +36,21 @@ pub(crate) const DEFINITION_SCHEMA_VERSION_V1: i32 = 1;
 
 /// No skill system exists yet; the snapshot pins the nil skill set identity.
 const NO_SKILL_SET: Uuid = Uuid::nil();
+
+/// Skill set identity pinned into every runtime snapshot this binary writes;
+/// the resume barrier compares the persisted value against it.
+pub(crate) fn pinned_skill_set_version() -> SkillSetVersionId {
+    SkillSetVersionId::from(NO_SKILL_SET)
+}
+
+/// Ordered hook handler version ids of the chain built by
+/// [`build_hook_runtime`]; the single source for snapshot writes and the
+/// resume barrier's ordered-chain comparison.
+pub(crate) fn pinned_hook_handler_versions() -> Vec<stratum_core::HookHandlerVersionId> {
+    vec![stratum_core::HookHandlerVersionId::from(
+        crate::approval::APPROVAL_HANDLER_VERSION,
+    )]
+}
 
 /// Immutable resolved definition persisted in `agents.resolved_definition`
 /// (definition schema v1).
@@ -131,11 +147,9 @@ pub(crate) fn runtime_snapshot(
         view.agent_version_id,
         model,
         fingerprint,
-        SkillSetVersionId::from(NO_SKILL_SET),
+        pinned_skill_set_version(),
         extension_set_version_id,
-        vec![stratum_core::HookHandlerVersionId::from(
-            crate::approval::APPROVAL_HANDLER_VERSION,
-        )],
+        pinned_hook_handler_versions(),
     ))
 }
 
@@ -154,7 +168,10 @@ pub(crate) enum TurnRun {
     Resume(PreparedResume),
 }
 
-/// Spawns the managed future of one Turn and returns its handle.
+/// Spawns the managed future of one Turn and returns its handle. The future
+/// runs inside a `turn.run` span carrying the typed Agent/Session/Turn
+/// identity, so kernel and LLM spans nest under the admitting HTTP request
+/// in the OTLP trace.
 pub(crate) fn spawn_managed_turn(
     state: &Arc<AppState>,
     ids: TurnIds,
@@ -165,44 +182,53 @@ pub(crate) fn spawn_managed_turn(
     let state = Arc::clone(state);
     let claim_id = claim.claim_id;
     let token = claim.token.clone();
-    tokio::spawn(async move {
-        let result = match run {
-            TurnRun::Fresh {
-                agent_loop,
-                context,
-                prompts,
-            } => agent_loop.run(context, prompts, token).await,
-            TurnRun::Resume(prepared) => prepared.run(token).await,
-        };
-        if let Err(error) = result {
-            if let Some(signal) = &admission {
-                // A no-op when the sink already signalled the precise error.
-                signal.fail(ApiError::new(loop_error_kind(&error)));
-            }
-            let kind = loop_error_kind(&error);
-            match kind {
-                ErrorKind::StoreUnavailable => {
-                    tracing::error!(
-                        agent_id = %ids.agent_id,
-                        turn_id = %ids.turn_id,
-                        error.kind = kind.code(),
-                        "managed turn ended with a durability error"
-                    );
+    let span = tracing::info_span!(
+        "turn.run",
+        agent_id = %ids.agent_id,
+        session_id = %ids.session_id,
+        turn_id = %ids.turn_id,
+    );
+    tokio::spawn(
+        async move {
+            let result = match run {
+                TurnRun::Fresh {
+                    agent_loop,
+                    context,
+                    prompts,
+                } => agent_loop.run(context, prompts, token).await,
+                TurnRun::Resume(prepared) => prepared.run(token).await,
+            };
+            if let Err(error) = result {
+                if let Some(signal) = &admission {
+                    // A no-op when the sink already signalled the precise error.
+                    signal.fail(ApiError::new(loop_error_kind(&error)));
                 }
-                _ => {
-                    tracing::warn!(
-                        agent_id = %ids.agent_id,
-                        turn_id = %ids.turn_id,
-                        error.kind = kind.code(),
-                        "managed turn ended"
-                    );
+                let kind = loop_error_kind(&error);
+                match kind {
+                    ErrorKind::StoreUnavailable => {
+                        tracing::error!(
+                            agent_id = %ids.agent_id,
+                            turn_id = %ids.turn_id,
+                            error.kind = kind.code(),
+                            "managed turn ended with a durability error"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            agent_id = %ids.agent_id,
+                            turn_id = %ids.turn_id,
+                            error.kind = kind.code(),
+                            "managed turn ended"
+                        );
+                    }
                 }
             }
+            state
+                .registry()
+                .compare_remove(ids.agent_id, ids.turn_id, claim_id);
         }
-        state
-            .registry()
-            .compare_remove(ids.agent_id, ids.turn_id, claim_id);
-    })
+        .instrument(span),
+    )
 }
 
 /// Stable classification of a kernel failure, used for logs and as the

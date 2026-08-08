@@ -30,6 +30,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use secrecy::ExposeSecret;
 use stratum_config::{Config, ProviderConfig};
 use stratum_core::ModelId;
 use stratum_infra::{AgentTailConfig, NatsAgentTail};
@@ -115,6 +116,9 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     }
     state.admission().wait_drained().await;
     state.drain_managed_tasks(SHUTDOWN_DRAIN_BOUND).await;
+    // Dispatchers exit on the shutdown token and clean up their own hub
+    // entries; abort whatever remains so no task outlives the process.
+    state.dispatchers().abort_all();
     Ok(())
 }
 
@@ -187,7 +191,9 @@ fn register_openai(
         let model_id = model_id("openai", model)?;
         providers.register(Arc::new(OpenAICompatibleProvider::new(
             base_url,
-            ApiKey::new(config.api_key.clone()),
+            // The configured secret is revealed only at this construction
+            // boundary; provider clients hold it as a SecretString.
+            ApiKey::new(config.api_key.expose_secret()),
             model_id,
         )))?;
     }
@@ -210,7 +216,9 @@ fn register_deepseek(
         };
         providers.register(Arc::new(DeepSeekProvider::new(
             config.base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL),
-            ApiKey::new(config.api_key.clone()),
+            // The configured secret is revealed only at this construction
+            // boundary; provider clients hold it as a SecretString.
+            ApiKey::new(config.api_key.expose_secret()),
             adapter_model,
             DeepSeekThinking::Disabled,
         )))?;

@@ -159,7 +159,8 @@ export function PromptInput({
 
   const submit = () => {
     if (!canSend) return
-    onSubmit?.(currentValue.trim())
+    // 合同：trim 只用于 canSend 空判定，提交一律用原文（后端原样持久化）
+    onSubmit?.(currentValue)
     if (!controlled) setInnerValue("")
     // 提交后回到单行结构（高度由上面的 effect 回收）
     setMultiline(false)

@@ -236,17 +236,22 @@ pub(crate) async fn begin_turn(
         .map_err(PostgresError::StoreUnavailable)?;
     let state = lock_agent_state(&mut tx, command.agent_id).await?;
 
-    if state.status == crate::types::AgentStatus::Running {
-        return Err(PostgresError::AgentBusy {
-            agent_id: command.agent_id,
-        });
-    }
+    // The CAS expectation is judged before the busy status: a stale
+    // expectation must fail as StaleTurn even while the Agent is running (a
+    // lost-response retry carrying the old expected value must never be told
+    // busy). AgentBusy applies only when the expectation still matches the
+    // current Turn.
     let actual_turn = state.current_turn_id.map(TurnId::from);
     if actual_turn != command.expected_current_turn_id {
         return Err(PostgresError::StaleTurn {
             agent_id: command.agent_id,
             expected: command.expected_current_turn_id,
             actual: actual_turn,
+        });
+    }
+    if state.status == crate::types::AgentStatus::Running {
+        return Err(PostgresError::AgentBusy {
+            agent_id: command.agent_id,
         });
     }
     if let Some(bound) = state.session_id
@@ -534,7 +539,7 @@ pub(crate) async fn resolve_approval(
     }
 
     let requested = sqlx::query(
-        "SELECT payload FROM durable_events \
+        "SELECT event_version, payload FROM durable_events \
          WHERE agent_id = $1 AND turn_id = $2 AND event_type = 'tool_approval_requested' \
              AND payload ->> 'approval_id' = $3",
     )
@@ -547,14 +552,18 @@ pub(crate) async fn resolve_approval(
     .ok_or(PostgresError::ApprovalNotFound {
         approval_id: command.approval_id,
     })?;
-    // Decode eagerly so a malformed request payload fails closed as corrupt.
+    // Decode eagerly so an unsupported version or a malformed request payload
+    // fails closed (runtime-incompatible / corrupt) before any decision.
+    let event_version: i32 = requested
+        .try_get("event_version")
+        .map_err(PostgresError::StoreUnavailable)?;
     let payload: serde_json::Value = requested
         .try_get("payload")
         .map_err(PostgresError::StoreUnavailable)?;
-    codec::RequestedApprovalPayload::decode(payload)?;
+    codec::RequestedApprovalPayload::decode(event_version, payload)?;
 
     let resolved = sqlx::query(
-        "SELECT payload FROM durable_events \
+        "SELECT event_version, payload FROM durable_events \
          WHERE agent_id = $1 AND event_type = 'tool_approval_resolved' \
              AND payload ->> 'approval_id' = $2",
     )
@@ -574,10 +583,13 @@ pub(crate) async fn resolve_approval(
     }
 
     if let Some(resolved) = resolved {
+        let event_version: i32 = resolved
+            .try_get("event_version")
+            .map_err(PostgresError::StoreUnavailable)?;
         let payload: serde_json::Value = resolved
             .try_get("payload")
             .map_err(PostgresError::StoreUnavailable)?;
-        let resolution = codec::ResolvedApprovalPayload::decode(payload)?;
+        let resolution = codec::ResolvedApprovalPayload::decode(event_version, payload)?;
         return if resolution.decision == command.decision {
             Ok(ResolveApprovalOutcome::AlreadyResolvedSame)
         } else {

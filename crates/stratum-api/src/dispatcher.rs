@@ -16,13 +16,14 @@
 //! republish historical rows.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use stratum_core::{AgentId, AgentTelemetryEvent, LlmCallId, SessionId, TurnId};
 use stratum_infra::NatsAgentTail;
 use stratum_postgres::PostgresBackend;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::frames::{AgentStreamFrameV1, ScannedRow, product_event};
@@ -112,9 +113,17 @@ impl DispatcherHandle {
     }
 }
 
-/// Lazily creates and tracks the per-Agent dispatchers of this process.
+/// One tracked dispatcher: its sending half and its owned task handle.
+struct DispatcherEntry {
+    handle: DispatcherHandle,
+    task: JoinHandle<()>,
+}
+
+/// Lazily creates and tracks the per-Agent dispatchers of this process. An
+/// exiting dispatcher removes its own entry and shutdown aborts the rest, so
+/// the hub neither grows unboundedly nor leaves tasks unowned.
 pub(crate) struct DispatcherHub {
-    handles: Mutex<HashMap<AgentId, DispatcherHandle>>,
+    entries: Arc<Mutex<HashMap<AgentId, DispatcherEntry>>>,
     pg: PostgresBackend,
     tail: Option<NatsAgentTail>,
     shutdown: CancellationToken,
@@ -129,7 +138,7 @@ impl DispatcherHub {
         shutdown: CancellationToken,
     ) -> Self {
         Self {
-            handles: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
             pg,
             tail,
             shutdown,
@@ -139,13 +148,14 @@ impl DispatcherHub {
     /// Returns the dispatcher of a locally active Agent, creating it at the
     /// supplied frontier when absent.
     pub(crate) fn ensure(&self, agent_id: AgentId, frontier: u64) -> DispatcherHandle {
-        let mut handles = self
-            .handles
+        let mut entries = self
+            .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        handles
+        entries
             .entry(agent_id)
             .or_insert_with(|| self.spawn(agent_id, frontier))
+            .handle
             .clone()
     }
 
@@ -157,7 +167,19 @@ impl DispatcherHub {
             .receipt(high_water);
     }
 
-    fn spawn(&self, agent_id: AgentId, frontier: u64) -> DispatcherHandle {
+    /// Aborts every remaining dispatcher task and clears the hub; called
+    /// during shutdown so no dispatcher task outlives the process.
+    pub(crate) fn abort_all(&self) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (_, entry) in entries.drain() {
+            entry.task.abort();
+        }
+    }
+
+    fn spawn(&self, agent_id: AgentId, frontier: u64) -> DispatcherEntry {
         let (tx, rx) = mpsc::channel(DISPATCHER_CHANNEL_CAPACITY);
         let io = PgNatsIo {
             agent_id,
@@ -165,12 +187,31 @@ impl DispatcherHub {
             tail: self.tail.clone(),
         };
         let shutdown = self.shutdown.clone();
-        tokio::spawn(run_dispatcher(agent_id, frontier, rx, io, shutdown));
-        DispatcherHandle { agent_id, tx }
+        let entries = Arc::clone(&self.entries);
+        let task = tokio::spawn(async move {
+            run_dispatcher(agent_id, frontier, rx, io, shutdown).await;
+            // Self-cleanup: remove only this task's own entry — a newer
+            // dispatcher of the same Agent is never deleted.
+            let mut entries = entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if entries
+                .get(&agent_id)
+                .is_some_and(|entry| entry.task.id() == tokio::task::id())
+            {
+                entries.remove(&agent_id);
+            }
+        });
+        DispatcherEntry {
+            handle: DispatcherHandle { agent_id, tx },
+            task,
+        }
     }
 }
 
-/// IO boundary of the dispatcher; the second implementation lives in tests.
+/// IO boundary of the dispatcher. This stays a trait because it has two real
+/// implementations: the production Postgres+NATS IO below and the in-memory
+/// mock in tests — testability of the ordering loop is the documented reason.
 #[allow(async_fn_in_trait)] // single-call-site trait; dyn compatibility is not needed
 pub(crate) trait DispatcherIo {
     /// Publishes one serialized frame to the Agent tail.

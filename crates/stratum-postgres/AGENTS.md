@@ -49,6 +49,11 @@
   未知的新版本表示数据合法但当前 binary 不支持，返回 `runtime_incompatible`；已知版本
   无法解码或违反字段不变量，返回 `durable_state_corrupt`。不实现 upcaster，不通过字符串
   解析分类错误。
+- 所有专门化派生读取（pending approvals、`read_approval`、`resolve_approval`、
+  `read_open_hook_invocation`）必须选中并校验每一参与行的 `event_version`，禁止把未知
+  版本 payload 静默按 v1 解码。纯存在性的 NOT EXISTS 子查询（Resolved/Consumed/
+  Completed 匹配）对任意版本的匹配行按存在计——invalidate/consume 方向本身就是 fail
+  closed，该选择已在各查询注释中记录。
 - 缺少必需 compaction companion/summary 或 identity 不一致属于 durable truth 不完整：
   `durable_state_corrupt` fail closed，绝不修表或提供 rebuild API；只有加速指针
   （locator/`retained_from_event_seq`）无效时才回退内存 full replay。

@@ -49,3 +49,8 @@
   `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，compose project
   `stratum-api-test`，pg 45433 / nats 44228，与其它 crate 端口错开）。
 - OTLP 由 `telemetry.rs::init_telemetry()` 按环境激活：设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时安装 OTLP span exporter（HTTP/protobuf，reqwest-blocking，无 tonic）与 `tracing-opentelemetry` layer，未设置时与纯 fmt 行为完全一致；进程退出前必须经 `TelemetryGuard::shutdown()` flush。collector 端点仅支持 `http://`。
+- approval waiter 使用 RAII registration guard（Drop 按精确注册身份注销）；`register` 返回 guard+receiver，早命中/读错/cancel 均不泄漏。
+- DispatcherHub 条目自清理（task 退出时按 `task.id()` 身份删除自己的 entry），进程关闭时 `abort_all`；dispatcher task 不允许 detached。
+- resume 的六字段 snapshot 校验含 `skill_set_version_id` 与有序 `hook_handler_versions`，由 `turn.rs` 的 pinned 常量单一来源同时供写入与校验。
+- message admission 的 expected-current-turn 判定先于 status 判定：expected 不匹配即 `stale_turn`（即使 running）；`agent_busy`/`resume_required` 只对 expected 匹配的 running 请求。
+- 进程关闭语义：managed task 一旦 spawn 即拥有 claim，`take_tasks` 必须能看到它的 JoinHandle；shutdown 只关 admission 并 drain，绝不 signal turn token。

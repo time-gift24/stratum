@@ -92,11 +92,28 @@ const TELEMETRY_EVENT_TYPES = new Set([
   "llm_finished",
 ])
 
+// unit variants：serde 序列化不携带 `data` key（loop_started / llm_started），
+// 其余 variant 必须携带 object data。缺失 data 的 data-variant 与携带 data 的
+// unit-variant 都不是合法 wire 形状，一律拒绝。
+const UNIT_PRODUCT_EVENT_TYPES = new Set(["loop_started"])
+const UNIT_TELEMETRY_EVENT_TYPES = new Set(["llm_started"])
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
 const isNullableString = (value: unknown): value is string | null =>
   value === null || typeof value === "string"
+
+/**
+ * per-variant 校验 event 的 data 形状：unit variant 必须没有 data key，
+ * data variant 必须是 object。
+ */
+const hasValidEventDataShape = (
+  event: Record<string, unknown>,
+  eventType: string,
+  unitTypes: ReadonlySet<string>
+): boolean =>
+  unitTypes.has(eventType) ? event.data === undefined : isRecord(event.data)
 
 /**
  * 解析并校验一条 `AgentStreamFrameV1`。未知 protocol_version、未知 kind 或
@@ -145,7 +162,7 @@ export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefi
         !isEventSeq(value.event_seq) ||
         typeof value.event_version !== "number" ||
         !PRODUCT_EVENT_TYPES.has(eventType) ||
-        !isRecord(event.data)
+        !hasValidEventDataShape(event, eventType, UNIT_PRODUCT_EVENT_TYPES)
       )
         return undefined
       return {
@@ -163,7 +180,7 @@ export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefi
       if (
         typeof value.llm_call_id !== "string" ||
         !TELEMETRY_EVENT_TYPES.has(eventType) ||
-        !isRecord(event.data)
+        !hasValidEventDataShape(event, eventType, UNIT_TELEMETRY_EVENT_TYPES)
       )
         return undefined
       // telemetry_seq 是 call-local 序号；容忍十进制字符串或 number

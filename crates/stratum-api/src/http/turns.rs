@@ -26,11 +26,12 @@ use crate::sink::{AdmissionSignal, TurnDurableSink, TurnIds, TurnTelemetrySink};
 use crate::state::AppState;
 use crate::turn::{
     TurnRun, build_agent_loop, build_hook_runtime, build_tool_registry, decode_definition,
-    runtime_snapshot, spawn_managed_turn,
+    pinned_hook_handler_versions, pinned_skill_set_version, runtime_snapshot, spawn_managed_turn,
 };
 
-/// RAII cleanup for a claim installed by one request: disarmed on success,
-/// otherwise only this exact claim identity is removed.
+/// RAII cleanup for a claim installed by one request: disarmed once the
+/// managed task owns the claim, otherwise only this exact claim identity is
+/// removed.
 struct ClaimCleanup<'a> {
     state: &'a AppState,
     agent_id: stratum_core::AgentId,
@@ -92,7 +93,14 @@ pub(crate) async fn post_message(
         .map_err(ApiError::from_postgres)?;
     let definition = decode_definition(&view)?;
 
-    // Durable state pre-checks; the admission CAS stays authoritative.
+    // Durable state pre-checks; the admission CAS stays authoritative. An
+    // expected-turn mismatch is stale regardless of status: a lost-response
+    // retry with an old expectation must never create a second Turn, while
+    // busy/resume_required only apply to requests carrying the correct
+    // current expectation.
+    if body.expected_current_turn_id != view.current_turn_id {
+        return Err(ApiError::new(ErrorKind::StaleTurn));
+    }
     match view.status {
         stratum_postgres::AgentStatus::Running => {
             let current = view
@@ -106,11 +114,7 @@ pub(crate) async fn post_message(
         stratum_postgres::AgentStatus::Idle
         | stratum_postgres::AgentStatus::Finished
         | stratum_postgres::AgentStatus::Failed
-        | stratum_postgres::AgentStatus::Cancelled => {
-            if body.expected_current_turn_id != view.current_turn_id {
-                return Err(ApiError::new(ErrorKind::StaleTurn));
-            }
-        }
+        | stratum_postgres::AgentStatus::Cancelled => {}
         _ => return Err(ApiError::new(ErrorKind::Internal)),
     }
 
@@ -133,7 +137,7 @@ pub(crate) async fn post_message(
     let provider = state
         .providers()
         .configure(&effective_model)
-        .map_err(|_| ApiError::new(ErrorKind::RuntimeUnavailable))?;
+        .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
     let registry = build_tool_registry(&definition.tools)?;
 
     let turn_id = TurnId::new();
@@ -198,6 +202,11 @@ pub(crate) async fn post_message(
     state
         .registry()
         .attach_task(agent_id, turn_id, claim.claim_id, handle);
+    // From here the managed task owns the claim: it removes only its own
+    // claim identity when it ends, and its handle stays in the registry drain
+    // set even when this request returns early — a shutdown race can never
+    // strand a started turn outside `take_tasks`.
+    cleanup.defuse();
 
     // Accepted only after the managed future is installed and the first user
     // message is committed.
@@ -213,7 +222,6 @@ pub(crate) async fn post_message(
     state
         .registry()
         .mark_running(agent_id, turn_id, claim.claim_id);
-    cleanup.defuse();
     Span::current().record("session_id", field::display(session_id));
     Span::current().record("turn_id", field::display(turn_id));
     Ok((
@@ -235,7 +243,7 @@ pub(crate) async fn post_message(
     request_body = ResumeRequest,
     responses(
         (status = 202, description = "turn resumed under this process", body = TurnAccepted),
-        (status = 204, description = "the exact turn is already starting or running here"),
+        (status = 204, description = "the exact turn is already starting or running here", body = ()),
         (status = 400, description = "invalid request body or agent identity", body = ErrorResponse),
         (status = 404, description = "agent not found", body = ErrorResponse),
         (status = 409, description = "stale turn, not running, preamble incomplete, or incompatible runtime", body = ErrorResponse),
@@ -348,7 +356,7 @@ async fn resume_preflight_and_spawn(
     let provider = state
         .providers()
         .configure(&snapshot.model)
-        .map_err(|_| ApiError::new(ErrorKind::RuntimeUnavailable))?;
+        .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
     let registry = build_tool_registry(&definition.tools)?;
     let fingerprint = registry
         .fingerprint()
@@ -365,6 +373,14 @@ async fn resume_preflight_and_spawn(
     let dispatcher = state.dispatchers().ensure(agent_id, through);
     let hook_runtime = build_hook_runtime(state, ids, dispatcher.clone());
     if hook_runtime.extension_set_version() != Some(snapshot.extension_set_version_id) {
+        return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
+    }
+    // The six-field snapshot also pins the skill set identity and the ordered
+    // hook handler versions; both must match the rebuilt runtime exactly or
+    // the pinned runtime component is unavailable to this binary.
+    if snapshot.skill_set_version_id != pinned_skill_set_version()
+        || snapshot.hook_handler_versions != pinned_hook_handler_versions()
+    {
         return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
     }
 
@@ -491,8 +507,8 @@ async fn reconcile_started_only(
     params(("agent_id" = String, Path, description = "agent identity")),
     request_body = CancelRequest,
     responses(
-        (status = 202, description = "cancellation signal accepted by the hosted turn"),
-        (status = 204, description = "the exact turn is already cancelled"),
+        (status = 202, description = "cancellation signal accepted by the hosted turn", body = ()),
+        (status = 204, description = "the exact turn is already cancelled", body = ()),
         (status = 400, description = "invalid request body or agent identity", body = ErrorResponse),
         (status = 404, description = "agent not found", body = ErrorResponse),
         (status = 409, description = "stale turn, turn not running/hosted, or turn still starting", body = ErrorResponse),
@@ -554,7 +570,7 @@ pub(crate) async fn post_cancel(
     ),
     request_body = ApprovalResolveRequest,
     responses(
-        (status = 204, description = "decision committed (or an identical decision already exists)"),
+        (status = 204, description = "decision committed (or an identical decision already exists)", body = ()),
         (status = 400, description = "invalid request body or path identity", body = ErrorResponse),
         (status = 404, description = "agent or approval not found", body = ErrorResponse),
         (status = 409, description = "stale turn, opposite decision exists, or approval invalidated", body = ErrorResponse),

@@ -93,6 +93,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .allowed_origins()
         .iter()
         .map(|origin| {
+            // Invariant (programmer error): `stratum-config` validation
+            // rejects any origin that is not a valid header value, so parsing
+            // here can never fail.
             http::HeaderValue::from_str(origin)
                 .expect("allowed origins are validated during config parsing")
         })
@@ -146,7 +149,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
                 .allow_methods([http::Method::GET, http::Method::POST])
-                .allow_headers([http::header::CONTENT_TYPE]),
+                // Browser clients send `Idempotency-Key` on create and
+                // `Last-Event-ID` on SSE reconnect; both must survive the
+                // preflight allowlist.
+                .allow_headers([
+                    http::header::CONTENT_TYPE,
+                    http::HeaderName::from_static("last-event-id"),
+                    http::HeaderName::from_static("idempotency-key"),
+                ]),
         )
     }
 }

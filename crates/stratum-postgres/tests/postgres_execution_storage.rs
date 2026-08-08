@@ -10,14 +10,15 @@
 use serde_json::{Map, Value, json};
 use stratum_core::{
     AgentId, AgentVersionId, ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel,
-    DurableAgentEvent, ExtensionSetVersionId, HookHandlerVersionId, HookInvocationId, ModelConfig,
-    ModelId, SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName, ToolSetFingerprint,
-    TurnId, TurnRuntimeSnapshot,
+    DecideToolCallDecisionRecord, DurableAgentEvent, ExtensionSetVersionId, HookDecisionRecord,
+    HookHandlerVersionId, HookInputDigest, HookInvocationId, HookPoint, ModelConfig, ModelId,
+    SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName, ToolSetFingerprint, TurnId,
+    TurnRuntimeSnapshot,
 };
 use stratum_postgres::{
     AppendEvent, ApprovalLookup, BeginTurn, CompactionInput, CreateAgent, CreateAgentOutcome,
-    HistoryQuery, PostgresBackend, PostgresError, ResolveApproval, ResolveApprovalOutcome,
-    ResumeSliceQuery,
+    HistoryQuery, HookInvocationLookup, PostgresBackend, PostgresError, ResolveApproval,
+    ResolveApprovalOutcome, ResumeSliceQuery, VersionedKind,
 };
 use uuid::Uuid;
 
@@ -391,7 +392,29 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
         .expect("admission commits");
     assert_eq!(receipt.event_seq, 1);
 
-    // A running agent rejects admission.
+    // A stale expectation fails as StaleTurn even while the agent is running:
+    // a lost-response retry with the old expected value must never see busy.
+    let (command, _) = begin_command(agent, None, session);
+    let error = backend
+        .begin_turn(command)
+        .await
+        .expect_err("stale first-admission expectation while running");
+    assert!(matches!(
+        error,
+        PostgresError::StaleTurn {
+            expected: None,
+            actual: Some(actual),
+            ..
+        } if actual == turn_one
+    ));
+    let (command, _) = begin_command(agent, Some(TurnId::new()), session);
+    let error = backend
+        .begin_turn(command)
+        .await
+        .expect_err("stale expectation while running");
+    assert!(matches!(error, PostgresError::StaleTurn { .. }));
+
+    // A running agent rejects admission when the expectation still matches.
     let (command, _) = begin_command(agent, Some(turn_one), session);
     let error = backend.begin_turn(command).await.expect_err("busy agent");
     assert!(matches!(error, PostgresError::AgentBusy { .. }));
@@ -1237,4 +1260,181 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
     let view = backend.read_agent_view(agent).await.expect("view reads");
     assert_eq!(view.status, stratum_postgres::AgentStatus::Running);
     assert_eq!(view.latest_usage, None, "new turn has no usage yet");
+}
+
+/// Flips one row's `event_version` in place, simulating a row written by a
+/// newer binary; the payload keeps the v1 shape so only the version gate can
+/// reject it.
+async fn set_event_version(
+    backend: &PostgresBackend,
+    agent_id: AgentId,
+    event_seq: u64,
+    version: i32,
+) {
+    sqlx::query(
+        "UPDATE durable_events SET event_version = $3 WHERE agent_id = $1 AND event_seq = $2",
+    )
+    .bind(agent_id.as_uuid())
+    .bind(event_seq as i64)
+    .bind(version)
+    .execute(backend.pool())
+    .await
+    .expect("event version flips");
+}
+
+fn assert_incompatible(error: PostgresError, version: i32) {
+    assert!(
+        matches!(
+            error,
+            PostgresError::RuntimeIncompatible {
+                kind: VersionedKind::EventPayload,
+                version: found,
+            } if found == version
+        ),
+        "expected runtime_incompatible for version {version}, got {error:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn approval_and_hook_derivation_fail_closed_on_unsupported_event_versions() {
+    let backend = reset_backend().await;
+    let agent = create_agent(&backend, "alpha").await;
+    let (session, turn) = running_turn(&backend, agent).await;
+
+    let approval = ApprovalId::new();
+    let hook = HookInvocationId::new();
+    let mut command = append_command(agent, session, turn, approval_request(approval));
+    command.approval_hook_invocation_id = Some(hook);
+    let requested_seq = backend
+        .append_event(command)
+        .await
+        .expect("request appends")
+        .event_seq;
+    let view = backend.read_agent_view(agent).await.expect("view reads");
+    assert_eq!(view.pending_approvals.len(), 1);
+
+    // A same-shaped request row at an unsupported version is never decoded as
+    // v1: every derivation that reads its payload fails closed.
+    set_event_version(&backend, agent, requested_seq, 2).await;
+    let error = backend
+        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval))
+        .await
+        .expect_err("v2 request is incompatible");
+    assert_incompatible(error, 2);
+    let error = backend
+        .read_agent_view(agent)
+        .await
+        .expect_err("v2 pending derivation is incompatible");
+    assert_incompatible(error, 2);
+    let error = backend
+        .resolve_approval(resolve_command(
+            agent,
+            turn,
+            approval,
+            ApprovalDecision::Approve,
+        ))
+        .await
+        .expect_err("v2 request cannot resolve");
+    assert_incompatible(error, 2);
+    set_event_version(&backend, agent, requested_seq, 1).await;
+
+    // The decision commits at v1.
+    let ResolveApprovalOutcome::Resolved { receipt } = backend
+        .resolve_approval(resolve_command(
+            agent,
+            turn,
+            approval,
+            ApprovalDecision::Approve,
+        ))
+        .await
+        .expect("resolve commits")
+    else {
+        panic!("first resolve must commit");
+    };
+
+    // An unsupported-version decision row fails closed where it is decoded…
+    set_event_version(&backend, agent, receipt.event_seq, 2).await;
+    let error = backend
+        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval))
+        .await
+        .expect_err("v2 resolution is incompatible");
+    assert_incompatible(error, 2);
+    let error = backend
+        .resolve_approval(resolve_command(
+            agent,
+            turn,
+            approval,
+            ApprovalDecision::Approve,
+        ))
+        .await
+        .expect_err("v2 resolution cannot be re-decoded");
+    assert_incompatible(error, 2);
+    // …but still counts as an existing decision for the existence-only
+    // pending derivation (fail closed: the approval stays hidden).
+    let view = backend.read_agent_view(agent).await.expect("view reads");
+    assert!(view.pending_approvals.is_empty());
+    set_event_version(&backend, agent, receipt.event_seq, 1).await;
+
+    // A v1 pending hook invocation is open at its exact address.
+    let invocation = HookInvocationId::new();
+    let pending_seq = backend
+        .append_event(append_command(
+            agent,
+            session,
+            turn,
+            DurableAgentEvent::HookInvocationPending {
+                invocation_id: invocation,
+                point: HookPoint::DecideToolCall,
+                iteration: 0,
+                call_id: Some(CallId::from("call-1")),
+                input_digest: "b".repeat(64).parse::<HookInputDigest>().expect("digest"),
+            },
+        ))
+        .await
+        .expect("pending appends")
+        .event_seq;
+    let lookup = HookInvocationLookup {
+        agent_id: agent,
+        turn_id: turn,
+        point: HookPoint::DecideToolCall,
+        iteration: 0,
+        call_id: Some(CallId::from("call-1")),
+    };
+    let open = backend
+        .read_open_hook_invocation(lookup.clone())
+        .await
+        .expect("lookup reads");
+    assert_eq!(open, Some(invocation));
+
+    // An unsupported-version pending row is never read as v1.
+    set_event_version(&backend, agent, pending_seq, 2).await;
+    let error = backend
+        .read_open_hook_invocation(lookup.clone())
+        .await
+        .expect_err("v2 pending invocation is incompatible");
+    assert_incompatible(error, 2);
+    set_event_version(&backend, agent, pending_seq, 1).await;
+
+    // A completion at an unsupported version still counts as consumption for
+    // the existence-only open check (fail closed: nothing re-opens).
+    let completed_seq = backend
+        .append_event(append_command(
+            agent,
+            session,
+            turn,
+            DurableAgentEvent::HookInvocationCompleted {
+                invocation_id: invocation,
+                decision: HookDecisionRecord::DecideToolCall(DecideToolCallDecisionRecord::Execute),
+            },
+        ))
+        .await
+        .expect("completion appends")
+        .event_seq;
+    set_event_version(&backend, agent, completed_seq, 2).await;
+    let open = backend
+        .read_open_hook_invocation(lookup)
+        .await
+        .expect("lookup reads");
+    assert_eq!(open, None, "a consumed invocation never re-opens");
 }

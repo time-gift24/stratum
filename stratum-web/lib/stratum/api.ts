@@ -85,7 +85,9 @@ export type AgentView = {
  * event_seq 允许有数值间隔。
  */
 export type AgentProductEventV1 =
-  | { type: "loop_started"; data: { extension_set_version_id?: string } }
+  // loop_started 是 unit variant：wire 上不携带 `data` key（安全投影已丢弃
+  // extension_set_version_id 等内部字段）
+  | { type: "loop_started" }
   | { type: "message_appended"; data: { message: ChatMessage } }
   | { type: "tool_approval_requested"; data: PendingApprovalView }
   | {
@@ -122,7 +124,8 @@ export type HistoryPage = {
 
 /** typed LLM telemetry event（call-local，不进入 durable history） */
 export type LlmTelemetryEventV1 =
-  | { type: "llm_started"; data: Record<string, unknown> }
+  // llm_started 是 unit variant：wire 上不携带 `data` key
+  | { type: "llm_started" }
   | { type: "text_delta"; data: { delta: string } }
   | { type: "reasoning_delta"; data: { delta: string } }
   | {
@@ -293,10 +296,12 @@ export function createStratumApi(options: {
       return response.json() as Promise<CreateAgentResult>
     },
     getAgentTemplates: async () => {
-      const response = await request<{ agents: readonly AgentTemplateView[] }>(
-        "/v1/agent-templates"
-      )
-      return response.agents
+      // 后端响应形状是 {"templates": [...]}（crates/stratum-api dto.rs
+      // AgentTemplatesResponse）
+      const response = await request<{
+        templates: readonly AgentTemplateView[]
+      }>("/v1/agent-templates")
+      return response.templates
     },
     getModels: async () => {
       const response = await request<{ models: readonly ModelDescriptor[] }>(

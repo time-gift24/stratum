@@ -14,6 +14,8 @@ const ORDER_STREAM: &str = "AGENT_TAIL_TEST_ORDER";
 const NEW_ONLY_STREAM: &str = "AGENT_TAIL_TEST_NEW_ONLY";
 const RESUME_STREAM: &str = "AGENT_TAIL_TEST_RESUME";
 const EXPIRY_STREAM: &str = "AGENT_TAIL_TEST_EXPIRY";
+const FUTURE_STREAM: &str = "AGENT_TAIL_TEST_FUTURE";
+const EMPTY_STREAM: &str = "AGENT_TAIL_TEST_EMPTY";
 const ISOLATION_STREAM: &str = "AGENT_TAIL_TEST_ISOLATION";
 const RESTART_STREAM: &str = "AGENT_TAIL_TEST_RESTART";
 const NO_DELIVERY_GRACE: Duration = Duration::from_millis(500);
@@ -113,6 +115,46 @@ async fn agent_tail_reports_expired_cursor_after_retention_eviction() -> Result<
     assert!(
         matches!(result, Err(AgentTailError::CursorExpired { cursor }) if cursor == evicted),
         "evicted cursor must fail with the typed CursorExpired error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_tail_reports_future_cursor_as_expired() -> Result<(), Box<dyn Error>> {
+    let config = test_config(FUTURE_STREAM, "events.agent.test.future");
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let agent_id = AgentId::new();
+
+    tail.publish(&agent_id, Bytes::from_static(b"frame-1"))
+        .await?;
+
+    // A cursor ahead of the tail (forged, or from a recreated stream) must
+    // expire instead of silently waiting for future messages.
+    let forged: TailCursor = "999999".parse()?;
+    let result = tail.subscribe(&agent_id, Some(forged)).await;
+    assert!(
+        matches!(result, Err(AgentTailError::CursorExpired { cursor }) if cursor == forged),
+        "future cursor must fail with the typed CursorExpired error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_tail_reports_any_cursor_as_expired_on_empty_stream() -> Result<(), Box<dyn Error>> {
+    let config = test_config(EMPTY_STREAM, "events.agent.test.empty");
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let agent_id = AgentId::new();
+
+    // Nothing was ever published: no cursor can be retained.
+    let cursor: TailCursor = "0".parse()?;
+    let result = tail.subscribe(&agent_id, Some(cursor)).await;
+    assert!(
+        matches!(result, Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor),
+        "an empty stream must expire every cursor"
     );
     Ok(())
 }

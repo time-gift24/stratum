@@ -302,11 +302,17 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.kind.status();
         if status.is_server_error() {
-            tracing::error!(
-                error.code = self.kind.code(),
-                source = ?self.source,
-                "request failed"
-            );
+            // Log the stable code plus the typed error's own Display, which
+            // libraries craft safe; never a Debug dump of arbitrary sources
+            // (SQL text, NATS detail, or host paths could leak there).
+            match &self.source {
+                Some(source) => tracing::error!(
+                    error.code = self.kind.code(),
+                    source = %source,
+                    "request failed"
+                ),
+                None => tracing::error!(error.code = self.kind.code(), "request failed"),
+            }
         } else {
             tracing::warn!(error.code = self.kind.code(), "request rejected");
         }

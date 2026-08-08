@@ -107,7 +107,9 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::DurableStateCorrupt`] when a persisted
+    /// Returns [`PostgresError::RuntimeIncompatible`] when the matched pending
+    /// row declares an unsupported event version,
+    /// [`PostgresError::DurableStateCorrupt`] when a persisted
     /// invocation identity is malformed and [`PostgresError::StoreUnavailable`]
     /// on storage failure.
     pub async fn read_open_hook_invocation(
@@ -169,9 +171,12 @@ impl PostgresBackend {
     ///
     /// Returns [`PostgresError::AgentNotFound`],
     /// [`PostgresError::ApprovalNotFound`], [`PostgresError::StaleTurn`],
-    /// [`PostgresError::ApprovalInvalidated`], or
-    /// [`PostgresError::ApprovalAlreadyResolved`] on validation failure and
-    /// [`PostgresError::StoreUnavailable`] on storage failure.
+    /// [`PostgresError::ApprovalInvalidated`],
+    /// [`PostgresError::ApprovalAlreadyResolved`], or
+    /// [`PostgresError::RuntimeIncompatible`] when a matched approval row
+    /// declares an unsupported event version,
+    /// [`PostgresError::DurableStateCorrupt`] when such a row fails strict v1
+    /// decode, and [`PostgresError::StoreUnavailable`] on storage failure.
     pub async fn resolve_approval(
         &self,
         command: ResolveApproval,
@@ -200,6 +205,8 @@ impl PostgresBackend {
     /// # Errors
     ///
     /// Returns [`PostgresError::AgentNotFound`] when the Agent does not exist,
+    /// [`PostgresError::RuntimeIncompatible`] when a derived approval row
+    /// declares an unsupported event version,
     /// [`PostgresError::DurableStateCorrupt`] when persisted shapes fail v1
     /// decode, and [`PostgresError::StoreUnavailable`] on storage failure.
     pub async fn read_agent_view(&self, agent_id: AgentId) -> Result<AgentView, PostgresError> {
@@ -289,7 +296,9 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::DurableStateCorrupt`] when a payload fails
+    /// Returns [`PostgresError::RuntimeIncompatible`] when a matched row
+    /// declares an unsupported event version,
+    /// [`PostgresError::DurableStateCorrupt`] when a payload fails
     /// strict v1 decode and [`PostgresError::StoreUnavailable`] on storage
     /// failure.
     pub async fn read_approval(

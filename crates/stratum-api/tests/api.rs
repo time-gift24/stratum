@@ -1577,3 +1577,175 @@ async fn compaction_pointer_corruption_falls_back_to_full_replay() {
         "the corrupted pointer really differs from the valid one"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires the stratum-api-test compose stack"]
+async fn stale_expected_turn_wins_over_busy_and_resume_required() {
+    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![Script::Pending]).await;
+    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (status, accepted) = send_message(&fixture, &agent_id, "hello", Value::Null).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
+
+    // Hosted running turn: a retry with the OLD expected value is stale (it
+    // must never create a second turn), while the correct current value still
+    // reports busy.
+    let (status, body) = send_message(&fixture, &agent_id, "again", Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "stale_turn");
+    let (status, body) = send_message(&fixture, &agent_id, "again", json!(turn_id)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "agent_busy");
+
+    // Unhosted running turn (restarted host): stale still wins over
+    // resume_required, and the correct current value still requires resume.
+    let restarted = restarted(&fixture, vec![]).await;
+    let (status, body) = send_message(&restarted, &agent_id, "again", Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "stale_turn");
+    let (status, body) = send_message(&restarted, &agent_id, "again", json!(turn_id)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "resume_required");
+
+    // Clean up the running turn through the original host.
+    let (status, _) = fixture
+        .json(
+            "POST",
+            &format!("/v1/agents/{agent_id}/cancel"),
+            Some(json!({ "turn_id": turn_id })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_for_status(&fixture, &agent_id, "cancelled").await;
+}
+
+/// Commits one running turn whose `LoopStarted` snapshot is the real snapshot
+/// of `source_turn` with one field tampered, plus its first user message, and
+/// returns the new turn id.
+async fn begin_tampered_turn(
+    pg: &PostgresBackend,
+    agent_id: &str,
+    source_turn: &str,
+    tamper: impl FnOnce(&mut TurnRuntimeSnapshot),
+) -> String {
+    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
+    let source_uuid = source_turn.parse::<uuid::Uuid>().expect("turn uuid");
+    let started = pg
+        .read_loop_started(AgentId::from(agent_uuid), TurnId::from(source_uuid))
+        .await
+        .expect("source loop_started reads");
+    let mut snapshot = started.snapshot;
+    tamper(&mut snapshot);
+    let turn_id = TurnId::new();
+    pg.begin_turn(BeginTurn {
+        agent_id: AgentId::from(agent_uuid),
+        expected_current_turn_id: Some(TurnId::from(source_uuid)),
+        turn_id,
+        session_id: started.session_id,
+        snapshot,
+    })
+    .await
+    .expect("tampered turn commits");
+    pg.append_event(stratum_postgres::AppendEvent {
+        agent_id: AgentId::from(agent_uuid),
+        session_id: started.session_id,
+        turn_id,
+        event: stratum_core::DurableAgentEvent::MessageAppended {
+            message: stratum_core::ChatMessage::user("hi"),
+        },
+        approval_hook_invocation_id: None,
+        default_model_update: None,
+        compaction: None,
+    })
+    .await
+    .expect("first user message commits");
+    turn_id.to_string()
+}
+
+#[tokio::test]
+#[ignore = "requires the stratum-api-test compose stack"]
+async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
+    let mut script = MockProvider::text("one");
+    script.extend(MockProvider::text("two"));
+    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], script).await;
+    let pg = PostgresBackend::connect(&common::pg_url())
+        .await
+        .expect("postgres connects");
+
+    // Agent A: the persisted skill set identity does not match the runtime
+    // this binary rebuilds.
+    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_a = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, accepted) = send_message(&fixture, &agent_a, "first", Value::Null).await;
+    let turn_a = accepted["turn_id"].as_str().expect("turn id").to_owned();
+    wait_for_status(&fixture, &agent_a, "finished").await;
+    let tampered = begin_tampered_turn(&pg, &agent_a, &turn_a, |snapshot| {
+        snapshot.skill_set_version_id = SkillSetVersionId::new();
+    })
+    .await;
+    let (status, body) = fixture
+        .json(
+            "POST",
+            &format!("/v1/agents/{agent_a}/resume"),
+            Some(json!({ "turn_id": tampered })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "runtime_unavailable");
+
+    // Agent B: the persisted ordered hook handler versions do not match the
+    // chain this binary rebuilds.
+    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_b = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, accepted) = send_message(&fixture, &agent_b, "first", Value::Null).await;
+    let turn_b = accepted["turn_id"].as_str().expect("turn id").to_owned();
+    wait_for_status(&fixture, &agent_b, "finished").await;
+    let tampered = begin_tampered_turn(&pg, &agent_b, &turn_b, |snapshot| {
+        snapshot.hook_handler_versions = Vec::new();
+    })
+    .await;
+    let (status, body) = fixture
+        .json(
+            "POST",
+            &format!("/v1/agents/{agent_b}/resume"),
+            Some(json!({ "turn_id": tampered })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "runtime_unavailable");
+}
+
+#[tokio::test]
+#[ignore = "requires the stratum-api-test compose stack"]
+async fn ledger_tail_gap_fails_closed_as_durable_state_corrupt() {
+    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("one")).await;
+    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, accepted) = send_message(&fixture, &agent_id, "first", Value::Null).await;
+    let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
+    wait_for_status(&fixture, &agent_id, "finished").await;
+
+    // Corrupt the ledger: delete the newest committed row so the durable
+    // high-water points past the retained rows.
+    let pool = sqlx::PgPool::connect(&common::pg_url())
+        .await
+        .expect("raw pool connects");
+    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
+    sqlx::query(
+        "DELETE FROM durable_events WHERE agent_id = $1 AND event_seq = \
+         (SELECT last_event_seq FROM agent_state WHERE agent_id = $1)",
+    )
+    .bind(agent_uuid)
+    .execute(&pool)
+    .await
+    .expect("tail row deleted");
+
+    // The next admission must fail closed instead of cementing the gap.
+    let (status, body) = send_message(&fixture, &agent_id, "second", json!(turn_id)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["code"], "durable_state_corrupt");
+}

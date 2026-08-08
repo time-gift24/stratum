@@ -2,26 +2,40 @@
 
 use std::{error::Error, fmt};
 
+use secrecy::{ExposeSecret, SecretString};
 use stratum_core::ModelId;
 use thiserror::Error;
 
-/// Secret API key used by provider clients.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ApiKey(String);
+/// Secret API key used by provider clients; held as a [`SecretString`] so the
+/// value is zeroized on drop and never Debug/Display exposed (§6).
+#[derive(Clone)]
+pub struct ApiKey(SecretString);
 
 impl ApiKey {
-    /// Creates a new API key wrapper.
+    /// Creates a new API key wrapper from a revealed value; callers reveal
+    /// configured secrets with [`ExposeSecret::expose_secret`] at the
+    /// provider construction boundary only.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(SecretString::from(value.into()))
     }
 
-    /// Returns the raw API key string.
+    /// Returns the raw API key string for provider request construction.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.expose_secret()
     }
 }
+
+// Equality compares the revealed key value in code only; the secret is never
+// Debug/Display exposed (§6).
+impl PartialEq for ApiKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.expose_secret() == other.0.expose_secret()
+    }
+}
+
+impl Eq for ApiKey {}
 
 impl fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

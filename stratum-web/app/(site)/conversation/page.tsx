@@ -422,11 +422,16 @@ export default function ConversationPage() {
       : currentThinkingLevel(selectedModelConfig.parameters)
 
   const [sendVersion, setSendVersion] = useState(0)
+  // 受控 composer：发送成功才清空；首条消息失败等场景保留用户原文
+  const [composerValue, setComposerValue] = useState("")
   const handleSubmit = (value: string) => {
     // 发送信号：让 thread 把随后的 null → 新 agentId 识别为同一对话的首发
     setSendVersion((version) => version + 1)
-    if (state.agentId === null) void createConversation(value)
-    else void sendMessage(value)
+    const sent =
+      state.agentId === null ? createConversation(value) : sendMessage(value)
+    void sent.then((ok) => {
+      if (ok) setComposerValue("")
+    })
   }
 
   const handleNewConversation = useCallback(
@@ -484,6 +489,8 @@ export default function ConversationPage() {
               ) : null}
               <PromptInput
                 placeholder="问问 Stratum"
+                value={composerValue}
+                onChange={setComposerValue}
                 onSubmit={handleSubmit}
                 running={turnRunning && !resumeRequired}
                 cancelRequested={state.cancelRequested}

@@ -53,5 +53,5 @@ Postgres-first agent runtime 协议（openspec change `complete-postgres-agent-r
 
 ## 验证
 
-- 不得在 `stratum-web` 下新增前端测试文件。
-- 前端变更至少运行 `pnpm typecheck` 与 `pnpm build`；提交前跑 `pnpm lint`。
+- 协议层（`lib/stratum/` 与 `features/agent-conversation/`）允许新增 vitest 单元测试（`*.test.ts`，纯 node 环境、离线 mock），经 `pnpm test` 运行；UI/组件测试文件仍然禁止。
+- 前端变更至少运行 `pnpm typecheck` 与 `pnpm build`；提交前跑 `pnpm lint` 与 `pnpm test`。
