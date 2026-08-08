@@ -1,9 +1,13 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { ChevronDown, CircleAlert, Loader2, Wrench } from "lucide-react"
 
 import { ApprovalCard } from "@/components/stratum/conversation/approval-card"
+import {
+  ExcalidrawResult,
+  parseExcalidrawScene,
+} from "@/components/stratum/conversation/excalidraw-result"
 import type { ConversationToolCall } from "@/components/stratum/conversation/types"
 import { cn } from "@/lib/utils"
 
@@ -12,6 +16,9 @@ import { cn } from "@/lib/utils"
  * 不用 runtime/MessagePrimitive）。渐进式透明：默认折叠为 trigger 行
  * （状态图标 + 工具名，streaming 时转圈 + shimmer），展开后显示
  * 审批状态（如有）/ 参数 / 结果 / 错误。
+ *
+ * 结果分发：excalidraw_render 的结果通过最小 scene 形状校验时渲染为只读
+ * 白板（ExcalidrawResult），其余工具结果一律原始 JSON 文本。
  *
  * 审批：内联只读展示（ApprovalCard 不传 onResolve——待决"等待审批…"，
  * 已决"已批准/已拒绝"）；允许/拒绝操作在 composer 上方的 ApprovalDock 浮层。
@@ -30,6 +37,11 @@ export function ToolCall({
   const approvalActive =
     approval?.status === "pending" || approval?.status === "submitting"
   const expanded = open || approvalActive
+  // JSON.parse 只在结果变化时重算（excalidraw 分发判定）
+  const excalidraw = useMemo(
+    () => (isExcalidrawScene(call) ? call.result : null),
+    [call]
+  )
 
   return (
     <div
@@ -90,11 +102,24 @@ export function ToolCall({
           {call.errorText !== null ? (
             <ToolCallSection label="错误" text={call.errorText} destructive />
           ) : call.result !== null ? (
-            <ToolCallSection label="结果" text={call.result} />
+            excalidraw !== null ? (
+              <ExcalidrawResult sceneText={excalidraw} />
+            ) : (
+              <ToolCallSection label="结果" text={call.result} />
+            )
           ) : null}
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** excalidraw_render 结果且通过最小 scene 形状校验时，分发为只读白板渲染 */
+function isExcalidrawScene(call: ConversationToolCall): boolean {
+  return (
+    call.name === "excalidraw_render" &&
+    call.result !== null &&
+    parseExcalidrawScene(call.result) !== null
   )
 }
 

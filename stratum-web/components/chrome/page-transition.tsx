@@ -18,7 +18,7 @@ gsap.registerPlugin(useGSAP)
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
 
-const PAGE_ORDER = ["/conversation"]
+const PAGE_ORDER = ["/conversation", "/excalidraw"]
 
 // 模块级共享状态（应用级单例，仅客户端运行）
 let pageElement: HTMLElement | null = null
