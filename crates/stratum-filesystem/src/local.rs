@@ -1,21 +1,16 @@
 //! Local sandbox filesystem backend.
 
 use std::{
-    collections::BTreeMap,
     ffi::OsString,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use async_trait::async_trait;
 use tokio::fs;
 
 use crate::{
-    CasExpectation, DirEntry, Entry, FileMetadata, FileType, Filesystem, FilesystemError,
-    RecordVersion, VersionedEntry, VirtualPath, VirtualPathError,
+    DirEntry, FileMetadata, FileType, Filesystem, FilesystemError, VirtualPath, VirtualPathError,
 };
 
 /// Configuration for [`LocalFilesystem`].
@@ -32,8 +27,6 @@ pub struct LocalFilesystemConfig {
 pub struct LocalFilesystem {
     root: PathBuf,
     max_file_bytes: Option<u64>,
-    records: Arc<Mutex<BTreeMap<VirtualPath, RecordVersion>>>,
-    next_record_version: Arc<AtomicU64>,
 }
 
 impl LocalFilesystem {
@@ -59,8 +52,6 @@ impl LocalFilesystem {
         Ok(Self {
             root,
             max_file_bytes: config.max_file_bytes,
-            records: Arc::new(Mutex::new(BTreeMap::new())),
-            next_record_version: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -115,88 +106,37 @@ impl LocalFilesystem {
 
 #[async_trait]
 impl Filesystem for LocalFilesystem {
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        let root = self.root.clone();
-        let path = path.clone();
-        let error_path = path.clone();
-        let records = Arc::clone(&self.records);
-        let next_record_version = Arc::clone(&self.next_record_version);
-        let max_file_bytes = self.max_file_bytes;
-
-        tokio::task::spawn_blocking(move || {
-            let host = host_path(&root, &path);
-            let metadata = match std::fs::symlink_metadata(&host) {
-                Ok(metadata) => metadata,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(source) => return Err(FilesystemError::local_io("metadata", path, source)),
-            };
-            if metadata.file_type().is_symlink() {
-                return Err(FilesystemError::PathEscapesSandbox { path });
-            }
-            let canonical = std::fs::canonicalize(&host).map_err(|source| {
-                FilesystemError::local_io("canonicalize", path.clone(), source)
-            })?;
-            if !canonical.starts_with(&root) {
-                return Err(FilesystemError::PathEscapesSandbox { path });
-            }
-            if !metadata.is_file() {
-                return Err(FilesystemError::NotAFile { path });
-            }
-            if max_file_bytes.is_some_and(|max| metadata.len() > max) {
-                return Err(FilesystemError::ContentTooLarge { path });
-            }
-
-            let mut records = records
-                .lock()
-                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
-            let contents = std::fs::read(&canonical)
-                .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
-            let version = match records.get(&path) {
-                Some(version) => *version,
-                None => {
-                    let value = next_record_version
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                            value.checked_add(1)
-                        })
-                        .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
-                    let version = RecordVersion::from_backend(value);
-                    records.insert(path.clone(), version);
-                    version
-                }
-            };
-            Ok(Some(VersionedEntry {
-                entry: Entry::new(contents),
-                version,
-            }))
-        })
-        .await
-        .map_err(|error| {
-            FilesystemError::local_io("cas_get", error_path, std::io::Error::other(error))
-        })?
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let host = self.ensure_existing_inside_root(path).await?;
+        let metadata = fs::metadata(&host)
+            .await
+            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
+        if !metadata.is_file() {
+            return Err(FilesystemError::NotAFile { path: path.clone() });
+        }
+        self.check_len(path, metadata.len())?;
+        let content = fs::read(&host)
+            .await
+            .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
+        Ok(content)
     }
 
-    async fn put(
+    async fn write_file(
         &self,
         path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
         self.check_len(
             path,
-            u64::try_from(entry.contents().len())
+            u64::try_from(contents.len())
                 .map_err(|_| FilesystemError::ContentTooLarge { path: path.clone() })?,
         )?;
         let root = self.root.clone();
         let path = path.clone();
         let error_path = path.clone();
-        let records = Arc::clone(&self.records);
-        let next_record_version = Arc::clone(&self.next_record_version);
 
         tokio::task::spawn_blocking(move || {
             let host = host_path(&root, &path);
-            let mut records = records
-                .lock()
-                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let metadata = match std::fs::symlink_metadata(&host) {
                 Ok(metadata) => Some(metadata),
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
@@ -229,89 +169,27 @@ impl Filesystem for LocalFilesystem {
                 host
             };
 
-            let current = if metadata.is_some() {
-                Some(match records.get(&path) {
-                    Some(version) => *version,
-                    None => {
-                        let value = next_record_version
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                                value.checked_add(1)
-                            })
-                            .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
-                        let version = RecordVersion::from_backend(value);
-                        records.insert(path.clone(), version);
-                        version
-                    }
-                })
-            } else {
-                None
-            };
-            match cas {
-                CasExpectation::Absent if current.is_some() => {
-                    return Err(FilesystemError::VersionMismatch { path });
-                }
-                CasExpectation::Version(expected) if current != Some(expected) => {
-                    return Err(FilesystemError::VersionMismatch { path });
-                }
-                _ => {}
-            }
-            let value = next_record_version
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
-            let version = RecordVersion::from_backend(value);
-            let temporary = target.with_extension(format!("stratum-{value}.tmp"));
-            std::fs::write(&temporary, entry.into_contents())
+            let temporary = temporary_path(&target);
+            std::fs::write(&temporary, contents)
                 .map_err(|source| FilesystemError::local_io("write", path.clone(), source))?;
             if let Err(source) = std::fs::rename(&temporary, &target) {
-                let _ = std::fs::remove_file(&temporary);
+                let _ = std::fs::remove_file(&temporary); // best-effort cleanup of the temp sibling after a failed rename; the next write uses a fresh unique name
                 return Err(FilesystemError::local_io("rename", path, source));
             }
-            records.insert(path, version);
-            Ok(version)
+            Ok(())
         })
         .await
         .map_err(|error| {
-            FilesystemError::local_io("cas_put", error_path, std::io::Error::other(error))
+            FilesystemError::local_io("write_file", error_path, std::io::Error::other(error))
         })?
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        let host = self.ensure_existing_inside_root(path).await?;
-        let metadata = fs::metadata(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
-        if !metadata.is_file() {
-            return Err(FilesystemError::NotAFile { path: path.clone() });
-        }
-        self.check_len(path, metadata.len())?;
-        let content = fs::read(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
-        Ok(content)
-    }
-
-    async fn write_file(
-        &self,
-        path: &VirtualPath,
-        contents: Vec<u8>,
-    ) -> Result<(), FilesystemError> {
-        self.put(path, Entry::new(contents), CasExpectation::Any)
-            .await
-            .map(|_| ())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let root = self.root.clone();
         let path = path.clone();
         let error_path = path.clone();
-        let records = Arc::clone(&self.records);
 
         tokio::task::spawn_blocking(move || {
-            let _records = records
-                .lock()
-                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let host = host_path(&root, &path);
             let canonical = std::fs::canonicalize(&host).map_err(|source| {
                 FilesystemError::local_io("canonicalize", path.clone(), source)
@@ -333,6 +211,9 @@ impl Filesystem for LocalFilesystem {
                     FilesystemError::local_io("read_dir_entry", path.clone(), source)
                 })?;
                 let file_name = file_name_to_string(entry.file_name())?;
+                if is_temporary_file_name(&file_name) {
+                    continue;
+                }
                 let child_path = child_virtual_path(&path, &file_name)?;
                 let entry_file_type = entry.file_type().map_err(|source| {
                     FilesystemError::local_io("entry_file_type", child_path.clone(), source)
@@ -376,8 +257,6 @@ impl Filesystem for LocalFilesystem {
         let root = self.root.clone();
         let path = path.clone();
         let error_path = path.clone();
-        let records = Arc::clone(&self.records);
-        let next_record_version = Arc::clone(&self.next_record_version);
 
         tokio::task::spawn_blocking(move || {
             let host = host_path(&root, &path);
@@ -394,17 +273,8 @@ impl Filesystem for LocalFilesystem {
                 return Err(FilesystemError::NotAFile { path });
             }
 
-            let mut records = records
-                .lock()
-                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             std::fs::remove_file(&host)
                 .map_err(|source| FilesystemError::local_io("remove_file", path.clone(), source))?;
-            let value = next_record_version
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
-            records.insert(path, RecordVersion::from_backend(value));
             Ok(())
         })
         .await
@@ -436,6 +306,16 @@ fn host_path(root: &std::path::Path, path: &VirtualPath) -> PathBuf {
         host.push(segment);
     }
     host
+}
+
+fn temporary_path(target: &std::path::Path) -> PathBuf {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_extension(format!("stratum-{}-{id}.tmp", std::process::id()))
+}
+
+fn is_temporary_file_name(file_name: &str) -> bool {
+    file_name.contains(".stratum-") && file_name.ends_with(".tmp")
 }
 
 fn child_virtual_path(
@@ -472,8 +352,7 @@ fn file_type_from_file_type(file_type: &std::fs::FileType) -> FileType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CasExpectation, Entry, Filesystem, VirtualPath};
-    use tokio::sync::Barrier;
+    use crate::{Filesystem, VirtualPath};
 
     #[tokio::test]
     async fn reads_writes_lists_and_removes_inside_sandbox() {
@@ -511,219 +390,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_does_not_observe_temporary_files_during_cas_write() {
+    async fn list_dir_hides_temporary_write_files() {
         let temp =
-            std::env::temp_dir().join(format!("stratum-fs-list-during-cas-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-        tokio::fs::create_dir_all(temp.join("messages"))
-            .await
-            .expect("create messages directory");
-        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
-            root: temp.clone(),
-            max_file_bytes: Some(1024),
-        })
-        .expect("filesystem is valid");
-        let directory = VirtualPath::try_from("/messages").expect("path is valid");
-        let temporary = temp.join("messages/1.stratum-1.tmp");
-        let records = Arc::clone(&filesystem.records);
-        let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let writer = tokio::task::spawn_blocking(move || {
-            let _records = records.lock().expect("record lock is available");
-            std::fs::write(&temporary, b"pending").expect("temporary file is written");
-            ready_sender.send(()).expect("reader receives readiness");
-            let _ = release_receiver.recv();
-            std::fs::remove_file(temporary).expect("temporary file is removed");
-        });
-        ready_receiver.await.expect("writer becomes ready");
-
-        let listing_filesystem = filesystem.clone();
-        let listing = tokio::spawn(async move { listing_filesystem.list_dir(&directory).await });
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(
-            !listing.is_finished(),
-            "directory listing must wait for the CAS write to become visible atomically"
-        );
-
-        release_sender.send(()).expect("writer is released");
-        writer.await.expect("writer task completes");
-        let entries = listing
-            .await
-            .expect("listing task completes")
-            .expect("directory listing succeeds");
-        assert!(entries.is_empty());
-
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-    }
-
-    #[tokio::test]
-    async fn local_filesystem_compares_records_and_rejects_stale_versions() {
-        let temp = std::env::temp_dir().join(format!("stratum-fs-cas-{}", std::process::id()));
+            std::env::temp_dir().join(format!("stratum-fs-temp-hidden-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&temp).await;
         tokio::fs::create_dir_all(&temp)
             .await
             .expect("create temp root");
-        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+        tokio::fs::write(temp.join("note.stratum-1-2.tmp"), b"partial")
+            .await
+            .expect("write temporary file");
+        tokio::fs::write(temp.join("done.txt"), b"done")
+            .await
+            .expect("write file");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
             root: temp.clone(),
             max_file_bytes: Some(1024),
         })
         .expect("filesystem is valid");
-        let path = VirtualPath::try_from("/agent.json").expect("valid path");
+        let root = VirtualPath::try_from("/").expect("root path is valid");
 
-        assert!(filesystem.get(&path).await.expect("read record").is_none());
-        let first = filesystem
-            .put(&path, Entry::new(b"one".to_vec()), CasExpectation::Absent)
-            .await
-            .expect("create record");
-        let stored = filesystem
-            .get(&path)
-            .await
-            .expect("read record")
-            .expect("record exists");
-        assert_eq!(stored.version, first);
-        assert_eq!(stored.entry.contents(), b"one");
+        let entries = fs.list_dir(&root).await.expect("list root");
 
-        filesystem
-            .put(
-                &path,
-                Entry::new(b"two".to_vec()),
-                CasExpectation::Version(stored.version),
-            )
-            .await
-            .expect("update matching record");
-        let error = filesystem
-            .put(
-                &path,
-                Entry::new(b"three".to_vec()),
-                CasExpectation::Version(stored.version),
-            )
-            .await
-            .expect_err("stale version is rejected");
-
-        assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-    }
-
-    #[tokio::test]
-    async fn concurrent_absent_puts_allow_only_one_creator() {
-        let temp =
-            std::env::temp_dir().join(format!("stratum-fs-concurrent-cas-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-        tokio::fs::create_dir_all(&temp)
-            .await
-            .expect("create temp root");
-        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
-            root: temp.clone(),
-            max_file_bytes: Some(1024),
-        })
-        .expect("filesystem is valid");
-        let path = VirtualPath::try_from("/agent.json").expect("path is valid");
-        let barrier = Arc::new(Barrier::new(2));
-
-        let first = {
-            let filesystem = filesystem.clone();
-            let path = path.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                filesystem
-                    .put(&path, Entry::new(b"first".to_vec()), CasExpectation::Absent)
-                    .await
-            })
-        };
-        let second = {
-            let filesystem = filesystem.clone();
-            let path = path.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                filesystem
-                    .put(
-                        &path,
-                        Entry::new(b"second".to_vec()),
-                        CasExpectation::Absent,
-                    )
-                    .await
-            })
-        };
-
-        let results = [
-            first.await.expect("first task completes"),
-            second.await.expect("second task completes"),
-        ];
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        assert!(
-            results
-                .iter()
-                .any(|result| matches!(result, Err(FilesystemError::VersionMismatch { .. })))
-        );
-
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-    }
-
-    #[tokio::test]
-    async fn ordinary_mutations_invalidate_observed_cas_versions() {
-        let temp =
-            std::env::temp_dir().join(format!("stratum-fs-cas-mutations-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&temp).await;
-        tokio::fs::create_dir_all(&temp)
-            .await
-            .expect("create temp root");
-        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
-            root: temp.clone(),
-            max_file_bytes: Some(1024),
-        })
-        .expect("filesystem is valid");
-        let path = VirtualPath::try_from("/agent.json").expect("valid path");
-
-        filesystem
-            .put(&path, Entry::new(b"one".to_vec()), CasExpectation::Absent)
-            .await
-            .expect("create record");
-        let before_write = filesystem
-            .get(&path)
-            .await
-            .expect("read record")
-            .expect("record exists");
-
-        filesystem
-            .write_file(&path, b"two".to_vec())
-            .await
-            .expect("ordinary write");
-        let write_error = filesystem
-            .put(
-                &path,
-                Entry::new(b"stale write".to_vec()),
-                CasExpectation::Version(before_write.version),
-            )
-            .await
-            .expect_err("write invalidates observed version");
-        assert!(matches!(
-            write_error,
-            FilesystemError::VersionMismatch { .. }
-        ));
-
-        let before_remove = filesystem
-            .get(&path)
-            .await
-            .expect("read record")
-            .expect("record exists");
-        filesystem
-            .remove_file(&path)
-            .await
-            .expect("ordinary remove");
-        let remove_error = filesystem
-            .put(
-                &path,
-                Entry::new(b"stale remove".to_vec()),
-                CasExpectation::Version(before_remove.version),
-            )
-            .await
-            .expect_err("remove invalidates observed version");
-        assert!(matches!(
-            remove_error,
-            FilesystemError::VersionMismatch { .. }
-        ));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name, "done.txt");
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }

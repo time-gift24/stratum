@@ -10,15 +10,12 @@ pub enum ConfigError {
     /// TOML input could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[source] toml::de::Error),
-    /// A resolved definition could not be encoded as TOML.
-    #[error("could not encode TOML definition")]
-    TomlEncode(#[source] toml::ser::Error),
     /// An agent name did not match the required ASCII pattern.
     #[error("invalid agent name `{value}`")]
     InvalidAgentName { value: String },
-    /// The agent storage root was empty.
-    #[error("agent storage root must not be empty")]
-    InvalidStorageRoot,
+    /// The agent templates root was empty.
+    #[error("agent templates root must not be empty")]
+    InvalidTemplatesRoot,
     /// A configured CORS origin was a wildcard or invalid HTTP header value.
     #[error("api allowed origin is invalid")]
     InvalidAllowedOrigin,
@@ -34,6 +31,9 @@ pub enum ConfigError {
     /// A provider had no configured models.
     #[error("provider `{provider}` must configure at least one model")]
     EmptyModels { provider: &'static str },
+    /// A provider base URL override was blank.
+    #[error("base url for provider `{provider}` must not be blank")]
+    InvalidProviderBaseUrl { provider: &'static str },
     /// A provider listed the same model more than once.
     #[error("duplicate model `{model}` for provider `{provider}`")]
     DuplicateModel {
@@ -46,23 +46,17 @@ pub enum ConfigError {
     /// A caller required an optional section that was not configured.
     #[error("missing required configuration section `{section}`")]
     MissingSection { section: &'static str },
-    /// A NATS field was not valid for the event stream bus.
+    /// A NATS field was not valid for the short Agent-scoped tail.
     #[error("invalid nats configuration field `{field}`")]
     InvalidNatsConfig { field: &'static str },
-    /// A storage field was not valid for the selected backend.
-    #[error("invalid storage configuration field `{field}`")]
-    InvalidStorageConfig { field: &'static str },
+    /// A Postgres field was not valid.
+    #[error("invalid postgres configuration field `{field}`")]
+    InvalidPostgresConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {
     fn from(mut source: toml::de::Error) -> Self {
         source.set_input(None);
         Self::Toml(source)
-    }
-}
-
-impl From<toml::ser::Error> for ConfigError {
-    fn from(source: toml::ser::Error) -> Self {
-        Self::TomlEncode(source)
     }
 }

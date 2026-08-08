@@ -87,6 +87,9 @@ impl AgentLoop {
     /// be in flight and the loop must finish recording the tool outcome. A durable start without
     /// a corresponding result has an unknown outcome and must not be retried automatically unless
     /// the tool has an explicit idempotency guarantee.
+    // Tracing skips every argument: prompts and context carry user content,
+    // and no agent_id/turn_id exists at the kernel layer.
+    #[tracing::instrument(skip_all)]
     pub async fn run(
         &self,
         context: LoopContext,
@@ -147,7 +150,8 @@ impl AgentLoop {
     /// the resume fails closed before any model, tool, or hook action; a
     /// runtime reporting no version skips that check. The resumed run keeps
     /// appending to the same durable sink and does not record a second
-    /// `LoopStarted`.
+    /// `LoopStarted`. The pure validation half of this method is available
+    /// separately as [`AgentLoop::prepare_resume`].
     ///
     /// Tool execution stays at-least-once: a call started before the crash
     /// without a committed result re-executes as part of the missing result
@@ -162,6 +166,9 @@ impl AgentLoop {
     /// # Cancellation safety
     ///
     /// Same contract as [`AgentLoop::run`].
+    // Tracing skips every argument: the replayed event stream carries user
+    // content, and no agent_id/turn_id exists at the kernel layer.
+    #[tracing::instrument(skip_all)]
     pub async fn resume(
         &self,
         system_prompt: impl Into<String>,
@@ -171,6 +178,54 @@ impl AgentLoop {
         if self.limits.max_iterations == 0 {
             return Err(AgentLoopError::IterationLimitExceeded { maximum: 0 });
         }
+        let start = self.resume_start(system_prompt, events)?;
+        // Usage is a volatile observation, not resume state: the first hook
+        // boundary after a resume observes `None` until the next model
+        // response reports usage.
+        let mut usage: Option<TokenUsage> = None;
+        let result = self.run_started(start, &cancellation, &mut usage).await;
+        self.finish_run(result, usage).await
+    }
+
+    /// Validates one durable event stream into a prepared resume bound to
+    /// this exact loop.
+    ///
+    /// This is the pure half of [`AgentLoop::resume`]: it performs exactly the
+    /// replay validation, extension-set-version guard, and run-state
+    /// construction that `resume` performs before any model, tool, or hook
+    /// action — see its documentation for the full replay contract. It does
+    /// no I/O: no durable append, no model, tool, or hook call. The returned
+    /// [`PreparedResume`] is bound to this exact loop instance and can be run
+    /// exactly once through its consuming [`PreparedResume::run`], so the
+    /// composing side can validate the replay window before accepting external
+    /// work and then run the continuation on the same runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ResumeError`] when the stream cannot be rebuilt into
+    /// a consistent run state, or when the injected hook runtime reports a
+    /// different extension set version than the stream recorded; every failure
+    /// refuses the resume closed before any side effect.
+    pub fn prepare_resume(
+        self: &Arc<Self>,
+        system_prompt: impl Into<String>,
+        events: Vec<DurableAgentEvent>,
+    ) -> Result<PreparedResume, ResumeError> {
+        Ok(PreparedResume {
+            agent_loop: Arc::clone(self),
+            start: self.resume_start(system_prompt, events)?,
+        })
+    }
+
+    /// Replay validation, extension-set-version guard, and run-state
+    /// construction shared by [`AgentLoop::resume`] and
+    /// [`AgentLoop::prepare_resume`]; performs no I/O and no model, tool, or
+    /// hook call.
+    fn resume_start(
+        &self,
+        system_prompt: impl Into<String>,
+        events: Vec<DurableAgentEvent>,
+    ) -> Result<RunStart, ResumeError> {
         let replay = replay_events(events)?;
         // A run that pinned its handler chain refuses to resume under a chain
         // reporting a different version (changed membership, order, or handler
@@ -185,9 +240,9 @@ impl AgentLoop {
                 current = %current,
                 "refusing resume: hook extension set version mismatch"
             );
-            return Err(ResumeError::ExtensionSetVersionMismatch { recorded, current }.into());
+            return Err(ResumeError::ExtensionSetVersionMismatch { recorded, current });
         }
-        let start = RunStart {
+        Ok(RunStart {
             context: LoopContext::new(system_prompt).with_messages(replay.messages),
             prompts: Vec::new(),
             first_iteration: usize::try_from(replay.frontier).unwrap_or(usize::MAX),
@@ -195,13 +250,7 @@ impl AgentLoop {
             journal: replay.journal,
             iteration_start: replay.iteration_start,
             compacted_iterations: replay.compacted_iterations,
-        };
-        // Usage is a volatile observation, not resume state: the first hook
-        // boundary after a resume observes `None` until the next model
-        // response reports usage.
-        let mut usage: Option<TokenUsage> = None;
-        let result = self.run_started(start, &cancellation, &mut usage).await;
-        self.finish_run(result, usage).await
+        })
     }
 
     async fn finish_run(
@@ -1024,6 +1073,51 @@ impl AgentLoop {
         Err(AgentLoopError::IterationLimitExceeded {
             maximum: self.limits.max_iterations,
         })
+    }
+}
+
+/// A validated resume bound to the exact [`AgentLoop`] that prepared it.
+///
+/// Produced only by [`AgentLoop::prepare_resume`], which completes all replay
+/// validation before any side effect. The value is opaque and intentionally
+/// not `Clone` or `Serialize`: it can be run exactly once, on the runtime it
+/// was prepared from, through [`PreparedResume::run`]. There is no entry
+/// point that hands the prepared run state to another loop.
+pub struct PreparedResume {
+    agent_loop: Arc<AgentLoop>,
+    start: RunStart,
+}
+
+impl PreparedResume {
+    /// Runs the prepared continuation once, consuming this value.
+    ///
+    /// The run continues through the same path as [`AgentLoop::resume`]: it
+    /// appends continuation events to the same durable sink and never records
+    /// a second [`DurableAgentEvent::LoopStarted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`AgentLoop::resume`] once the continuation
+    /// starts.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Same contract as [`AgentLoop::run`].
+    // Tracing skips the consumed prepared state: it carries user content.
+    #[tracing::instrument(skip_all)]
+    pub async fn run(self, cancellation: CancellationToken) -> Result<LoopOutcome, AgentLoopError> {
+        if self.agent_loop.limits.max_iterations == 0 {
+            return Err(AgentLoopError::IterationLimitExceeded { maximum: 0 });
+        }
+        // Usage is a volatile observation, not resume state: the first hook
+        // boundary after a resume observes `None` until the next model
+        // response reports usage.
+        let mut usage: Option<TokenUsage> = None;
+        let result = self
+            .agent_loop
+            .run_started(self.start, &cancellation, &mut usage)
+            .await;
+        self.agent_loop.finish_run(result, usage).await
     }
 }
 

@@ -58,6 +58,11 @@ export function ToolCall({
           />
         ) : call.status === "failed" ? (
           <CircleAlert aria-hidden className="size-3.5 shrink-0 text-destructive" />
+        ) : call.status === "interrupted" ? (
+          <CircleAlert
+            aria-hidden
+            className="size-3.5 shrink-0 text-muted-foreground"
+          />
         ) : (
           <Wrench aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
         )}
@@ -91,6 +96,10 @@ export function ToolCall({
             <ToolCallSection label="错误" text={call.errorText} destructive />
           ) : call.result !== null ? (
             <ToolCallSection label="结果" text={call.result} />
+          ) : call.status === "interrupted" ? (
+            <p className="text-xs text-muted-foreground">
+              执行中断，未返回结果。
+            </p>
           ) : null}
         </div>
       ) : null}

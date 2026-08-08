@@ -1,15 +1,20 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ArrowDown } from "lucide-react"
+import { ArrowDown, Loader2 } from "lucide-react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
+import { CompactionMarker } from "@/components/stratum/conversation/compaction-marker"
 import {
   AssistantMessage,
   UserMessage,
 } from "@/components/stratum/conversation/message"
-import type { ConversationMessage } from "@/components/stratum/conversation/types"
+import { TerminalMarker } from "@/components/stratum/conversation/terminal-marker"
+import type {
+  ConversationItem,
+  ConversationMessage,
+} from "@/components/stratum/conversation/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -28,17 +33,62 @@ const SWITCH_CHOREO = {
   enterDelay: 0.06,
 } as const
 
+/** 滚动到距顶部该阈值内且有更旧分页时自动加载 */
+const OLDER_LOAD_THRESHOLD = 64
+
+function renderItem(
+  item: ConversationItem,
+  isLast: boolean,
+  handlers: {
+    onReload?: (message: ConversationMessage) => void
+    onEditUserMessage?: (message: ConversationMessage) => void
+    onRetryUserMessage?: (message: ConversationMessage) => void
+  } = {}
+) {
+  if (item.kind === "compaction")
+    return <CompactionMarker key={item.id} summary={item.summary} />
+  if (item.kind === "terminal")
+    return (
+      <TerminalMarker
+        key={item.id}
+        terminal={item.terminal}
+        errorText={item.errorText}
+      />
+    )
+  const message = item.message
+  return message.role === "user" ? (
+    <UserMessage
+      key={item.id}
+      message={message}
+      onEdit={handlers.onEditUserMessage}
+      onRetry={handlers.onRetryUserMessage}
+    />
+  ) : (
+    <AssistantMessage
+      key={item.id}
+      message={message}
+      isLast={isLast}
+      onReload={handlers.onReload}
+    />
+  )
+}
+
 /**
  * ConversationThread —— 对话消息列表（assistant-ui thread 底稿的展示层 fork）。
  * 结构：可滚动 viewport（消息列居中，max-w 44rem）+ composer。数据驱动：
- * messages 由调用方持有；滚动到底部仅在用户本就近底时自动跟随，上翻后不打扰。
+ * items 由调用方持有；滚动到底部仅在用户本就近底时自动跟随，上翻后不打扰。
+ *
+ * items 混合三类条目（升序渲染，id = agentId:eventSeq 十进制字符串）：
+ * 普通消息、TranscriptCompacted 可折叠 marker、安全 terminal marker。
+ * 向上分页：滚动接近顶部且 hasOlder 时调 onLoadOlder；旧页 prepend 后
+ * 用预先记录的 scrollHeight 差值恢复滚动位置（不跳动）。
  *
  * 两种布局模式（单一 DOM 树，节点跨模式保留，composer 不 remount）：
- * - 空态（无消息）：composer 包装器脱离文档流（absolute inset-0 +
+ * - 空态（无条目）：composer 包装器脱离文档流（absolute inset-0 +
  *   items-center justify-center + pointer-events-none，内部恢复 auto），
  *   恒定容器正中心；欢迎语独立锚定在中线上方（bottom: 50% + 2rem），
  *   其高度/有无及未来新增内容都不改变 composer 位置。宽度与稳态一致。
- * - 稳态（有消息）：消息流 + composer sticky 底部。
+ * - 稳态（有条目）：消息流 + composer sticky 底部。
  *
  * 双向过场（GSAP FLIP）：passive effect 在每次提交后（绘制之后、布局干净，
  * 不产生 forced reflow）记录 composer rect；welcome 只在可见时记录。
@@ -54,21 +104,24 @@ const SWITCH_CHOREO = {
  * 续播；prefers-reduced-motion 全程瞬时。
  */
 export function ConversationThread({
-  messages,
+  items,
   composer,
   welcome,
   conversationId,
   sendVersion,
   recovering = false,
+  hasOlder = false,
+  olderLoading = false,
+  onLoadOlder,
   onReload,
   onEditUserMessage,
   onRetryUserMessage,
   className,
 }: {
-  messages: ConversationMessage[]
+  items: ConversationItem[]
   /** 底部 sticky 区域（如 PromptInput） */
   composer?: React.ReactNode
-  /** 空状态内容（messages 为空时居中展示） */
+  /** 空状态内容（items 为空时居中展示） */
   welcome?: React.ReactNode
   /** 当前会话 id（state.agentId）；变化 = 切换会话，一律不播位置动画 */
   conversationId?: string | null
@@ -76,13 +129,19 @@ export function ConversationThread({
   sendVersion?: number
   /** 会话恢复中（phase === "recovering"）：切换过场的进场等恢复结束再播 */
   recovering?: boolean
+  /** 固定 through barrier 内还有更旧的分页 */
+  hasOlder?: boolean
+  /** 更旧分页加载中（顶部显示克制加载行） */
+  olderLoading?: boolean
+  /** 用户滚动接近顶部时请求更旧一页 */
+  onLoadOlder?: () => void
   onReload?: (message: ConversationMessage) => void
   onEditUserMessage?: (message: ConversationMessage) => void
   /** 用户消息发送失败时的重发入口 */
   onRetryUserMessage?: (message: ConversationMessage) => void
   className?: string
 }) {
-  const isEmpty = messages.length === 0
+  const isEmpty = items.length === 0
   const rootRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const welcomeRef = useRef<HTMLDivElement>(null)
@@ -99,20 +158,22 @@ export function ConversationThread({
   // FLIP first 帧：每次提交后记录，切换模式时即为旧布局位置（双向都需要）
   const prevComposerRectRef = useRef<DOMRect | null>(null)
   const prevWelcomeRectRef = useRef<DOMRect | null>(null)
+  // 向上分页的滚动锚点：触发加载时记录，prepend 完成后按高度差恢复位置
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const [nearBottom, setNearBottom] = useState(true)
 
   // 会话切换过场：track.departing = 旧内容的最后已知快照（退场期间不再重渲染
   // 旧内容，借鉴 approval-dock 的 known/leaving）；enterPendingRef = 退场完成且
-  // recovery 结束后待播的进场。快照内容随 messages.length / isEmpty /
+  // recovery 结束后待播的进场。快照内容随 items.length / isEmpty /
   // sendVersion 更新（不按 token 更新，保住流式热路径）
-  type DepartingContent = { messages: ConversationMessage[]; isEmpty: boolean }
+  type DepartingContent = { items: ConversationItem[]; isEmpty: boolean }
   const [track, setTrack] = useState<{
     conversationId: string | null | undefined
     sendVersion: number | undefined
-    messages: ConversationMessage[]
+    items: ConversationItem[]
     isEmpty: boolean
     departing: DepartingContent | null
-  }>({ conversationId, sendVersion, messages, isEmpty, departing: null })
+  }>({ conversationId, sendVersion, items, isEmpty, departing: null })
   const enterPendingRef = useRef(false)
   const departingRef = useRef<HTMLDivElement>(null)
   // 已开始退场的快照（防止 recovering 翻转重跑 effect 时退场 tween 重头再播）
@@ -126,18 +187,18 @@ export function ConversationThread({
     setTrack({
       conversationId,
       sendVersion,
-      messages,
+      items,
       isEmpty,
       departing: createFlow
         ? null
-        : { messages: track.messages, isEmpty: track.isEmpty },
+        : { items: track.items, isEmpty: track.isEmpty },
     })
   } else if (
-    track.messages.length !== messages.length ||
+    track.items.length !== items.length ||
     track.isEmpty !== isEmpty ||
     track.sendVersion !== sendVersion
   ) {
-    setTrack({ ...track, messages, isEmpty, sendVersion })
+    setTrack({ ...track, items, isEmpty, sendVersion })
   }
   const departing = track.departing
   const clearDeparting = useCallback(
@@ -163,7 +224,19 @@ export function ConversationThread({
     const viewport = viewportRef.current
     if (!viewport || !nearBottom) return
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
-  }, [messages, nearBottom])
+  }, [items, nearBottom])
+
+  // 向上分页完成后恢复滚动位置：旧条目 prepend 在顶部，scrollHeight 增量
+  // 加回 scrollTop，用户视口不动
+  useEffect(() => {
+    if (olderLoading) return
+    const anchor = prependAnchorRef.current
+    const viewport = viewportRef.current
+    if (!anchor || !viewport) return
+    prependAnchorRef.current = null
+    viewport.scrollTop =
+      anchor.scrollTop + (viewport.scrollHeight - anchor.scrollHeight)
+  }, [olderLoading, items])
 
   // 每次提交后记录 composer rect（passive effect 在绘制之后运行，布局已干净，
   // 读取不产生 forced reflow）；welcome 只在可见时记录，隐藏态保留最后可见
@@ -385,6 +458,20 @@ export function ConversationThread({
     const gap =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
     setNearBottom(gap < 80)
+
+    // 接近顶部且还有更旧分页：记录滚动锚点后请求上一页
+    if (
+      viewport.scrollTop < OLDER_LOAD_THRESHOLD &&
+      hasOlder &&
+      !olderLoading &&
+      onLoadOlder
+    ) {
+      prependAnchorRef.current = {
+        scrollHeight: viewport.scrollHeight,
+        scrollTop: viewport.scrollTop,
+      }
+      onLoadOlder()
+    }
   }
 
   const scrollToBottom = () => {
@@ -421,22 +508,24 @@ export function ConversationThread({
             ref={messagesRef}
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
-            {messages.map((message, index) =>
-              message.role === "user" ? (
-                <UserMessage
-                  key={message.id}
-                  message={message}
-                  onEdit={onEditUserMessage}
-                  onRetry={onRetryUserMessage}
+            {olderLoading ? (
+              <p
+                role="status"
+                className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground"
+              >
+                <Loader2
+                  aria-hidden
+                  className="size-3.5 animate-spin motion-reduce:animate-none"
                 />
-              ) : (
-                <AssistantMessage
-                  key={message.id}
-                  message={message}
-                  isLast={index === messages.length - 1}
-                  onReload={onReload}
-                />
-              )
+                加载更早的消息…
+              </p>
+            ) : null}
+            {items.map((item, index) =>
+              renderItem(item, index === items.length - 1, {
+                onReload,
+                onEditUserMessage,
+                onRetryUserMessage,
+              })
             )}
           </div>
 
@@ -454,16 +543,8 @@ export function ConversationThread({
                 </div>
               ) : (
                 <div className="flex flex-col gap-y-6">
-                  {departing.messages.map((message, index) =>
-                    message.role === "user" ? (
-                      <UserMessage key={message.id} message={message} />
-                    ) : (
-                      <AssistantMessage
-                        key={message.id}
-                        message={message}
-                        isLast={index === departing.messages.length - 1}
-                      />
-                    )
+                  {departing.items.map((item, index) =>
+                    renderItem(item, index === departing.items.length - 1)
                   )}
                 </div>
               )}

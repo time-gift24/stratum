@@ -2,40 +2,39 @@
 
 mod error;
 
-use std::{collections::HashSet, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 pub use error::ConfigError;
 use serde::{Deserialize, Serialize};
 use stratum_core::{ModelId, ToolName};
-use stratum_infra::NatsEventStreamBusConfig;
 
 /// Top-level Stratum configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-    /// Agent filesystem configuration.
+    /// Agent template catalog configuration.
     pub agent: AgentConfig,
     /// LLM provider configuration.
     pub llm: LlmConfig,
     /// HTTP API configuration, when the API is enabled.
     #[serde(default)]
     pub api: Option<ApiConfig>,
-    /// NATS configuration, when the event stream bus is enabled.
+    /// NATS configuration for the short Agent-scoped realtime tail.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
-    /// Execution-fact storage configuration, required by the API host.
+    /// Postgres execution-storage configuration, required by the API host.
     #[serde(default)]
-    pub storage: Option<StorageConfig>,
+    pub postgres: Option<PostgresConfig>,
 }
 
-/// Agent filesystem configuration.
+/// Agent template catalog configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AgentConfig {
-    /// Root directory for persisted agent state.
-    pub storage_root: PathBuf,
+    /// Read-only root directory of the agent template catalog.
+    pub templates_root: PathBuf,
 }
 
 /// HTTP API configuration.
@@ -55,7 +54,7 @@ fn default_api_bind() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 8080))
 }
 
-/// NATS event stream bus configuration.
+/// NATS short-tail configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -76,33 +75,11 @@ pub struct NatsConfig {
     pub max_messages: i64,
 }
 
-/// Execution-fact storage backend configuration.
+/// Postgres execution-storage configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub struct StorageConfig {
-    /// Backend that persists agent execution facts.
-    pub backend: StorageBackend,
-    /// Postgres backend settings, required when `backend = "postgres"`.
-    #[serde(default)]
-    pub postgres: Option<PostgresStorageConfig>,
-}
-
-/// Execution-fact storage backend selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StorageBackend {
-    /// Postgres persists all execution facts; the production backend.
-    Postgres,
-    /// The local filesystem persists execution facts (dev/test/embedded).
-    Filesystem,
-}
-
-/// Postgres storage backend settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct PostgresStorageConfig {
+pub struct PostgresConfig {
     /// Postgres connection URL.
     pub url: String,
 }
@@ -175,7 +152,7 @@ pub struct LlmConfig {
 }
 
 /// Credentials and allowed models for one LLM provider.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ProviderConfig {
@@ -183,6 +160,21 @@ pub struct ProviderConfig {
     pub api_key: String,
     /// Provider-local model names available to agents.
     pub models: Vec<String>,
+    /// Optional base URL override; when absent the provider's well-known
+    /// public endpoint is used by the assembly layer.
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+// The API key is a credential: Debug never exposes it (§6).
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("api_key", &"[redacted]")
+            .field("models", &self.models)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
 }
 
 /// Validated, self-contained agent definition without provider credentials.
@@ -271,30 +263,30 @@ impl Config {
             .ok_or(ConfigError::MissingSection { section: "nats" })
     }
 
-    /// Returns the configured storage section.
+    /// Returns the configured Postgres section.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::MissingSection`] when no storage section was provided.
-    pub fn require_storage(&self) -> Result<&StorageConfig, ConfigError> {
-        self.storage
-            .as_ref()
-            .ok_or(ConfigError::MissingSection { section: "storage" })
+    /// Returns [`ConfigError::MissingSection`] when no Postgres section was provided.
+    pub fn require_postgres(&self) -> Result<&PostgresConfig, ConfigError> {
+        self.postgres.as_ref().ok_or(ConfigError::MissingSection {
+            section: "postgres",
+        })
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.agent.storage_root.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidStorageRoot);
+        if self.agent.templates_root.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidTemplatesRoot);
         }
         validate_provider("deepseek", self.llm.deepseek.as_ref())?;
         validate_provider("openai", self.llm.openai.as_ref())?;
-        if let Some(storage) = &self.storage
-            && storage.backend == StorageBackend::Postgres
-            && !matches!(&storage.postgres, Some(postgres) if !postgres.url.trim().is_empty())
+        if let Some(postgres) = &self.postgres
+            && postgres.url.trim().is_empty()
         {
-            return Err(ConfigError::InvalidStorageConfig {
-                field: "postgres.url",
-            });
+            return Err(ConfigError::InvalidPostgresConfig { field: "url" });
+        }
+        if let Some(nats) = &self.nats {
+            validate_nats(nats)?;
         }
         if let Some(api) = &self.api {
             for origin in &api.allowed_origins {
@@ -332,79 +324,33 @@ impl Config {
     }
 }
 
-impl TryFrom<&NatsConfig> for NatsEventStreamBusConfig {
-    type Error = ConfigError;
-
-    /// Converts validated scalar NATS settings into runtime settings.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::InvalidNatsConfig`] when a required string is blank or a numeric
-    /// limit is not positive.
-    fn try_from(value: &NatsConfig) -> Result<Self, Self::Error> {
-        for (field, candidate) in [
-            ("url", value.url.as_str()),
-            ("stream_name", value.stream_name.as_str()),
-            ("subject_prefix", value.subject_prefix.as_str()),
-        ] {
-            if candidate.trim().is_empty() {
-                return Err(ConfigError::InvalidNatsConfig { field });
-            }
+fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
+    for (field, candidate) in [
+        ("url", config.url.as_str()),
+        ("stream_name", config.stream_name.as_str()),
+        ("subject_prefix", config.subject_prefix.as_str()),
+    ] {
+        if candidate.trim().is_empty() {
+            return Err(ConfigError::InvalidNatsConfig { field });
         }
-        if !(1..=5).contains(&value.replicas) {
-            return Err(ConfigError::InvalidNatsConfig { field: "replicas" });
-        }
-        if value.max_age_seconds == 0 {
-            return Err(ConfigError::InvalidNatsConfig {
-                field: "max_age_seconds",
-            });
-        }
-        if value.max_bytes <= 0 {
-            return Err(ConfigError::InvalidNatsConfig { field: "max_bytes" });
-        }
-        if value.max_messages <= 0 {
-            return Err(ConfigError::InvalidNatsConfig {
-                field: "max_messages",
-            });
-        }
-
-        Ok(Self {
-            url: value.url.clone(),
-            stream_name: value.stream_name.clone(),
-            subject_prefix: value.subject_prefix.clone(),
-            replicas: value.replicas,
-            max_age: Duration::from_secs(value.max_age_seconds),
-            max_bytes: value.max_bytes,
-            max_messages: value.max_messages,
-        })
     }
-}
-
-impl ResolvedAgentDefinition {
-    /// Parses and validates a resolved definition from TOML.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] when TOML decoding, the prompt, or tool uniqueness is invalid.
-    pub fn parse(input: &str) -> Result<Self, ConfigError> {
-        let mut definition: Self = toml::from_str(input)?;
-        let prompt = definition.prompt.trim();
-        if prompt.is_empty() {
-            return Err(ConfigError::EmptyPrompt);
-        }
-        validate_tools(&definition.tools)?;
-        definition.prompt = prompt.to_owned();
-        Ok(definition)
+    if !(1..=5).contains(&config.replicas) {
+        return Err(ConfigError::InvalidNatsConfig { field: "replicas" });
     }
-
-    /// Encodes this resolved definition as TOML.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::TomlEncode`] if TOML serialization fails.
-    pub fn encode(&self) -> Result<String, ConfigError> {
-        toml::to_string(self).map_err(ConfigError::from)
+    if config.max_age_seconds == 0 {
+        return Err(ConfigError::InvalidNatsConfig {
+            field: "max_age_seconds",
+        });
     }
+    if config.max_bytes <= 0 {
+        return Err(ConfigError::InvalidNatsConfig { field: "max_bytes" });
+    }
+    if config.max_messages <= 0 {
+        return Err(ConfigError::InvalidNatsConfig {
+            field: "max_messages",
+        });
+    }
+    Ok(())
 }
 
 fn validate_provider(
@@ -419,6 +365,13 @@ fn validate_provider(
     }
     if config.models.is_empty() {
         return Err(ConfigError::EmptyModels { provider });
+    }
+    if config
+        .base_url
+        .as_deref()
+        .is_some_and(|base_url| base_url.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidProviderBaseUrl { provider });
     }
     let mut models = HashSet::with_capacity(config.models.len());
     for model in &config.models {
@@ -448,12 +401,11 @@ fn validate_tools(tools: &[ToolName]) -> Result<(), ConfigError> {
 mod tests {
     use std::error::Error as StdError;
 
-    use super::{AgentName, Config, ConfigError, ResolvedAgentDefinition, StorageBackend};
-    use stratum_infra::NatsEventStreamBusConfig;
+    use super::{AgentName, Config, ConfigError};
 
     const VALID_CONFIG: &str = r#"
 [agent]
-storage_root = "./.stratum/agents"
+templates_root = "./templates"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"
@@ -468,12 +420,12 @@ allowed_origins = ["http://localhost:5173"]
 
 [nats]
 url = "nats://127.0.0.1:4222"
-stream_name = "SESSION_EVENTS"
-subject_prefix = "events.session"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
 replicas = 1
-max_age_seconds = 604800
-max_bytes = 1073741824
-max_messages = 1000000
+max_age_seconds = 3600
+max_bytes = 268435456
+max_messages = 100000
 "#;
 
     const VALID_TEMPLATE_WITHOUT_MODEL: &str = r#"
@@ -485,10 +437,7 @@ prompt = "  You are a coding agent.  "
     fn parses_complete_config() {
         let config = Config::parse(VALID_CONFIG).expect("config parses");
 
-        assert_eq!(
-            config.agent.storage_root.to_string_lossy(),
-            "./.stratum/agents"
-        );
+        assert_eq!(config.agent.templates_root.to_string_lossy(), "./templates");
         assert_eq!(config.llm.default.as_str(), "deepseek:deepseek-v4-flash");
         assert_eq!(config.require_api().expect("api exists").bind.port(), 8080);
         assert_eq!(config.require_nats().expect("nats exists").replicas, 1);
@@ -528,9 +477,15 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
+    fn rejects_removed_storage_section() {
+        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"postgres\"\n");
+        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
+    }
+
+    #[test]
     fn malformed_toml_error_redacts_input_from_entire_source_chain() {
         let secret = "malformed-secret-key";
-        let input = format!("[agent]\nstorage_root = \"{secret}");
+        let input = format!("[agent]\ntemplates_root = \"{secret}");
         let error = Config::parse(&input).expect_err("malformed TOML is rejected");
 
         assert_error_chain_redacts(&error, secret);
@@ -570,11 +525,11 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
-    fn rejects_empty_storage_root() {
-        let input = VALID_CONFIG.replace("./.stratum/agents", "");
+    fn rejects_empty_templates_root() {
+        let input = VALID_CONFIG.replace("./templates", "");
         assert!(matches!(
             Config::parse(&input),
-            Err(ConfigError::InvalidStorageRoot)
+            Err(ConfigError::InvalidTemplatesRoot)
         ));
     }
 
@@ -597,6 +552,49 @@ prompt = "  You are a coding agent.  "
             Config::parse(&input),
             Err(ConfigError::EmptyModels { .. })
         ));
+    }
+
+    #[test]
+    fn parses_provider_base_url_override() {
+        let input = VALID_CONFIG.replace(
+            "api_key = \"secret-key\"",
+            "api_key = \"secret-key\"\nbase_url = \"https://llm.internal.example/v1\"",
+        );
+        let config = Config::parse(&input).expect("config parses");
+
+        assert_eq!(
+            config
+                .llm
+                .deepseek
+                .as_ref()
+                .expect("provider exists")
+                .base_url
+                .as_deref(),
+            Some("https://llm.internal.example/v1")
+        );
+    }
+
+    #[test]
+    fn rejects_blank_provider_base_url() {
+        let input = VALID_CONFIG.replace(
+            "api_key = \"secret-key\"",
+            "api_key = \"secret-key\"\nbase_url = \"  \"",
+        );
+        assert!(matches!(
+            Config::parse(&input),
+            Err(ConfigError::InvalidProviderBaseUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn provider_config_debug_redacts_api_key() {
+        let config = Config::parse(VALID_CONFIG).expect("config parses");
+        let provider = config.llm.deepseek.as_ref().expect("provider exists");
+        let debug = format!("{provider:?}");
+
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("secret-key"));
+        assert!(!format!("{config:?}").contains("secret-key"));
     }
 
     #[test]
@@ -731,111 +729,60 @@ prompt = "Use tools."
             Err(ConfigError::MissingSection { section: "nats" })
         ));
         assert!(matches!(
-            config.require_storage(),
-            Err(ConfigError::MissingSection { section: "storage" })
+            config.require_postgres(),
+            Err(ConfigError::MissingSection {
+                section: "postgres"
+            })
         ));
     }
 
     #[test]
-    fn parses_postgres_storage_config() {
+    fn parses_postgres_config() {
         let input = format!(
-            "{VALID_CONFIG}\n[storage]\nbackend = \"postgres\"\n\n[storage.postgres]\nurl = \"postgres://stratum:secret@db:5432/stratum\"\n"
+            "{VALID_CONFIG}\n[postgres]\nurl = \"postgres://stratum:secret@db:5432/stratum\"\n"
         );
         let config = Config::parse(&input).expect("config parses");
-        let storage = config.require_storage().expect("storage exists");
 
-        assert_eq!(storage.backend, StorageBackend::Postgres);
         assert_eq!(
-            storage
-                .postgres
-                .as_ref()
-                .expect("postgres section exists")
-                .url,
+            config.require_postgres().expect("postgres exists").url,
             "postgres://stratum:secret@db:5432/stratum"
         );
     }
 
     #[test]
-    fn parses_filesystem_storage_config() {
-        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"filesystem\"\n");
-        let config = Config::parse(&input).expect("config parses");
+    fn rejects_blank_postgres_url() {
+        let input = format!("{VALID_CONFIG}\n[postgres]\nurl = \"  \"\n");
 
-        assert_eq!(
-            config.require_storage().expect("storage exists").backend,
-            StorageBackend::Filesystem
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_storage_backend() {
-        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"sqlite\"\n");
-
-        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
-    }
-
-    #[test]
-    fn rejects_postgres_backend_without_url() {
-        for storage in [
-            "[storage]\nbackend = \"postgres\"\n",
-            "[storage]\nbackend = \"postgres\"\n\n[storage.postgres]\nurl = \"  \"\n",
-        ] {
-            let input = format!("{VALID_CONFIG}\n{storage}");
-
-            assert!(matches!(
-                Config::parse(&input),
-                Err(ConfigError::InvalidStorageConfig {
-                    field: "postgres.url"
-                })
-            ));
-        }
-    }
-
-    #[test]
-    fn converts_valid_nats_config() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let nats = NatsEventStreamBusConfig::try_from(config.require_nats().expect("nats exists"))
-            .expect("nats converts");
-
-        assert_eq!(nats.max_age.as_secs(), 604800);
-        assert_eq!(nats.subject_prefix, "events.session");
+        assert!(matches!(
+            Config::parse(&input),
+            Err(ConfigError::InvalidPostgresConfig { field: "url" })
+        ));
     }
 
     #[test]
     fn rejects_invalid_nats_config() {
-        let input = VALID_CONFIG.replace("replicas = 1", "replicas = 0");
-        let config = Config::parse(&input).expect("config parses");
+        for (from, to, field) in [
+            ("url = \"nats://127.0.0.1:4222\"", "url = \"  \"", "url"),
+            ("replicas = 1", "replicas = 0", "replicas"),
+            ("replicas = 1", "replicas = 6", "replicas"),
+            (
+                "max_age_seconds = 3600",
+                "max_age_seconds = 0",
+                "max_age_seconds",
+            ),
+            ("max_bytes = 268435456", "max_bytes = 0", "max_bytes"),
+            ("max_messages = 100000", "max_messages = -1", "max_messages"),
+        ] {
+            let input = VALID_CONFIG.replace(from, to);
 
-        assert!(matches!(
-            NatsEventStreamBusConfig::try_from(config.require_nats().expect("nats exists")),
-            Err(ConfigError::InvalidNatsConfig { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_nats_replica_count_above_runtime_limit() {
-        let input = VALID_CONFIG.replace("replicas = 1", "replicas = 6");
-        let config = Config::parse(&input).expect("config parses");
-
-        assert!(matches!(
-            NatsEventStreamBusConfig::try_from(config.require_nats().expect("nats exists")),
-            Err(ConfigError::InvalidNatsConfig { field: "replicas" })
-        ));
-    }
-
-    #[test]
-    fn resolved_definition_round_trips_without_secret() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let definition = config
-            .resolve_template(name, VALID_TEMPLATE_WITHOUT_MODEL)
-            .expect("template resolves");
-
-        let encoded = definition.encode().expect("definition encodes");
-        assert!(!encoded.contains("secret-key"));
-        assert_eq!(
-            ResolvedAgentDefinition::parse(&encoded).expect("definition parses"),
-            definition
-        );
+            assert!(
+                matches!(
+                    Config::parse(&input),
+                    Err(ConfigError::InvalidNatsConfig { field: actual }) if actual == field
+                ),
+                "case {from} -> {to}"
+            );
+        }
     }
 
     #[test]

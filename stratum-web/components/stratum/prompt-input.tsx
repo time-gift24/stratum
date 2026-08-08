@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { ArrowUp, Plus } from "lucide-react"
+import { ArrowUp, Plus, Square } from "lucide-react"
 
 import { BorderGlow } from "@/components/react-bits/border-glow"
 import { Button } from "@/components/ui/button"
@@ -38,6 +38,9 @@ export function PromptInput({
   value,
   onChange,
   onSubmit,
+  running = false,
+  cancelRequested = false,
+  onCancel,
   className,
 }: {
   placeholder?: string
@@ -47,6 +50,11 @@ export function PromptInput({
   value?: string
   onChange?: (value: string) => void
   onSubmit?: (value: string) => void
+  /** Turn 运行中：发送按钮替换为取消按钮（信号语义，非立即终态） */
+  running?: boolean
+  /** cancel 202 已接受但 durable terminal 未确认：按钮禁用等待收敛 */
+  cancelRequested?: boolean
+  onCancel?: () => void
   className?: string
 }) {
   const [innerValue, setInnerValue] = useState("")
@@ -220,15 +228,28 @@ export function PromptInput({
           />
           <div className="mb-1 flex items-center gap-1.5">
             {trailing}
-            <Button
-              size="icon"
-              className="rounded-full"
-              aria-label="发送"
-              disabled={!canSend}
-              onClick={submit}
-            >
-              <ArrowUp aria-hidden />
-            </Button>
+            {running && onCancel ? (
+              <Button
+                size="icon"
+                variant="outline"
+                className="rounded-full"
+                aria-label="取消生成"
+                disabled={cancelRequested}
+                onClick={onCancel}
+              >
+                <Square aria-hidden />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                className="rounded-full"
+                aria-label="发送"
+                disabled={!canSend}
+                onClick={submit}
+              >
+                <ArrowUp aria-hidden />
+              </Button>
+            )}
           </div>
         </div>
       </BorderGlow>

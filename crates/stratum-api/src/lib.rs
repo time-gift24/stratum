@@ -1,59 +1,95 @@
-//! HTTP API host for persisted Stratum agents.
+//! HTTP assembly and orchestration layer of the Postgres-first agent runtime.
+//!
+//! `stratum-api` is the only assembly crate: it owns the process registry,
+//! the Postgres-backed sink adapters injected into the kernel, the approval
+//! handler and resolver, the per-Agent realtime dispatcher, and the HTTP/SSE
+//! surface. Postgres is the only durable truth and the core readiness
+//! dependency; NATS is a short, lossy observation channel whose failure only
+//! degrades realtime. The kernel (`stratum-agent`) stays storage-agnostic and
+//! never sees Session, Turn, or sequence concepts beyond its typed events.
+//!
+//! `main.rs` stays thin; everything reusable lives here.
 
-mod api;
+mod approval;
+mod baseline;
+mod dispatcher;
+mod dto;
 mod error;
-mod host;
+mod frames;
+mod host_error;
+mod http;
+mod provenance;
+mod registry;
+mod sink;
+mod state;
+mod telemetry;
+mod templates;
+mod turn;
 
-use std::{path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use stratum_config::{Config, ProviderConfig};
 use stratum_core::ModelId;
-use stratum_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
-use stratum_infra::{EventStreamBus, NatsEventStreamBusConfig, create_nats_event_stream_bus};
+use stratum_infra::{AgentTailConfig, NatsAgentTail};
 use stratum_llm::{
     ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager,
     OpenAICompatibleProvider,
 };
+use stratum_postgres::PostgresBackend;
 
-pub use api::{AgentCreated, AgentTemplateView, AgentView, TurnAccepted, router};
-pub use error::{AgentCleanupError, HostError};
-pub use host::{HostState, HostedAgent};
+pub use dto::{
+    AgentStatusDto, AgentTemplateDto, AgentTemplatesResponse, AgentViewResponse,
+    CreateAgentRequest, CreateAgentResponse, HistoryItemDto, HistoryResponse, LivenessResponse,
+    ModelsResponse, PendingApprovalDto, ReadinessResponse, TurnAccepted,
+};
+pub use error::{ApiError, ErrorKind, ErrorResponse};
+pub use frames::{AgentProductEventV1, AgentStreamFrameV1};
+pub use host_error::HostError;
+pub use http::router;
+pub use state::AppState;
+pub use telemetry::{TelemetryGuard, init_telemetry};
 
+/// Well-known public OpenAI API endpoint. This is a product constant, not an
+/// environment-specific value; deployments override it via
+/// `[llm.openai].base_url` when routing through a gateway or compatible API.
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+/// Well-known public DeepSeek API endpoint; same product-constant contract as
+/// [`OPENAI_BASE_URL`], overridable via `[llm.deepseek].base_url`.
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+/// Bounded wait for managed turn tasks after shutdown starts.
+const SHUTDOWN_DRAIN_BOUND: Duration = Duration::from_secs(10);
+/// Bounded wait for the NATS tail connection before degrading realtime.
+const NATS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Reads a config file and serves until shutdown.
 ///
 /// # Errors
 ///
-/// Returns [`HostError`] when the file, configuration, runtime dependencies, listener, or server
-/// fails.
+/// Returns [`HostError`] when the file, configuration, runtime dependencies,
+/// listener, or server fails.
 pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
     let contents = tokio::fs::read_to_string(path).await?;
     let config = Config::parse(&contents)?;
-    config.require_api()?;
-    config.require_nats()?;
-    config.require_storage()?;
     serve(config).await
 }
 
-/// Composes the configured providers, filesystem, NATS bus, restored host, and HTTP listener.
+/// Composes providers, Postgres, the NATS tail, the shared state, and the
+/// HTTP listener, then serves until SIGTERM/SIGINT with a graceful drain.
 ///
 /// # Errors
 ///
-/// Returns [`HostError`] when configuration or any runtime dependency cannot be initialized.
+/// Returns [`HostError`] when configuration or any core runtime dependency
+/// cannot be initialized. A NATS connection failure degrades realtime and is
+/// not fatal.
 pub async fn serve(config: Config) -> Result<(), HostError> {
     let api = config.require_api()?.clone();
-    let nats = NatsEventStreamBusConfig::try_from(config.require_nats()?)?;
+    let pg = PostgresBackend::connect(&config.require_postgres()?.url).await?;
+    let tail = connect_tail(&config).await;
     let providers = providers(&config)?;
-    tokio::fs::create_dir_all(config.agent.storage_root.join("templates")).await?;
-    tokio::fs::create_dir_all(config.agent.storage_root.join("history")).await?;
-    let filesystem: Arc<dyn Filesystem> = Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
-        root: config.agent.storage_root.clone(),
-        max_file_bytes: None,
-    })?);
-    let event_bus: Arc<dyn EventStreamBus> = Arc::new(create_nats_event_stream_bus(nats).await?);
-    let state = HostState::restore(config, filesystem, event_bus, providers).await?;
+    let state = Arc::new(AppState::new(pg, tail, providers, config).await?);
+
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
     let shutdown = state.shutdown_token();
     let server = axum::serve(listener, router(Arc::clone(&state)))
@@ -62,22 +98,76 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     let mut signal_result = None;
     let server_result = tokio::select! {
         result = &mut server => Some(result),
-        signal = tokio::signal::ctrl_c() => {
+        signal = shutdown_signal() => {
             signal_result = Some(signal);
             None
         }
     };
-    state.shutdown().await;
+    // Close admission and end SSE streams, drain in-flight requests, then
+    // boundedly wait for managed turn tasks. Turn tokens are never signalled
+    // and no cancelled/failed rows are written on behalf of the process.
+    state.initiate_shutdown();
     if let Some(signal_result) = signal_result {
         signal_result?;
         server.await?;
     } else if let Some(server_result) = server_result {
         server_result?;
     }
+    state.admission().wait_drained().await;
+    state.drain_managed_tasks(SHUTDOWN_DRAIN_BOUND).await;
     Ok(())
 }
 
-fn providers(config: &Config) -> Result<LlmProviderManager, HostError> {
+/// SIGTERM or SIGINT, whichever arrives first.
+async fn shutdown_signal() -> std::io::Result<()> {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = ctrl_c => result,
+            _ = sigterm.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await
+    }
+}
+
+/// Connects the NATS tail; any failure degrades realtime (the core Postgres
+/// commands keep working).
+async fn connect_tail(config: &Config) -> Option<NatsAgentTail> {
+    let nats = config.nats.as_ref()?;
+    let tail_config = AgentTailConfig {
+        url: nats.url.clone(),
+        stream_name: nats.stream_name.clone(),
+        subject_prefix: nats.subject_prefix.clone(),
+        replicas: nats.replicas,
+        max_age: Duration::from_secs(nats.max_age_seconds),
+        max_bytes: nats.max_bytes,
+        max_messages: nats.max_messages,
+    };
+    match tokio::time::timeout(NATS_CONNECT_TIMEOUT, NatsAgentTail::connect(tail_config)).await {
+        Ok(Ok(tail)) => Some(tail),
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "nats tail connect failed; realtime is degraded");
+            None
+        }
+        Err(_) => {
+            tracing::error!("nats tail connect timed out; realtime is degraded");
+            None
+        }
+    }
+}
+
+/// Builds the provider registry from `[llm]`.
+///
+/// # Errors
+///
+/// Returns [`HostError`] when a configured model cannot be registered.
+pub fn providers(config: &Config) -> Result<LlmProviderManager, HostError> {
     let mut providers = LlmProviderManager::new();
     if let Some(provider) = &config.llm.openai {
         register_openai(&mut providers, provider)?;
@@ -92,10 +182,11 @@ fn register_openai(
     providers: &mut LlmProviderManager,
     config: &ProviderConfig,
 ) -> Result<(), HostError> {
+    let base_url = config.base_url.as_deref().unwrap_or(OPENAI_BASE_URL);
     for model in &config.models {
         let model_id = model_id("openai", model)?;
         providers.register(Arc::new(OpenAICompatibleProvider::new(
-            OPENAI_BASE_URL,
+            base_url,
             ApiKey::new(config.api_key.clone()),
             model_id,
         )))?;
@@ -118,7 +209,7 @@ fn register_deepseek(
             }
         };
         providers.register(Arc::new(DeepSeekProvider::new(
-            DEEPSEEK_BASE_URL,
+            config.base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL),
             ApiKey::new(config.api_key.clone()),
             adapter_model,
             DeepSeekThinking::Disabled,
@@ -146,7 +237,7 @@ mod tests {
         let config = Config::parse(
             r#"
 [agent]
-storage_root = "."
+templates_root = "."
 
 [llm]
 default = "openai:gpt-4.1-mini"
@@ -183,7 +274,7 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
         let config = Config::parse(
             r#"
 [agent]
-storage_root = "."
+templates_root = "."
 
 [llm]
 default = "deepseek:deepseek-v4-flash"

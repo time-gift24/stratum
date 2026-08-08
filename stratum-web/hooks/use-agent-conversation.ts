@@ -13,15 +13,16 @@ import {
   initialConversationState,
   conversationReducer,
 } from "@/features/agent-conversation/reducer"
-import { recoverConversation } from "@/features/agent-conversation/recovery"
+import {
+  loadOlderHistoryPage,
+  reconcileConversation,
+  runConversationSession,
+} from "@/features/agent-conversation/recovery"
 import type { ConversationState } from "@/features/agent-conversation/types"
 import {
-  clearCursor,
-  loadCursor,
   loadRecentAgents,
   rememberRecentAgent as rememberStoredRecentAgent,
   removeRecentAgent as removeStoredRecentAgent,
-  saveCursor,
   type RecentAgent,
   type StorageLike,
 } from "@/lib/stratum/recent-agents"
@@ -41,6 +42,9 @@ import {
   STRATUM_API_BASE_URL,
 } from "@/lib/stratum/api"
 import { subscribeToAgentEvents } from "@/lib/stratum/event-stream"
+
+/** running / 待决审批 / 取消确认中 / realtime 降级时的低频 reconcile 间隔 */
+const RECONCILE_POLL_INTERVAL_MS = 15_000
 
 export type ComposerConfiguration = {
   agentTemplates: readonly AgentTemplateView[]
@@ -73,7 +77,14 @@ export type AgentConversation = {
     decision: "approve" | "reject"
   ): Promise<boolean>
   reconnect(): void
+  loadOlderHistory(): void
   removeRecentAgent(agentId: string): void
+}
+
+type PendingCreate = {
+  key: string
+  agentName: string
+  modelConfig?: ModelConfig
 }
 
 export function useAgentConversation(): AgentConversation {
@@ -102,6 +113,15 @@ export function useAgentConversation(): AgentConversation {
   >(null)
   const selectedAgentRef = useRef<string | null>(null)
   const selectionGeneration = useRef(0)
+  // SSE cursor 只存当前页面内存（协议禁止跨刷新持久化）
+  const cursorsRef = useRef(new Map<string, string>())
+  // 结果未确定的 create 保留同一 Idempotency-Key；新 intent 才生成新 key
+  const pendingCreateRef = useRef<PendingCreate | null>(null)
+  // reconcile/pagination 读取最新 reducer state（命令回调里的闭包读不到）
+  const stateRef = useRef(state)
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
 
   useEffect(() => {
     let cancelled = false
@@ -166,6 +186,8 @@ export function useAgentConversation(): AgentConversation {
   const selectAgent = useCallback((agentId: string | null) => {
     selectionGeneration.current += 1
     selectedAgentRef.current = agentId
+    // 切换会话 = state 全量重置：page cursor 一并作废，重新 cold bootstrap
+    cursorsRef.current.clear()
     if (agentId === null) setSelectedTemplate(null)
     setSelectedAgentId(agentId)
     dispatch({ type: "agent_selected", agentId })
@@ -191,8 +213,8 @@ export function useAgentConversation(): AgentConversation {
 
     const controller = new AbortController()
     const generation = selectionGeneration.current
-    const storage = browserStorage()
     const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
+    const cursors = cursorsRef.current
     const dispatchIfCurrent = (action: Parameters<typeof dispatch>[0]) => {
       if (
         !controller.signal.aborted &&
@@ -201,7 +223,7 @@ export function useAgentConversation(): AgentConversation {
         dispatch(action)
     }
 
-    void recoverConversation(
+    void runConversationSession(
       {
         api,
         subscribe: (options) =>
@@ -209,20 +231,12 @@ export function useAgentConversation(): AgentConversation {
             ...options,
             baseUrl: STRATUM_API_BASE_URL,
           }),
-        loadCursor: (agentId) =>
-          storage ? loadCursor(storage, agentId) : undefined,
+        loadCursor: (agentId) => cursors.get(agentId),
         saveCursor: (agentId, cursor) => {
-          if (
-            storage &&
-            !controller.signal.aborted &&
-            generation === selectionGeneration.current
-          )
-            saveCursor(storage, agentId, cursor)
+          if (generation === selectionGeneration.current)
+            cursors.set(agentId, cursor)
         },
-        clearCursor: (agentId) => {
-          if (storage && generation === selectionGeneration.current)
-            clearCursor(storage, agentId)
-        },
+        clearCursor: (agentId) => cursors.delete(agentId),
         dispatch: dispatchIfCurrent,
       },
       { agentId: selectedAgentId, signal: controller.signal }
@@ -242,8 +256,82 @@ export function useAgentConversation(): AgentConversation {
 
   const reconnect = useCallback(() => {
     if (selectedAgentRef.current === null) return
+    // 手动重连 = hard reset：清 page cursor，从无 cursor cold bootstrap 重来
+    cursorsRef.current.delete(selectedAgentRef.current)
     selectionGeneration.current += 1
     setReconnectVersion((version) => version + 1)
+  }, [])
+
+  /** 命令返回后 / 窗口聚焦 / 低频轮询共用的增量 reconcile */
+  const reconcileNow = useCallback(() => {
+    const agentId = selectedAgentRef.current
+    if (agentId === null) return
+    const generation = selectionGeneration.current
+    const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
+    void reconcileConversation(
+      {
+        api,
+        getBarrier: () => {
+          const current = stateRef.current
+          return current.agentId === agentId && current.phase === "ready"
+            ? current.barrier
+            : null
+        },
+        dispatch: (action) => {
+          if (generation === selectionGeneration.current) dispatch(action)
+        },
+      },
+      { agentId }
+    )
+  }, [])
+
+  // 窗口重新获得焦点立即 reconcile
+  useEffect(() => {
+    const onFocus = () => reconcileNow()
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [reconcileNow])
+
+  const polling =
+    state.phase === "ready" &&
+    state.agentId !== null &&
+    (state.view?.status === "running" ||
+      state.cancelRequested ||
+      state.realtimeDegraded ||
+      Object.keys(state.approvals).length > 0)
+
+  // running / 待决审批 / realtime 降级期间的低频 PG reconcile
+  useEffect(() => {
+    if (!polling) return
+    const timer = setInterval(reconcileNow, RECONCILE_POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [polling, reconcileNow])
+
+  const loadOlderHistory = useCallback(() => {
+    const agentId = selectedAgentRef.current
+    if (agentId === null) return
+    const generation = selectionGeneration.current
+    const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
+    void loadOlderHistoryPage(
+      {
+        api,
+        getWindow: () => {
+          const current = stateRef.current
+          if (current.agentId !== agentId || current.historyThrough === null)
+            return null
+          return {
+            through: current.historyThrough,
+            before: current.historyBefore,
+            hasMore: current.historyHasMore,
+            loading: current.historyLoading,
+          }
+        },
+        dispatch: (action) => {
+          if (generation === selectionGeneration.current) dispatch(action)
+        },
+      },
+      { agentId }
+    )
   }, [])
 
   const createConversation = useCallback(
@@ -266,32 +354,74 @@ export function useAgentConversation(): AgentConversation {
       }
 
       const generation = selectionGeneration.current
+      const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
+      const modelConfig = requestedModelConfig ?? undefined
       try {
-        const created = await createStratumApi({
-          baseUrl: STRATUM_API_BASE_URL,
-        }).createAgent({
-          agentName: effectiveTemplate.agent_name,
-          text: prompt,
-          modelConfig: requestedModelConfig ?? undefined,
+        // 同一 pending intent 复用 Idempotency-Key；只有新 intent 才生成新 key
+        let pending = pendingCreateRef.current
+        if (
+          pending === null ||
+          pending.agentName !== effectiveTemplate.agent_name ||
+          !sameModelConfig(pending.modelConfig, modelConfig)
+        ) {
+          pending = {
+            key: crypto.randomUUID(),
+            agentName: effectiveTemplate.agent_name,
+            modelConfig,
+          }
+          pendingCreateRef.current = pending
+        }
+        const created = await api.createAgent({
+          agentName: pending.agentName,
+          modelConfig: pending.modelConfig,
+          idempotencyKey: pending.key,
         })
+        pendingCreateRef.current = null
         if (generation !== selectionGeneration.current) return false
 
-        const recentAgent: RecentAgent = {
+        rememberRecentAgent({
           agentId: created.agent_id,
           agentName: created.agent_name,
           title: prompt,
           lastOpenedAt: new Date().toISOString(),
-        }
-        rememberRecentAgent(recentAgent)
+        })
         selectAgent(created.agent_id)
+
+        // 首个 Turn：idle Agent 的 CAS 是 expected_current_turn_id = null；
+        // 只对同一 Agent 发送首条消息，不再 create
+        await api.sendMessage(created.agent_id, {
+          text: prompt,
+          expectedCurrentTurnId: null,
+          modelConfig,
+        })
+        if (
+          modelConfig !== undefined &&
+          generation === selectionGeneration.current
+        ) {
+          setAcceptedModelConfig(modelConfig)
+          setRequestedModelConfig((pendingConfig) =>
+            pendingConfig === modelConfig ? null : pendingConfig
+          )
+        }
         return true
       } catch (error) {
-        if (generation === selectionGeneration.current) reportError(error)
+        if (generation !== selectionGeneration.current) return false
+        // key 命中但请求不同 = 新 intent：清掉 pending key，下次生成新 key
+        if (isApiErrorCode(error, "idempotency_key_conflict"))
+          pendingCreateRef.current = null
+        // stale_turn：首条消息可能已提交但响应丢失——只 reconcile 收敛，
+        // 绝不重发创建第二个 Turn
+        if (isApiErrorCode(error, "stale_turn")) {
+          reconcileNow()
+          return true
+        }
+        reportError(error)
         return false
       }
     },
     [
       effectiveTemplate,
+      reconcileNow,
       rememberRecentAgent,
       reportError,
       requestedModelConfig,
@@ -323,7 +453,8 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
 
-      if (state.phase === "recovering" || state.view?.status === "running")
+      const view = state.view
+      if (state.phase === "recovering" || view === null || view.status === "running")
         return false
 
       const client = selectedClient()
@@ -331,11 +462,12 @@ export function useAgentConversation(): AgentConversation {
 
       const selectedConfig = requestedModelConfig
       try {
-        await client.api.sendMessage(
-          client.agentId,
-          message,
-          selectedConfig ?? undefined
-        )
+        await client.api.sendMessage(client.agentId, {
+          text: message,
+          // exact current-Turn CAS：terminal 后携带最近 TurnId 才能开新 Turn
+          expectedCurrentTurnId: view.current_turn_id,
+          modelConfig: selectedConfig ?? undefined,
+        })
         if (
           selectedConfig !== null &&
           client.generation === selectionGeneration.current
@@ -345,72 +477,115 @@ export function useAgentConversation(): AgentConversation {
             pendingConfig === selectedConfig ? null : pendingConfig
           )
         }
+        reconcileNow()
         return true
       } catch (error) {
-        if (
-          client.generation === selectionGeneration.current &&
-          !isApiErrorCode(error, "agent_busy")
-        )
+        if (client.generation !== selectionGeneration.current) return false
+        // stale_turn：view 过期，刷新后由用户重试，不静默创建第二个 Turn
+        if (isApiErrorCode(error, "stale_turn")) {
+          reconcileNow()
           reportError(error)
+          return false
+        }
+        // resume_required：unhosted running Turn，reconcile 后显示 Resume
+        if (isApiErrorCode(error, "resume_required")) {
+          reconcileNow()
+          return false
+        }
+        if (!isApiErrorCode(error, "agent_busy")) reportError(error)
         return false
       }
     },
     [
+      reconcileNow,
       reportError,
       requestedModelConfig,
       selectedClient,
       state.phase,
-      state.view?.status,
+      state.view,
     ]
   )
 
   const resume = useCallback(async () => {
+    const turnId = stateRef.current.view?.current_turn_id
     const client = selectedClient()
-    if (!client) return
+    if (!client || turnId === undefined || turnId === null) return
 
     try {
-      await client.api.resume(client.agentId)
+      // 202 = 已托管；204 = already hosted/starting，幂等成功
+      await client.api.resume(client.agentId, turnId)
+      reconcileNow()
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
-      if (isApiErrorCode(error, "resume_not_running")) {
-        reconnect()
+      // stale_turn / turn_not_running：view 已过期，reconcile 收敛
+      if (
+        isApiErrorCode(error, "stale_turn") ||
+        isApiErrorCode(error, "turn_not_running")
+      ) {
+        reconcileNow()
         return
       }
       reportError(error)
     }
-  }, [reconnect, reportError, selectedClient])
+  }, [reconcileNow, reportError, selectedClient])
 
   const cancel = useCallback(async () => {
+    const turnId = stateRef.current.view?.current_turn_id
     const client = selectedClient()
-    if (!client) return
+    if (!client || turnId === undefined || turnId === null) return
 
     try {
-      await client.api.cancel(client.agentId)
+      // 202 = 信号已接受（只显示"取消请求已发送"）；204 = 已 cancelled
+      await client.api.cancel(client.agentId, turnId)
+      dispatch({ type: "cancel_requested" })
+      reconcileNow()
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
-      if (isApiErrorCode(error, "resume_required")) {
-        reconnect()
+      // turn_not_hosted / stale_turn：reconcile 后按真实 view 显示 Resume 等
+      if (
+        isApiErrorCode(error, "turn_not_hosted") ||
+        isApiErrorCode(error, "stale_turn") ||
+        isApiErrorCode(error, "turn_starting")
+      ) {
+        reconcileNow()
         return
       }
       reportError(error)
     }
-  }, [reconnect, reportError, selectedClient])
+  }, [reconcileNow, reportError, selectedClient])
 
   const resolveApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject") => {
+      const turnId = stateRef.current.view?.current_turn_id
       const client = selectedClient()
-      if (!client) return false
+      if (!client || turnId === undefined || turnId === null) return false
 
       try {
-        await client.api.resolveApproval(client.agentId, approvalId, decision)
+        // 204：持久化决定；unhosted Turn 由后续显式 Resume 接管（不自动 resume）
+        await client.api.resolveApproval(client.agentId, approvalId, {
+          turnId,
+          decision,
+        })
+        if (client.generation !== selectionGeneration.current) return false
+        dispatch({ type: "approval_resolved", approvalId })
+        reconcileNow()
         return true
       } catch (error) {
-        if (client.generation === selectionGeneration.current)
-          reportError(error)
+        if (client.generation !== selectionGeneration.current) return false
+        // approval_invalidated / already_resolved：reconcile 以 ledger 为准
+        if (
+          isApiErrorCode(error, "approval_invalidated") ||
+          isApiErrorCode(error, "approval_already_resolved") ||
+          isApiErrorCode(error, "stale_turn")
+        ) {
+          reconcileNow()
+          return false
+        }
+        reportError(error)
         return false
       }
     },
-    [reportError, selectedClient]
+    [reconcileNow, reportError, selectedClient]
   )
 
   const selectTemplate = useCallback(
@@ -508,6 +683,7 @@ export function useAgentConversation(): AgentConversation {
     cancel,
     resolveApproval,
     reconnect,
+    loadOlderHistory,
     removeRecentAgent,
   }
 }
@@ -524,6 +700,17 @@ function browserStorage(): StorageLike | undefined {
 
 function isApiErrorCode(error: unknown, code: string): boolean {
   return error instanceof ApiError && error.code === code
+}
+
+function sameModelConfig(
+  left: ModelConfig | undefined,
+  right: ModelConfig | undefined
+): boolean {
+  if (left === undefined || right === undefined) return left === right
+  return (
+    left.model === right.model &&
+    JSON.stringify(left.parameters) === JSON.stringify(right.parameters)
+  )
 }
 
 function toApiError(error: unknown): ApiError {

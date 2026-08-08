@@ -1,7 +1,16 @@
-.PHONY: test-session-runtime test-deepseek-session
+COMPOSE ?= podman compose
+TEST_COMPOSE_FILE := docker-compose.test.yml
 
-test-session-runtime:
-	cargo test -p stratum-api --test session_runtime session_runtime_survives_restart_and_isolates_agent_history
+.PHONY: test-integration test-up test-down
 
-test-deepseek-session:
-	cargo test -p stratum-api --test session_runtime live_deepseek_session_survives_host_restart -- --ignored --nocapture
+test-integration:
+	@set -eu; \
+	trap '$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v' EXIT; \
+	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d --wait; \
+	cargo test -p stratum-api --test api -- --ignored --test-threads=1
+
+test-up:
+	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d
+
+test-down:
+	$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v

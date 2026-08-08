@@ -1,26 +1,14 @@
 //! Infrastructure primitives for Stratum runtimes.
-
-use thiserror::Error;
+//!
+//! The retained surface is narrow: the kernel sink contracts
+//! ([`DurableEventSink`], [`TelemetryEventSink`]) and the concrete Agent-scoped
+//! NATS tail transport ([`NatsAgentTail`]).
 
 pub mod agent_event_sink;
-pub mod agent_store;
-pub mod event_stream_bus;
+pub mod agent_tail;
 
-pub use agent_event_sink::{
-    DurableEventSink, DurableEventSinkError, FilesystemDurableEventSink, FilesystemEventSinkError,
-    ScopedAgentEventSink, TelemetryEventSink,
+pub use agent_event_sink::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
+pub use agent_tail::{
+    AgentTailConfig, AgentTailError, AgentTailStream, NatsAgentTail, TailCursor,
+    TailCursorParseError,
 };
-pub use agent_store::{FilesystemAgentStore, StoreEventStreamBus};
-pub use event_stream_bus::{
-    EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig,
-    create_nats_event_stream_bus,
-};
-
-/// Error returned by infrastructure operations.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum InfraError {
-    /// Event stream bus operation failed.
-    #[error("event stream bus operation failed")]
-    EventStreamBus(#[from] EventStreamBusError),
-}

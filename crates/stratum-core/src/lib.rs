@@ -3,10 +3,9 @@
 pub mod agent_loop_event;
 pub mod error;
 
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use bon::Builder;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stratum_macros::{sha256_fingerprint, string_id, uuid_identity};
@@ -122,12 +121,16 @@ impl ModelId {
     /// Returns the canonical provider name.
     #[must_use]
     pub fn provider_name(&self) -> &str {
+        // Invariant: `ModelId` is only constructible through the validating
+        // `FromStr`, which guarantees the `provider:model` separator exists.
         self.0.split_once(':').expect("validated model id").0
     }
 
     /// Returns the provider-local model name.
     #[must_use]
     pub fn model_name(&self) -> &str {
+        // Invariant: `ModelId` is only constructible through the validating
+        // `FromStr`, which guarantees the `provider:model` separator exists.
         self.0.split_once(':').expect("validated model id").1
     }
 
@@ -812,463 +815,9 @@ pub enum LlmEvent {
     },
 }
 
-/// Event emitted by an agent runtime.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AgentEvent {
-    /// One complete message committed to agent history.
-    Message {
-        /// Monotonic sequence in this agent's committed message history.
-        message_seq: u64,
-        /// Complete message payload.
-        message: ChatMessage,
-    },
-    /// Agent turn started.
-    Started,
-    /// Agent turn finished.
-    Finished {
-        /// Why the turn finished.
-        finish_reason: String,
-        /// Token usage accumulated by the turn.
-        usage: TokenUsage,
-    },
-    /// Agent turn failed.
-    Failed {
-        /// Error text safe to expose to callers.
-        error_text: String,
-        /// Token usage accumulated by the turn.
-        usage: TokenUsage,
-    },
-    /// Agent turn was cancelled.
-    Cancelled {
-        /// Token usage accumulated by the turn.
-        usage: TokenUsage,
-    },
-    /// A tool call requires user approval.
-    ToolApprovalRequested {
-        /// Approval request identity.
-        approval_id: ApprovalId,
-        /// Agent requesting approval.
-        agent_name: String,
-        /// Tool call identity.
-        call_id: CallId,
-        /// Provider-visible tool name.
-        tool_name: ToolName,
-        /// Tool call arguments.
-        arguments: Value,
-        /// Whether the tool observes or mutates state.
-        tool_kind: ToolKind,
-        /// Declared danger of the tool.
-        danger_level: DangerLevel,
-    },
-    /// A tool approval request was resolved.
-    ToolApprovalResolved {
-        /// Approval request identity.
-        approval_id: ApprovalId,
-        /// User decision.
-        decision: ApprovalDecision,
-    },
-    /// A validated and approved tool call began executing.
-    ToolExecutionStarted {
-        /// Tool call identity.
-        call_id: CallId,
-        /// Provider-visible tool name.
-        tool_name: ToolName,
-    },
-    /// One agent-loop iteration reached its durable boundary.
-    IterationCompleted {
-        /// Completed iteration number.
-        iteration: u64,
-        /// Token usage accumulated through the iteration.
-        usage: TokenUsage,
-    },
-    /// Event emitted by one LLM call inside the agent run.
-    Llm {
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
-        /// LLM event payload.
-        event: LlmEvent,
-    },
-    /// Agent-visible plan changed.
-    PlanUpdated {
-        /// Plan identity.
-        plan_id: PlanId,
-        /// Plan payload.
-        plan: Value,
-    },
-}
-
-impl AgentEvent {
-    /// Returns the serialized event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Message { .. } => "message",
-            Self::Started => "started",
-            Self::Finished { .. } => "finished",
-            Self::Failed { .. } => "failed",
-            Self::Cancelled { .. } => "cancelled",
-            Self::ToolApprovalRequested { .. } => "tool_approval_requested",
-            Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
-            Self::ToolExecutionStarted { .. } => "tool_execution_started",
-            Self::IterationCompleted { .. } => "iteration_completed",
-            Self::Llm { .. } => "llm",
-            Self::PlanUpdated { .. } => "plan_updated",
-        }
-    }
-}
-
-/// Event emitted for the long-lived session asset itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    content = "data",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[non_exhaustive]
-pub enum SessionEvent {
-    /// Session was created.
-    Created,
-}
-
-// Hand-written schema: the derive generates unparsable tokens for a
-// unit-only adjacently tagged enum (serde `tag` + `content`).
-impl utoipa::PartialSchema for SessionEvent {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::ObjectBuilder::new()
-            .property(
-                "type",
-                utoipa::openapi::schema::ObjectBuilder::new()
-                    .schema_type(utoipa::openapi::schema::SchemaType::Type(
-                        utoipa::openapi::schema::Type::String,
-                    ))
-                    .enum_values(Some(["created"])),
-            )
-            .required("type")
-            .build()
-            .into()
-    }
-}
-
-impl utoipa::ToSchema for SessionEvent {
-    fn name() -> std::borrow::Cow<'static, str> {
-        "SessionEvent".into()
-    }
-}
-
-impl SessionEvent {
-    /// Returns the serialized event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Created => "created",
-        }
-    }
-}
-
-/// Event emitted by one ordinary workflow node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(
-    tag = "type",
-    content = "data",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[non_exhaustive]
-pub enum NodeEvent {
-    /// Node started.
-    Started,
-    /// Node produced output.
-    Output {
-        /// Node output payload.
-        output: Value,
-    },
-    /// Node finished.
-    Finished,
-    /// Node failed.
-    Failed {
-        /// Error text safe to expose to callers.
-        error_text: String,
-    },
-}
-
-impl NodeEvent {
-    /// Returns the serialized event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::Output { .. } => "output",
-            Self::Finished => "finished",
-            Self::Failed { .. } => "failed",
-        }
-    }
-}
-
-/// Runtime event payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(
-    tag = "type",
-    content = "data",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[non_exhaustive]
-pub enum RuntimeEvent {
-    /// Event concerning the session asset itself.
-    Session {
-        /// Session event payload.
-        event: SessionEvent,
-    },
-    /// Event emitted by one ordinary workflow node.
-    Node {
-        /// Immutable workflow version containing the node.
-        workflow_version_id: WorkflowVersionId,
-        /// Node that emitted the event.
-        node_id: NodeId,
-        /// Node event payload.
-        event: NodeEvent,
-    },
-    /// Event emitted by one agent.
-    Agent {
-        /// Agent identity.
-        agent_id: AgentId,
-        /// Resumable turn identity.
-        turn_id: TurnId,
-        /// Agent execution location.
-        location: AgentLocation,
-        /// Agent event payload.
-        event: AgentEvent,
-    },
-}
-
-impl RuntimeEvent {
-    /// Returns the serialized event type name.
-    #[must_use]
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Session { .. } => "session",
-            Self::Node { .. } => "node",
-            Self::Agent { .. } => "agent",
-        }
-    }
-}
-
-/// Opaque position in a transport event stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-#[serde(transparent)]
-pub struct EventCursor(u64);
-
-impl EventCursor {
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn from_transport_sequence(value: u64) -> Self {
-        Self(value)
-    }
-
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn transport_sequence(self) -> u64 {
-        self.0
-    }
-}
-
-/// Starting position for a replayable event subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplayStart {
-    /// Replay all retained events.
-    All,
-    /// Replay events after the supplied transport cursor.
-    After(EventCursor),
-    /// Deliver only newly published events.
-    New,
-}
-
-/// One event in a session-scoped runtime stream.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StreamEnvelope {
-    /// Long-lived session containing the event.
-    pub session_id: SessionId,
-    /// Event creation time.
-    pub timestamp: DateTime<Utc>,
-    /// Typed runtime event payload.
-    pub event: RuntimeEvent,
-    /// Runtime-only metadata; not for business payloads.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, Value>,
-}
-
-impl StreamEnvelope {
-    /// Returns the committed agent-message sequence, when this is a message event.
-    #[must_use]
-    pub const fn message_seq(&self) -> Option<u64> {
-        match &self.event {
-            RuntimeEvent::Agent {
-                event: AgentEvent::Message { message_seq, .. },
-                ..
-            } => Some(*message_seq),
-            _ => None,
-        }
-    }
-}
-
-/// Complete agent message awaiting durable sequence assignment.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct NewAgentMessage {
-    /// Long-lived session containing the message.
-    pub session_id: SessionId,
-    /// Agent that owns the message history.
-    pub agent_id: AgentId,
-    /// Turn that produced the message.
-    pub turn_id: TurnId,
-    /// Location where the agent is executing.
-    pub location: AgentLocation,
-    /// Message creation time.
-    pub timestamp: DateTime<Utc>,
-    /// Complete message payload.
-    pub message: ChatMessage,
-    /// Runtime-only metadata; not for business payloads.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, Value>,
-}
-
-impl NewAgentMessage {
-    /// Creates an uncommitted complete agent message.
-    #[must_use]
-    pub fn new(
-        context: &AgentRuntimeContext,
-        agent_id: AgentId,
-        turn_id: TurnId,
-        message: ChatMessage,
-    ) -> Self {
-        Self {
-            session_id: context.session_id,
-            agent_id,
-            turn_id,
-            location: context.location.clone(),
-            timestamp: Utc::now(),
-            message,
-            metadata: BTreeMap::new(),
-        }
-    }
-
-    /// Converts the message into a committed runtime event.
-    #[must_use]
-    pub fn into_envelope(self, message_seq: u64) -> StreamEnvelope {
-        StreamEnvelope {
-            session_id: self.session_id,
-            timestamp: self.timestamp,
-            event: RuntimeEvent::Agent {
-                agent_id: self.agent_id,
-                turn_id: self.turn_id,
-                location: self.location,
-                event: AgentEvent::Message {
-                    message_seq,
-                    message: self.message,
-                },
-            },
-            metadata: self.metadata,
-        }
-    }
-}
-
-/// One transport event and its replay cursor.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EventRecord {
-    /// Transport position of the event.
-    pub cursor: EventCursor,
-    /// Event payload.
-    pub envelope: StreamEnvelope,
-}
-
-/// Fixed-range query over complete agent messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryQuery {
-    /// Excludes messages at or before this agent-message sequence.
-    pub after_seq: u64,
-    /// Optional inclusive upper agent-message-sequence bound.
-    pub through_seq: Option<u64>,
-    /// Maximum number of messages to return.
-    pub limit: usize,
-}
-
-/// One page of complete agent-message history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct HistoryPage {
-    /// Inclusive upper agent-message-sequence bound used for this page.
-    pub through_seq: u64,
-    /// Complete message events in the page.
-    pub events: Vec<StreamEnvelope>,
-    /// Agent-message sequence from which the next front page should continue.
-    pub next_front_seq: u64,
-    /// Whether additional events remain in the fixed range.
-    pub has_more: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn agent_envelope(event: AgentEvent) -> StreamEnvelope {
-        StreamEnvelope {
-            session_id: SessionId::new(),
-            timestamp: Utc::now(),
-            event: RuntimeEvent::Agent {
-                agent_id: AgentId::new(),
-                turn_id: TurnId::new(),
-                location: AgentLocation::Direct,
-                event,
-            },
-            metadata: BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn only_complete_agent_message_has_message_sequence() -> serde_json::Result<()> {
-        let message = agent_envelope(AgentEvent::Message {
-            message_seq: 7,
-            message: ChatMessage::user("hello"),
-        });
-        let delta = agent_envelope(AgentEvent::Llm {
-            llm_call_id: LlmCallId::from("llm-call-1"),
-            event: LlmEvent::ReasoningDelta {
-                delta: "thinking".to_owned(),
-            },
-        });
-
-        assert_eq!(message.message_seq(), Some(7));
-        assert_eq!(delta.message_seq(), None);
-        let message_json = serde_json::to_value(&message)?;
-        assert_eq!(
-            message_json["event"]["data"]["event"]["data"]["message_seq"],
-            7
-        );
-        assert!(message_json.get("message_seq").is_none());
-        assert!(serde_json::to_value(&delta)?.get("message_seq").is_none());
-
-        Ok(())
-    }
-
-    #[test]
-    fn stream_envelope_has_no_top_level_sequence() {
-        let value =
-            serde_json::to_value(agent_envelope(AgentEvent::Started)).expect("serialize envelope");
-
-        assert!(value.get("seq").is_none());
-        assert!(value.get("business_seq").is_none());
-    }
-
-    #[test]
-    fn event_cursor_round_trips_transport_sequence() {
-        let cursor = EventCursor::from_transport_sequence(12);
-        assert_eq!(cursor.transport_sequence(), 12);
-    }
 
     #[test]
     fn session_id_uses_uuid_v7() {
@@ -1413,54 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn event_type_matches_protocol_name() {
-        let event = RuntimeEvent::Agent {
-            agent_id: AgentId::new(),
-            turn_id: TurnId::new(),
-            location: AgentLocation::Direct,
-            event: AgentEvent::Llm {
-                llm_call_id: LlmCallId::from("llm-call-1"),
-                event: LlmEvent::TextDelta {
-                    role: LlmCallRole::Assistant,
-                    delta: "hello".to_owned(),
-                },
-            },
-        };
-
-        assert_eq!(event.event_type(), "agent");
-    }
-
-    #[test]
-    fn runtime_agent_event_type_is_agent() {
-        let event = RuntimeEvent::Agent {
-            agent_id: AgentId::new(),
-            turn_id: TurnId::new(),
-            location: AgentLocation::Direct,
-            event: AgentEvent::Started,
-        };
-
-        assert_eq!(event.event_type(), "agent");
-    }
-
-    #[test]
-    fn llm_started_has_nested_event_type() {
-        let event = RuntimeEvent::Agent {
-            agent_id: AgentId::new(),
-            turn_id: TurnId::new(),
-            location: AgentLocation::Direct,
-            event: AgentEvent::Llm {
-                llm_call_id: LlmCallId::from("llm-call-1"),
-                event: LlmEvent::Started,
-            },
-        };
-
-        assert_eq!(event.event_type(), "agent");
-        let value = serde_json::to_value(event).expect("event should serialize");
-        assert_eq!(value["data"]["event"]["type"], "llm");
-        assert_eq!(value["data"]["event"]["data"]["event"]["type"], "started");
-    }
-
-    #[test]
     fn user_input_uses_text_delta_role() {
         let event = LlmEvent::TextDelta {
             role: LlmCallRole::User,
@@ -1473,24 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn llm_runtime_event_wraps_text_delta() {
-        let event = RuntimeEvent::Agent {
-            agent_id: AgentId::new(),
-            turn_id: TurnId::new(),
-            location: AgentLocation::Direct,
-            event: AgentEvent::Llm {
-                llm_call_id: LlmCallId::from("llm-call-1"),
-                event: LlmEvent::TextDelta {
-                    role: LlmCallRole::User,
-                    delta: "hello".to_owned(),
-                },
-            },
-        };
-
-        assert_eq!(event.event_type(), "agent");
-    }
-
-    #[test]
     fn assistant_output_uses_text_delta_role() {
         let event = LlmEvent::TextDelta {
             role: LlmCallRole::Assistant,
@@ -1500,27 +983,6 @@ mod tests {
 
         assert_eq!(value["type"], "text_delta");
         assert_eq!(value["data"]["role"], "assistant");
-    }
-
-    #[test]
-    fn reasoning_delta_uses_llm_call_id() {
-        let event = RuntimeEvent::Agent {
-            agent_id: AgentId::new(),
-            turn_id: TurnId::new(),
-            location: AgentLocation::Direct,
-            event: AgentEvent::Llm {
-                llm_call_id: LlmCallId::from("llm-call-1"),
-                event: LlmEvent::ReasoningDelta {
-                    delta: "thinking".to_owned(),
-                },
-            },
-        };
-
-        let value = serde_json::to_value(event).expect("event should serialize");
-        assert_eq!(
-            value["data"]["event"]["data"]["event"]["type"],
-            "reasoning_delta"
-        );
     }
 
     #[test]
@@ -1549,36 +1011,6 @@ mod tests {
     #[test]
     fn approval_id_uses_uuid_v7() {
         assert_eq!(ApprovalId::new().as_uuid().get_version_num(), 7);
-    }
-
-    #[test]
-    fn tool_approval_events_use_protocol_names() {
-        let approval_id = ApprovalId::new();
-        let requested = AgentEvent::ToolApprovalRequested {
-            approval_id,
-            agent_name: "review-agent".to_owned(),
-            call_id: CallId::from("call-1"),
-            tool_name: ToolName::from("apply_patch"),
-            arguments: serde_json::json!({"patch": "*** Begin Patch"}),
-            tool_kind: ToolKind::Write,
-            danger_level: DangerLevel::High,
-        };
-        let resolved = AgentEvent::ToolApprovalResolved {
-            approval_id,
-            decision: ApprovalDecision::Approve,
-        };
-
-        assert_eq!(requested.event_type(), "tool_approval_requested");
-        assert_eq!(resolved.event_type(), "tool_approval_resolved");
-
-        let requested_json = serde_json::to_value(requested).expect("requested event serializes");
-        let resolved_json = serde_json::to_value(resolved).expect("resolved event serializes");
-
-        assert_eq!(requested_json["type"], "tool_approval_requested");
-        assert_eq!(requested_json["data"]["tool_kind"], "write");
-        assert_eq!(requested_json["data"]["danger_level"], "high");
-        assert_eq!(resolved_json["type"], "tool_approval_resolved");
-        assert_eq!(resolved_json["data"]["decision"], "approve");
     }
 
     #[test]
@@ -1630,32 +1062,6 @@ mod tests {
             serde_json::to_value(workflow).expect("workflow context serializes")["location"]["type"],
             "workflow_node"
         );
-    }
-
-    #[test]
-    fn stream_envelope_rejects_legacy_and_incomplete_wire_shapes() {
-        let envelope = agent_envelope(AgentEvent::Message {
-            message_seq: 1,
-            message: ChatMessage::user("hello"),
-        });
-        let mut legacy = serde_json::to_value(&envelope).expect("envelope serializes");
-        legacy["run_id"] = serde_json::json!(SessionId::new());
-        legacy["source"] = serde_json::json!({"type": "run"});
-        assert!(serde_json::from_value::<StreamEnvelope>(legacy).is_err());
-
-        let mut missing_turn = serde_json::to_value(&envelope).expect("envelope serializes");
-        missing_turn["event"]["data"]
-            .as_object_mut()
-            .expect("agent event data is an object")
-            .remove("turn_id");
-        assert!(serde_json::from_value::<StreamEnvelope>(missing_turn).is_err());
-
-        let mut missing_message_seq = serde_json::to_value(&envelope).expect("envelope serializes");
-        missing_message_seq["event"]["data"]["event"]["data"]
-            .as_object_mut()
-            .expect("message data is an object")
-            .remove("message_seq");
-        assert!(serde_json::from_value::<StreamEnvelope>(missing_message_seq).is_err());
     }
 
     fn hook_address(handler_position: u32) -> HookInvocationAddress {

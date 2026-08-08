@@ -1,5 +1,8 @@
 [agent]
-storage_root = "./.stratum/agents"
+# Read-only agent template catalog (hot-reloaded per catalog read / create).
+# Must exist, be a directory and be readable at startup; an empty directory is
+# allowed and the service never creates it.
+templates_root = "./templates"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"
@@ -7,25 +10,26 @@ default = "deepseek:deepseek-v4-flash"
 [llm.deepseek]
 api_key = "replace-with-your-api-key"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# Optional endpoint override (e.g. an LLM gateway or compatible API); when
+# omitted the provider's well-known public endpoint is used. Blank is rejected.
+# base_url = "https://api.deepseek.com"
 
 [api]
 bind = "127.0.0.1:8080"
 allowed_origins = ["http://localhost:5173"]
 
 [nats]
+# Connection and short Agent-scoped realtime tail limits. The tail is
+# lossy and never carries durable history.
 url = "nats://127.0.0.1:4222"
-stream_name = "SESSION_EVENTS"
-subject_prefix = "events.session"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
 replicas = 1
-max_age_seconds = 604800
-max_bytes = 1073741824
-max_messages = 1000000
+max_age_seconds = 3600
+max_bytes = 268435456
+max_messages = 100000
 
-# Production default: all execution facts live in Postgres.
-# For local dev without containers or embedded use, switch to the filesystem
-# backend with `backend = "filesystem"` (and drop [storage.postgres]).
-[storage]
-backend = "postgres"
-
-[storage.postgres]
+[postgres]
+# Postgres is the only execution-fact store; there is no backend selector
+# or fallback. Missing or blank url fails startup.
 url = "postgres://stratum:stratum@127.0.0.1:5432/stratum"

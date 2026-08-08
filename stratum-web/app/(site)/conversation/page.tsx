@@ -4,8 +4,13 @@ import { useCallback, useMemo, useRef, useState } from "react"
 
 import { ApprovalDock } from "@/components/stratum/conversation/approval-dock"
 import { ConversationThread } from "@/components/stratum/conversation/conversation-thread"
+import {
+  RealtimeDegradedNotice,
+  ResumeNotice,
+} from "@/components/stratum/conversation/notices"
 import { ThreadListRail } from "@/components/stratum/conversation/thread-list-rail"
 import type {
+  ConversationItem,
   ConversationMessage,
   ConversationToolCall,
   ToolCallApproval,
@@ -17,6 +22,7 @@ import type {
   StableMessage,
 } from "@/features/agent-conversation/types"
 import { useAgentConversation } from "@/hooks/use-agent-conversation"
+import { compareEventSeq } from "@/lib/stratum/api"
 import {
   currentThinkingLevel,
   thinkingLevels,
@@ -32,8 +38,11 @@ import {
  * FIRST VIEWPORT: 左侧会话列表 + 右侧消息流 + 底部 PromptInput（模型选择 + 电弧激活）。
  * FORM: 整屏 Operate 界面（assistant-ui 底稿的展示层 fork），非 section 展示页。
  *
- * 数据来自 Stratum 后端（REST + SSE）：reasoning 与 tool calls 在正文上方
- * 渐进式透明展示（默认折叠，待决审批强制展开可操作）。
+ * 数据来自 Stratum 后端（Postgres-first REST + Agent-scoped SSE）：durable
+ * identity 是 (agentId, eventSeq 十进制字符串)；reasoning 与 tool calls 在
+ * 正文上方渐进式透明展示（默认折叠，待决审批强制展开可操作）；
+ * TranscriptCompacted 渲染为可折叠"上下文已压缩" marker；failed/cancelled
+ * 渲染为安全 terminal marker；向上滚动按固定 through barrier 分页更旧历史。
  */
 
 /** 工具 result/arguments（unknown）→ 可显示文本 */
@@ -73,7 +82,10 @@ export default function ConversationPage() {
     selectAgent,
     createConversation,
     sendMessage,
+    cancel,
+    resume,
     resolveApproval,
+    loadOlderHistory,
   } = useAgentConversation()
 
   const threads = useMemo(
@@ -85,22 +97,16 @@ export default function ConversationPage() {
     [recentAgents]
   )
 
-  // 历史/新消息区分：recovery 完成（ready）时快照已有消息 id 为历史
-  // （reasoning 默认折叠），之后出现的 id 为本轮新消息（默认简略预览）。
+  // 历史/新消息区分：recovery 完成（ready）时快照当时的 barrier；seq ≤ 该
+  // barrier 的消息为历史（reasoning 默认折叠，含之后向上分页加载的旧页），
+  // 之后到达的为本轮新消息（默认简略预览）。
   // derive-state-during-render 模式：渲染期条件 setState，立即重渲染提交。
   const [historical, setHistorical] = useState<{
     agentId: string | null
-    ids: Set<string>
-  }>({ agentId: null, ids: new Set() })
+    barrier: string
+  }>({ agentId: null, barrier: "0" })
   if (state.phase === "ready" && historical.agentId !== state.agentId) {
-    setHistorical({
-      agentId: state.agentId,
-      ids: new Set(
-        state.messages.map(
-          (message) => `${message.agentId}:${message.messageSeq}`
-        )
-      ),
-    })
+    setHistorical({ agentId: state.agentId, barrier: state.barrier })
   }
 
   // 审批提交状态：submitting = 已点击等后端确认；outcomes = 本会话已决终态。
@@ -191,84 +197,106 @@ export default function ConversationPage() {
     [resolveApproval, state.approvals]
   )
 
-  // 冷段：已落成消息 → 视图对象（只在消息落成/工具结果/审批/历史标记变化时
-  // 重跑；WeakMap 缓存保证未变消息复用旧对象引用）
+  // 冷段：timeline 已落成部分 → 视图条目（只在消息落成/工具结果/审批/历史
+  // 标记变化时重跑；WeakMap 缓存保证未变消息复用旧对象引用）
   const settled = useMemo(() => {
-    const views: ConversationMessage[] = state.messages
-      .filter(
-        (message) => message.role === "user" || message.role === "assistant"
-      )
-      .map((message) => {
-        const id = `${message.agentId}:${message.messageSeq}`
-        const isHistorical = historical.ids.has(id)
-        const inputs: readonly unknown[] = [
-          isHistorical,
-          ...message.toolCalls.map(
-            (toolCall) => state.tools[toolCall.callId] ?? null
-          ),
-          ...message.toolCalls.map(
-            (toolCall) => approvalEntries.get(toolCall.callId)?.view ?? null
-          ),
-        ]
-        const cached = settledViewCache.get(message)
-        if (
-          cached &&
-          cached.inputs.length === inputs.length &&
-          cached.inputs.every((input, index) => input === inputs[index])
-        )
-          return cached.view
+    const views: ConversationItem[] = []
+    for (const entry of state.timeline) {
+      if (entry.kind === "compaction") {
+        views.push({
+          kind: "compaction",
+          id: `${entry.marker.agentId}:${entry.marker.eventSeq}`,
+          summary: entry.marker.summary,
+          compactedIteration: entry.marker.compactedIteration,
+        })
+        continue
+      }
+      if (entry.kind === "terminal") {
+        views.push({
+          kind: "terminal",
+          id: `${entry.marker.agentId}:${entry.marker.eventSeq}`,
+          terminal: entry.marker.terminal,
+          errorText: entry.marker.errorText,
+        })
+        continue
+      }
 
-        const view: ConversationMessage = {
-          id,
-          role: message.role as "user" | "assistant",
-          content: message.text ?? "",
-          status: "done",
-          ...(message.reasoning
-            ? {
-                reasoning: message.reasoning,
-                reasoningDefaultView: isHistorical
-                  ? ("collapsed" as const)
-                  : ("preview" as const),
-              }
-            : {}),
-          ...(message.toolCalls.length > 0
-            ? {
-                toolCalls: message.toolCalls.map((toolCall) => {
-                  // 结果/状态从实时 tools 配对（含 tool 角色消息带回的 result）；
-                  // 配不上就只做 name + arguments
-                  const progress = state.tools[toolCall.callId]
-                  const approval = approvalEntries.get(toolCall.callId)?.view
-                  return {
-                    callId: toolCall.callId,
-                    name: toolCall.name,
-                    argumentsText:
-                      progress?.argumentsText ||
-                      (stringifyToolData(toolCall.arguments) ?? ""),
-                    result: stringifyToolData(progress?.result),
-                    errorText: progress?.errorText ?? null,
-                    status: progress?.status ?? ("finished" as const),
-                    ...(approval ? { approval } : {}),
-                  }
-                }),
-              }
-            : {}),
-        }
-        settledViewCache.set(message, { inputs, view })
-        return view
-      })
+      const message = entry.message
+      if (message.role !== "user" && message.role !== "assistant") continue
+      const id = `${message.agentId}:${message.eventSeq}`
+      const isHistorical = compareEventSeq(message.eventSeq, historical.barrier) <= 0
+      const inputs: readonly unknown[] = [
+        isHistorical,
+        ...message.toolCalls.map(
+          (toolCall) => state.tools[toolCall.callId] ?? null
+        ),
+        ...message.toolCalls.map(
+          (toolCall) => approvalEntries.get(toolCall.callId)?.view ?? null
+        ),
+      ]
+      const cached = settledViewCache.get(message)
+      if (
+        cached &&
+        cached.inputs.length === inputs.length &&
+        cached.inputs.every((input, index) => input === inputs[index])
+      ) {
+        views.push({ kind: "message", id, message: cached.view })
+        continue
+      }
+
+      const view: ConversationMessage = {
+        id,
+        role: message.role as "user" | "assistant",
+        content: message.text ?? "",
+        status: "done",
+        ...(message.reasoning
+          ? {
+              reasoning: message.reasoning,
+              reasoningDefaultView: isHistorical
+                ? ("collapsed" as const)
+                : ("preview" as const),
+            }
+          : {}),
+        ...(message.toolCalls.length > 0
+          ? {
+              toolCalls: message.toolCalls.map((toolCall) => {
+                // 结果/状态从实时 tools 配对（含 tool 角色消息带回的 result）；
+                // 配不上就只做 name + arguments
+                const progress = state.tools[toolCall.callId]
+                const approval = approvalEntries.get(toolCall.callId)?.view
+                return {
+                  callId: toolCall.callId,
+                  name: toolCall.name,
+                  argumentsText:
+                    progress?.argumentsText ||
+                    (stringifyToolData(toolCall.arguments) ?? ""),
+                  result: stringifyToolData(progress?.result),
+                  errorText: progress?.errorText ?? null,
+                  status: progress?.status ?? ("finished" as const),
+                  ...(approval ? { approval } : {}),
+                }
+              }),
+            }
+          : {}),
+      }
+      settledViewCache.set(message, { inputs, view })
+      views.push({ kind: "message", id, message: view })
+    }
     // 已落成消息里的工具 callId（用于把已提交的调用从实时 tools 中排除）
     const callIds = new Set(
-      views.flatMap((message) =>
-        (message.toolCalls ?? []).map((toolCall) => toolCall.callId)
+      views.flatMap((item) =>
+        item.kind === "message"
+          ? (item.message.toolCalls ?? []).map((toolCall) => toolCall.callId)
+          : []
       )
     )
-    return { messages: views, callIds }
-  }, [state.messages, state.tools, approvalEntries, historical])
+    return { items: views, callIds }
+  }, [state.timeline, state.tools, approvalEntries, historical])
 
   // 热段：draft/实时 tools/连接错误（流式 token 每帧重跑，但只追加新对象，
   // settled 部分整体复用）
-  const messages = useMemo<ConversationMessage[]>(() => {
-    const result: ConversationMessage[] = [...settled.messages]
+  const items = useMemo<ConversationItem[]>(() => {
+    const result: ConversationItem[] = [...settled.items]
     const stableCallIds = settled.callIds
     const attachApproval = (call: ConversationToolCall): ConversationToolCall => {
       const entry = approvalEntries.get(call.callId)
@@ -316,33 +344,34 @@ export default function ConversationPage() {
     const status = state.view?.status
     if (status === "running") {
       result.push({
+        kind: "message",
         id: "draft",
-        role: "assistant",
-        content: draftText,
-        status: "streaming",
-        ...(draftReasoning
-          ? { reasoning: draftReasoning, reasoningDefaultView: "preview" as const }
-          : {}),
-        ...(liveToolCalls.length > 0 ? { toolCalls: liveToolCalls } : {}),
-      })
-    } else if (status === "failed") {
-      result.push({
-        id: "draft",
-        role: "assistant",
-        content: draftText || (state.error?.message ?? "生成失败"),
-        status: "error",
-        ...(draftReasoning
-          ? { reasoning: draftReasoning, reasoningDefaultView: "preview" as const }
-          : {}),
-        ...(liveToolCalls.length > 0 ? { toolCalls: liveToolCalls } : {}),
+        message: {
+          id: "draft",
+          role: "assistant",
+          content: draftText,
+          status: "streaming",
+          ...(draftReasoning
+            ? {
+                reasoning: draftReasoning,
+                reasoningDefaultView: "preview" as const,
+              }
+            : {}),
+          ...(liveToolCalls.length > 0 ? { toolCalls: liveToolCalls } : {}),
+        },
       })
     } else if (liveToolCalls.length > 0) {
       // 回合结束但工具未落成到消息（含等待审批的空闲态）：挂到最后一条 assistant 消息
       for (let index = result.length - 1; index >= 0; index -= 1) {
-        if (result[index].role !== "assistant") continue
+        const item = result[index]
+        if (item.kind !== "message" || item.message.role !== "assistant")
+          continue
         result[index] = {
-          ...result[index],
-          toolCalls: [...(result[index].toolCalls ?? []), ...liveToolCalls],
+          ...item,
+          message: {
+            ...item.message,
+            toolCalls: [...(item.message.toolCalls ?? []), ...liveToolCalls],
+          },
         }
         break
       }
@@ -350,13 +379,17 @@ export default function ConversationPage() {
 
     if (state.phase === "connection_error" || state.phase === "missing") {
       result.push({
+        kind: "message",
         id: "connection-error",
-        role: "assistant",
-        content:
-          state.phase === "missing"
-            ? "会话不存在或已被删除（404）。"
-            : `连接出错：${state.error?.message ?? "无法连接到 Stratum 后端"}`,
-        status: "error",
+        message: {
+          id: "connection-error",
+          role: "assistant",
+          content:
+            state.phase === "missing"
+              ? "会话不存在或已被删除（404）。"
+              : `连接出错：${state.error?.message ?? "无法连接到 Stratum 后端"}`,
+          status: "error",
+        },
       })
     }
 
@@ -401,6 +434,9 @@ export default function ConversationPage() {
     [selectAgent]
   )
 
+  const turnRunning = composerConfiguration.turnRunning
+  const resumeRequired = state.view?.resume_required === true
+
   return (
     <div className="flex h-svh pt-24 font-sans sm:pt-28">
       <main className="relative min-w-0 flex-1">
@@ -412,10 +448,13 @@ export default function ConversationPage() {
         />
 
         <ConversationThread
-          messages={messages}
+          items={items}
           conversationId={state.agentId}
           sendVersion={sendVersion}
           recovering={state.phase === "recovering"}
+          hasOlder={state.historyHasMore}
+          olderLoading={state.historyLoading}
+          onLoadOlder={loadOlderHistory}
           welcome={WELCOME}
           composer={
             <div className="relative">
@@ -423,9 +462,32 @@ export default function ConversationPage() {
                 approvals={pendingApprovals}
                 onResolve={handleResolveApproval}
               />
+              {resumeRequired ||
+              state.realtimeDegraded ||
+              (state.cancelRequested && turnRunning) ? (
+                <div className="mb-2 flex flex-col gap-1.5">
+                  {resumeRequired ? (
+                    <ResumeNotice onResume={() => void resume()} />
+                  ) : null}
+                  {state.cancelRequested && turnRunning ? (
+                    <p
+                      role="status"
+                      className="px-2 text-xs text-muted-foreground"
+                    >
+                      取消请求已发送
+                    </p>
+                  ) : null}
+                  {state.realtimeDegraded ? (
+                    <RealtimeDegradedNotice />
+                  ) : null}
+                </div>
+              ) : null}
               <PromptInput
                 placeholder="问问 Stratum"
                 onSubmit={handleSubmit}
+                running={turnRunning && !resumeRequired}
+                cancelRequested={state.cancelRequested}
+                onCancel={() => void cancel()}
                 trailing={
                   <ModelSelector
                     models={composerConfiguration.models}

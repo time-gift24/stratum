@@ -1,4 +1,9 @@
-import { ApiError, apiErrorFromResponse } from "@/lib/stratum/api"
+import {
+  ApiError,
+  apiErrorFromResponse,
+  isEventSeq,
+  type AgentStreamFrameV1,
+} from "@/lib/stratum/api"
 
 export type SseEvent = { id: string | null; event: string; data: string }
 
@@ -67,20 +72,142 @@ export async function readSseStream(
   }
 }
 
+const PRODUCT_EVENT_TYPES = new Set([
+  "loop_started",
+  "message_appended",
+  "tool_approval_requested",
+  "tool_approval_resolved",
+  "transcript_compacted",
+  "iteration_completed",
+  "loop_finished",
+  "loop_failed",
+  "loop_cancelled",
+])
+
+const TELEMETRY_EVENT_TYPES = new Set([
+  "llm_started",
+  "text_delta",
+  "reasoning_delta",
+  "tool_call_delta",
+  "llm_finished",
+])
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === "string"
+
+/**
+ * 解析并校验一条 `AgentStreamFrameV1`。未知 protocol_version、未知 kind 或
+ * 未知 event variant 一律拒绝（返回 undefined），不按 v1 猜测。
+ */
+export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(data)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(value)) return undefined
+  if (value.protocol_version !== 1) return undefined
+  if (typeof value.agent_id !== "string") return undefined
+  if (typeof value.created_at !== "string") return undefined
+  if (!isNullableString(value.session_id ?? null)) return undefined
+  if (!isNullableString(value.turn_id ?? null)) return undefined
+  if (!isRecord(value.event) || typeof value.event.type !== "string")
+    return undefined
+
+  const identity = {
+    protocol_version: 1 as const,
+    agent_id: value.agent_id,
+    session_id: (value.session_id ?? null) as string | null,
+    turn_id: (value.turn_id ?? null) as string | null,
+    created_at: value.created_at,
+  }
+  const event = value.event
+  const eventType = event.type as string
+
+  switch (value.kind) {
+    case "control": {
+      if (eventType === "stream_ready")
+        return { ...identity, kind: "control", event: { type: "stream_ready" } }
+      if (eventType === "stream_reset" && event.reason === "buffer_overflow")
+        return {
+          ...identity,
+          kind: "control",
+          event: { type: "stream_reset", reason: "buffer_overflow" },
+        }
+      return undefined
+    }
+    case "durable": {
+      if (
+        !isEventSeq(value.event_seq) ||
+        typeof value.event_version !== "number" ||
+        !PRODUCT_EVENT_TYPES.has(eventType) ||
+        !isRecord(event.data)
+      )
+        return undefined
+      return {
+        ...identity,
+        kind: "durable",
+        event_seq: value.event_seq,
+        event_version: value.event_version,
+        event: event as unknown as Extract<
+          AgentStreamFrameV1,
+          { kind: "durable" }
+        >["event"],
+      }
+    }
+    case "telemetry": {
+      if (
+        typeof value.llm_call_id !== "string" ||
+        !TELEMETRY_EVENT_TYPES.has(eventType) ||
+        !isRecord(event.data)
+      )
+        return undefined
+      // telemetry_seq 是 call-local 序号；容忍十进制字符串或 number
+      const seq =
+        typeof value.telemetry_seq === "number"
+          ? value.telemetry_seq
+          : isEventSeq(value.telemetry_seq)
+            ? Number(value.telemetry_seq)
+            : Number.NaN
+      if (!Number.isSafeInteger(seq) || seq < 0) return undefined
+      return {
+        ...identity,
+        kind: "telemetry",
+        llm_call_id: value.llm_call_id,
+        telemetry_seq: seq,
+        event: event as unknown as Extract<
+          AgentStreamFrameV1,
+          { kind: "telemetry" }
+        >["event"],
+      }
+    }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * 订阅 Agent SSE tail。无 cursor 时从当前新 tail 开始；页面内恢复通过
+ * `after_cursor` query param（单一 cursor 来源，避免 Last-Event-ID 二义性）。
+ * cursor 是不透明 NATS position，只做 transport 寻址。
+ */
 export function subscribeToAgentEvents(options: {
   baseUrl: string
   agentId: string
   afterCursor?: string
   signal?: AbortSignal
   fetcher?: typeof fetch
-  onEvent(event: SseEvent): void
+  onFrame(frame: AgentStreamFrameV1, cursor: string | null): void
 }): { done: Promise<void> } {
-  const search = new URLSearchParams(
-    options.afterCursor
-      ? { after_cursor: options.afterCursor }
-      : { replay: "all" }
-  )
-  const url = `${options.baseUrl.replace(/\/$/, "")}/v1/agents/${options.agentId}/events?${search}`
+  const search = options.afterCursor
+    ? new URLSearchParams({ after_cursor: options.afterCursor })
+    : ""
+  const base = `${options.baseUrl.replace(/\/$/, "")}/v1/agents/${options.agentId}/events`
+  const url = search === "" ? base : `${base}?${search}`
   const fetcher = options.fetcher ?? fetch
 
   return {
@@ -96,7 +223,17 @@ export function subscribeToAgentEvents(options: {
       if (!response.body) {
         throw new ApiError("invalid_stream", 500, "event stream has no body")
       }
-      await readSseStream(response.body, options.onEvent)
+      await readSseStream(response.body, (event) => {
+        const frame = parseAgentStreamFrame(event.data)
+        if (frame === undefined) {
+          throw new ApiError(
+            "unsupported_frame",
+            400,
+            "received an unsupported stream frame"
+          )
+        }
+        options.onFrame(frame, event.id)
+      })
     })(),
   }
 }

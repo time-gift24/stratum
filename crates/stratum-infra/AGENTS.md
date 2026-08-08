@@ -5,37 +5,11 @@
 - `stratum-infra` contains external infrastructure adapters. Keep interface definitions in
   capability `definition.rs` files, errors in `error.rs`, and concrete backends/adapters in named
   modules.
-- Durable local backends for the `stratum-store` contract also live here (`agent_store/`), per the
-  constitution's durable-backend rule. The store contract itself (`AgentStore`, `AgentState`,
-  `StoreError`) stays in `stratum-store`; this crate depends on it, never the reverse.
-
-## AgentStore backends
-
-- `agent_store::FilesystemAgentStore` implements the `stratum-store` `AgentStore` contract on top
-  of `stratum-filesystem`. Its integrity, CAS-retry, and corruption-tracing behavior is covered by
-  the integration tests in `tests/filesystem_store.rs` and `tests/recovery_composition.rs`.
-- Backend failures (`FilesystemError`, CAS exhaustion) are wrapped into the contract error via
-  `StoreError::backend`; `stratum-store` stays backend-agnostic.
-- `agent_store::StoreEventStreamBus` is the store-backed event stream bus decorator: it applies
-  durable loop-event projections (see the "Agent Loop Event Projection" invariants in
-  `crates/stratum-store/AGENTS.md`) before forwarding to the inner `EventStreamBus`.
-
-## EventStreamBus
-
-- `EventStreamBus` publishes complete `StreamEnvelope` values and subscribes by `SessionId` plus
-  `ReplayStart`. It is a retained delivery boundary, not the durable source of complete Agent
-  history.
-- `EventCursor` is an opaque transport position. JetStream uses its stream sequence internally;
-  callers may serialize/replay it but must not compare it with `message_seq` or loop `iteration`.
-- `ReplayStart::After(cursor)` means strictly after that cursor. Cursor expiry must be reported as
-  `CursorExpired`, not silently changed to `All` or `New`; overflow and backend failures remain
-  typed errors.
-- NATS subjects are derived from `StreamEnvelope.session_id` and the top-level runtime event type.
-  One Session stream may contain Session, Node, and multiple Agent event families.
-- JetStream is limits-retained and independent of AgentStore. Retention loss is expected and is
-  recovered through fixed-barrier AgentStore history plus a new subscription.
-- Subscription decoding/delivery failure terminates the stream after the typed error. Never skip a
-  malformed retained event and continue, because that would create an undetectable projection gap.
+- The retained surface is narrow: the kernel sink contracts (`DurableEventSink`,
+  `TelemetryEventSink`) and the concrete Agent-scoped NATS tail transport. The old
+  `FilesystemAgentStore`, filesystem durable sink, `compact.jsonl` checkpoint,
+  `StoreEventStreamBus` decorator, and the generic memory/NATS `EventStreamBus` are deleted and
+  must not be reintroduced.
 
 ## Durable and telemetry sinks
 
@@ -43,45 +17,29 @@
   acknowledges the event, and preserve the source error chain. Do not downgrade durable failure to
   logging.
 - `TelemetryEventSink::emit` is synchronous best-effort and cannot fail or block the loop on
-  transport I/O. The scoped implementation uses `try_send` into a bounded telemetry queue of 256,
-  reports only the first loss/failure/timeout for a turn, and bounds each telemetry publish to 100ms. Durable events
-  use a separate bounded priority lane and wait for their publish acknowledgment; they never wait
-  behind a telemetry backlog. On durable arrival, discard older queued telemetry. Sequence assignment
-  and enqueue share one critical section, and the worker keeps a durable fence for defensive late
-  arrivals, so older telemetry cannot publish after a later durable message or terminal event.
-- `ScopedAgentEventSink` is bound to exactly one `(agent_id, session_id, turn_id, location)` and
-  agent name. It
-  performs scope/protocol projection only; it must not own recovery, history paging, tool policy, or
-  AgentStore state transitions.
-- Scoped envelopes carry identity through
-  `RuntimeEvent::Agent { agent_id, turn_id, location, event }`; there is no separate `EventSource`.
-- `FilesystemDurableEventSink` writes one run per directory (`<root>/<run_id>/events.jsonl`),
-  one JSON line per event, and acknowledges an append only after fsyncing both the file and the
-  run directory. Appends are serialized through an internal async lock, so concurrent writers
-  never interleave lines. `read_events(run_dir)` replays the log: a missing log is an empty event
-  stream, an unreadable/invalid run directory is a typed error, a malformed non-tail line is a
-  typed error, and a malformed tail line is ignored as crash truncation. The reader does blocking
-  IO; async callers with large logs should offload it with `spawn_blocking`. No retention or
-  cleanup policy exists yet; that decision belongs to the future sqlite backend.
-- A `TranscriptCompacted` append only records a pending compaction in memory; the following
-  `IterationCompleted` flushes one `CompactionCheckpoint` line to `<root>/<run_id>/compact.jsonl`
-  after the boundary is durable (write order is irreversible: boundary first, index second). The
-  index is a rebuildable derivative, never a second source of truth; it only accelerates resume.
-  `window_start_line` is the physical line of the first retained message — the committed-context
-  message at index `upto` — located by scanning the log and replaying committed-message ordinals
-  (earlier compactions shift ordinals by `upto - 1`; the summary has no `message_appended` line).
-  `read_events_from_checkpoint(run_dir)` validates the head `LoopStarted`, that the window starts
-  at a `message_appended`, and that the window contains a `TranscriptCompacted` matching the
-  checkpoint's iteration/upto/summary sha-256, then returns `LoopStarted` plus the self-contained
-  window (retained suffix, prepare journal records, compaction event, iteration boundary). A
-  missing, empty, truncated, corrupt, or mismatching index falls back to a full `read_events`
-  replay — index problems never fail closed; only event-log corruption itself is a typed error.
-- Durable projection includes loop start, complete messages, approvals, tool execution start,
-  iteration completion, and terminal events. Telemetry projection includes supported LLM start,
-  text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit
-  mapping decision and tests; do not rely on wildcard behavior accidentally.
-- Metadata is diagnostic only. The current `agent_name` and `turn_id` entries must not become
-  business truth; downstream projections use the typed nested fields.
+  transport I/O.
+- This crate owns only the two kernel contract traits and `DurableEventSinkError`; the concrete
+  durable implementation lives in `stratum-postgres`, and the per-agent realtime dispatcher that
+  turns committed rows into tail frames lives in `stratum-api`. The old scoped filesystem/bus sink
+  pipeline is deleted and must not be reintroduced.
+
+## Agent-scoped NATS tail
+
+- The NATS transport is the narrow concrete `agent_tail::NatsAgentTail`: it publishes and
+  subscribes short retained per-agent frame streams on one JetStream stream with configurable
+  finite age/bytes/message-count limits and discard-old retention. It is not a durable history and
+  never guarantees replay across restarts; the Postgres durable ledger is the recovery truth.
+- Tail payloads are opaque `Bytes`; `AgentStreamFrameV1` serialization and per-agent ordering of
+  product vs telemetry frames are owned by `stratum-api`. The tail guarantees per-subject
+  JetStream order only.
+- NATS subject naming is centralized in `agent_tail/subject.rs`; business code must never use
+  `async-nats` directly.
+- A no-cursor subscription delivers only new frames from subscription time (`DeliverPolicy::New`);
+  a cursor resumes after its position while retained, and a discarded position fails with the
+  typed `AgentTailError::CursorExpired` before any delivery — never a silent fallback to full
+  replay.
+- `TailCursor` is an opaque transport position (string-encoded for SSE `id`); it must never be
+  compared with `event_seq`/telemetry sequences or persisted as business state.
 
 ## Safety and observability
 

@@ -74,37 +74,6 @@ export const removeRecentAgent = (
     saveRecentAgents(storage, remainingAgents)
 }
 
-export const loadCursor = (
-  storage: StorageLike,
-  agentId: string
-): string | undefined => {
-  try {
-    return storage.getItem(cursorKey(agentId)) ?? undefined
-  } catch {
-    return undefined
-  }
-}
-
-export const saveCursor = (
-  storage: StorageLike,
-  agentId: string,
-  cursor: string
-): void => {
-  try {
-    storage.setItem(cursorKey(agentId), cursor)
-  } catch {
-    // Storage can be unavailable in private browsing or when disabled.
-  }
-}
-
-export const clearCursor = (storage: StorageLike, agentId: string): void => {
-  try {
-    storage.removeItem(cursorKey(agentId))
-  } catch {
-    // Storage can be unavailable in private browsing or when disabled.
-  }
-}
-
 export const formatRelativeTime = (iso: string, locale: string): string => {
   try {
     const date = new Date(iso)
@@ -140,8 +109,6 @@ const saveRecentAgents = (
     // Storage can be unavailable in private browsing or when disabled.
   }
 }
-
-const cursorKey = (agentId: string): string => `stratum-agent-cursor:${agentId}`
 
 const isRecentAgent = (value: unknown): value is RecentAgent => {
   if (typeof value !== "object" || value === null) return false

@@ -1,7 +1,7 @@
 # CONSTITUTION.md — Stratum 项目宪法
 
 > 本文件为项目级 AI 编码与审查规范，是 `constitution-review` skill 的审查依据。
-> 技术栈：Rust workspace（edition 2024, rust 1.88）+ Axum（仅 stratum-api）+ Tokio + tracing + NATS/文件存储。
+> 技术栈：Rust workspace（edition 2024, rust 1.88）+ Axum（仅 stratum-api）+ Tokio + tracing + Postgres（唯一执行真相）+ NATS（仅短期实时 tail）。
 > 前端（stratum-web）规范不在本文件范围，见 `PRODUCT.md` 与 `stratum-web/DESIGN.md`。
 > Rust 编码的深度规则（265 条）以 `.agents/skills/rust-skills/` 为参考；本宪法收录其中必须强制执行的子集。
 > 审查时遇到本文件未覆盖的 Rust 细节问题，参照 rust-skills 检视并归入 `suggestion` 或 `constitution-gap`。
@@ -13,11 +13,10 @@
 项目按能力分层，依赖方向必须保持 DAG，禁止下层依赖上层：
 
 - **核心层**：`stratum-core`（+ `stratum-macros`）——领域类型、ID newtype、事件、错误、trait 定义；不得依赖任何其他 stratum crate。
-- **合同层**：`stratum-store`——持久化合同（trait、状态类型、错误定义），只依赖核心层；不含后端实现。
-- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，只依赖核心层与合同层。
-- **存储后端层**：`stratum-postgres`——实现合同层/能力层耐久合同的外部存储后端；可依赖核心层、合同层、能力层，不得被组合层及以下依赖。
-- **组合层**：`stratum-agent`——编排能力层，不得被能力层依赖。
-- **装配层**：`stratum-agent-builtin`（内置实现）、`stratum-api`（HTTP/进程入口）——最上层；`stratum-api` 是唯一含 `main.rs` 的 crate，`main.rs` 必须保持薄，可复用逻辑放 `lib.rs`。
+- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，只依赖核心层。
+- **存储后端层**：`stratum-postgres`——具体执行存储边界，暴露具体的 command/query 接口、类型与 `thiserror` 错误；只允许被装配层 `stratum-api` 调用，组合层及以下不得依赖。
+- **组合层**：`stratum-agent`——编排能力层，不得被能力层依赖；kernel/`stratum-agent` 不得依赖 Postgres、HTTP、Session、hosting、scheduler 或分页。
+- **装配层**：`stratum-api`（HTTP/进程入口）——最上层、唯一装配 crate；`stratum-api` 是唯一含 `main.rs` 的 crate，`main.rs` 必须保持薄，可复用逻辑放 `lib.rs`。
 
 ### crate 内规则
 
@@ -74,14 +73,14 @@
 
 ---
 
-## 5. 存储与事件总线（强制）
+## 5. 存储与实时事件（强制）
 
-- 状态/定义持久化必须经 `stratum-store`，业务 crate 禁止直接读写存储介质。
-- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；实现 `stratum-store` / `stratum-infra` 耐久合同的存储后端 crate（当前为 `stratum-infra`、`stratum-postgres`）作为基础设施可以直接使用 `std::fs` / `tokio::fs` 或相应存储驱动，并自行保证崩溃一致性。
-- 事件发布/订阅必须经 `stratum-infra` 的 event bus 抽象，业务代码禁止直连 `async-nats`。
-- 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`、`stratum-agent-builtin`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
-- 文件写操作必须崩溃一致：临时文件 + 原子 rename，或 store 层提供的等效保证。append-only 日志在同时满足以下条件时视为等效：写入后做文件与目录双 fsync，读取器容忍截断尾行（含落在多字节 UTF-8 字符中间的撕裂写，按字节解析并丢弃尾部残缺行）。
-- 持久化载荷（事件流、Hook journal decision 等）按对话级敏感数据处理：secret、token、用户凭据永远不得写入持久流；保留时间与清理策略由存储后端定义并在其 crate 文档归档。
+- 执行持久化的唯一真相是 Postgres durable ledger，经 `stratum-postgres` 的具体 command/query 接口访问；只有装配层 `stratum-api` 允许调用这些接口，kernel 持久化仍经 `DurableEventSink` 合同、telemetry 仍经 `TelemetryEventSink` 合同。业务 crate 禁止直连 `sqlx`。
+- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；作为基础设施后端的 `stratum-postgres` / `stratum-infra` 可以直接使用相应存储驱动，并自行保证崩溃一致性。禁止 filesystem 执行持久化（Agent 状态、历史、durable 事件、checkpoint 一律不得落盘）；`stratum-filesystem` 只保留只读 template catalog 访问与 Agent 可见的业务文件操作。
+- Agent realtime 事件只经 `stratum-infra` 的窄 concrete Agent-tail transport 边界；业务代码禁止直连 `async-nats`。
+- 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
+- 业务文件写操作必须崩溃一致：临时文件 + 原子 rename，或等效保证。append-only 日志在同时满足以下条件时视为等效：写入后做文件与目录双 fsync，读取器容忍截断尾行（含落在多字节 UTF-8 字符中间的撕裂写，按字节解析并丢弃尾部残缺行）。
+- 敏感载荷边界：已接受的 opaque user-authored conversation text 按对话级敏感数据原样持久化，不引入通用 secret scanner；runtime-managed secret/token/credential value 永远不得进入 definition、snapshot、durable events、NATS 或日志——Tool 只能携带 opaque credential reference，真实值在执行时从安全 credential provider 注入。保留时间与清理策略由存储后端定义并在其 crate 文档归档。
 - 从持久层读回的 `#[non_exhaustive]` 枚举，`_` 分支必须返回错误（fail closed），禁止提供默认值——尤其禁止向放宽权限的方向默认。
 - NATS subject / bucket 命名集中定义，禁止散落字符串字面量。
 - 持久化 shape 变更必须与协议兼容策略一致：不支持的旧 shape 显式报错，禁止静默吞掉或猜测性迁移。
@@ -116,8 +115,8 @@
 ## 8. 部署与运维（强制）
 
 - 镜像构建统一走根 `Dockerfile.rust` 多阶段构建（`PACKAGE` / `BIN` 参数化）；禁止为单个 crate 另写 Dockerfile。
-- `stratum-api` 必须实现优雅关闭：处理 SIGTERM / SIGINT，停止接收新请求并 drain 进行中的 turn。
-- 必须提供 liveness 健康检查端点；依赖（store、NATS）未就绪时 readiness 必须返回不可用。
+- `stratum-api` 必须实现优雅关闭：处理 SIGTERM / SIGINT，停止接收新请求并 drain 进行中的 turn；进程 shutdown 绝不转化为业务 cancellation（不得把进行中的 turn 写成 cancelled/failed）。
+- 必须提供 liveness 健康检查端点；Postgres 是核心 readiness 依赖，未就绪时 readiness 必须返回不可用；NATS 故障只把 realtime capability 标记为 degraded，不得禁用 Postgres-backed commands。
 - 运行时配置经 `stratum-config` 加载并校验；禁止在代码中硬编码环境相关值（地址、凭据、超时）。
 - CI 的 fmt / clippy / test / image 门禁必须保持通过后才允许合入。
 
@@ -189,7 +188,7 @@
 - [ ] `println!` / `eprintln!` 出现在非 CLI 生产代码中（测试代码豁免）
 - [ ] 密钥、token、用户凭据进入日志、span 字段或错误消息
 - [ ] 领域 ID 以裸字符串（stringly typed）穿越 crate 或 HTTP 边界
-- [ ] 业务 crate 直连 `std::fs` / `tokio::fs` 或 `async-nats`（实现耐久合同的存储后端 crate 的存储 IO 除外，见 §5）
+- [ ] 业务 crate 直连 `std::fs` / `tokio::fs`、`sqlx` 或 `async-nats`（作为基础设施后端的 `stratum-postgres` / `stratum-infra` 的存储 IO 除外，见 §5）
 - [ ] 在宿主机直接执行 agent 生成的命令
 - [ ] std `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点（为跨 await 串行化而持有 `tokio::sync::Mutex` guard 是允许的，见 §11）
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）

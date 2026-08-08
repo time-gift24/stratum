@@ -2,8 +2,6 @@
 members = [
     "crates/stratum-api",
     "crates/stratum-agent",
-    "crates/stratum-agent-builtin",
-    "crates/stratum-store",
     "crates/stratum-core",
     "crates/stratum-config",
     "crates/stratum-filesystem",
@@ -48,11 +46,17 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
+# OTLP trace export (CONSTITUTION §4): activated only when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set; the reqwest-blocking HTTP transport
+# keeps the tree free of the tonic gRPC stack.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.33"
 stratum-core = { path = "crates/stratum-core" }
 stratum-config = { path = "crates/stratum-config" }
 stratum-filesystem = { path = "crates/stratum-filesystem" }
 stratum-agent = { path = "crates/stratum-agent" }
-stratum-store = { path = "crates/stratum-store" }
 stratum-infra = { path = "crates/stratum-infra" }
 stratum-postgres = { path = "crates/stratum-postgres" }
 stratum-llm = { path = "crates/stratum-llm" }

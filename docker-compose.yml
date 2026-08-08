@@ -41,11 +41,16 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     ports:
       - "18080:8080"
     volumes:
-      - stratum-agent-data:/var/lib/stratum
-      - ./templates:/var/lib/stratum/agents/templates:ro
+      - ./templates:/etc/stratum/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
@@ -54,11 +59,11 @@ services:
     build:
       context: ./stratum-web
     depends_on:
-      - stratum-api
+      stratum-api:
+        condition: service_healthy
     ports:
       - "5173:3000"
 
 volumes:
   nats-data:
   postgres-data:
-  stratum-agent-data:

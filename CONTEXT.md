@@ -6,7 +6,7 @@ Stratum agent 内核的领域语言：一个确定性 kernel 驱动模型/工具
 
 - **确定性 kernel**：给定事件流 + journal，当前状态（committed context、迭代号）完全可重建。
 - **journal 固化非确定性**：一切非确定性（LLM 调用、handler 决策）被隔离在 Hook 点，决策记入 journal，崩溃后 replay 用 journal 替代重新调用。
-- **事件流唯一真相**：append-only `DurableAgentEvent` 是唯一真相来源；任何派生物（如 `compact.jsonl`）只加速、不承载真相。
+- **事件流唯一真相**：append-only `DurableAgentEvent` 是唯一真相来源；恢复的快速路径由 Postgres `transcript_compactions` companion 提供，只加速、不取代真相流。
 
 ## Language
 
@@ -31,7 +31,7 @@ _Avoid_: turn 边界、轮次结束
 _Avoid_: 结果压缩、结果截断
 
 **Journal**:
-handler 决策的耐久记录，以 `HookInvocationPending` / `Completed` / `Failed` 事件变体住在事件流内部——没有第二个耐久边界，只有一个 fsync 顺序故事。replay 时用已 Completed 的记录替代重新调用 handler，非确定性（含 LLM 摘要）因此被固化，不二次生成。
+handler 决策的耐久记录，以 `HookInvocationPending` / `Completed` / `Failed` 事件变体住在事件流内部——没有第二个耐久边界，事件与 journal 记录共用 Postgres ledger 的同一条事务提交链，只有一个 commit 顺序故事。replay 时用已 Completed 的记录替代重新调用 handler，非确定性（含 LLM 摘要）因此被固化，不二次生成。
 _Avoid_: 日志、审计日志
 
 **Hook 地址 (HookAddress)**:
@@ -54,12 +54,12 @@ _Avoid_: 重试、恢复
 `ToolExecutionStarted` 已提交而结果未提交的调用，resume 时原样重执行。exactly-once 需要工具侧幂等，超出 kernel 职责；副作用工具的防护归组合方。
 _Avoid_: exactly-once、幂等执行
 
-**压缩检查点 (compact.jsonl)**:
-filesystem 后端的派生索引，加速 resume，可由事件流完全重建——缺失、损坏、校验不匹配一律回退全量重放，**永不 fail closed**（fail closed 只留给真相流本身）。三条不变量：①边界后写——检查点在该次压缩的 `IterationCompleted` 落盘后才追加，故"压缩已提交而边界未提交"的窗口不存在检查点；②窗口自足——`window_start_line` 指向第一条保留消息的物理行，窗口自带保留后缀、prepare journal 记录、压缩事件与边界；③三项校验——窗口内必须找到 iteration/upto/digest 与检查点一致的 `TranscriptCompacted`。
-_Avoid_: 压缩历史、快照（它不是真相）
+**压缩 companion (transcript_compactions)**:
+Postgres 中与 `TranscriptCompacted` discriminator 同事务写入的专用 durable companion row，保存单一 typed summary、kernel `upto`、`compacted_iteration` 与非空 `retained_from_event_seq`（第一条保留 message 的 durable pointer）；原始 messages 永久保留。discriminator 与 companion 互相校验：存在 discriminator 却缺少必需 companion、或 summary 无法解码/identity 不一致，一律视为 durable 损坏并 fail closed；只有 `retained_from_event_seq` 这类加速指针无效时才回退为从 ledger 起点做内存 full replay。两种异常都绝不在线修复。
+_Avoid_: 压缩历史、快照（它不是真相）、compact.jsonl（已删除）
 
 **Replay 双模式**:
-replay 应用 `TranscriptCompacted` 时：`upto <= 当前已重建长度`为全量流绝对 splice；`upto` 超出则为检查点窗口模式（已重建消息即保留后缀，summary 前置到 index 0）。窗口合法性由组合方在存储边界校验，kernel 对两种模式一视同仁。
+replay 应用 `TranscriptCompacted` 时：`upto <= 当前已重建长度`为全量流绝对 splice；`upto` 超出则为窗口模式（已重建消息即保留后缀，summary 前置到 index 0）。窗口合法性由组合方（`stratum-api` 外层编排）对照 Postgres `transcript_compactions` companion 在存储边界校验，kernel 对两种模式一视同仁。
 _Avoid_: 增量重放、部分重放
 
 **机制/策略分离**:

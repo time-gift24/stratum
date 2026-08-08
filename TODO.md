@@ -70,8 +70,8 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 定义 Agent 接收 `AgentRuntimeContext`、只创建 `TurnId` 的接口。
 - [x] 定义 `HookInvocationId` 的语义地址；本阶段不引入 node execution 或 attempt 身份。
 - [x] 定义 Agent、Workflow、SkillSet、ExtensionSet 和 Hook Handler 的不可变版本身份。
-- [x] 统一 `docs/PROTOCOL.md` 与当前 `StreamEnvelope`、三类 `RuntimeEvent`、Agent `message_seq` 和不透明 `EventCursor`。
-- [x] 确认 Hook journal 属于 Session/Turn 执行状态，与 `AgentStore` 对话历史和 EventBus 观察分离。
+- [x] 统一 `docs/PROTOCOL.md` 与当前 `StreamEnvelope`、三类 `RuntimeEvent`、Agent `message_seq` 和不透明 `EventCursor`。（该协议面已被 `complete-postgres-agent-runtime` 取代并删除；协议权威现为 utoipa 生成的 OpenAPI，见 `docs/runtime.md`。）
+- [x] 确认 Hook journal 属于 Session/Turn 执行状态，与 `AgentStore` 对话历史和 EventBus 观察分离。（`AgentStore` 与 EventBus 已随 `complete-postgres-agent-runtime` 删除；journal 作为 durable event 变体进入 Postgres ledger。）
 - [x] 完成 Skill、Script Extension、链接式 Rust Hook 和 Hook Service 的基础信任规则。
 
 **验收条件：**
@@ -159,13 +159,13 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 ### H3b：Postgres 统一执行层存储与保留策略
 
-**依赖：** H3a。**变更说明：** 原方案（sqlite per-session）已否决——N 库文件迁移、无跨 session 查询、server 语境并发调优、三引擎碎片，维护成本不可接受。改为统一 Postgres 承载全部执行事实（journal、agent state、消息历史）；filesystem 保留定义层与 dev/test/嵌入后端。change：`add-postgres-execution-storage`。
+**依赖：** H3a。**变更说明：** 原方案（sqlite per-session）已否决——N 库文件迁移、无跨 session 查询、server 语境并发调优、三引擎碎片，维护成本不可接受。改为统一 Postgres 承载全部执行事实（journal、agent state、消息历史）；filesystem 保留定义层与 dev/test/嵌入后端。change：`add-postgres-execution-storage`（已归档并被 `complete-postgres-agent-runtime` 取代：filesystem 执行后端、backend selector 与消息投影一并删除，Postgres 成为唯一执行真相，最终为四表模型，见 `docs/runtime.md`）。
 
-- [ ] 新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。
-- [ ] `append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。
-- [ ] `stratum-store` 纯合同化；filesystem 后端迁 `stratum-infra`（独立 commit）。
-- [ ] 组合根显式 `backend = "postgres" | "filesystem"`，无静默回退；生产默认 postgres。
-- [ ] 双后端行为对齐：同一事件序列两种后端 replay，resume 结果逐事件一致。
+- [ ] ~~新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。~~（已由 `complete-postgres-agent-runtime` 取代：concrete `PostgresBackend` + 内嵌 sqlx baseline，四表 `agents`/`agent_state`/`durable_events`/`transcript_compactions`，无 `agent_messages` 投影表。）
+- [ ] ~~`append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。~~（已取代：无消息投影；集中 append 事务以 `agent_state` 行锁分配无空洞 agent-wide `event_seq`。）
+- [ ] ~~`stratum-store` 纯合同化；filesystem 后端迁 `stratum-infra`（独立 commit）。~~（已取代：`stratum-store` crate 与 filesystem 执行后端均已整体删除。）
+- [ ] ~~组合根显式 `backend = "postgres" | "filesystem"`，无静默回退；生产默认 postgres。~~（已取代：不存在 backend selector，Postgres 是唯一执行存储。）
+- [ ] ~~双后端行为对齐：同一事件序列两种后端 replay，resume 结果逐事件一致。~~（已取代：双后端与 dual-backend replay 测试已删除。）
 - [ ] 定义记录大小、保留时间和清理方式（等真实 SLO；`created_at` 列已预留，届时走 declarative partition + DROP PARTITION）。
 - [ ] 评估 per-handler 粒度 journal（依赖 H2 链式 Runner 落地）。
 
@@ -202,7 +202,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
 - [x] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"并携带摘要，写回由 kernel 代执行。
 - [x] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记（`COMPACTION_MARKER_PREFIX`），不得伪装成用户或助手消息。
-- [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume 从压缩基线恢复；派生检查点索引 `compact.jsonl` 提供快速路径（可重建、损坏回退全量）。
+- [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume 从压缩基线恢复；派生检查点索引 `compact.jsonl` 提供快速路径（可重建、损坏回退全量）。（`compact.jsonl` 已随 `complete-postgres-agent-runtime` 删除；快速路径改由 Postgres `transcript_compactions` companion 的 `retained_from_event_seq` 指针承担，指针无效时回退内存 full replay。）
 - [x] 摘要算力归属：handler 自带（决策记录含摘要，journal 固化非确定性；kernel 不引入 summarizer 组件）。
 - [x] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
 
@@ -363,7 +363,7 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 ### P4：可靠性与运维
 
-- [ ] 为 API、Scheduler、EventBus、Store 和 Extension Worker 提供健康检查。
+- [ ] 为 API、Scheduler 和 Extension Worker 提供健康检查。（API 已有 `/health/live` 与 `/health/ready`，见 `docs/runtime.md`；旧 EventBus/Store 已随 `complete-postgres-agent-runtime` 删除。）
 - [ ] 为排队节点、运行节点和 Hook Invocation 实现优雅关闭。
 - [ ] 验证定义、状态、执行日志和制品的备份恢复。
 - [ ] 在首个生产持久化格式变更前建立数据迁移机制。
@@ -394,6 +394,15 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - 隔离和能力模型通过评审后，才能执行不受信任的 Script Extension。
 
 ## 9. 延后事项
+
+### 由 `complete-postgres-agent-runtime` 明确延期（本 change 不实现）
+
+以下能力已确认需要，但**明确延期**，不属于 Postgres 执行真相切换的范围，届时以独立 change 提出：
+
+- **调度与多实例（scheduler PATCH）**：durable scheduling、ownership lease/fencing、多实例 ownership/hosting、rolling deployment、自动 takeover/resume、durable cancel、Agent/Workflow Session 协调。未来的 scheduler change 必须用 ownership/placement 替换 `resume_required` 的 process-local 判定来源，同时保留该 API 字段。
+- **Agent template 管理（独立 change）**：正式 template 版本、catalog 管理与 Agent 列表（`GET /v1/agents`）。当前只保留只读 `templates_root` 热读 catalog，不提前实现这些抽象。
+
+### 其他延后事项
 
 - Rust 动态共享库加载；
 - 运行中的 Skill 或 Extension 热替换；

@@ -2,14 +2,15 @@
 
 ## Scope
 
-`stratum-agent` contains the session-independent `AgentLoop` kernel and the
-legacy stateful `Agent` compatibility path.
+`stratum-agent` contains only the session-independent `AgentLoop` kernel. The legacy stateful
+`Agent` compatibility path is deleted. Postgres, HTTP, Session, hosting, scheduler, and
+pagination must never enter this crate.
 
 ## AgentLoop Kernel
 
 - `AgentLoop` consumes a caller-preloaded `LoopContext` plus user prompts. It
-  does not own session creation, history loading, an `AgentStore`, or an
-  `EventStreamBus`.
+  does not own session creation, history loading, durable storage, or any
+  realtime transport.
 - Required transitions use `DurableEventSink`; model deltas and non-critical
   diagnostics use the separate best-effort `TelemetryEventSink`.
 - A durable append must be acknowledged before the kernel mutates its in-memory
@@ -102,9 +103,10 @@ legacy stateful `Agent` compatibility path.
   JSON result; the kernel rebuilds the tool message with the original `CallId`.
 - User approval is an ordinary `decide_tool_call` handler: approve maps to
   `Execute`, reject maps to `Block`, and the ask-a-human channel is private to
-  the handler implementation. The kernel has no approval concept and the new
-  kernel path emits no `ToolApprovalRequested`/`ToolApprovalResolved` events
-  (the legacy Agent keeps its own approval path). A crash after approval but
+  the handler implementation. The kernel has no approval concept and never
+  emits `ToolApprovalRequested`/`ToolApprovalResolved` itself; those durable
+  approval facts are written through the sink by the composition-side approval
+  handler in `stratum-api`. A crash after approval but
   before dispatch is fail-safe: resume either reuses the journaled completed
   decision (the handler is not asked again) or retries the pending invocation
   under its original identity.
@@ -137,7 +139,7 @@ legacy stateful `Agent` compatibility path.
   rebuilds committed context from `MessageAppended`, fixes the frontier at one
   past the maximum `IterationCompleted`, and refuses terminal runs. Event
   variants the kernel does not understand fail closed as
-  `ResumeError::UnsupportedEvent`; only the legacy approval events
+  `ResumeError::UnsupportedEvent`; only the approval fact events
   (`ToolApprovalRequested`/`ToolApprovalResolved`) are explicitly skipped
   because they carry no kernel resume state. Committed
   tool results must be the exact ordered prefix of the preceding assistant
@@ -208,62 +210,19 @@ legacy stateful `Agent` compatibility path.
   Compaction never changes hook addressing or digests.
 - Deferred to later milestones (do not add here): per-handler journal
   granularity (H3b evaluation), Skill/Script/service adapters, and hook
-  telemetry or EventBus payloads.
+  telemetry or realtime transport payloads.
   Also recorded for evaluation: the resume chain-version check passes when
   the event stream recorded a version but the injected runtime reports none
   (replacing the chain with a version-less runtime bypasses the guard) —
   decide whether that combination should fail closed.
 
-## Legacy Agent Compatibility
+## Prepared Resume Seam
 
-The following rules describe the existing `Agent`, session, resume, store, and
-`EventStreamBus` integration. This remains temporary compatibility code and is
-not the ownership model for the new `AgentLoop` kernel.
-
-- The Agent receives an injected `EventStreamBus` for event delivery and an
-  injected `AgentStore` for durable resumption.
-- The host supplies `AgentRuntimeContext`; the Agent creates only `TurnId`.
-- `ModelConfig` may change between Turns. Each Agent instance uses the configuration selected by
-  the host for its next Turn, while an active or resumed Turn must keep its pinned snapshot value.
-- The Agent commits complete messages through `AgentStore::append_message` before publishing the
-  returned sequenced envelope. Lifecycle and streaming events are observation-only envelopes.
-- Retained event delivery remains an EventBus responsibility; the Store is durable truth.
-
-## Turn Control (Legacy Agent)
-
-- Use a bounded MPSC channel for interactive commands sent to an active turn.
-- Keep cancellation on `CancellationToken` and prioritize it in `tokio::select!`.
-- The agent owns approval interaction; `stratum-tools` owns authorization metadata.
-- Publish `tool_approval_requested` successfully before waiting.
-- Keep user-message queuing separate until its behavior is implemented.
-
-## Resume (Legacy Agent)
-
-- `Agent::resume()` takes no user message. It loads the injected store and continues the unfinished
-  Turn with the same persisted Session, Turn, location, and runtime snapshot.
-- Resume validates Agent/SkillSet/ExtensionSet/Handler versions, resolved model configuration, and
-  ToolSet fingerprint before any model, Tool, or future Hook work. Missing or mismatched pinned
-  components fail closed.
-- `agent.json` records `next_iteration` as the durable iteration frontier: every
-  lower iteration has committed its stable boundary, while the frontier has not.
-  It is not simply the next LLM request because committed history may instead
-  require tool reconciliation or terminal completion without another LLM call.
-  Do not recover this frontier from JetStream metadata.
-- Resume rebuilds conversation history only from committed complete messages
-  through the fixed `last_seq` captured from the loaded state; realtime deltas
-  are never resume state.
-- Resume validates the active turn against `next_iteration`. Committed tool
-  result messages must be the exact ordered prefix of the immediately preceding
-  assistant `tool_calls`. Unknown, duplicate, sparse, or out-of-order results
-  are invalid resume history; only the missing suffix executes.
-- Advance `next_iteration` with the `agent.json` CAS only after the assistant
-  message and every tool result message for the iteration are durably committed.
-- Resumed LLM, tool, complete-message, and lifecycle events continue through the
-  injected `EventStreamBus`; resume does not publish directly to the store or
-  retained transport.
-- Tool execution is at-least-once. A process may stop after a tool has produced
-  an external side effect but before its result message is committed, causing
-  resume to execute that tool again. Every tool implementation must therefore
-  guarantee idempotent execution for the same tool call.
-- Web or scheduler composition guarantees that only the Agent owner resumes and
-  writes the turn; `stratum-agent` does not add a second writer lease.
+- The only approved kernel seam for resume composition is pure `prepare_resume`: an exact
+  `Arc<AgentLoop>` produces an opaque prepared value bound to that same runtime — not `Clone`,
+  not `Serialize` — that exposes a single consuming `run(token)` path.
+- `prepare_resume` performs no I/O: no durable append, no model/tool/hook calls, and it never
+  receives Postgres, Session, hosting, or pagination concerns. The composing side (`stratum-api`)
+  builds and validates the typed replay window; the prepared value reuses the existing private
+  replay validator so resume composition never duplicates the kernel state machine.
+- Fresh run, durable sink acknowledgement, and sequential tool execution semantics are unchanged.

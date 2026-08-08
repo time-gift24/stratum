@@ -1,5 +1,5 @@
 //! OpenAI-compatible protocol implementation.
-use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bon::Builder;
@@ -19,10 +19,32 @@ use crate::{
     protocol::sse::{SseEvent, SseParser, stream_eof_error},
 };
 
+/// TCP connect timeout for LLM egress: an unreachable provider endpoint
+/// fails fast instead of blocking a turn (§6: LLM egress is never unbounded).
+pub(crate) const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total request bound (connect + headers + body) for the non-streaming
+/// `chat` path, applied per request via `RequestBuilder::timeout`.
+pub(crate) const LLM_CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bound on the time to the first response (status line and headers) for
+/// streaming requests. After headers the SSE stream may live arbitrarily
+/// long and is cancelled through the turn's `CancellationToken`, so no total
+/// timeout is applied to the stream body.
+pub(crate) const LLM_STREAM_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds the default HTTP client with the explicit egress connect timeout.
+pub(crate) fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(LLM_CONNECT_TIMEOUT)
+        .build()
+        // Invariant: the builder only fails on TLS backend misconfiguration;
+        // setting a connect timeout cannot make it fail.
+        .expect("reqwest client with connect timeout builds")
+}
+
 /// OpenAI-compatible chat completions provider.
 #[derive(Debug, Clone, Builder)]
 pub struct OpenAICompatibleProvider {
-    #[builder(default = reqwest::Client::new())]
+    #[builder(default = default_client())]
     client: reqwest::Client,
     #[builder(into)]
     base_url: String,
@@ -31,11 +53,12 @@ pub struct OpenAICompatibleProvider {
 }
 
 impl OpenAICompatibleProvider {
-    /// Creates a provider using a default reqwest client.
+    /// Creates a provider using the default reqwest client (explicit connect
+    /// timeout; see the module-level egress bounds).
     #[must_use]
     pub fn new(base_url: impl Into<String>, api_key: ApiKey, model: ModelId) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_client(),
             base_url: base_url.into(),
             api_key,
             model,
@@ -64,6 +87,7 @@ impl LlmProvider for OpenAICompatibleProvider {
         self.model.clone()
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -77,6 +101,7 @@ impl LlmProvider for OpenAICompatibleProvider {
             .post(self.chat_completions_url()?)
             .headers(self.headers()?)
             .json(&payload)
+            .timeout(LLM_CHAT_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(LlmError::transport)?;
@@ -98,6 +123,7 @@ impl LlmProvider for OpenAICompatibleProvider {
         chat_response_from_value(value)
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -106,13 +132,17 @@ impl LlmProvider for OpenAICompatibleProvider {
         }
 
         let payload = to_chat_payload(&request, true)?;
-        let response = self
+        // Only the wait for the first response is bounded; once headers
+        // arrive, the SSE stream lives until completion or turn cancellation.
+        let send = self
             .client
             .post(self.chat_completions_url()?)
             .headers(self.headers()?)
             .json(&payload)
-            .send()
+            .send();
+        let response = tokio::time::timeout(LLM_STREAM_FIRST_RESPONSE_TIMEOUT, send)
             .await
+            .map_err(LlmError::transport)?
             .map_err(LlmError::transport)?;
         let status = response.status();
         let request_id = request_id(response.headers());
@@ -777,5 +807,83 @@ mod tests {
         assert_eq!(message["role"], "tool");
         assert_eq!(message["content"], "{\"ok\":true}");
         assert_eq!(message["tool_call_id"], "call-1");
+    }
+
+    /// A server that accepts the connection but never answers must fail the
+    /// streaming call at the first-response bound instead of hanging. Time is
+    /// paused, so the 30s bound is auto-advanced and the test runs fast.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_headers_fail_at_the_first_response_bound() {
+        let (addr, _hold) = never_responding_server().await;
+        let provider = stall_test_provider(addr);
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(ChatMessage::user("hello"));
+
+        let started = tokio::time::Instant::now();
+        let result = provider.chat_stream(request).await.map(|_| ());
+
+        assert!(
+            matches!(result, Err(LlmError::Transport(_))),
+            "got {result:?}"
+        );
+        assert!(
+            started.elapsed() >= LLM_STREAM_FIRST_RESPONSE_TIMEOUT,
+            "elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The same stall fails the non-streaming call at its total request bound.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_response_fails_at_the_chat_request_bound() {
+        let (addr, _hold) = never_responding_server().await;
+        let provider = stall_test_provider(addr);
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(ChatMessage::user("hello"));
+
+        let started = tokio::time::Instant::now();
+        let result = provider.chat(request).await;
+
+        assert!(
+            matches!(result, Err(LlmError::Transport(_))),
+            "got {result:?}"
+        );
+        assert!(
+            started.elapsed() >= LLM_CHAT_REQUEST_TIMEOUT,
+            "elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Provider pointed at the stalling server, with proxy env vars disabled
+    /// so the loopback request cannot be routed through a local HTTP proxy.
+    fn stall_test_provider(addr: std::net::SocketAddr) -> OpenAICompatibleProvider {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test client builds");
+        OpenAICompatibleProvider::builder()
+            .client(client)
+            .base_url(format!("http://{addr}"))
+            .api_key(ApiKey::new("test-key"))
+            .model("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .build()
+    }
+
+    /// Binds a loopback server that accepts connections and holds them open
+    /// without ever writing a response. The returned join handle keeps the
+    /// accept task (and the held sockets) alive for the test's duration.
+    async fn never_responding_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        let hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        (addr, hold)
     }
 }

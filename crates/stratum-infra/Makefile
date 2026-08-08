@@ -7,13 +7,14 @@ test-integration:
 	@set -eu; \
 	trap '$(COMPOSE) -f $(TEST_COMPOSE_FILE) down -v' EXIT; \
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d --wait; \
-	cargo test -p stratum-infra --test event_stream_bus_nats nats_rejects_incompatible_existing_stream -- --ignored --exact; \
-	cargo test -p stratum-infra --test event_stream_bus_nats nats_agent_replay_modes_and_isolation -- --ignored --exact; \
-	cargo test -p stratum-infra --test event_stream_bus_nats nats_reports_expired_cursor -- --ignored --exact; \
-	cargo test -p stratum-infra --test event_stream_bus_nats nats_malformed_payload_terminates_subscription -- --ignored --exact; \
-	cargo test -p stratum-infra --test event_stream_bus_nats seed_file_backed_event_for_restart -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_publish_subscribe_preserves_order -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_no_cursor_subscription_receives_only_new_frames -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_cursor_subscription_resumes_after_cursor -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_reports_expired_cursor_after_retention_eviction -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_isolates_frames_per_agent -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_seed_frames_before_restart -- --ignored --exact; \
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) restart nats-stream; \
-	cargo test -p stratum-infra --test event_stream_bus_nats replay_file_backed_event_after_restart -- --ignored --exact
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_restart_does_not_redeliver_history_to_new_subscription -- --ignored --exact
 
 test-up:
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d

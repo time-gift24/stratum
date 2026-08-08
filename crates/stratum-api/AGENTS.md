@@ -1,27 +1,51 @@
 # stratum-api 约定
 
+- `stratum-api` 是唯一装配 crate：装配/编排层，拥有 process registry、Postgres 编排、
+  approval handler/resolver、NATS bridge/dispatcher 与 SSE。`main.rs` 必须保持薄，可复用
+  逻辑放 `lib.rs`。
 - 只有在 Agent/Session/Turn 的必要状态、runtime snapshot 和输入已持久化后，创建或消息接口才能返回已接受；失败不得留下可被接受为成功的半成品。
-- hosted-agent registry 的锁只保护内存映射访问。文件系统、Store、NATS、provider 和 agent 的异步工作必须在锁外完成。
-- Store 是 agent 状态、消息历史和启动恢复的持久化真相源；NATS/JetStream 只负责事件分发与重放，不能代替 Store。
-- 执行事实存储后端由 `[storage]` 配置段显式选择（`backend = "postgres" | "filesystem"`），组合根 `host.rs` 的 `StoreBackend` 只构造配置选定的那一个，无静默回退。配置段缺失（`require_storage()`）、backend 拼错、`postgres.url` 缺失或为空、Postgres 无法连接或迁移失败都直接启动失败（fail closed），拒绝"连不上就悄悄降级 filesystem"的耐久性隐形降级。
-- postgres 是生产唯一支持路径（docker-compose 与 config.example 默认 postgres），启动即跑完 schema migrations；filesystem 后端只服务单测、嵌入式与无容器本地体验，同时是双后端 replay 对齐测试的行为参照。
-- SSE 使用传输序号 cursor：响应写入 `id`，恢复时 `Last-Event-ID` 优先于 `after_cursor`，过期 cursor 必须显式报错。
-- Session 是长期、图无关的核心身份；API 可以创建 Session 或将新 Agent 加入既有 Session，但一期每个 Session 同时只允许一个活跃操作。
-- 启动时必须从持久化 definition 和 Store 完整重建 registry；恢复失败不得返回部分 registry。
-- 新 Turn 必须同时通过 Session 单活检查、Agent persisted-running 检查和 Store start-turn CAS；持久化 `running` 只能显式 resume，任何新 Turn 都不得覆盖原 Session/Turn。
-- Resume 复用既有 Session 占用，不得被单活集合误判为第二个操作；恢复 terminalize 后同步释放占用。
-- failed/cancelled turn 中已经持久化的完整 user、assistant、tool 消息属于后续上下文；同进程后续请求必须从 Store 刷新到与重启恢复相同的 history，流式 partial delta 不进入 history。
-- `HostState` 持有共享 shutdown token。shutdown 关闭 admission 后结束 SSE，在独立固定时限内 drain 已准入请求，再 stop 所有 active Agent 并有界等待终态持久化；超时保留 durable `running`，由下次启动显式 resume。
-- create、message 和 resume 在任何持久化或 provider I/O 前必须取得 atomic admission RAII，并在 pending Store/EventStreamBus 工作中观察 shutdown token。admission drain 超时后的 late acceptance 必须自我 stop；create 还必须在 registry write lock 内重查 closed，禁止 snapshot 后注册。关闭后的新 durable work 返回安全稳定的 503，且不得触碰 Store/history。
-- create 的持久化 mutation 必须拆成有界阶段，并在每个 `await` 前进入“可能已写入”状态；shutdown、timeout 或检查失败都必须 fail-safe 保留 definition/Store/history，只有 mutation 已确定结束且能确定零消息时才能 cleanup。Store commit 后的 NATS best-effort forward 必须内部有界，不能决定 durable acceptance。
-- persisted `running` 只有在 Session ID 和 Turn ID 都存在、且 current Turn 在固定 Store barrier 内完全没有 durable message 时，`/resume` 才可把 Started-only 状态 terminalize 为 `failed`，保留 Session/Turn/usage/history/frontier；任一身份缺失或 current Turn 存在消息都必须走正常 resume 校验。
-- SSE 直接 Session 路由与 Agent 解析路由都必须订阅同一个 Session stream；cursor 只控制传输重放。
-- HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 Agent/Session/Turn/cursor 等 ID，不得记录 message、prompt、tool args、secret 或 host path。
-- Recovery derives an agent's provider configuration solely from its persisted `ModelConfig`; the API
-  exposes schemas only for configured models and never a second default-parameter representation.
-- `POST /v1/agents` accepts an optional `model_config`. When present, creation preflights,
-  persists, and composes with that configuration; when absent, it uses the resolved template default.
-- `POST /v1/agents/{agent_id}/messages` also accepts an optional `model_config`. A valid override is
-  committed only with an accepted new Turn and becomes that Agent's persisted default; omission
-  reuses the persisted value, and any rejected start leaves it unchanged.
-- API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个 handler 必须有 `#[utoipa::path]`，DTO 与 wire 类型必须有 `ToSchema`；错误响应只声明该 handler 经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` + `StreamEnvelope` body 描述，帧语义（id=cursor、event=内层事件名、data=envelope JSON）写在 path description。`docs/PROTOCOL.md` 已废弃。
+- Postgres durable ledger 是 agent 状态、消息历史和启动恢复的唯一持久化真相源；NATS 只负责短期 Agent tail 分发，不能代替 Postgres。`sqlx` 只允许出现在 `stratum-postgres`，本 crate 只调用其 concrete command/query 接口。
+- hosting 是进程内 exact `(AgentId, TurnId)` registry 的易失观察，永不持久化；registry 的锁只保护内存映射访问，Postgres、NATS、provider 和 agent 的异步工作必须在锁外完成。
+- 持久化顺序固定为 Postgres commit 先于 NATS 发布；per-Agent dispatcher 按 `event_seq` 从已提交 PG row 发布 product event。NATS 发布/通知失败只记录一次安全错误，不回滚 PG、不改变 command 或 kernel 结果。
+- 审批完全从 durable ledger 派生：approval Handler 是普通 `decide_tool_call` Hook handler，resolver 事务复用 `agent_state` 行锁线性化；resolve 与 resume 是分离的 endpoint，unhosted resolve 不隐式 resume。
+- Postgres 决定核心 readiness；NATS 不可用时 SSE 返回稳定的 `realtime_unavailable`，Web 降级为 PG reconcile，核心 command 继续可用。
+- SSE 使用不透明 NATS cursor：cursor 不得与 `event_seq`/`telemetry_seq` 比较或持久化为业务状态，过期必须显式报错；建流后的 buffer overflow 发送 `stream_reset` 并关闭连接。
+- `AppState` 持有共享 shutdown token 与 admission gate。shutdown 关闭 admission 后结束 SSE，在独立固定时限内 drain 已准入请求，再有界等待终态持久化；超时保留 durable `running`，由显式 resume 接管。进程 shutdown 绝不转化为业务 cancel/failed：managed turn 的 CancellationToken 在 shutdown 时从不被 signal，超时后未完成任务由 runtime 回收，PG 中保持 `running`。
+- create、message 和 resume 在任何持久化或 provider I/O 前必须取得 atomic admission RAII，并在 pending Postgres/NATS 工作中观察 shutdown token。关闭后的新 durable work 返回安全稳定的 503。
+- HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 Agent/Session/Turn/cursor 等 ID，不得记录 message、prompt、tool args、secret、SQL 或 host path。
+- 错误映射合同：library errors 用 `thiserror`，HTTP 统一映射为安全 envelope
+  `{"error":{"code":"...","message":"..."}}` 与约定的 400/404/409/410/413/422/500/503；
+  响应体不暴露 SQL、NATS subject、host path、prompt、Tool arguments/result、provider 正文或 credential。
+- API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个 handler 必须有 `#[utoipa::path]`，DTO 与 wire 类型必须有 `ToSchema`；错误响应只声明该 handler 经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` 与 API-owned `AgentStreamFrameV1` 描述。`docs/PROTOCOL.md` 已废弃。
+
+## 模块与实现约定（重写后归档）
+
+- 模块布局：`state.rs`（AppState + admission gate）、`registry.rs`（exact
+  `(AgentId, TurnId)` claim + compare-and-remove）、`sink.rs`（per-turn
+  `DurableEventSink`/`TelemetryEventSink` adapter + admission oneshot）、`baseline.rs`
+  （历史基线物化 + 7.10 规范化，纯函数 `assemble` 可单测）、`provenance.rs`（committed-context
+  来源 seq lineage，供 compaction retained pointer 解析）、`dispatcher.rs`（per-agent
+  有序 dispatcher，`DispatcherIo` trait 的真实实现是 PG scan + NATS publish）、
+  `approval.rs`（decide 相位的审批 HookHandler + 进程内 waiter）、`turn.rs`（runtime
+  重建与 managed task spawn）、`templates.rs`（只读热 catalog）、`frames.rs`
+  （`AgentStreamFrameV1`/`AgentProductEventV1`）、`dto.rs`、`error.rs`（`ErrorKind` →
+  status/code 映射表）、`host_error.rs`（启动错误）、`http/`（router + handlers + utoipa）。
+- 审批 Handler 的 `HookInvocationId` 不由 kernel 传入：kernel 保证 Pending 先提交，Handler 通过
+  `stratum-postgres` 的 `read_open_hook_invocation`（point + iteration + call_id exact 地址）
+  找到自己的 open invocation，再以它为键 reuse/创建 Requested。resume 重放 Pending 时同一地址
+  命中同一 invocation，天然复用既有 ApprovalId。
+- `TurnRuntimeSnapshot` 的六字段在 message admission 时构造：`extension_set_version_id` 必须取
+  自建 `ChainHookRuntime` 的计算值（与 kernel 写入 `LoopStarted` payload 的值一致）；
+  `skill_set_version_id` 固定为 nil UUID；hook 版本列表当前只有审批 Handler 的固定 UUID 常量
+  （行为变更必须换版本号）。resume 重建 runtime 时校验 provider/model 可用、tool fingerprint
+  与 extension set version 一致，不一致即 503 `runtime_unavailable`。
+- resume 的 replay window = 当前 `LoopStarted` + 基线消息（作为 MessageAppended）+
+  current-Turn 后缀（含 hook journal 与 approval facts），按 event_seq 序； resumed sink 的
+  lineage 必须与 kernel 重建的 context 对齐（基线 origins + 后缀消息/压缩逐个应用）。
+- dispatcher 的 telemetry 采用到即发：kernel 单 sender FIFO（telemetry 先于同 call 的 final
+  message commit）加上 dispatcher 单命令队列即满足"telemetry 先于 final durable frame"；durable
+  一律按 receipt high-water 从 PG 扫描发布，writer 醒来顺序不影响 NATS 顺序。
+- 测试：单元测试在各模块 `#[cfg(test)]`；容器集成测试在 `tests/api.rs` +
+  `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，compose project
+  `stratum-api-test`，pg 45433 / nats 44228，与其它 crate 端口错开）。
+- OTLP 由 `telemetry.rs::init_telemetry()` 按环境激活：设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时安装 OTLP span exporter（HTTP/protobuf，reqwest-blocking，无 tonic）与 `tracing-opentelemetry` layer，未设置时与纯 fmt 行为完全一致；进程退出前必须经 `TelemetryGuard::shutdown()` flush。collector 端点仅支持 `http://`。
