@@ -10,10 +10,14 @@ export default defineConfig({
     alias: { "@": fileURLToPath(new URL(".", import.meta.url)) },
   },
   test: {
+    environment: "node",
     include: [
       "lib/stratum/**/*.test.ts",
       "features/agent-conversation/**/*.test.ts",
+      "features/ontology-editor/**/*.test.ts",
+      "hooks/use-ontology-editor.test.ts",
       "components/stratum/**/*.test.ts",
     ],
+    exclude: ["node_modules/**", ".next/**"],
   },
 })

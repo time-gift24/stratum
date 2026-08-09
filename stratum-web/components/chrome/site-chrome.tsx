@@ -17,7 +17,7 @@ gsap.registerPlugin(useGSAP)
 /**
  * 站点导航外壳（client 组件：图标是函数，不能从 Server Component 传入）。
  * SiteNavChrome —— root 级业务导航，由 (site) 路由组 layout 挂载，fixed 悬浮于所有页面之上。
- * 当前入口：对话（/conversation）、Excalidraw（/excalidraw）。
+ * 当前入口：对话（/conversation）、本体（/ontologies）、Excalidraw（/excalidraw）。
  *
  * 沉浸模式（/excalidraw）：导航默认收起，只留画布。进入时先 peek 1.6s
  * 展示入口位置再滑出；顶边 8px 感应条（悬停 150ms 意图延迟）或居中的
@@ -165,6 +165,7 @@ export function SiteNavChrome() {
           brand={{ name: "Stratum", href: "/conversation" }}
           links={[
             { label: "对话", href: "/conversation" },
+            { label: "本体", href: "/ontologies" },
             { label: "Excalidraw", href: "/excalidraw" },
           ]}
         />

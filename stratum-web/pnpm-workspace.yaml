@@ -4,4 +4,5 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
   msw: false
+  # vitest 传递依赖 esbuild 的 postinstall 构建批准
   esbuild: true

@@ -23,6 +23,15 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 - 消息列条目（`ConversationItem`）由普通消息、`compaction-marker.tsx`（`TranscriptCompacted` 的可折叠“上下文已压缩”标记，展开显示完整摘要，不伪装为系统消息）和 `terminal-marker.tsx`（安全的失败/取消标记）组成。连接、命令、缺失资源等运行错误绝不能伪装成 assistant 消息或写入正文；它们统一由 `notices.tsx` 在输入区上方展示，成功命令或 PG reconcile 证明恢复后用 GSAP 退场再卸载。`notices.tsx` 还承载恢复提示（`resume_required` 只是建议状态，必须显式点击，绝不自动恢复）与实时降级提示。
 - 模型/Thinking 选择器为 `components/stratum/model-selector.tsx`（基于 assistant-ui model-selector 底稿的数据驱动分支，不接入其 runtime/ModelContext）：搜索、provider 筛选项、分组列表和 Thinking 分段行经 `composerConfiguration` 与 hook 接线，并通过 `PromptInput` 的 `trailing` 插槽挂载。
 
+## Ontology 管理（前端按契约实现，后端联调待落地）
+
+- 契约：`docs/ontology/API.md`。`lib/stratum/api.ts` 的 ontology 方法组：`listOntologies` / `createOntology` / `getOntology` / `replaceOntology`（ETag 整文档替换）/ `deleteOntology` / `getObjectTypeNeighborhood`；ETag 经响应头读取，缺失视为契约破坏；`ApiError` 携带 422 `violations`。
+- `features/ontology-editor/{types,reducer,save,violations,validation,pointer,ids,recovery,layout,neighborhood}.ts` — UI 无关内核：编辑器状态 reducer、保存副作用编排（`save.ts`）、422 violations 到节点/边的映射、命名校验、指针路径、id 生成、IndexedDB 崩溃恢复草稿、布局与只读邻域计算。
+- 保存状态机不变量：`acknowledged`（服务端确认的最近文档 + ETag）/ `candidate`（画布展示的可变本地文档）/ `in_flight`（已发出的保存快照）。412 时重读远端交用户显式调和，绝不静默换新 ETag 重试；422 时 candidate 原样保留、violations 交给 pointer 映射展示。
+- `hooks/use-ontology-editor.ts` / `hooks/use-ontology-list.ts` — 编辑器与列表的自包含 hook，api 经依赖注入。
+- 路由 `/ontologies`（列表）与 `/ontologies/[id]`（编辑器）位于 `app/(site)/ontologies/`，组件集中在 `components/stratum/ontology/`；SiteNav 挂「本体」入口。
+- 已接受依赖：`@xyflow/react`（画布）与 `vitest`（`features/` 纯逻辑单测，`pnpm test`）（均为 MIT 许可证）。
+
 ## 运行时协议投影
 
 - 持久化身份是 `(agentRuntimeId, eventSeq)`，其中 `eventSeq` 是十进制字符串。每个帧的 `agent_runtime_id` 必须匹配当前运行实例，固定的 `agent_id` 必须匹配当前 `AgentRuntimeView`；任一不匹配都要关闭流，并进行无 cursor 冷启动。新视图仍不一致时，停止自动重连并报告协议身份错误。可见序号允许有间隔（内部 Hook/Tool 事件不发布），不能据此判断丢帧。遥测身份是 `(agentRuntimeId, llmCallId, telemetrySeq)`：低于期望值表示重复并忽略，高于期望值则把草稿标为不完整并等待持久化终稿收敛。每条遥测另带 `durable_before_event_seq` 顺序水位；PG 先收敛 assistant 最终消息 F 时，丢弃水位低于 F 的旧短尾流，但允许水位不低于 F 的下一次调用建立草稿。有 `acceptedTurnId` 时只接收该精确 Turn 的遥测；否则只接收运行中 `AgentRuntimeView` 的 `current_turn_id`，上一 Turn 的 NATS 积压不得复活草稿。
@@ -46,7 +55,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 ## 设计上下文
 
 - 修改界面前必须阅读本目录 `PRODUCT.md` 与 `DESIGN.md`（均来自 front-playground）。
-- 产品是单对话页应用：`/` 重定向到 `/conversation`（`app/(site)/page.tsx` 调用 `redirect`），`/conversation` 是唯一连接真实后端的页面；展示页面（首页、canvas、markdown）及其专用组件已全部删除。
+- 产品当前有三组页面：对话 `/conversation`（`/` 经 `app/(site)/page.tsx` 调 `redirect` 进入）、本体管理 `/ontologies` + `/ontologies/[id]`、白板 `/excalidraw`；showcase 页面（首页、canvas、markdown）及其专用组件已全部删除。本体页前端按 `docs/ontology/API.md` 契约实现，后端联调待落地。
 - 禁止用主题化文案、无功能小字、伪技术参数制造产品感。
 
 ## 动效
@@ -55,5 +64,5 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 
 ## 验证
 
-- 协议层（`lib/stratum/` 与 `features/agent-conversation/`）允许新增 Vitest 单元测试（`*.test.ts`，纯 Node.js 环境、离线 mock），通过 `pnpm test` 运行；仍禁止新增 UI/组件测试文件。
+- 协议层（`lib/stratum/`）、纯逻辑 feature（`features/agent-conversation/`、`features/ontology-editor/`）及 Ontology hook 允许新增 Vitest 单元测试（`*.test.ts`，纯 Node.js 环境、离线 mock），通过 `pnpm test` 运行；仍禁止新增 UI/组件测试文件。
 - 前端变更至少运行 `pnpm typecheck` 与 `pnpm build`；提交前跑 `pnpm lint` 与 `pnpm test`。

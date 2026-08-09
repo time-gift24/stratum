@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { ApiError, compareEventSeq, createStratumApi } from "@/lib/stratum/api"
+import type { OntologyDocument } from "@/features/ontology-editor/types"
 
 const RUNTIME_ID = "runtime-1"
 const AGENT_ID = "agent-definition-1"
@@ -343,5 +344,270 @@ describe("event sequence helpers", () => {
     expect(
       compareEventSeq("18446744073709551615", "18446744073709551615")
     ).toBe(0)
+  })
+})
+
+const BASE_URL = "http://stratum.test"
+
+function makeDocument(): OntologyDocument {
+  return {
+    id: "0198f5e8-92ce-7c52-b55f-ecdc06090f4a",
+    name: "support_domain",
+    display_name: "Support domain",
+    object_types: [],
+    link_types: [],
+    canvas: { positions: [] },
+  }
+}
+
+type RecordedRequest = { url: string; init?: RequestInit }
+
+function createMockFetcher(
+  handler: (url: string, init?: RequestInit) => Response
+) {
+  const requests: RecordedRequest[] = []
+  const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    requests.push({ url, init })
+    return handler(url, init)
+  }) as typeof fetch
+  return { fetcher, requests }
+}
+
+describe("ontology api client", () => {
+  it("lists ontologies with pagination and sort query params", async () => {
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: [],
+            pagination: { page: 2, per_page: 50, total: 0 },
+          }),
+          { status: 200 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const page = await api.listOntologies({
+      page: 2,
+      perPage: 50,
+      sort: "-updated_at",
+    })
+    expect(requests[0]?.url).toBe(
+      `${BASE_URL}/v1/ontologies?page=2&per_page=50&sort=-updated_at`
+    )
+    expect(page.pagination).toEqual({ page: 2, per_page: 50, total: 0 })
+  })
+
+  it("omits query string when list options are absent", async () => {
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: [],
+            pagination: { page: 1, per_page: 20, total: 0 },
+          }),
+          { status: 200 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    await api.listOntologies()
+    expect(requests[0]?.url).toBe(`${BASE_URL}/v1/ontologies`)
+  })
+
+  it("creates an ontology and returns document, etag, and location", async () => {
+    const document = makeDocument()
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(JSON.stringify(document), {
+          status: 201,
+          headers: {
+            etag: '"rev-1"',
+            location: `/v1/ontologies/${document.id}`,
+          },
+        })
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const created = await api.createOntology({
+      name: "support_domain",
+      displayName: "Support domain",
+    })
+    expect(requests[0]?.init?.method).toBe("POST")
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      name: "support_domain",
+      display_name: "Support domain",
+    })
+    expect(created).toEqual({
+      document,
+      etag: '"rev-1"',
+      location: `/v1/ontologies/${document.id}`,
+    })
+  })
+
+  it("reads an ontology with its etag", async () => {
+    const document = makeDocument()
+    const { fetcher } = createMockFetcher(
+      () =>
+        new Response(JSON.stringify(document), {
+          status: 200,
+          headers: { etag: '"rev-3"' },
+        })
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const resource = await api.getOntology(document.id)
+    expect(resource.document).toEqual(document)
+    expect(resource.etag).toBe('"rev-3"')
+  })
+
+  it("replaces an ontology with If-Match and returns the new etag", async () => {
+    const document = makeDocument()
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(null, { status: 204, headers: { etag: '"rev-4"' } })
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const result = await api.replaceOntology(document.id, document, '"rev-3"')
+    const headers = new Headers(requests[0]?.init?.headers)
+    expect(requests[0]?.init?.method).toBe("PUT")
+    expect(headers.get("if-match")).toBe('"rev-3"')
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(document)
+    expect(result).toEqual({ etag: '"rev-4"' })
+  })
+
+  it("deletes an ontology with If-Match", async () => {
+    const { fetcher, requests } = createMockFetcher(
+      () => new Response(null, { status: 204 })
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    await api.deleteOntology("onto-1", '"rev-2"')
+    const headers = new Headers(requests[0]?.init?.headers)
+    expect(requests[0]?.url).toBe(`${BASE_URL}/v1/ontologies/onto-1`)
+    expect(requests[0]?.init?.method).toBe("DELETE")
+    expect(headers.get("if-match")).toBe('"rev-2"')
+  })
+
+  it("reads a neighborhood with an explicit depth", async () => {
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            origin_object_type_id: "ot-1",
+            depth: 2,
+            object_types: [],
+            link_types: [],
+            canvas: { positions: [] },
+          }),
+          { status: 200 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const neighborhood = await api.getObjectTypeNeighborhood("onto-1", "ot-1", 2)
+    expect(requests[0]?.url).toBe(
+      `${BASE_URL}/v1/ontologies/onto-1/object-types/ot-1/neighborhood?depth=2`
+    )
+    expect(neighborhood.origin_object_type_id).toBe("ot-1")
+  })
+
+  it("parses 422 violations into ApiError", async () => {
+    const { fetcher } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "invalid_ontology_schema",
+              message: "ontology schema is invalid",
+              violations: [
+                {
+                  code: "duplicate_object_type_name",
+                  path: "/object_types/1/name",
+                  message:
+                    "object type name is already used in this ontology",
+                },
+              ],
+            },
+          }),
+          { status: 422 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const failure = await api
+      .replaceOntology("onto-1", makeDocument(), '"rev-1"')
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    const apiError = failure as ApiError
+    expect(apiError.code).toBe("invalid_ontology_schema")
+    expect(apiError.status).toBe(422)
+    expect(apiError.violations).toEqual([
+      {
+        code: "duplicate_object_type_name",
+        path: "/object_types/1/name",
+        message: "object type name is already used in this ontology",
+      },
+    ])
+  })
+
+  it("keeps violations undefined for errors without them", async () => {
+    const { fetcher } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "ontology_precondition_failed",
+              message: "stale etag",
+            },
+          }),
+          { status: 412 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const failure = await api
+      .deleteOntology("onto-1", '"rev-1"')
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).violations).toBeUndefined()
+  })
+
+  it("normalizes fully filtered-out violations to undefined", async () => {
+    const { fetcher } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "invalid_ontology_schema",
+              message: "ontology schema is invalid",
+              violations: [{ code: 42 }, "not-a-violation"],
+            },
+          }),
+          { status: 422 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const failure = await api
+      .replaceOntology("onto-1", makeDocument(), '"rev-1"')
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).violations).toBeUndefined()
+  })
+
+  it("throws invalid_response when a document response lacks an etag", async () => {
+    const { fetcher } = createMockFetcher(
+      () => new Response(JSON.stringify(makeDocument()), { status: 200 })
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    const failure = await api
+      .getOntology("onto-1")
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).code).toBe("invalid_response")
   })
 })

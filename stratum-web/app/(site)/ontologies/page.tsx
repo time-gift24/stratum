@@ -1,0 +1,57 @@
+"use client"
+
+import { useState } from "react"
+
+import { OntologyCreateDialog } from "@/components/stratum/ontology/ontology-create-dialog"
+import { OntologyDeleteDialog } from "@/components/stratum/ontology/ontology-delete-dialog"
+import { OntologyList } from "@/components/stratum/ontology/ontology-list"
+import type { OntologySummary } from "@/features/ontology-editor/types"
+import { useOntologyList } from "@/hooks/use-ontology-list"
+
+/**
+ * Ontology 列表页：薄页面，数据经 useOntologyList 获取后以 props 下发。
+ * 顶部避让常开导航（pt-24 sm:pt-28，与对话页一致）。
+ */
+export default function OntologiesPage() {
+  const { state, api, loadPage, reload } = useOntologyList()
+  const [createOpen, setCreateOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<OntologySummary | null>(null)
+
+  // 删除等写操作后的列表刷新：若删的是当前页最后一项且不在第一页，回退一页
+  const handleListChanged = () => {
+    if (
+      state.phase === "ready" &&
+      state.page > 1 &&
+      state.result.data.length <= 1
+    ) {
+      loadPage(state.page - 1)
+      return
+    }
+    reload()
+  }
+
+  return (
+    <div className="min-h-svh pt-24 font-sans sm:pt-28">
+      <main className="mx-auto w-full max-w-3xl px-4 pb-16">
+        <OntologyList
+          state={state}
+          onPageChange={loadPage}
+          onRetry={reload}
+          onRequestCreate={() => setCreateOpen(true)}
+          onRequestDelete={setDeleteTarget}
+        />
+        <OntologyCreateDialog
+          api={api}
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+        />
+        <OntologyDeleteDialog
+          api={api}
+          ontology={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onListChanged={handleListChanged}
+        />
+      </main>
+    </div>
+  )
+}
