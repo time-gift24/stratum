@@ -2,12 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
 
-import {
-  createStratumApi,
-  ApiError,
-  STRATUM_API_BASE_URL,
-  type StratumApi,
-} from "@/lib/stratum/api"
+import { ApiError, type StratumApi } from "@/lib/stratum/api"
+import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
 import { createUuidV7 } from "@/features/ontology-editor/ids"
 import {
   browserOntologyDraftStore,
@@ -92,10 +88,7 @@ export function useOntologyEditor(
 
   const apiOption = options?.api
   const draftStoreOption = options?.draftStore
-  const api = useMemo(
-    () => apiOption ?? createStratumApi({ baseUrl: STRATUM_API_BASE_URL }),
-    [apiOption]
-  )
+  const api = useMemo(() => resolveOntologyApi(apiOption), [apiOption])
   const draftStore = useMemo(
     () =>
       draftStoreOption !== undefined

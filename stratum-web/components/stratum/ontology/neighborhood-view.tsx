@@ -6,11 +6,8 @@ import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { nativeSelectClassName } from "@/components/stratum/ontology/form-controls"
 import { NeighborhoodCanvas } from "@/components/stratum/ontology/ontology-canvas"
-import {
-  ApiError,
-  createStratumApi,
-  STRATUM_API_BASE_URL,
-} from "@/lib/stratum/api"
+import { ApiError } from "@/lib/stratum/api"
+import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
 import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import type {
   OntologyNeighborhood,
@@ -37,10 +34,7 @@ export function NeighborhoodView({
   ontologyId: string
   objectTypes: readonly OntologyObjectType[]
 }) {
-  const api = useMemo(
-    () => createStratumApi({ baseUrl: STRATUM_API_BASE_URL }),
-    []
-  )
+  const api = useMemo(() => resolveOntologyApi(undefined), [])
   const [originId, setOriginId] = useState("")
   const [depth, setDepth] = useState(1)
   const [status, setStatus] = useState<ViewStatus>({ kind: "idle" })

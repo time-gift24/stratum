@@ -3,12 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import type { OntologyListPage } from "@/features/ontology-editor/types"
-import {
-  ApiError,
-  createStratumApi,
-  STRATUM_API_BASE_URL,
-  type StratumApi,
-} from "@/lib/stratum/api"
+import { ApiError, type StratumApi } from "@/lib/stratum/api"
+import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
 
 // 契约（docs/ontology/API.md）：per_page 默认 20，sort 默认 -updated_at。
 export const ONTOLOGY_LIST_PER_PAGE = 20
@@ -34,10 +30,7 @@ type SettledResult =
 
 export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
   const apiOption = options?.api
-  const api = useMemo(
-    () => apiOption ?? createStratumApi({ baseUrl: STRATUM_API_BASE_URL }),
-    [apiOption]
-  )
+  const api = useMemo(() => resolveOntologyApi(apiOption), [apiOption])
 
   const [page, setPage] = useState(1)
   const [reloadVersion, setReloadVersion] = useState(0)
