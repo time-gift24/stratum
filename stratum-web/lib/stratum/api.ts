@@ -30,7 +30,8 @@ export class ApiError extends Error {
   }
 }
 
-export type AgentStatus = "idle" | "running" | "finished" | "failed" | "cancelled"
+export type AgentStatus =
+  "idle" | "running" | "finished" | "failed" | "cancelled"
 
 export type TokenUsage = {
   input_tokens: number
@@ -73,6 +74,8 @@ export type AgentView = {
   current_turn_id: string | null
   /** 十进制字符串 barrier，等于 snapshot 中的 agent_state.last_event_seq */
   snapshot_event_seq: string
+  /** 同一 barrier 内最新 assistant durable message 序号；不存在时为 "0" */
+  telemetry_floor_event_seq: string
   pending_approvals: readonly PendingApprovalView[]
   latest_usage: TokenUsage | null
   /** 进程内 advisory：running 且本进程未托管 exact current Turn */
@@ -102,7 +105,10 @@ export type AgentProductEventV1 =
       type: "iteration_completed"
       data: { iteration: number; usage: TokenUsage }
     }
-  | { type: "loop_finished"; data: { finish_reason: string; usage: TokenUsage } }
+  | {
+      type: "loop_finished"
+      data: { finish_reason: string; usage: TokenUsage }
+    }
   | { type: "loop_failed"; data: { error_text: string; usage: TokenUsage } }
   | { type: "loop_cancelled"; data: { usage: TokenUsage } }
 
@@ -137,34 +143,44 @@ export type LlmTelemetryEventV1 =
       data: { finish_reason: string; usage?: TokenUsage | null }
     }
 
-type FrameIdentity = {
+type BaseFrameIdentity = {
   agent_id: string
+  created_at: string
+}
+
+type ControlFrameIdentity = BaseFrameIdentity & {
   session_id: string | null
   turn_id: string | null
-  created_at: string
+}
+
+type TurnFrameIdentity = BaseFrameIdentity & {
+  session_id: string
+  turn_id: string
 }
 
 /** SSE `GET /v1/agents/{id}/events` 的唯一公开 frame（protocol_version = 1） */
 export type AgentStreamFrameV1 =
-  | (FrameIdentity & {
+  | (ControlFrameIdentity & {
       protocol_version: 1
       kind: "control"
       event:
         | { type: "stream_ready" }
         | { type: "stream_reset"; reason: "buffer_overflow" }
     })
-  | (FrameIdentity & {
+  | (TurnFrameIdentity & {
       protocol_version: 1
       kind: "durable"
       event_seq: string
       event_version: number
       event: AgentProductEventV1
     })
-  | (FrameIdentity & {
+  | (TurnFrameIdentity & {
       protocol_version: 1
       kind: "telemetry"
       llm_call_id: string
       telemetry_seq: number
+      /** telemetry 入队前已知的 Agent-wide durable high-water */
+      durable_before_event_seq: string
       event: LlmTelemetryEventV1
     })
 
@@ -188,10 +204,14 @@ export type StratumApi = {
   }): Promise<CreateAgentResult>
   getAgentTemplates(): Promise<readonly AgentTemplateView[]>
   getModels(): Promise<readonly ModelDescriptor[]>
-  getAgent(agentId: string): Promise<AgentView>
+  getAgent(
+    agentId: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<AgentView>
   getHistory(
     agentId: string,
-    query: { throughSeq: string; beforeSeq?: string; limit?: number }
+    query: { throughSeq: string; beforeSeq?: string; limit?: number },
+    options?: { signal?: AbortSignal }
   ): Promise<HistoryPage>
   sendMessage(
     agentId: string,
@@ -309,28 +329,34 @@ export function createStratumApi(options: {
       )
       return response.models
     },
-    getAgent: (agentId) => request(`/v1/agents/${agentId}`),
-    getHistory: (agentId, query) => {
+    getAgent: (agentId, options) =>
+      request(`/v1/agents/${agentId}`, { signal: options?.signal }),
+    getHistory: (agentId, query, options) => {
       const search = new URLSearchParams({
         through_event_seq: query.throughSeq,
         limit: String(query.limit ?? 50),
       })
       if (query.beforeSeq !== undefined)
         search.set("before_event_seq", query.beforeSeq)
-      return request(`/v1/agents/${agentId}/history?${search}`)
+      return request(`/v1/agents/${agentId}/history?${search}`, {
+        signal: options?.signal,
+      })
     },
     sendMessage: async (agentId, input) => {
-      const response = await fetcher(`${baseUrl}/v1/agents/${agentId}/messages`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          text: input.text,
-          expected_current_turn_id: input.expectedCurrentTurnId,
-          ...(input.modelConfig === undefined
-            ? {}
-            : { model_config: input.modelConfig }),
-        }),
-      })
+      const response = await fetcher(
+        `${baseUrl}/v1/agents/${agentId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: input.text,
+            expected_current_turn_id: input.expectedCurrentTurnId,
+            ...(input.modelConfig === undefined
+              ? {}
+              : { model_config: input.modelConfig }),
+          }),
+        }
+      )
       if (!response.ok) throw await apiErrorFromResponse(response)
       return response.json() as Promise<SendMessageResult>
     },

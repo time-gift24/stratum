@@ -19,7 +19,16 @@ use uuid::Uuid;
 use crate::error::PostgresError;
 
 /// Largest event sequence representable in the `bigint` column.
-pub const EVENT_SEQ_MAX: u64 = i64::MAX as u64;
+pub const EVENT_SEQ_MAX: u64 = i64::MAX.unsigned_abs();
+
+/// Converts a non-negative domain integer into the schema's `bigint`
+/// representation without truncation.
+pub(crate) fn u64_to_bigint(
+    value: u64,
+    overflow_context: &'static str,
+) -> Result<i64, PostgresError> {
+    i64::try_from(value).map_err(|_| PostgresError::InvalidCommand(overflow_context))
+}
 
 /// Default history page size.
 pub const HISTORY_DEFAULT_LIMIT: u32 = 50;
@@ -313,6 +322,10 @@ pub struct AgentView {
     /// Snapshot barrier; always equals `agent_state.last_event_seq` in the
     /// same MVCC snapshot.
     pub snapshot_event_seq: u64,
+    /// Latest assistant `MessageAppended` sequence at the snapshot barrier,
+    /// or zero when no assistant message exists. This is the durable floor
+    /// used to reject an older volatile telemetry tail after cold recovery.
+    pub telemetry_floor_event_seq: u64,
     /// Undecided approvals of the current Turn within the barrier, ordered by
     /// requested sequence; empty when the Turn is terminal.
     pub pending_approvals: Vec<PendingApproval>,
@@ -546,6 +559,21 @@ mod tests {
         assert_eq!(encode_event_seq(EVENT_SEQ_MAX), "9223372036854775807");
         assert_eq!(parse_event_seq("9223372036854775807"), Some(EVENT_SEQ_MAX));
         assert_eq!(parse_event_seq("0"), Some(0));
+    }
+
+    #[test]
+    fn bigint_conversion_rejects_values_above_the_schema_boundary() {
+        assert_eq!(
+            u64_to_bigint(EVENT_SEQ_MAX, "overflow").expect("boundary fits"),
+            i64::MAX
+        );
+        let overflow = EVENT_SEQ_MAX
+            .checked_add(1)
+            .expect("u64 has room above bigint max");
+        assert!(matches!(
+            u64_to_bigint(overflow, "overflow"),
+            Err(PostgresError::InvalidCommand("overflow"))
+        ));
     }
 
     #[test]

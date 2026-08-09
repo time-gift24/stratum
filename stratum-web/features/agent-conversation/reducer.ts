@@ -25,7 +25,7 @@ import type {
  * - telemetry identity = (llmCallId, telemetrySeq)：低于期待值 = 重复忽略；
  *   高于期待值 = draft 标 incomplete 并等待 durable final 收敛。
  * - final assistant MessageAppended 整体替换 draft 并关闭该 call；
- *   closed call 的迟到 telemetry 忽略。
+ *   closed call 与 durable watermark 之前的迟到 telemetry 忽略。
  * - 任一 terminal（frame 或 reconcile 发现）清空未闭合 draft，并把无 result
  *   的实时 Tool UI 标为 interrupted，不伪造 result。
  */
@@ -39,6 +39,7 @@ export const initialConversationState: ConversationState = {
   drafts: {},
   activeLlmCallId: null,
   closedLlmCallIds: new Set<string>(),
+  telemetryFloorEventSeq: "0",
   tools: {},
   approvals: {},
   historyThrough: null,
@@ -47,6 +48,7 @@ export const initialConversationState: ConversationState = {
   historyLoading: false,
   realtimeDegraded: false,
   cancelRequested: false,
+  acceptedTurnId: null,
   phase: "empty",
   error: null,
 }
@@ -71,7 +73,10 @@ export function conversationReducer(
       return {
         ...initialConversationState,
         agentId: action.agentId,
-        realtimeDegraded: state.agentId === action.agentId ? state.realtimeDegraded : false,
+        realtimeDegraded:
+          state.agentId === action.agentId ? state.realtimeDegraded : false,
+        acceptedTurnId:
+          state.agentId === action.agentId ? state.acceptedTurnId : null,
         phase: "recovering",
       }
     case "snapshot_loaded": {
@@ -82,14 +87,20 @@ export function conversationReducer(
         agentId: action.view.agent_id,
         view: action.view,
         barrier: action.view.snapshot_event_seq,
+        telemetryFloorEventSeq: action.view.telemetry_floor_event_seq,
         approvals: approvalsFromView(action.view),
         historyThrough: action.view.snapshot_event_seq,
         historyBefore: action.historyBefore,
         historyHasMore: action.historyHasMore,
         realtimeDegraded: state.realtimeDegraded,
+        acceptedTurnId:
+          state.acceptedTurnId === action.view.current_turn_id
+            ? null
+            : state.acceptedTurnId,
         phase: "recovering",
       }
-      for (const item of action.items) next = projectHistoryItem(next, item, true)
+      for (const item of action.items)
+        next = projectHistoryItem(next, item, true)
       return next
     }
     case "history_page_started":
@@ -112,20 +123,34 @@ export function conversationReducer(
       return projectDurableFrame(state, action.frame)
     case "telemetry_frame":
       return projectTelemetryFrame(state, action.frame)
+    case "turn_accepted":
+      if (state.agentId !== action.agentId) return state
+      return state.view?.current_turn_id === action.turnId
+        ? state
+        : { ...state, acceptedTurnId: action.turnId }
     case "view_reconciled": {
       if (state.agentId !== action.view.agent_id) return state
-      // 原子应用：bundle 以 view.snapshot_event_seq 为 barrier 标签。慢
-      // reconcile 的 barrier 落后于当前已应用 barrier 时整体丢弃（含
-      // items/view/approvals），不允许 barrier=12 + view=10 的混装状态
+      // 原子应用：只有 reducer 仍停在本次读取起点，才允许合并整个 bundle。
+      // SSE 或另一个 reconcile 已推进 barrier 时，items 是按旧区间计算的，
+      // view/approvals 也可能已过时，必须整体丢弃并等下一次 reconcile。
+      if (compareEventSeq(state.barrier, action.baseBarrier) !== 0) return state
       if (compareEventSeq(action.view.snapshot_event_seq, state.barrier) < 0)
         return state
-      let next = state
-      for (const item of action.items) next = projectHistoryItem(next, item, true)
+      let next = convergeAssistantFinal(
+        state,
+        action.view.telemetry_floor_event_seq
+      )
+      for (const item of action.items)
+        next = projectHistoryItem(next, item, true)
       next = {
         ...next,
         view: action.view,
         barrier: action.view.snapshot_event_seq,
         approvals: approvalsFromView(action.view),
+        acceptedTurnId:
+          next.acceptedTurnId === action.view.current_turn_id
+            ? null
+            : next.acceptedTurnId,
       }
       // reconcile 发现 terminal：与 terminal frame 相同的 draft/Tool 清理
       if (TERMINAL_STATUSES.has(action.view.status))
@@ -169,7 +194,9 @@ function approvalsFromView(
 }
 
 function entrySeq(entry: TimelineEntry): string {
-  return entry.kind === "message" ? entry.message.eventSeq : entry.marker.eventSeq
+  return entry.kind === "message"
+    ? entry.message.eventSeq
+    : entry.marker.eventSeq
 }
 
 /** 按 eventSeq 升序插入（常见情形是末位 append，向上分页才走排序） */
@@ -178,7 +205,10 @@ function insertTimelineEntry(
   entry: TimelineEntry
 ): TimelineEntry[] {
   const last = timeline.at(-1)
-  if (last === undefined || compareEventSeq(entrySeq(last), entrySeq(entry)) <= 0)
+  if (
+    last === undefined ||
+    compareEventSeq(entrySeq(last), entrySeq(entry)) <= 0
+  )
     return [...timeline, entry]
   return [...timeline, entry].sort((left, right) =>
     compareEventSeq(entrySeq(left), entrySeq(right))
@@ -216,8 +246,19 @@ function projectDurableFrame(
   frame: DurableFrame
 ): ConversationState {
   if (state.agentId === null || frame.agent_id !== state.agentId) return state
-  if (compareEventSeq(frame.event_seq, state.barrier) <= 0) return state
-  if (state.appliedEventSeqs.has(frame.event_seq)) return state
+  if (
+    compareEventSeq(frame.event_seq, state.barrier) <= 0 ||
+    state.appliedEventSeqs.has(frame.event_seq)
+  ) {
+    // Snapshot/reconcile may have applied the final outside the latest visible
+    // history page, so its floor is not necessarily in memory. The ordered
+    // realtime duplicate arrives after that call's queued telemetry; use it as
+    // convergence evidence without appending the durable item twice.
+    return frame.event.type === "message_appended" &&
+      frame.event.data.message.role === "assistant"
+      ? convergeAssistantFinal(state, frame.event_seq)
+      : state
+  }
 
   const record: AgentDurableRecordV1 = {
     event_seq: frame.event_seq,
@@ -240,6 +281,8 @@ function projectDurableFrame(
         ...next,
         error: null,
         cancelRequested: false,
+        acceptedTurnId:
+          next.acceptedTurnId === frame.turn_id ? null : next.acceptedTurnId,
         view:
           next.view === null
             ? next.view
@@ -278,13 +321,44 @@ function projectDurableFrame(
             view: { ...next.view, latest_usage: event.data.usage },
           }
     case "loop_finished":
-      return projectTerminalFrame(next, "finished", event.data.usage)
+      return projectTerminalFrame(
+        confirmDurableTurn(next, frame),
+        "finished",
+        event.data.usage
+      )
     case "loop_failed":
-      return projectTerminalFrame(next, "failed", event.data.usage)
+      return projectTerminalFrame(
+        confirmDurableTurn(next, frame),
+        "failed",
+        event.data.usage
+      )
     case "loop_cancelled":
-      return projectTerminalFrame(next, "cancelled", event.data.usage)
+      return projectTerminalFrame(
+        confirmDurableTurn(next, frame),
+        "cancelled",
+        event.data.usage
+      )
     default:
       return next
+  }
+}
+
+function confirmDurableTurn(
+  state: ConversationState,
+  frame: DurableFrame
+): ConversationState {
+  return {
+    ...state,
+    acceptedTurnId:
+      state.acceptedTurnId === frame.turn_id ? null : state.acceptedTurnId,
+    view:
+      state.view === null
+        ? null
+        : {
+            ...state.view,
+            session_id: frame.session_id,
+            current_turn_id: frame.turn_id,
+          },
   }
 }
 
@@ -319,7 +393,8 @@ function terminalCleanup(state: ConversationState): ConversationState {
   }
   const closedLlmCallIds = new Set(state.closedLlmCallIds)
   for (const callId of Object.keys(state.drafts)) closedLlmCallIds.add(callId)
-  if (state.activeLlmCallId !== null) closedLlmCallIds.add(state.activeLlmCallId)
+  if (state.activeLlmCallId !== null)
+    closedLlmCallIds.add(state.activeLlmCallId)
   return {
     ...state,
     drafts: {},
@@ -414,8 +489,7 @@ function projectMessageAppended(
   message: ChatMessage,
   convergeDraft: boolean
 ): ConversationState {
-  if (message.role === "tool")
-    return projectPersistedToolResult(state, message)
+  if (message.role === "tool") return projectPersistedToolResult(state, message)
 
   if (state.agentId === null) return state
 
@@ -435,19 +509,11 @@ function projectMessageAppended(
   }
 
   let next = state
-  // final assistant message 是 draft truth：替换 draft 并关闭该 call
-  if (
-    convergeDraft &&
-    message.role === "assistant" &&
-    next.activeLlmCallId !== null
-  ) {
-    const closedCallId = next.activeLlmCallId
-    const drafts = { ...next.drafts }
-    delete drafts[closedCallId]
-    const closedLlmCallIds = new Set(next.closedLlmCallIds)
-    closedLlmCallIds.add(closedCallId)
-    next = { ...next, drafts, activeLlmCallId: null, closedLlmCallIds }
-  }
+  // final assistant message 是 draft truth。即使 PG reconcile 先于 NATS
+  // telemetry 到达、还不知道 call_id，也推进 durable watermark；迟到帧会
+  // 由其 durable_before_event_seq 被可靠过滤。
+  if (convergeDraft && message.role === "assistant")
+    next = convergeAssistantFinal(next, eventSeq)
 
   next = stableMessage.toolCalls.reduce(
     (current, toolCall) => projectPersistedToolCall(current, toolCall),
@@ -460,6 +526,41 @@ function projectMessageAppended(
       kind: "message",
       message: stableMessage,
     }),
+  }
+}
+
+function convergeAssistantFinal(
+  state: ConversationState,
+  eventSeq: string
+): ConversationState {
+  // Only a strictly newer durable assistant fact can close the active call.
+  // Replaying the already-known floor after the next call started must not
+  // close that newer draft.
+  if (compareEventSeq(eventSeq, state.telemetryFloorEventSeq) <= 0) return state
+  const advanced = { ...state, telemetryFloorEventSeq: eventSeq }
+  if (state.activeLlmCallId === null) return advanced
+
+  const activeDraft = state.drafts[state.activeLlmCallId]
+  // The call began at or after this assistant final. The final is older
+  // convergence evidence (for example omitted from the cold history page),
+  // so it advances the floor without closing the newer call.
+  if (
+    activeDraft !== undefined &&
+    compareEventSeq(activeDraft.durableBeforeEventSeq, eventSeq) >= 0
+  )
+    return advanced
+
+  const closedCallId = state.activeLlmCallId
+  const drafts = { ...state.drafts }
+  delete drafts[closedCallId]
+  const closedLlmCallIds = new Set(state.closedLlmCallIds)
+  closedLlmCallIds.add(closedCallId)
+  return {
+    ...advanced,
+    drafts,
+    activeLlmCallId: null,
+    closedLlmCallIds,
+    telemetryFloorEventSeq: eventSeq,
   }
 }
 
@@ -506,13 +607,28 @@ function projectTelemetryFrame(
   frame: TelemetryFrame
 ): ConversationState {
   if (state.agentId === null || frame.agent_id !== state.agentId) return state
+  // A running AgentView admits only its exact current Turn. Immediately after
+  // message 202 the view may still describe the previous terminal Turn, so the
+  // exact locally accepted Turn is the sole exception while PG catches up.
+  // This fence also rejects an old Turn's queued telemetry after a newer Turn
+  // has already become current.
+  const expectedTurnId =
+    state.acceptedTurnId ??
+    (state.view?.status === "running" ? state.view.current_turn_id : null)
+  if (expectedTurnId !== frame.turn_id) return state
+  if (
+    compareEventSeq(
+      frame.durable_before_event_seq,
+      state.telemetryFloorEventSeq
+    ) < 0
+  )
+    return state
 
   const callId = frame.llm_call_id
   const existing = state.drafts[callId]
   // closed call（durable final 已收敛 / terminal 已清理）的迟到 telemetry：
   // 忽略，不重新创建 draft
-  if (existing === undefined && state.closedLlmCallIds.has(callId))
-    return state
+  if (existing === undefined && state.closedLlmCallIds.has(callId)) return state
 
   const seq = frame.telemetry_seq
   const next_expected = existing?.nextTelemetrySeq ?? 0
@@ -521,6 +637,7 @@ function projectTelemetryFrame(
 
   const draft: DraftState = existing ?? {
     llmCallId: callId,
+    durableBeforeEventSeq: frame.durable_before_event_seq,
     text: "",
     reasoning: "",
     nextTelemetrySeq: 0,

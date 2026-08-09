@@ -26,16 +26,16 @@ mod telemetry;
 mod templates;
 mod turn;
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::ExposeSecret;
 use stratum_config::{Config, ProviderConfig};
 use stratum_core::ModelId;
 use stratum_infra::{AgentTailConfig, NatsAgentTail};
 use stratum_llm::{
-    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager,
+    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager, LlmTimeouts,
     OpenAICompatibleProvider,
 };
 use stratum_postgres::PostgresBackend;
@@ -59,11 +59,6 @@ const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 /// Well-known public DeepSeek API endpoint; same product-constant contract as
 /// [`OPENAI_BASE_URL`], overridable via `[llm.deepseek].base_url`.
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
-/// Bounded wait for managed turn tasks after shutdown starts.
-const SHUTDOWN_DRAIN_BOUND: Duration = Duration::from_secs(10);
-/// Bounded wait for the NATS tail connection before degrading realtime.
-const NATS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Reads a config file and serves until shutdown.
 ///
 /// # Errors
@@ -86,6 +81,7 @@ pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
 /// not fatal.
 pub async fn serve(config: Config) -> Result<(), HostError> {
     let api = config.require_api()?.clone();
+    let shutdown_drain_bound = Duration::from_secs(api.shutdown_drain_timeout_seconds);
     let pg = PostgresBackend::connect(&config.require_postgres()?.url).await?;
     let tail = connect_tail(&config).await;
     let providers = providers(&config)?;
@@ -105,21 +101,62 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
         }
     };
     // Close admission and end SSE streams, drain in-flight requests, then
-    // boundedly wait for managed turn tasks. Turn tokens are never signalled
-    // and no cancelled/failed rows are written on behalf of the process.
+    // boundedly wait for managed turn tasks. The request middleware observes
+    // this token and drops any still-pending handler future, allowing Axum's
+    // connection tasks to finish without converting shutdown into a Turn
+    // cancellation or durable terminal event.
     state.initiate_shutdown();
-    if let Some(signal_result) = signal_result {
-        signal_result?;
-        server.await?;
-    } else if let Some(server_result) = server_result {
-        server_result?;
+    let shutdown_deadline = tokio::time::Instant::now()
+        .checked_add(shutdown_drain_bound)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "shutdown drain bound exceeds the platform clock range; using an immediate deadline"
+            );
+            tokio::time::Instant::now()
+        });
+    let server_result = match server_result {
+        Some(result) => {
+            drop(server);
+            Some(result)
+        }
+        None => {
+            let result = wait_until(shutdown_deadline, server).await;
+            if result.is_none() {
+                tracing::warn!("http graceful shutdown timed out; terminating the server");
+            }
+            result
+        }
+    };
+    let signal_result = signal_result.unwrap_or(Ok(())).map_err(HostError::from);
+    let server_result = server_result.unwrap_or(Ok(())).map_err(HostError::from);
+    let serve_result = signal_result.and(server_result);
+    if wait_until(shutdown_deadline, state.admission().wait_drained())
+        .await
+        .is_none()
+    {
+        tracing::warn!("http admission drain timed out");
     }
-    state.admission().wait_drained().await;
-    state.drain_managed_tasks(SHUTDOWN_DRAIN_BOUND).await;
-    // Dispatchers exit on the shutdown token and clean up their own hub
-    // entries; abort whatever remains so no task outlives the process.
-    state.dispatchers().abort_all();
-    Ok(())
+    state
+        .drain_runtime_tasks(
+            shutdown_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await;
+    state.dispatchers().clear();
+    serve_result
+}
+
+/// Waits for one shutdown phase within the process-wide drain deadline and
+/// drops its future when the remaining budget expires.
+async fn wait_until<F>(deadline: tokio::time::Instant, future: F) -> Option<F::Output>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        output = &mut future => Some(output),
+        () = tokio::time::sleep_until(deadline) => None,
+    }
 }
 
 /// SIGTERM or SIGINT, whichever arrives first.
@@ -153,7 +190,8 @@ async fn connect_tail(config: &Config) -> Option<NatsAgentTail> {
         max_bytes: nats.max_bytes,
         max_messages: nats.max_messages,
     };
-    match tokio::time::timeout(NATS_CONNECT_TIMEOUT, NatsAgentTail::connect(tail_config)).await {
+    let connect_timeout = Duration::from_secs(nats.connect_timeout_seconds);
+    match tokio::time::timeout(connect_timeout, NatsAgentTail::connect(tail_config)).await {
         Ok(Ok(tail)) => Some(tail),
         Ok(Err(error)) => {
             tracing::error!(error = %error, "nats tail connect failed; realtime is degraded");
@@ -187,14 +225,15 @@ fn register_openai(
     config: &ProviderConfig,
 ) -> Result<(), HostError> {
     let base_url = config.base_url.as_deref().unwrap_or(OPENAI_BASE_URL);
+    let api_key = ApiKey::from(config.api_key.clone());
+    let timeouts = provider_timeouts(config);
     for model in &config.models {
         let model_id = model_id("openai", model)?;
         providers.register(Arc::new(OpenAICompatibleProvider::new(
             base_url,
-            // The configured secret is revealed only at this construction
-            // boundary; provider clients hold it as a SecretString.
-            ApiKey::new(config.api_key.expose_secret()),
+            api_key.clone(),
             model_id,
+            timeouts,
         )))?;
     }
     Ok(())
@@ -204,6 +243,8 @@ fn register_deepseek(
     providers: &mut LlmProviderManager,
     config: &ProviderConfig,
 ) -> Result<(), HostError> {
+    let api_key = ApiKey::from(config.api_key.clone());
+    let timeouts = provider_timeouts(config);
     for model in &config.models {
         let adapter_model = match model.as_str() {
             "deepseek-v4-flash" => DeepSeekModel::V4Flash,
@@ -216,14 +257,22 @@ fn register_deepseek(
         };
         providers.register(Arc::new(DeepSeekProvider::new(
             config.base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL),
-            // The configured secret is revealed only at this construction
-            // boundary; provider clients hold it as a SecretString.
-            ApiKey::new(config.api_key.expose_secret()),
+            api_key.clone(),
             adapter_model,
             DeepSeekThinking::Disabled,
+            timeouts,
         )))?;
     }
     Ok(())
+}
+
+fn provider_timeouts(config: &ProviderConfig) -> LlmTimeouts {
+    LlmTimeouts::new(
+        Duration::from_secs(config.connect_timeout_seconds),
+        Duration::from_secs(config.request_timeout_seconds),
+        Duration::from_secs(config.first_response_timeout_seconds),
+        Duration::from_secs(config.stream_idle_timeout_seconds),
+    )
 }
 
 fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {
@@ -236,7 +285,13 @@ fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostError, providers};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    use super::{HostError, providers, wait_until};
     use stratum_config::Config;
     use stratum_core::ModelId;
 
@@ -298,5 +353,35 @@ models = ["deepseek-v4-flash", "deepseek-v3"]
             providers(&config),
             Err(HostError::UnsupportedDeepSeekModel { .. })
         ));
+    }
+
+    struct PendingUntilDropped(Arc<AtomicBool>);
+
+    impl Future for PendingUntilDropped {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingUntilDropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_phase_drops_a_future_that_does_not_finish() {
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let result = wait_until(
+            tokio::time::Instant::now(),
+            PendingUntilDropped(Arc::clone(&dropped)),
+        )
+        .await;
+
+        assert!(result.is_none());
+        assert!(dropped.load(Ordering::Acquire));
     }
 }

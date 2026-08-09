@@ -71,7 +71,7 @@ Postgres create command 必须（SHALL）以客户端提供的 UUID `Idempotency
 - **THEN**公开 product sequence可以跳号；恢复读取完整 truth range时仍要求无缺行
 
 ### Requirement: Event 与 Runtime Snapshot 显式版本化
-`definition_schema_version`、`event_version` 与 `runtime_snapshot_version` 必须（SHALL）彼此独立并从 v1 开始；当前版本不得（SHALL NOT）实现 upcaster。未知但结构可识别的更高版本必须（SHALL）映射 `runtime_incompatible`；已知版本无法解码、字段畸形或违反 identity/ordering invariant 必须（SHALL）映射 `durable_state_corrupt`。
+`definition_schema_version`、`event_version` 与 `runtime_snapshot_version` 必须（SHALL）彼此独立并从 v1 开始；当前版本不得（SHALL NOT）实现 upcaster。未知但结构可识别的更高版本必须（SHALL）映射 `runtime_incompatible`；已知版本无法解码、含typed shape之外的未知字段、使用非canonical默认/别名或违反 identity/ordering invariant 必须（SHALL）映射 `durable_state_corrupt`。普通event必须（SHALL）经typed decode后与canonical v1重新编码逐值相等；`ToolApprovalRequested`仅允许store-owned `hook_invocation_id`这一精确扩展，并由deny-unknown wire shape解码。
 
 runtime snapshot必须（SHALL）只附着于 `LoopStarted` durable row，且严格包含 `agent_version_id`、`effective_model_config`、`tool_set_fingerprint`、`skill_set_version_id`、`extension_set_version_id` 与 ordered `hook_handler_versions`。snapshot不得（SHALL NOT）包含 prompt、provider重建配置、secret或base；`base_event_seq` 必须（SHALL）由 `LoopStarted.event_seq - 1` 推导。snapshot version和snapshot必须（SHALL）同时存在或同时为空，并且每个 `(agent_id,turn_id)` 必须（SHALL）恰有一个 `LoopStarted`、至多一个 terminal event。
 
@@ -86,6 +86,10 @@ runtime snapshot必须（SHALL）只附着于 `LoopStarted` durable row，且严
 #### Scenario: 已知 Event Version 内容损坏
 - **WHEN** v1 durable row缺少必需variant字段或identity不合法
 - **THEN**读取返回 `durable_state_corrupt` 并保留底层source chain
+
+#### Scenario: 已知 Event Version 含未知字段
+- **WHEN** v1 durable row在variant、嵌套message/hook decision或approval wire shape中增加当前合同未声明的字段
+- **THEN**读取返回`durable_state_corrupt`，不得由serde静默忽略后继续resume、发布或执行外部动作
 
 ### Requirement: TranscriptCompacted 使用单一 Companion Summary
 每个 `TranscriptCompacted` 必须（SHALL）在 durable append 的同一事务中写一条 `durable_events` discriminator row 与一条同 `(agent_id,event_seq)` 的 `transcript_compactions` companion row。companion必须（SHALL）保存 `turn_id`、`compacted_iteration`、`upto`、non-null `retained_from_event_seq`、单一 typed system-marker `summary` 与 `created_at`；companion shape由对应durable row的`event_version`治理，不增加独立summary version。该event的durable `payload`必须（SHALL）固定为空对象，不得（SHALL NOT）复制summary、iteration、upto或pointer；读取typed `TranscriptCompacted`时必须（SHALL）通过一对一companion物化。不得（SHALL NOT）保存完整messages、suffix snapshot、`summary_digest`、filesystem line或byte offset。
@@ -109,11 +113,11 @@ companion是永久 durable fact的一部分而不是可丢失projection。存在
 - **THEN** recovery忽略加速pointer并从ledger起点内存重放，不写repair row
 
 ### Requirement: History 与 Derived View 直接查询 Durable Ledger
-Postgres query API必须（SHALL）从固定 high-water 的 `durable_events` 读取AgentView派生事实与product history，不得（SHALL NOT）维护 `agent_messages`、`tool_approvals`、usage、outcome或resume projection。history必须（SHALL）使用只覆盖 `MessageAppended`、`TranscriptCompacted`和安全 `LoopFailed/LoopCancelled` marker的partial index；Tool最终结果必须（SHALL）作为 `MessageAppended(role=tool,tool_call_id=CallId)`读取。原始durable rows与compaction companions必须（SHALL）永久保留，当前change不得（SHALL NOT）提供retention delete或projection rebuild API。
+Postgres query API必须（SHALL）从固定 high-water 的 `durable_events` 读取AgentView派生事实与product history，不得（SHALL NOT）维护 `agent_messages`、`tool_approvals`、usage、telemetry floor、outcome或resume projection。AgentView 的 telemetry floor 必须（SHALL）通过严格版本/companion 解码 barrier 内的 `MessageAppended` rows 派生为最后一个 assistant row 的 event sequence；history必须（SHALL）使用只覆盖 `MessageAppended`、`TranscriptCompacted`和安全 `LoopFailed/LoopCancelled` marker的partial index；Tool最终结果必须（SHALL）作为 `MessageAppended(role=tool,tool_call_id=CallId)`读取。原始durable rows与compaction companions必须（SHALL）永久保留，当前change不得（SHALL NOT）提供retention delete或projection rebuild API。
 
 #### Scenario: Pending Approval 从同一 Snapshot 派生
 - **WHEN** AgentView在PG MVCC snapshot中捕获barrier
-- **THEN** status、usage与Requested减Resolved的pending approvals均按该barrier查询，不读取state副本
+- **THEN** status、usage、latest assistant telemetry floor与Requested减Resolved的pending approvals均按该barrier查询，不读取state副本
 
 #### Scenario: History 不依赖 Message Projection
 - **WHEN** 调用方分页读取公开history

@@ -27,9 +27,9 @@ impl TelemetryGuard {
     /// Flushes pending spans and ends the tracer provider, when installed.
     pub fn shutdown(self) {
         if let Some(provider) = self.provider
-            && let Err(error) = provider.shutdown()
+            && provider.shutdown().is_err()
         {
-            tracing::warn!(error = %error, "otlp tracer provider shutdown failed");
+            tracing::warn!("otlp tracer provider shutdown failed");
         }
     }
 }

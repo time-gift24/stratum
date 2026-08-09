@@ -49,10 +49,52 @@ pub struct ApiConfig {
     /// Browser origins allowed to call the API.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Maximum graceful drain time for managed and background tasks.
+    #[serde(default = "default_shutdown_drain_timeout_seconds")]
+    pub shutdown_drain_timeout_seconds: u64,
+    /// SSE keep-alive interval.
+    #[serde(default = "default_sse_keep_alive_seconds")]
+    pub sse_keep_alive_seconds: u64,
+    /// Durable approval ledger fallback polling interval.
+    #[serde(default = "default_approval_poll_interval_seconds")]
+    pub approval_poll_interval_seconds: u64,
+    /// Idle interval after which an Agent dispatcher with no external handles
+    /// releases its map entry and task.
+    #[serde(default = "default_dispatcher_idle_timeout_seconds")]
+    pub dispatcher_idle_timeout_seconds: u64,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_api_bind(),
+            allowed_origins: Vec::new(),
+            shutdown_drain_timeout_seconds: default_shutdown_drain_timeout_seconds(),
+            sse_keep_alive_seconds: default_sse_keep_alive_seconds(),
+            approval_poll_interval_seconds: default_approval_poll_interval_seconds(),
+            dispatcher_idle_timeout_seconds: default_dispatcher_idle_timeout_seconds(),
+        }
+    }
 }
 
 fn default_api_bind() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 8080))
+}
+
+const fn default_shutdown_drain_timeout_seconds() -> u64 {
+    10
+}
+
+const fn default_sse_keep_alive_seconds() -> u64 {
+    15
+}
+
+const fn default_approval_poll_interval_seconds() -> u64 {
+    15
+}
+
+const fn default_dispatcher_idle_timeout_seconds() -> u64 {
+    60
 }
 
 /// NATS short-tail configuration.
@@ -74,6 +116,13 @@ pub struct NatsConfig {
     pub max_bytes: i64,
     /// Maximum retained event count.
     pub max_messages: i64,
+    /// Maximum time allowed for the initial NATS connection.
+    #[serde(default = "default_nats_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+}
+
+const fn default_nats_connect_timeout_seconds() -> u64 {
+    5
 }
 
 /// Postgres execution-storage configuration.
@@ -157,8 +206,8 @@ pub struct LlmConfig {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ProviderConfig {
-    /// Provider API key; held as a secret in memory (§6) and revealed only
-    /// through [`ExposeSecret`] at the provider construction boundary.
+    /// Provider API key; held as a secret in memory (§6) and transferred to
+    /// the provider wrapper without creating an ordinary plaintext `String`.
     pub api_key: SecretString,
     /// Provider-local model names available to agents.
     pub models: Vec<String>,
@@ -166,6 +215,34 @@ pub struct ProviderConfig {
     /// public endpoint is used by the assembly layer.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// TCP connect timeout for provider egress.
+    #[serde(default = "default_llm_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    /// Total timeout for a non-streaming chat request.
+    #[serde(default = "default_llm_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+    /// Maximum wait for streaming response headers.
+    #[serde(default = "default_llm_first_response_timeout_seconds")]
+    pub first_response_timeout_seconds: u64,
+    /// Maximum silence between streaming response body chunks.
+    #[serde(default = "default_llm_stream_idle_timeout_seconds")]
+    pub stream_idle_timeout_seconds: u64,
+}
+
+const fn default_llm_connect_timeout_seconds() -> u64 {
+    10
+}
+
+const fn default_llm_request_timeout_seconds() -> u64 {
+    120
+}
+
+const fn default_llm_first_response_timeout_seconds() -> u64 {
+    30
+}
+
+const fn default_llm_stream_idle_timeout_seconds() -> u64 {
+    60
 }
 
 // Equality compares the revealed key value in code only; the secret is never
@@ -175,6 +252,10 @@ impl PartialEq for ProviderConfig {
         self.api_key.expose_secret() == other.api_key.expose_secret()
             && self.models == other.models
             && self.base_url == other.base_url
+            && self.connect_timeout_seconds == other.connect_timeout_seconds
+            && self.request_timeout_seconds == other.request_timeout_seconds
+            && self.first_response_timeout_seconds == other.first_response_timeout_seconds
+            && self.stream_idle_timeout_seconds == other.stream_idle_timeout_seconds
     }
 }
 
@@ -187,6 +268,16 @@ impl fmt::Debug for ProviderConfig {
             .field("api_key", &"[redacted]")
             .field("models", &self.models)
             .field("base_url", &self.base_url)
+            .field("connect_timeout_seconds", &self.connect_timeout_seconds)
+            .field("request_timeout_seconds", &self.request_timeout_seconds)
+            .field(
+                "first_response_timeout_seconds",
+                &self.first_response_timeout_seconds,
+            )
+            .field(
+                "stream_idle_timeout_seconds",
+                &self.stream_idle_timeout_seconds,
+            )
             .finish()
     }
 }
@@ -308,6 +399,25 @@ impl Config {
                     return Err(ConfigError::InvalidAllowedOrigin);
                 }
             }
+            for (field, value) in [
+                (
+                    "shutdown_drain_timeout_seconds",
+                    api.shutdown_drain_timeout_seconds,
+                ),
+                ("sse_keep_alive_seconds", api.sse_keep_alive_seconds),
+                (
+                    "approval_poll_interval_seconds",
+                    api.approval_poll_interval_seconds,
+                ),
+                (
+                    "dispatcher_idle_timeout_seconds",
+                    api.dispatcher_idle_timeout_seconds,
+                ),
+            ] {
+                if value == 0 {
+                    return Err(ConfigError::InvalidApiConfig { field });
+                }
+            }
         }
         self.validate_model_configured(&self.llm.default)
     }
@@ -364,6 +474,11 @@ fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
             field: "max_messages",
         });
     }
+    if config.connect_timeout_seconds == 0 {
+        return Err(ConfigError::InvalidNatsConfig {
+            field: "connect_timeout_seconds",
+        });
+    }
     Ok(())
 }
 
@@ -386,6 +501,22 @@ fn validate_provider(
         .is_some_and(|base_url| base_url.trim().is_empty())
     {
         return Err(ConfigError::InvalidProviderBaseUrl { provider });
+    }
+    for (field, value) in [
+        ("connect_timeout_seconds", config.connect_timeout_seconds),
+        ("request_timeout_seconds", config.request_timeout_seconds),
+        (
+            "first_response_timeout_seconds",
+            config.first_response_timeout_seconds,
+        ),
+        (
+            "stream_idle_timeout_seconds",
+            config.stream_idle_timeout_seconds,
+        ),
+    ] {
+        if value == 0 {
+            return Err(ConfigError::InvalidProviderTimeout { provider, field });
+        }
     }
     let mut models = HashSet::with_capacity(config.models.len());
     for model in &config.models {
@@ -455,6 +586,58 @@ prompt = "  You are a coding agent.  "
         assert_eq!(config.llm.default.as_str(), "deepseek:deepseek-v4-flash");
         assert_eq!(config.require_api().expect("api exists").bind.port(), 8080);
         assert_eq!(config.require_nats().expect("nats exists").replicas, 1);
+        let api = config.require_api().expect("api exists");
+        assert_eq!(api.shutdown_drain_timeout_seconds, 10);
+        assert_eq!(api.sse_keep_alive_seconds, 15);
+        assert_eq!(api.approval_poll_interval_seconds, 15);
+        assert_eq!(api.dispatcher_idle_timeout_seconds, 60);
+        let nats = config.require_nats().expect("nats exists");
+        assert_eq!(nats.connect_timeout_seconds, 5);
+        let provider = config.llm.deepseek.as_ref().expect("provider exists");
+        assert_eq!(provider.connect_timeout_seconds, 10);
+        assert_eq!(provider.request_timeout_seconds, 120);
+        assert_eq!(provider.first_response_timeout_seconds, 30);
+        assert_eq!(provider.stream_idle_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn rejects_zero_operational_timeouts() {
+        let cases = [
+            (
+                VALID_CONFIG.replace(
+                    "[api]\n",
+                    "[api]\nshutdown_drain_timeout_seconds = 0\n",
+                ),
+                "api",
+            ),
+            (
+                VALID_CONFIG.replace(
+                    "[nats]\n",
+                    "[nats]\nconnect_timeout_seconds = 0\n",
+                ),
+                "nats",
+            ),
+            (
+                VALID_CONFIG.replace(
+                    "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
+                    "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]\nstream_idle_timeout_seconds = 0",
+                ),
+                "provider",
+            ),
+        ];
+
+        for (input, kind) in cases {
+            let error = Config::parse(&input).expect_err("zero timeout is rejected");
+            assert!(
+                matches!(
+                    (kind, error),
+                    ("api", ConfigError::InvalidApiConfig { .. })
+                        | ("nats", ConfigError::InvalidNatsConfig { .. })
+                        | ("provider", ConfigError::InvalidProviderTimeout { .. })
+                ),
+                "unexpected timeout error for {kind}"
+            );
+        }
     }
 
     #[test]

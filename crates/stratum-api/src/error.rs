@@ -4,15 +4,46 @@
 //! envelope. Codes are stable snake_case discriminants; messages are fixed,
 //! safe, and never contain SQL, NATS subjects, host paths, prompts, tool
 //! payloads, provider bodies, or credentials. Source chains are kept inside
-//! [`ApiError`] and logged once at the HTTP boundary: `tracing::error!` for
-//! 5xx, `tracing::warn!` for 4xx.
+//! [`ApiError`]; the HTTP boundary logs only the stable safe classification,
+//! never arbitrary source text: `tracing::error!` for 5xx and
+//! `tracing::warn!` for 4xx.
 
 use std::error::Error as StdError;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use stratum_infra::AgentTailError;
 use stratum_postgres::PostgresError;
 use utoipa::ToSchema;
+
+/// A persisted non-exhaustive variant that this API binary cannot map to its
+/// explicit v1 behavior. These errors fail closed instead of inventing a
+/// product event or approval decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PersistedVariantError {
+    /// A future durable event has no explicit product-stream projection.
+    #[error("persisted durable event has no v1 product projection")]
+    UnsupportedDurableProductEvent,
+    /// A future approval decision has no explicit v1 behavior.
+    #[error("persisted approval decision is not supported")]
+    UnsupportedApprovalDecision,
+}
+
+/// Failure at one concrete dispatcher scan, projection, or publish boundary.
+/// Each variant preserves the typed source while exposing only a fixed safe
+/// message to logs.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DispatchError {
+    /// NATS rejected or failed a realtime publish.
+    #[error("realtime publish failed")]
+    Publish(#[source] AgentTailError),
+    /// Postgres failed to scan a committed durable interval.
+    #[error("durable event scan failed")]
+    Scan(#[source] PostgresError),
+    /// A persisted event cannot be projected into the explicit v1 protocol.
+    #[error("durable product projection failed")]
+    Projection(#[source] PersistedVariantError),
+}
 
 /// Stable error envelope returned by every error response of the API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
@@ -284,6 +315,7 @@ pub(crate) fn kind_of_postgres(source: &PostgresError) -> ErrorKind {
         | PostgresError::Migrate(_)
         | PostgresError::StoreUnavailable(_) => ErrorKind::StoreUnavailable,
         PostgresError::ApprovalAlreadyRequested { .. }
+        | PostgresError::ApprovalIdConflict { .. }
         | PostgresError::InvalidCompactionPointer { .. }
         | PostgresError::InvalidCommand(_)
         | PostgresError::SequenceOverflow { .. }
@@ -302,17 +334,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.kind.status();
         if status.is_server_error() {
-            // Log the stable code plus the typed error's own Display, which
-            // libraries craft safe; never a Debug dump of arbitrary sources
-            // (SQL text, NATS detail, or host paths could leak there).
-            match &self.source {
-                Some(source) => tracing::error!(
-                    error.code = self.kind.code(),
-                    source = %source,
-                    "request failed"
-                ),
-                None => tracing::error!(error.code = self.kind.code(), "request failed"),
-            }
+            tracing::error!(error.code = self.kind.code(), "request failed");
         } else {
             tracing::warn!(error.code = self.kind.code(), "request rejected");
         }

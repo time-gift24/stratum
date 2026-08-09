@@ -16,17 +16,22 @@
 //! republish historical rows.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 use stratum_core::{AgentId, AgentTelemetryEvent, LlmCallId, SessionId, TurnId};
 use stratum_infra::NatsAgentTail;
 use stratum_postgres::PostgresBackend;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-use crate::frames::{AgentStreamFrameV1, ScannedRow, product_event};
+use crate::error::{DispatchError, PersistedVariantError};
+use crate::frames::{AgentProductEventV1, AgentStreamFrameV1, ScannedRow, product_event};
+use crate::state::{RuntimeTasks, spawn_runtime_task};
 
 /// Bounded per-dispatcher command queue.
 const DISPATCHER_CHANNEL_CAPACITY: usize = 1024;
@@ -34,13 +39,15 @@ const DISPATCHER_CHANNEL_CAPACITY: usize = 1024;
 /// Command accepted by one Agent's dispatcher.
 #[derive(Debug)]
 pub(crate) enum DispatcherCommand {
-    /// A durable commit advanced the Agent high-water.
-    Durable {
-        /// Highest committed event sequence known to the sender.
-        high_water: u64,
+    /// Publishes committed durable rows through this receipt's fixed target.
+    DurableWake {
+        /// Committed Agent-wide high-water observed by this receipt.
+        through: u64,
     },
     /// One volatile LLM telemetry event of the active Turn.
     Telemetry {
+        /// Durable high-water observed before this telemetry was enqueued.
+        durable_before: u64,
         /// Bound Session.
         session_id: SessionId,
         /// Exact Turn.
@@ -59,6 +66,7 @@ pub(crate) enum DispatcherCommand {
 pub(crate) struct DispatcherHandle {
     agent_id: AgentId,
     tx: mpsc::Sender<DispatcherCommand>,
+    durable_target: Arc<AtomicU64>,
 }
 
 impl DispatcherHandle {
@@ -66,22 +74,29 @@ impl DispatcherHandle {
     #[cfg(test)]
     pub(crate) fn stub(agent_id: AgentId) -> (Self, mpsc::Receiver<DispatcherCommand>) {
         let (tx, rx) = mpsc::channel(16);
-        (Self { agent_id, tx }, rx)
+        (
+            Self {
+                agent_id,
+                tx,
+                durable_target: Arc::new(AtomicU64::new(0)),
+            },
+            rx,
+        )
     }
 
-    /// Reports one committed durable high-water. The queue is bounded; a
-    /// dropped receipt only delays realtime delivery, and Postgres reconcile
-    /// converges the client.
+    /// Reports one committed durable high-water without making the Postgres
+    /// acknowledgement wait for realtime transport capacity. A full queue may
+    /// coalesce this wake into `durable_target`; the dispatcher reloads that
+    /// target whenever its accepted command queue drains and before retiring.
     pub(crate) fn receipt(&self, high_water: u64) {
-        if self
-            .tx
-            .try_send(DispatcherCommand::Durable { high_water })
-            .is_err()
-        {
-            tracing::warn!(
-                agent_id = %self.agent_id,
-                "dispatcher queue is full; dropping a durable receipt"
-            );
+        self.durable_target.fetch_max(high_water, Ordering::Release);
+        match self.tx.try_send(DispatcherCommand::DurableWake {
+            through: high_water,
+        }) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(agent_id = %self.agent_id, "dispatcher is closed");
+            }
         }
     }
 
@@ -94,9 +109,11 @@ impl DispatcherHandle {
         telemetry_seq: u64,
         event: AgentTelemetryEvent,
     ) {
+        let durable_before = self.durable_target.load(Ordering::Acquire);
         if self
             .tx
             .try_send(DispatcherCommand::Telemetry {
+                durable_before,
                 session_id,
                 turn_id,
                 llm_call_id,
@@ -113,20 +130,25 @@ impl DispatcherHandle {
     }
 }
 
-/// One tracked dispatcher: its sending half and its owned task handle.
+/// One live dispatcher registration. The map's strong sender serializes all
+/// receipts for the Agent; the task retires it after a configured idle period
+/// only when no external handle exists.
 struct DispatcherEntry {
-    handle: DispatcherHandle,
-    task: JoinHandle<()>,
+    generation: Uuid,
+    tx: mpsc::Sender<DispatcherCommand>,
+    durable_target: Arc<AtomicU64>,
 }
 
-/// Lazily creates and tracks the per-Agent dispatchers of this process. An
-/// exiting dispatcher removes its own entry and shutdown aborts the rest, so
-/// the hub neither grows unboundedly nor leaves tasks unowned.
+/// Lazily creates the per-Agent dispatchers of this process. Tasks are owned
+/// by the process `JoinSet`; an idle retirement handshake breaks the map
+/// sender / task receiver lifecycle without allowing two live dispatchers.
 pub(crate) struct DispatcherHub {
     entries: Arc<Mutex<HashMap<AgentId, DispatcherEntry>>>,
     pg: PostgresBackend,
     tail: Option<NatsAgentTail>,
     shutdown: CancellationToken,
+    tasks: RuntimeTasks,
+    idle_timeout: Duration,
 }
 
 impl DispatcherHub {
@@ -136,51 +158,54 @@ impl DispatcherHub {
         pg: PostgresBackend,
         tail: Option<NatsAgentTail>,
         shutdown: CancellationToken,
+        tasks: RuntimeTasks,
+        idle_timeout: Duration,
     ) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             pg,
             tail,
             shutdown,
+            tasks,
+            idle_timeout,
         }
     }
 
     /// Returns the dispatcher of a locally active Agent, creating it at the
-    /// supplied frontier when absent.
+    /// supplied frontier when absent. A writer that does not already hold a
+    /// handle must call this with a Postgres barrier observed *before* its
+    /// commit and retain the handle through [`DispatcherHandle::receipt`];
+    /// lazy creation from a post-commit receipt can skip an earlier concurrent
+    /// writer whose task wake arrives later.
     pub(crate) fn ensure(&self, agent_id: AgentId, frontier: u64) -> DispatcherHandle {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries
-            .entry(agent_id)
-            .or_insert_with(|| self.spawn(agent_id, frontier))
-            .handle
-            .clone()
-    }
-
-    /// Reports a commit from a writer that may not hold a handle (approval
-    /// resolver); a dispatcher created here starts at the receipt itself so
-    /// exactly the committing row is scanned.
-    pub(crate) fn receipt(&self, agent_id: AgentId, high_water: u64) {
-        self.ensure(agent_id, high_water.saturating_sub(1))
-            .receipt(high_water);
-    }
-
-    /// Aborts every remaining dispatcher task and clears the hub; called
-    /// during shutdown so no dispatcher task outlives the process.
-    pub(crate) fn abort_all(&self) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (_, entry) in entries.drain() {
-            entry.task.abort();
+        if let Some(entry) = entries.get(&agent_id) {
+            return DispatcherHandle {
+                agent_id,
+                tx: entry.tx.clone(),
+                durable_target: Arc::clone(&entry.durable_target),
+            };
         }
+
+        let (entry, handle) = self.spawn(agent_id, frontier);
+        entries.insert(agent_id, entry);
+        handle
     }
 
-    fn spawn(&self, agent_id: AgentId, frontier: u64) -> DispatcherEntry {
+    /// Clears the strong registrations after the process-owned task set drains.
+    pub(crate) fn clear(&self) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn spawn(&self, agent_id: AgentId, frontier: u64) -> (DispatcherEntry, DispatcherHandle) {
         let (tx, rx) = mpsc::channel(DISPATCHER_CHANNEL_CAPACITY);
+        let durable_target = Arc::new(AtomicU64::new(frontier));
         let io = PgNatsIo {
             agent_id,
             pg: self.pg.clone(),
@@ -188,49 +213,51 @@ impl DispatcherHub {
         };
         let shutdown = self.shutdown.clone();
         let entries = Arc::clone(&self.entries);
-        let task = tokio::spawn(async move {
-            run_dispatcher(agent_id, frontier, rx, io, shutdown).await;
-            // Self-cleanup: remove only this task's own entry — a newer
-            // dispatcher of the same Agent is never deleted.
+        let generation = Uuid::now_v7();
+        let idle_timeout = self.idle_timeout;
+        let task_entries = Arc::clone(&entries);
+        let task_durable_target = Arc::clone(&durable_target);
+        spawn_runtime_task(&self.tasks, async move {
+            run_dispatcher(
+                frontier,
+                rx,
+                io,
+                shutdown,
+                DispatcherTaskContext {
+                    agent_id,
+                    entries: task_entries,
+                    generation,
+                    idle_timeout,
+                    durable_target: task_durable_target,
+                },
+            )
+            .await;
+            // Remove only this generation. A new dispatcher may already have
+            // replaced an idle generation while this task was exiting.
             let mut entries = entries
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if entries
                 .get(&agent_id)
-                .is_some_and(|entry| entry.task.id() == tokio::task::id())
+                .is_some_and(|entry| entry.generation == generation)
             {
                 entries.remove(&agent_id);
             }
         });
-        DispatcherEntry {
-            handle: DispatcherHandle { agent_id, tx },
-            task,
-        }
+        let entry = DispatcherEntry {
+            generation,
+            tx: tx.clone(),
+            durable_target: Arc::clone(&durable_target),
+        };
+        (
+            entry,
+            DispatcherHandle {
+                agent_id,
+                tx,
+                durable_target,
+            },
+        )
     }
-}
-
-/// IO boundary of the dispatcher. This stays a trait because it has two real
-/// implementations: the production Postgres+NATS IO below and the in-memory
-/// mock in tests — testability of the ordering loop is the documented reason.
-#[allow(async_fn_in_trait)] // single-call-site trait; dyn compatibility is not needed
-pub(crate) trait DispatcherIo {
-    /// Publishes one serialized frame to the Agent tail.
-    async fn publish(&self, frame: Bytes) -> Result<(), DispatchIoError>;
-    /// Reads committed rows in `(from, to]` in ascending order.
-    async fn scan(
-        &self,
-        from_event_seq: u64,
-        to_event_seq: u64,
-    ) -> Result<Vec<ScannedRow>, DispatchIoError>;
-}
-
-/// Dispatcher IO failure; only its kind is ever logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DispatchIoError {
-    /// The publish half failed.
-    Publish,
-    /// The scan half failed.
-    Scan,
 }
 
 /// Production IO: Postgres scans plus the NATS tail, degrading to a no-op
@@ -241,14 +268,14 @@ struct PgNatsIo {
     tail: Option<NatsAgentTail>,
 }
 
-impl DispatcherIo for PgNatsIo {
-    async fn publish(&self, frame: Bytes) -> Result<(), DispatchIoError> {
+impl PgNatsIo {
+    async fn publish(&self, frame: Bytes) -> Result<(), DispatchError> {
         match &self.tail {
             Some(tail) => tail
                 .publish(&self.agent_id, frame)
                 .await
                 .map(|_| ())
-                .map_err(|_| DispatchIoError::Publish),
+                .map_err(DispatchError::Publish),
             // Realtime is degraded: frames drop silently and clients
             // reconcile from Postgres.
             None => Ok(()),
@@ -259,334 +286,626 @@ impl DispatcherIo for PgNatsIo {
         &self,
         from_event_seq: u64,
         to_event_seq: u64,
-    ) -> Result<Vec<ScannedRow>, DispatchIoError> {
+    ) -> Result<Vec<ScannedRow>, DispatchError> {
         let rows = self
             .pg
             .read_events_range(self.agent_id, from_event_seq, to_event_seq)
             .await
-            .map_err(|_| DispatchIoError::Scan)?;
+            .map_err(DispatchError::Scan)?;
         Ok(rows.into_iter().map(ScannedRow::from).collect())
     }
 }
 
-/// One dispatcher's ordered publish loop.
-async fn run_dispatcher<IO: DispatcherIo>(
+/// Lifecycle and ordering context owned by one dispatcher task.
+struct DispatcherTaskContext {
     agent_id: AgentId,
+    entries: Arc<Mutex<HashMap<AgentId, DispatcherEntry>>>,
+    generation: Uuid,
+    idle_timeout: Duration,
+    durable_target: Arc<AtomicU64>,
+}
+
+/// One dispatcher's ordered publish loop.
+async fn run_dispatcher(
     initial_frontier: u64,
     mut rx: mpsc::Receiver<DispatcherCommand>,
-    io: IO,
+    io: PgNatsIo,
     shutdown: CancellationToken,
+    context: DispatcherTaskContext,
 ) {
-    let mut last_published = initial_frontier;
+    let mut frontier = DurableFrontier(initial_frontier);
     loop {
         let command = tokio::select! {
             () = shutdown.cancelled() => break,
             command = rx.recv() => command,
+            () = tokio::time::sleep(context.idle_timeout) => {
+                flush_coalesced_target(&context, &rx, &io, &mut frontier).await;
+                let target = context.durable_target.load(Ordering::Acquire);
+                if frontier.is_caught_up(target) && retire_idle_dispatcher(
+                    &context.entries,
+                    context.agent_id,
+                    context.generation,
+                    &mut rx,
+                ) {
+                    break;
+                }
+                continue;
+            }
         };
         match command {
             None => break,
+            Some(DispatcherCommand::DurableWake { through }) => {
+                flush_durable(context.agent_id, &io, through, &mut frontier).await;
+            }
             Some(DispatcherCommand::Telemetry {
+                durable_before,
                 session_id,
                 turn_id,
                 llm_call_id,
                 telemetry_seq,
                 event,
             }) => {
-                let frame = AgentStreamFrameV1::telemetry(
-                    agent_id,
-                    session_id,
-                    turn_id,
-                    llm_call_id,
-                    telemetry_seq,
-                    &event,
-                );
-                match frame.to_bytes() {
-                    Ok(bytes) => {
-                        if io.publish(bytes).await.is_err() {
-                            tracing::warn!(
-                                agent_id = %agent_id,
-                                "realtime telemetry publish failed; clients recover via postgres"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(agent_id = %agent_id, error = %error, "telemetry frame failed to serialize");
-                    }
-                }
-            }
-            Some(DispatcherCommand::Durable { high_water }) => {
-                if high_water <= last_published {
-                    continue;
-                }
-                let rows = match io.scan(last_published, high_water).await {
-                    Ok(rows) => rows,
-                    Err(_) => {
-                        // Keep the frontier: the next receipt rescans.
-                        tracing::error!(
-                            agent_id = %agent_id,
-                            "durable scan failed; realtime delivery is delayed until the next receipt"
-                        );
-                        continue;
-                    }
-                };
-                for row in rows {
-                    if let Some(product) = product_event(&row.event) {
-                        let frame =
-                            AgentStreamFrameV1::durable(agent_id, &row, product, row.event_version);
+                let durable_ready =
+                    flush_durable(context.agent_id, &io, durable_before, &mut frontier).await;
+                if !durable_ready {
+                    tracing::warn!(
+                        agent_id = %context.agent_id,
+                        "telemetry was suppressed behind an unpublished durable event"
+                    );
+                } else {
+                    let frame = AgentStreamFrameV1::telemetry(
+                        context.agent_id,
+                        session_id,
+                        turn_id,
+                        durable_before,
+                        llm_call_id,
+                        telemetry_seq,
+                        &event,
+                    );
+                    if let Some(frame) = frame {
                         match frame.to_bytes() {
                             Ok(bytes) => {
-                                if io.publish(bytes).await.is_err() {
+                                if let Err(error) = io.publish(bytes).await {
                                     tracing::warn!(
-                                        agent_id = %agent_id,
-                                        "realtime durable publish failed; clients recover via postgres"
+                                        agent_id = %context.agent_id,
+                                        error = %error,
+                                        "realtime telemetry publish failed; clients recover via postgres"
                                     );
                                 }
                             }
                             Err(error) => {
-                                tracing::error!(agent_id = %agent_id, error = %error, "durable frame failed to serialize");
+                                tracing::error!(agent_id = %context.agent_id, error = %error, "telemetry frame failed to serialize");
                             }
                         }
+                    } else {
+                        tracing::warn!(
+                            agent_id = %context.agent_id,
+                            "unsupported telemetry event was omitted from the v1 stream"
+                        );
                     }
-                    last_published = row.event_seq;
                 }
             }
+        }
+        flush_coalesced_target(&context, &rx, &io, &mut frontier).await;
+    }
+}
+
+/// Flushes a receipt that was coalesced into the atomic target while the
+/// bounded command queue was full. Waiting until the queue drains preserves
+/// the fixed telemetry-before-final ordering of every accepted command.
+async fn flush_coalesced_target(
+    context: &DispatcherTaskContext,
+    rx: &mpsc::Receiver<DispatcherCommand>,
+    io: &PgNatsIo,
+    frontier: &mut DurableFrontier,
+) {
+    if let Some(target) = coalesced_target_after_drain(rx, &context.durable_target, *frontier) {
+        flush_durable(context.agent_id, io, target, frontier).await;
+    }
+}
+
+fn coalesced_target_after_drain(
+    rx: &mpsc::Receiver<DispatcherCommand>,
+    durable_target: &AtomicU64,
+    frontier: DurableFrontier,
+) -> Option<u64> {
+    // Snapshot first. If telemetry is accepted after this load, flushing only
+    // this older target cannot overtake it. Conversely, observing a later
+    // assistant-final target implies that call's synchronous telemetry enqueue
+    // already completed, so the subsequent empty check sees its command.
+    let target = durable_target.load(Ordering::Acquire);
+    drained_target(rx, target, frontier)
+}
+
+fn drained_target(
+    rx: &mpsc::Receiver<DispatcherCommand>,
+    observed_target: u64,
+    frontier: DurableFrontier,
+) -> Option<u64> {
+    if !rx.is_empty() {
+        return None;
+    }
+    (!frontier.is_caught_up(observed_target)).then_some(observed_target)
+}
+
+/// Flushes every durable row through `target` before volatile telemetry may
+/// pass. A product serialization or publish failure leaves the frontier
+/// immediately before that row, so the next wake retries it and later
+/// telemetry cannot overtake it. Duplicate delivery after an ambiguous NATS
+/// acknowledgement is safe because durable `event_seq` is the client dedupe
+/// identity.
+async fn flush_durable(
+    agent_id: AgentId,
+    io: &PgNatsIo,
+    target: u64,
+    frontier: &mut DurableFrontier,
+) -> bool {
+    if frontier.is_caught_up(target) {
+        return true;
+    }
+    let rows = match io.scan(frontier.sequence(), target).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(
+                agent_id = %agent_id,
+                error = %error,
+                "durable scan failed; realtime delivery is delayed until the next wake"
+            );
+            return false;
+        }
+    };
+    publish_scanned_rows(agent_id, rows, target, frontier, |bytes| io.publish(bytes)).await
+}
+
+async fn publish_scanned_rows<F, Fut>(
+    agent_id: AgentId,
+    rows: Vec<ScannedRow>,
+    target: u64,
+    frontier: &mut DurableFrontier,
+    mut publish: F,
+) -> bool
+where
+    F: FnMut(Bytes) -> Fut,
+    Fut: Future<Output = Result<(), DispatchError>>,
+{
+    for row in rows {
+        let Some(expected_event_seq) = frontier.sequence().checked_add(1) else {
+            tracing::error!(
+                agent_id = %agent_id,
+                "durable frontier overflowed; realtime delivery is halted"
+            );
+            return false;
+        };
+        if row.event_seq != expected_event_seq || row.event_seq > target {
+            tracing::error!(
+                agent_id = %agent_id,
+                expected_event_seq,
+                actual_event_seq = row.event_seq,
+                target_event_seq = target,
+                "durable scan returned a non-contiguous row; realtime delivery is halted"
+            );
+            return false;
+        }
+        let product =
+            match apply_product_projection(row.event_seq, product_event(&row.event), frontier) {
+                Ok(product) => product,
+                Err(error) => {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        event_seq = row.event_seq,
+                        error = %error,
+                        "durable product projection failed; realtime delivery is halted"
+                    );
+                    return false;
+                }
+            };
+        if let Some(product) = product {
+            let frame = AgentStreamFrameV1::durable(agent_id, &row, product, row.event_version);
+            let bytes = match frame.to_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        event_seq = row.event_seq,
+                        error = %error,
+                        "durable frame failed to serialize"
+                    );
+                    return false;
+                }
+            };
+            if let Err(error) = frontier.complete_product(row.event_seq, publish(bytes).await) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    event_seq = row.event_seq,
+                    error = %error,
+                    "realtime durable publish failed; later telemetry remains blocked"
+                );
+                return false;
+            }
+        }
+    }
+    frontier.is_caught_up(target)
+}
+
+/// Applies the explicit product/internal classification of one contiguous
+/// durable row. Only a known internal event advances without a publish; a
+/// projection error preserves the prior frontier for retry and blocks later
+/// telemetry.
+fn apply_product_projection(
+    event_seq: u64,
+    projection: Result<Option<AgentProductEventV1>, PersistedVariantError>,
+    frontier: &mut DurableFrontier,
+) -> Result<Option<AgentProductEventV1>, DispatchError> {
+    match projection.map_err(DispatchError::Projection)? {
+        Some(product) => Ok(Some(product)),
+        None => {
+            frontier.advance_internal(event_seq);
+            Ok(None)
         }
     }
 }
 
+/// Published durable frontier. Product rows advance only after a successful
+/// NATS acknowledgement; internal rows advance after scanning because they
+/// deliberately have no realtime projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableFrontier(u64);
+
+impl DurableFrontier {
+    const fn sequence(self) -> u64 {
+        self.0
+    }
+
+    const fn is_caught_up(self, target: u64) -> bool {
+        self.0 >= target
+    }
+
+    fn complete_product<E>(&mut self, event_seq: u64, result: Result<(), E>) -> Result<(), E> {
+        result?;
+        self.0 = event_seq;
+        Ok(())
+    }
+
+    fn advance_internal(&mut self, event_seq: u64) {
+        self.0 = event_seq;
+    }
+}
+
+/// Atomically removes an idle generation and closes its receiver while the
+/// map lock excludes a concurrent `ensure`. Retirement requires both that no
+/// caller holds a handle and that every already-accepted command was consumed;
+/// otherwise an idle-timer branch could win `select!` over a ready receiver and
+/// strand the queued command.
+fn retire_idle_dispatcher(
+    entries: &Mutex<HashMap<AgentId, DispatcherEntry>>,
+    agent_id: AgentId,
+    generation: Uuid,
+    rx: &mut mpsc::Receiver<DispatcherCommand>,
+) -> bool {
+    let mut entries = entries
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let can_retire = entries.get(&agent_id).is_some_and(|entry| {
+        entry.generation == generation && entry.tx.strong_count() == 1 && rx.is_empty()
+    });
+    if can_retire {
+        entries.remove(&agent_id);
+        rx.close();
+    }
+    can_retire
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
-
-    use stratum_core::{ChatMessage, DurableAgentEvent, TokenUsage};
+    use stratum_core::{ChatMessage, DurableAgentEvent};
+    use stratum_infra::AgentTailError;
 
     use super::*;
 
-    #[derive(Default)]
-    struct MockIo {
-        rows: Vec<ScannedRow>,
-        published: StdMutex<Vec<Bytes>>,
-        fail_publishes: StdMutex<bool>,
+    #[tokio::test]
+    async fn idle_retirement_waits_for_external_handles_and_closes_atomically() {
+        let (tx, mut rx) = mpsc::channel::<DispatcherCommand>(1);
+        let agent_id = AgentId::new();
+        let generation = Uuid::now_v7();
+        let entries = Mutex::new(HashMap::from([(
+            agent_id,
+            DispatcherEntry {
+                generation,
+                tx: tx.clone(),
+                durable_target: Arc::new(AtomicU64::new(0)),
+            },
+        )]));
+
+        assert!(!retire_idle_dispatcher(
+            &entries, agent_id, generation, &mut rx
+        ));
+        drop(tx);
+        assert!(retire_idle_dispatcher(
+            &entries, agent_id, generation, &mut rx
+        ));
+        assert!(rx.recv().await.is_none());
+        assert!(
+            entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 
-    impl MockIo {
-        fn row(event_seq: u64, event: DurableAgentEvent) -> ScannedRow {
+    #[tokio::test]
+    async fn idle_retirement_consumes_an_accepted_command_before_retiring() {
+        let (tx, mut rx) = mpsc::channel::<DispatcherCommand>(1);
+        let agent_id = AgentId::new();
+        let generation = Uuid::now_v7();
+        let entries = Mutex::new(HashMap::from([(
+            agent_id,
+            DispatcherEntry {
+                generation,
+                tx: tx.clone(),
+                durable_target: Arc::new(AtomicU64::new(0)),
+            },
+        )]));
+        tx.try_send(DispatcherCommand::DurableWake { through: 1 })
+            .expect("queue has one slot");
+        drop(tx);
+
+        assert!(!retire_idle_dispatcher(
+            &entries, agent_id, generation, &mut rx
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(DispatcherCommand::DurableWake { through: 1 })
+        ));
+        assert!(retire_idle_dispatcher(
+            &entries, agent_id, generation, &mut rx
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[test]
+    fn failed_durable_publish_keeps_later_telemetry_blocked() {
+        let mut frontier = DurableFrontier(4);
+
+        let result = frontier.complete_product(5, Err::<(), _>("nats unavailable"));
+
+        assert!(result.is_err());
+        assert_eq!(frontier.sequence(), 4);
+        assert!(!frontier.is_caught_up(5));
+    }
+
+    #[test]
+    fn unsupported_product_projection_does_not_advance_the_durable_frontier() {
+        let mut frontier = DurableFrontier(4);
+
+        let error = apply_product_projection(
+            5,
+            Err(PersistedVariantError::UnsupportedDurableProductEvent),
+            &mut frontier,
+        )
+        .expect_err("unsupported persisted variant fails closed");
+
+        assert!(matches!(
+            error,
+            DispatchError::Projection(PersistedVariantError::UnsupportedDurableProductEvent)
+        ));
+        assert_eq!(frontier.sequence(), 4);
+        assert!(!frontier.is_caught_up(5));
+    }
+
+    #[tokio::test]
+    async fn async_flush_failure_blocks_telemetry_until_the_durable_row_retries() {
+        let agent_id = AgentId::new();
+        let row = ScannedRow {
+            event_seq: 5,
+            event_version: 1,
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            created_at: chrono::Utc::now(),
+            event: DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("old final"),
+            },
+        };
+        let mut frontier = DurableFrontier(4);
+
+        let ready =
+            publish_scanned_rows(agent_id, vec![row.clone()], 5, &mut frontier, |_| async {
+                Err(DispatchError::Publish(AgentTailError::Nats {
+                    source: Box::new(std::io::Error::other("nats unavailable")),
+                }))
+            })
+            .await;
+
+        assert!(!ready, "run_dispatcher must suppress the next telemetry");
+        assert_eq!(frontier.sequence(), 4);
+
+        let ready =
+            publish_scanned_rows(agent_id, vec![row], 5, &mut frontier, |_| async { Ok(()) }).await;
+        assert!(ready);
+        assert_eq!(frontier.sequence(), 5);
+    }
+
+    #[tokio::test]
+    async fn telemetry_keeps_the_durable_barrier_from_its_enqueue_position() {
+        let (handle, mut rx) = DispatcherHandle::stub(AgentId::new());
+        handle.durable_target.store(4, Ordering::Release);
+        handle.telemetry(
+            SessionId::new(),
+            TurnId::new(),
+            LlmCallId::from("call-1"),
+            0,
+            AgentTelemetryEvent::LlmStarted {
+                llm_call_id: LlmCallId::from("call-1"),
+            },
+        );
+        handle.receipt(5);
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(DispatcherCommand::Telemetry {
+                durable_before: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(DispatcherCommand::DurableWake { through: 5 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_scan_gap_does_not_advance_the_frontier() {
+        let agent_id = AgentId::new();
+        let mut frontier = DurableFrontier(4);
+
+        let ready = publish_scanned_rows(
+            agent_id,
+            vec![internal_row(6)],
+            6,
+            &mut frontier,
+            |_| async { Ok(()) },
+        )
+        .await;
+
+        assert!(!ready);
+        assert_eq!(frontier.sequence(), 4);
+    }
+
+    #[tokio::test]
+    async fn out_of_order_durable_scan_stops_before_the_first_hole() {
+        let agent_id = AgentId::new();
+        let mut frontier = DurableFrontier(4);
+
+        let ready = publish_scanned_rows(
+            agent_id,
+            vec![internal_row(5), internal_row(7)],
+            7,
+            &mut frontier,
+            |_| async { Ok(()) },
+        )
+        .await;
+
+        assert!(!ready);
+        assert_eq!(frontier.sequence(), 5);
+    }
+
+    #[tokio::test]
+    async fn full_queue_coalesces_the_last_durable_wake_until_drain() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(DispatcherCommand::DurableWake { through: 3 })
+            .expect("queue has one slot");
+        let handle = DispatcherHandle {
+            agent_id: AgentId::new(),
+            tx,
+            durable_target: Arc::new(AtomicU64::new(3)),
+        };
+
+        handle.receipt(9);
+        assert_eq!(handle.durable_target.load(Ordering::Acquire), 9);
+        assert_eq!(rx.len(), 1, "the full queue cannot accept a second wake");
+        assert_eq!(
+            coalesced_target_after_drain(&rx, handle.durable_target.as_ref(), DurableFrontier(3)),
+            None,
+            "fixed queued commands must drain before the coalesced target"
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(DispatcherCommand::DurableWake { through: 3 })
+        ));
+        assert_eq!(
+            coalesced_target_after_drain(&rx, handle.durable_target.as_ref(), DurableFrontier(3)),
+            Some(9),
+            "the worker reloads the dropped wake once the queue drains"
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesced_flush_never_loads_a_future_final_after_declaring_drain() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let durable_target = AtomicU64::new(4);
+        let observed_before_telemetry = durable_target.load(Ordering::Acquire);
+
+        tx.try_send(DispatcherCommand::Telemetry {
+            durable_before: 4,
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            llm_call_id: LlmCallId::from("call-1"),
+            telemetry_seq: 0,
+            event: AgentTelemetryEvent::LlmStarted {
+                llm_call_id: LlmCallId::from("call-1"),
+            },
+        })
+        .expect("telemetry enters after the worker snapshots the old target");
+        durable_target.store(5, Ordering::Release);
+
+        assert_eq!(
+            drained_target(&rx, observed_before_telemetry, DurableFrontier(4)),
+            None,
+            "the queued telemetry is consumed before any coalesced final"
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(DispatcherCommand::Telemetry {
+                durable_before: 4,
+                ..
+            })
+        ));
+        assert_eq!(
+            coalesced_target_after_drain(&rx, &durable_target, DurableFrontier(4)),
+            Some(5),
+            "only the post-telemetry drain may observe the final target"
+        );
+    }
+
+    #[test]
+    fn durable_product_projection_preserves_row_order_and_omits_internal_rows() {
+        let rows = [
             ScannedRow {
-                event_seq,
+                event_seq: 7,
                 event_version: 1,
                 session_id: SessionId::new(),
                 turn_id: TurnId::new(),
                 created_at: chrono::Utc::now(),
-                event,
-            }
-        }
-    }
-
-    impl DispatcherIo for Arc<MockIo> {
-        async fn publish(&self, frame: Bytes) -> Result<(), DispatchIoError> {
-            if *self.fail_publishes.lock().expect("lock") {
-                return Err(DispatchIoError::Publish);
-            }
-            self.published.lock().expect("lock").push(frame);
-            Ok(())
-        }
-
-        async fn scan(
-            &self,
-            from_event_seq: u64,
-            to_event_seq: u64,
-        ) -> Result<Vec<ScannedRow>, DispatchIoError> {
-            Ok(self
-                .rows
-                .iter()
-                .filter(|row| row.event_seq > from_event_seq && row.event_seq <= to_event_seq)
-                .cloned()
-                .collect())
-        }
-    }
-
-    fn published_frames(io: &MockIo) -> Vec<serde_json::Value> {
-        io.published
-            .lock()
-            .expect("lock")
-            .iter()
-            .map(|bytes| serde_json::from_slice(bytes).expect("frame is json"))
-            .collect()
-    }
-
-    async fn drive(
-        io: Arc<MockIo>,
-        frontier: u64,
-        commands: Vec<DispatcherCommand>,
-    ) -> Arc<MockIo> {
-        let (tx, rx) = mpsc::channel(16);
-        let shutdown = CancellationToken::new();
-        let task = {
-            let io = Arc::clone(&io);
-            tokio::spawn(run_dispatcher(AgentId::new(), frontier, rx, io, shutdown))
-        };
-        for command in commands {
-            tx.send(command).await.expect("dispatcher alive");
-        }
-        drop(tx);
-        task.await.expect("dispatcher finishes");
-        io
-    }
-
-    #[tokio::test]
-    async fn reversed_receipts_publish_in_event_seq_order() {
-        let io = Arc::new(MockIo {
-            rows: vec![
-                MockIo::row(
-                    10,
-                    DurableAgentEvent::ToolApprovalResolved {
-                        approval_id: stratum_core::ApprovalId::new(),
-                        decision: stratum_core::ApprovalDecision::Approve,
-                    },
-                ),
-                MockIo::row(
-                    11,
-                    DurableAgentEvent::MessageAppended {
-                        message: ChatMessage::assistant("done"),
-                    },
-                ),
-            ],
-            ..MockIo::default()
-        });
-
-        let io = drive(
-            io,
-            9,
-            vec![
-                DispatcherCommand::Durable { high_water: 11 },
-                DispatcherCommand::Durable { high_water: 10 },
-            ],
-        )
-        .await;
-
-        let frames = published_frames(&io);
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0]["event_seq"], "10");
-        assert_eq!(frames[1]["event_seq"], "11");
-    }
-
-    #[tokio::test]
-    async fn telemetry_of_a_call_publishes_before_its_final_durable_message() {
-        let io = Arc::new(MockIo {
-            rows: vec![
-                MockIo::row(
-                    5,
-                    DurableAgentEvent::MessageAppended {
-                        message: ChatMessage::assistant("final"),
-                    },
-                ),
-                MockIo::row(
-                    6,
-                    DurableAgentEvent::LoopFinished {
-                        finish_reason: "stop".to_owned(),
-                        usage: TokenUsage::default(),
-                    },
-                ),
-            ],
-            ..MockIo::default()
-        });
-        let call = LlmCallId::from("call-1");
-
-        let io = drive(
-            io,
-            4,
-            vec![
-                DispatcherCommand::Telemetry {
-                    session_id: SessionId::new(),
-                    turn_id: TurnId::new(),
-                    llm_call_id: call.clone(),
-                    telemetry_seq: 0,
-                    event: AgentTelemetryEvent::LlmStarted {
-                        llm_call_id: call.clone(),
-                    },
+                event: DurableAgentEvent::ToolExecutionStarted {
+                    call_id: stratum_core::CallId::from("call-1"),
+                    tool_name: stratum_core::ToolName::from("echo"),
                 },
-                DispatcherCommand::Telemetry {
-                    session_id: SessionId::new(),
-                    turn_id: TurnId::new(),
-                    llm_call_id: call.clone(),
-                    telemetry_seq: 1,
-                    event: AgentTelemetryEvent::TextDelta {
-                        llm_call_id: call,
-                        delta: "fin".to_owned(),
-                    },
+            },
+            ScannedRow {
+                event_seq: 8,
+                event_version: 1,
+                session_id: SessionId::new(),
+                turn_id: TurnId::new(),
+                created_at: chrono::Utc::now(),
+                event: DurableAgentEvent::MessageAppended {
+                    message: ChatMessage::assistant("done"),
                 },
-                DispatcherCommand::Durable { high_water: 6 },
-            ],
-        )
-        .await;
+            },
+        ];
 
-        let frames = published_frames(&io);
-        let kinds: Vec<&str> = frames
+        let projected = rows
             .iter()
-            .filter_map(|frame| frame["kind"].as_str())
-            .collect();
-        assert_eq!(kinds, vec!["telemetry", "telemetry", "durable", "durable"]);
-        assert_eq!(frames[2]["event_seq"], "5");
-        assert_eq!(frames[3]["event"]["type"], "loop_finished");
+            .filter_map(|row| {
+                product_event(&row.event)
+                    .expect("known event projects")
+                    .map(|event| (row.event_seq, event))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].0, 8);
     }
 
-    #[tokio::test]
-    async fn publish_failure_is_tolerated_and_the_frontier_advances() {
-        let io = Arc::new(MockIo {
-            rows: vec![
-                MockIo::row(
-                    3,
-                    DurableAgentEvent::MessageAppended {
-                        message: ChatMessage::user("hi"),
-                    },
-                ),
-                MockIo::row(
-                    4,
-                    DurableAgentEvent::MessageAppended {
-                        message: ChatMessage::assistant("hello"),
-                    },
-                ),
-            ],
-            ..MockIo::default()
-        });
-        *io.fail_publishes.lock().expect("lock") = true;
-
-        let io = drive(io, 2, vec![DispatcherCommand::Durable { high_water: 4 }]).await;
-
-        assert!(published_frames(&io).is_empty(), "all publishes failed");
-        // A later receipt does not rescan published rows.
-        let io = drive(io, 4, vec![]).await;
-        assert!(published_frames(&io).is_empty());
-    }
-
-    #[tokio::test]
-    async fn internal_rows_are_scanned_past_but_never_published() {
-        let io = Arc::new(MockIo {
-            rows: vec![
-                MockIo::row(
-                    7,
-                    DurableAgentEvent::ToolExecutionStarted {
-                        call_id: stratum_core::CallId::from("call-1"),
-                        tool_name: stratum_core::ToolName::from("echo"),
-                    },
-                ),
-                MockIo::row(
-                    8,
-                    DurableAgentEvent::MessageAppended {
-                        message: ChatMessage::tool(
-                            stratum_core::CallId::from("call-1"),
-                            serde_json::json!({"ok": true}),
-                        ),
-                    },
-                ),
-            ],
-            ..MockIo::default()
-        });
-
-        let io = drive(io, 6, vec![DispatcherCommand::Durable { high_water: 8 }]).await;
-
-        let frames = published_frames(&io);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0]["event_seq"], "8");
+    fn internal_row(event_seq: u64) -> ScannedRow {
+        ScannedRow {
+            event_seq,
+            event_version: 1,
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            created_at: chrono::Utc::now(),
+            event: DurableAgentEvent::ToolExecutionStarted {
+                call_id: stratum_core::CallId::from("call-1"),
+                tool_name: stratum_core::ToolName::from("echo"),
+            },
+        }
     }
 }

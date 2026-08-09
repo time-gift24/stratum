@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Map, Value, json};
 use stratum_llm::{
     ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, ConfigurableLlmProvider, DeepSeekModel,
     DeepSeekProvider, DeepSeekReasoningEffort, DeepSeekThinking, FinishReason, LlmError,
-    LlmProvider, StructuredOutput,
+    LlmProvider, LlmTimeouts, StructuredOutput,
 };
 
 mod support;
@@ -27,6 +29,7 @@ async fn chat_posts_thinking_and_reasoning_content() {
         DeepSeekThinking::Enabled {
             effort: Some(DeepSeekReasoningEffort::Max),
         },
+        test_timeouts(),
     );
 
     let model = DeepSeekModel::V4Pro.model_id();
@@ -72,6 +75,7 @@ async fn builder_uses_injected_client() {
         .model(DeepSeekModel::V4Pro)
         .thinking(DeepSeekThinking::Disabled)
         .client(client)
+        .timeouts(test_timeouts())
         .build();
 
     provider
@@ -131,6 +135,7 @@ async fn chat_stream_maps_reasoning_and_text_delta() {
         DeepSeekThinking::Enabled {
             effort: Some(DeepSeekReasoningEffort::High),
         },
+        test_timeouts(),
     );
 
     let mut stream = provider
@@ -280,5 +285,15 @@ fn test_provider(base_url: impl Into<String>) -> DeepSeekProvider {
         ApiKey::new("sk-test"),
         DeepSeekModel::V4Pro,
         DeepSeekThinking::Disabled,
+        test_timeouts(),
+    )
+}
+
+fn test_timeouts() -> LlmTimeouts {
+    LlmTimeouts::new(
+        Duration::from_secs(2),
+        Duration::from_secs(10),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
     )
 }

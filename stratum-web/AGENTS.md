@@ -1,4 +1,5 @@
 <!-- BEGIN:nextjs-agent-rules -->
+
 # This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
@@ -24,11 +25,12 @@ Postgres-first agent runtime 协议（openspec change `complete-postgres-agent-r
 
 ## Runtime protocol projection
 
-- Durable identity 是 `(agentId, eventSeq)`，`eventSeq` 是十进制字符串；可见序号允许有间隔（内部 Hook/Tool 事件不发布），不是丢帧证据。Telemetry identity 是 `(llmCallId, telemetrySeq)`：低于期待值 = 重复忽略，高于期待值 = draft 标 incomplete 并等待 durable final 收敛。
-- Cold bootstrap 固定顺序：SSE buffer + 等 `stream_ready` → AgentView + `through=snapshot_event_seq` 的最新 history page → 应用 snapshot → 只应用 `event_seq > barrier` 的 buffered durable frame → 丢弃全部 buffered telemetry → 提交最新 cursor 进 live mode。
+- Durable identity 是 `(agentId, eventSeq)`，`eventSeq` 是十进制字符串；可见序号允许有间隔（内部 Hook/Tool 事件不发布），不是丢帧证据。Telemetry identity 是 `(llmCallId, telemetrySeq)`：低于期待值 = 重复忽略，高于期待值 = draft 标 incomplete并等待durable final收敛。每条telemetry另携`durable_before_event_seq` ordering watermark；PG先收敛assistant final F时丢弃watermark低于F的旧tail，但允许不低于F的下一call建立draft。有`acceptedTurnId`时只接收该exact Turn的telemetry；否则只接收running AgentView的`current_turn_id`，上一Turn的NATS backlog不得复活draft。
+- Cold bootstrap 固定顺序：SSE buffer + 等 `stream_ready` → AgentView + `through=snapshot_event_seq` 的最新 history page → 应用 snapshot，并用 barrier-governed `AgentView.telemetry_floor_event_seq` 初始化已收敛 assistant final floor（不能只靠最新 history page）→ 只应用 `event_seq > barrier` 的 buffered durable frame → 丢弃全部 buffered telemetry → 提交最新 cursor 进 live mode。AgentView/history fetch 与 SSE 共用 reset / Agent switch abort 链，旧 generation 的结果不得落入新会话。
 - SSE cursor 是不透明 NATS transport position：只存页面内存，不与 event_seq/telemetry_seq 比较，不跨刷新持久化；410 或 `stream_reset` 后丢弃 buffer/draft/cursor，从无 cursor cold bootstrap 重来。
-- Reconcile 是增量的：反向分页 history 直到越过已应用 barrier B，只合并 `(B,T]` 的可见 items 并替换 view 字段；running 时保留 active draft，view terminal 时执行与 terminal frame 相同的 draft/Tool 清理（无 result 的 Tool 标 interrupted，不伪造结果）。
-- 命令合同：create 带客户端 UUID `Idempotency-Key`（pending intent 复用同一 key）；message 带显式可空 `expected_current_turn_id` CAS（stale_turn 只 reconcile，绝不静默创建第二个 Turn）；cancel 202 只显示"取消请求已发送"；approval resolve（204）先移除 pending 再 reconcile；resume 与 resolve 是独立命令。
+- Browser cold durable buffer 与 SSE 单帧 parser 都必须有硬上限；溢出时 fail closed 并走 reset/cold recovery，不得无界积累。
+- Reconcile 是增量的：反向分页 history 直到越过已应用 barrier B，只合并 `(B,T]` 的可见 items 并替换 view 字段；running 时保留 active draft，view terminal 时执行与 terminal frame 相同的 draft/Tool 清理（无 result 的 Tool 标 interrupted，不伪造结果）。Reconcile必须single-flight，timer/focus/command只合并一次补跑；只有Agent切换、hard reset或unmount取消。向上分页请求仍可在Agent切换时取消。
+- 命令合同：create 带客户端 UUID `Idempotency-Key`（pending intent 复用同一 key）；message 带显式可空 `expected_current_turn_id` CAS（stale_turn 只 reconcile，绝不静默创建第二个 Turn），若响应是 ambiguous，同 Agent/原文/完整模型配置的 pending message intent 重试必须复用原 `expected_current_turn_id`，任一输入改变才形成新 intent；message 202携带的exact Turn必须保留到 AgentView 或同一 Turn 的 exact durable `loop_started`/terminal frame 证明，并驱动ready后的立即reconcile/低频轮询；cancel 202只显示"取消请求已发送"；approval resolve（204）先移除pending再reconcile；resume与resolve是独立命令。
 - Realtime degraded（503 realtime_unavailable）：克制的降级提示 + PG reconcile 收敛，核心命令不受影响。
 
 ## Utility-first 宪章

@@ -84,13 +84,17 @@ Template catalog 只能（SHALL）返回创建界面需要的公开标识、展�
 - **THEN** Web 为该 pending create 保留同一 key并重试；只有明确失败并形成新 create intent 时才生成新 key
 
 ### Requirement: AgentView 是固定 Postgres 屏障上的冷视图
-系统必须（SHALL）通过 `GET /v1/agents/{agent_id}` 返回 API-owned `AgentView`，而不是暴露数据库 row。view 必须（SHALL）包含 `agent_id`、Agent 名称、`status`、default `model_config`、可空 `session_id`、可空 `current_turn_id`、以无符号十进制字符串编码的 `snapshot_event_seq`、`pending_approvals`、current Turn 的可空 `latest_usage` 与布尔 `resume_required`；不得（SHALL NOT）包含公开 `outcome`、runtime snapshot、prompt、tools 或 raw durable payload。
+系统必须（SHALL）通过 `GET /v1/agents/{agent_id}` 返回 API-owned `AgentView`，而不是暴露数据库 row。view 必须（SHALL）包含 `agent_id`、Agent 名称、`status`、default `model_config`、可空 `session_id`、可空 `current_turn_id`、以无符号十进制字符串编码的 `snapshot_event_seq` 与 `telemetry_floor_event_seq`、`pending_approvals`、current Turn 的可空 `latest_usage` 与布尔 `resume_required`；不得（SHALL NOT）包含公开 `outcome`、runtime snapshot、prompt、tools 或 raw durable payload。
 
-除 `resume_required` 外，status、identity、barrier、latest usage 与 pending approvals 必须（SHALL）来自同一 Postgres MVCC snapshot。`snapshot_event_seq`必须（SHALL）直接等于该snapshot中读取的`agent_state.last_event_seq`，不得（SHALL NOT）另存snapshot cursor或第二个high-water。`pending_approvals` 必须（SHALL）由 current Turn 在 barrier 内的 Requested minus Resolved/Consumed/Invalidated ledger facts 派生。`latest_usage` 必须（SHALL）从 current Turn 在 barrier 内最后一个携带 provider usage 的 durable event 派生，不得从 `agent_state` 复制。`resume_required` 只是进程内 advisory：仅当 durable status 为 `running` 且 registry 没有 exact `(agent_id,current_turn_id)` 的 `starting` 或 `running` handle 时为 true；每个 command 仍必须重新校验 durable state。
+除 `resume_required` 外，status、identity、barrier、telemetry floor、latest usage 与 pending approvals 必须（SHALL）来自同一 Postgres MVCC snapshot。`snapshot_event_seq`必须（SHALL）直接等于该snapshot中读取的`agent_state.last_event_seq`，不得（SHALL NOT）另存snapshot cursor或第二个high-water。`telemetry_floor_event_seq`必须（SHALL）等于 barrier 内最后一个严格解码为 assistant `MessageAppended` 的 `event_seq`，不存在时为`"0"`；它是ledger派生的恢复事实，不得写入`agent_state`或新增projection。`pending_approvals` 必须（SHALL）由 current Turn 在 barrier 内的 Requested minus Resolved/Consumed/Invalidated ledger facts 派生。`latest_usage` 必须（SHALL）从 current Turn 在 barrier 内最后一个携带 provider usage 的 durable event 派生，不得从 `agent_state` 复制。`resume_required` 只是进程内 advisory：仅当 durable status 为 `running` 且 registry 没有 exact `(agent_id,current_turn_id)` 的 `starting` 或 `running` handle 时为 true；每个 command 仍必须重新校验 durable state。
 
 #### Scenario: 读取尚未开始 Turn 的 Agent
 - **WHEN** 客户端读取纯创建后仍为 `idle` 的 Agent
-- **THEN** API 返回 `200 OK`，Session/current Turn 与 latest usage 为空，`snapshot_event_seq` 为当前 durable frontier，且 view 不依赖 hosting registry
+- **THEN** API 返回 `200 OK`，Session/current Turn 与 latest usage 为空，`snapshot_event_seq` 为当前 durable frontier，`telemetry_floor_event_seq="0"`，且 view 不依赖 hosting registry
+
+#### Scenario: Cold 首屏之外的 Final 仍建立 Telemetry Floor
+- **WHEN** barrier 内最新 assistant `MessageAppended` 已被更多 product rows 推出最新 history page
+- **THEN** AgentView 仍返回该 assistant row 的 event sequence 作为 `telemetry_floor_event_seq`，Web 不依赖分页或 NATS 重放即可拒绝它之前的旧 telemetry tail
 
 #### Scenario: 读取未托管 Running Agent
 - **WHEN** Postgres 中 Agent 为 `running` 且本进程没有 exact-Turn handle

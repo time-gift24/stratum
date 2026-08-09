@@ -7,7 +7,7 @@
 
 - `control`：事件为 `stream_ready`，或仅由当前 SSE 连接本地产生的 `stream_reset { reason: "buffer_overflow" }`；
 - `durable`：包含 `event_seq`、`event_version` 与 typed `AgentProductEventV1`；
-- `telemetry`：包含 `llm_call_id`、`telemetry_seq` 与 typed LLM telemetry event。
+- `telemetry`：包含十进制字符串 `durable_before_event_seq`、`llm_call_id`、`telemetry_seq` 与 typed LLM telemetry event。
 
 Turn-scoped durable 与 telemetry frame 必须（SHALL）携带完整 Session/Turn identity；idle Agent 的 `stream_ready` 与连接级 `stream_reset` 可以（SHALL）省略这两个 identity。`stream_reset` 不得（SHALL NOT）写入 Postgres、发布到 NATS 或携带 SSE `id`。协议不得（SHALL NOT）直接序列化 kernel event、Postgres raw payload 或旧 transport DTO。未知 `protocol_version` 或未知 frame variant 必须（SHALL）被拒绝，不得静默按 v1 猜测。
 
@@ -59,7 +59,11 @@ Turn-scoped durable 与 telemetry frame 必须（SHALL）携带完整 Session/Tu
 ### Requirement: LLM Telemetry 使用 Call-local Sequence
 LLM lifecycle 与 delta 必须（SHALL）使用 `(LlmCallId,telemetry_seq)` 作为 volatile identity。API-side `TelemetryEventSink` 必须（SHALL）在进入 bounded realtime queue 前，为同一 call 的 `LlmStarted`、每条 content/reasoning/tool delta 与 `LlmFinished` 从 0 开始单调分配 telemetry_seq。telemetry 不得（SHALL NOT）分配 durable event_seq、写入 Postgres 或取代最终完整 assistant message。
 
+每条telemetry在进入dispatcher bounded queue时必须（SHALL）冻结当时已知的Postgres durable high-water，并在v1 frame中以无符号十进制字符串`durable_before_event_seq`公开。dispatcher必须（SHALL）在发布该frame前先flush到该watermark。该字段只是PG ordering watermark，不是telemetry identity、durable event identity或新的sequence frontier；consumer不得（SHALL NOT）用它替代`(LlmCallId,telemetry_seq)`去重，也不得假设watermark连续。
+
 NATS Agent tail 必须（SHALL）保留这些 delta frame，从而在连接健康时提供低延迟 token streaming。consumer 必须（SHALL）按 llm_call_id 隔离 sequence：低于下一期待值的 frame 是重复并被忽略，高于下一期待值表示 draft prefix 不完整；transport cursor不得（SHALL NOT）被解释为缺失的 telemetry sequence。
+
+live consumer必须（SHALL）先按exact Turn隔离telemetry：存在尚未由durable/view证明的accepted Turn时，只接受该Turn；否则只接受running AgentView的`current_turn_id`。旧Turn排队frame即使watermark不低于assistant floor也必须（SHALL）忽略，不得在新Turn运行后复活旧draft。
 
 #### Scenario: Delta 正常到达
 - **WHEN** client 收到 active LLM call 下一期待的 telemetry_seq
@@ -77,14 +81,30 @@ NATS Agent tail 必须（SHALL）保留这些 delta frame，从而在连接健�
 - **WHEN** LLM 产生大量 reasoning 或 content delta
 - **THEN** Postgres durable frontier不因这些 delta增长，刷新后的完整内容只来自 committed message
 
-### Requirement: Per-Agent Dispatcher 串行化 Product 与 Telemetry Tail
-`stratum-api` 必须（SHALL）为每个本机活跃 Agent 使用统一的有序 realtime dispatcher。durable commit receipt 必须（SHALL）只在 Postgres commit 后进入 dispatcher；dispatcher 必须（SHALL）按 Agent-wide event_seq 从 Postgres读取并跨过 internal rows，再按递增顺序发布 product frames，不得直接以多个 writer 的 task wake order决定 NATS 顺序。
+#### Scenario: PG Reconcile 先看到 Final
+- **WHEN** Web已通过PG reconcile应用event_seq为F的assistant final，随后才收到一条`durable_before_event_seq < F`的排队telemetry
+- **THEN** client把该frame判为final之前的旧tail并忽略，不重新创建已收敛draft
 
-当前一个 Turn 同时只能（SHALL）有一个 active LLM call。dispatcher 必须（SHALL）保证该 call 的已接收 telemetry 先于对应 final durable assistant `MessageAppended` 发布，final message 之后才可发布下一 LLM call 的 start。NATS publish failure不得（SHALL NOT）回滚 Postgres、改变 kernel acknowledgement 或让 durable sink重复 append；本版本不得（SHALL NOT）增加 durable outbox。
+#### Scenario: Final 后的新 Call 不被误杀
+- **WHEN** assistant final F提交并进入dispatcher high-water后，下一call产生`durable_before_event_seq >= F`的telemetry
+- **THEN** client不得仅因已经应用F而丢弃该frame，仍以新`llm_call_id`和`telemetry_seq`建立下一draft
+
+#### Scenario: 下一 Turn 拒绝上一 Turn 的迟到 Telemetry
+- **WHEN** failed/cancelled Turn没有assistant final且其排队telemetry在下一Turn已running后才到达
+- **THEN** client按exact expected Turn丢弃旧frame，不创建draft、Tool UI或覆盖新Turn的active call
+
+### Requirement: Per-Agent Dispatcher 串行化 Product 与 Telemetry Tail
+`stratum-api` 必须（SHALL）为每个本机活跃 Agent 使用统一的有序 realtime dispatcher。durable commit receipt 必须（SHALL）只在 Postgres commit 后进入 dispatcher，且不得因 bounded realtime queue 或 NATS 变慢而阻塞 Postgres acknowledgement；满队列的 wake 必须（SHALL）合并进单调 high-water。coalesced flush 必须（SHALL）先 snapshot target，再确认已接受命令队列为空，并且只能 flush 这个旧 snapshot；snapshot 后推进的 target 必须（SHALL）留给下一次 drain/idle 循环，dispatcher 在 idle 退休前必须（SHALL）最终追平。dispatcher 不得（SHALL NOT）先声明队列为空，再读取可能已包含未来 final 的 target。dispatcher 必须（SHALL）按 Agent-wide event_seq 从 Postgres读取并跨过 internal rows，再按递增顺序发布 product frames，不得直接以多个 writer 的 task wake order决定 NATS 顺序。
+
+当前一个 Turn 同时只能（SHALL）有一个 active LLM call。dispatcher 必须（SHALL）保证该 call 的已接收 telemetry 先于对应 final durable assistant `MessageAppended` 发布，final message 之后才可发布下一 LLM call 的 start。每条telemetry frame必须（SHALL）携带该命令入队时冻结的`durable_before_event_seq`，不得在出队时读取可能已包含未来final的最新target。NATS publish failure不得（SHALL NOT）回滚 Postgres、改变 kernel acknowledgement 或让 durable sink重复 append；本版本不得（SHALL NOT）增加 durable outbox。
 
 #### Scenario: 两个 Durable Writer 的 Receipt 乱序
 - **WHEN** approval resolver 与 kernel 的相邻 durable rows以相反 task wake order到达 dispatcher
 - **THEN** dispatcher按 Postgres event_seq 发布 product frames，NATS 不把较大 event_seq 先交付
+
+#### Scenario: 满队列时最后一次 Durable Wake
+- **WHEN** bounded queue 已满且 terminal commit 的 wake 只能更新 coalesced high-water
+- **THEN** Postgres acknowledgement 不等待 realtime；dispatcher 先 snapshot target、再确认既有命令已 drain，并只 flush 该旧 snapshot，之后推进的 target 留给下一次 drain/idle 循环且必须在退休前追平
 
 #### Scenario: Final Assistant 收敛当前 Draft
 - **WHEN** active call 的 final assistant message已 durable commit
@@ -155,7 +175,7 @@ Web 必须（SHALL）按以下顺序执行 cold bootstrap：
 
 1. 建立并 buffer Agent SSE，等待 `stream_ready`；
 2. 读取 `AgentView`，再以其 `snapshot_event_seq` 作为固定 `through_event_seq`读取最新 history page；
-3. 应用 PG view与history，对 buffered durable frame跳过 `event_seq <= barrier`，仅按 event_seq应用 `event_seq > barrier`；
+3. 应用 PG view与history，并用 barrier-governed `AgentView.telemetry_floor_event_seq` 初始化已收敛 assistant final floor（不得只从最新 history page 推导）；对 buffered durable frame跳过 `event_seq <= barrier`，仅按 event_seq应用 `event_seq > barrier`；
 4. 丢弃 bootstrap期间所有 buffered telemetry，因为 client无法证明拥有完整 call prefix；
 5. 只有 view、history 与 buffered durable merge全部成功后，才提交最新 NATS cursor并进入 live mode。
 
@@ -178,9 +198,9 @@ Cold bootstrap不得（SHALL NOT）要求加载全部历史。原始旧消息只
 - **THEN** cold bootstrap只加载固定 barrier内最新一页，旧页在向上滚动时按需请求
 
 ### Requirement: Web Reconcile 只增量补齐 Durable Gap
-进入 live mode 后，Web 必须（SHALL）保存已应用的 durable barrier B。下一次 reconcile读取新 `AgentView` 得到 barrier T 时，client 必须（SHALL）用 `through_event_seq=T` 从最新 history反向分页，直到页面越过或到达 B，只应用 `(B,T]` 的公开 product items，并用新 view替换 status、pending approvals、latest usage与其他 barrier-governed fields。只要exact current Turn仍为running，已有telemetry draft必须（SHALL）保留，不能因普通reconcile清空；若新view证明该Turn已经terminal，则必须（SHALL）执行与terminal frame相同的draft和未完成Tool UI清理。
+进入 live mode 后，Web 必须（SHALL）保存已应用的 durable barrier B。下一次 reconcile读取新 `AgentView` 得到 barrier T 时，client 必须（SHALL）用 `through_event_seq=T` 从最新 history反向分页，直到页面越过或到达 B，只应用 `(B,T]` 的公开 product items，并用新 view替换 status、pending approvals、latest usage与其他 barrier-governed fields。只要exact current Turn仍为running，已有telemetry draft必须（SHALL）保留，不能因普通reconcile清空；若reconcile先应用assistant final F，随后到达且`durable_before_event_seq < F`的telemetry必须（SHALL）作为旧tail忽略，而watermark不小于F的新call telemetry不得（SHALL NOT）仅因F被丢弃。若新view证明该Turn已经terminal，则必须（SHALL）执行与terminal frame相同的draft和未完成Tool UI清理。
 
-running 或存在 pending approval期间必须（SHALL）进行低频 PG reconcile；窗口重新获得焦点以及每个 command 返回后必须（SHALL）立即 reconcile。只有页面刷新、cursor expired、buffer overflow或用户明确 hard reset才可（SHALL）做完整 cold rebuild。
+running、message 202 已接受但 exact Turn 尚未由 AgentView 或同一 Turn 的 exact durable `LoopStarted`/terminal product frame 证明、cancel待确认、realtime degraded或存在 pending approval期间必须（SHALL）进行低频 PG reconcile；窗口重新获得焦点以及每个 command 返回后必须（SHALL）立即 reconcile。若command返回时cold bootstrap尚未提供可读barrier，client必须（SHALL）保留accepted Turn并在进入ready后立即执行该reconcile，不能因旧view仍是idle/terminal而停止收敛。reconcile必须（SHALL）single-flight；timer/focus/command在已有多页读取时只能合并一次补跑，不得取消并从同一旧barrier无限重启。只有页面刷新、cursor expired、buffer overflow或用户明确 hard reset才可（SHALL）做完整 cold rebuild。
 
 #### Scenario: NATS 漏掉 Durable Frame
 - **WHEN** durable event已提交但publish失败，旧 barrier为B且新AgentView barrier为T
@@ -201,6 +221,14 @@ running 或存在 pending approval期间必须（SHALL）进行低频 PG reconci
 #### Scenario: Cancel Accepted 不提前写 Terminal UI
 - **WHEN** cancel endpoint返回202但PG尚无terminal event
 - **THEN** client只显示取消请求已发送，直到 reconcile或durable frame确认真实terminal status
+
+#### Scenario: Message Accepted 早于 Cold Snapshot
+- **WHEN** message endpoint返回exact Turn的202，但并发cold snapshot仍只看到旧idle或terminal view
+- **THEN** client跨同Agent recovery保留accepted Turn，进入ready后立即reconcile并持续低频轮询，直到 AgentView 或同一 Turn 的 exact durable `LoopStarted`/terminal product frame 证明该Turn
+
+#### Scenario: 慢 Reconcile 不被周期轮询饿死
+- **WHEN** 从旧barrier追赶需要多页且一次reconcile超过轮询间隔
+- **THEN** timer只请求完成后补跑一次，不取消当前分页，也不反复从旧barrier重新开始
 
 #### Scenario: Compaction 作为可折叠 Marker
 - **WHEN** history/reconcile收到 `TranscriptCompacted`

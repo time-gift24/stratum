@@ -308,9 +308,13 @@ impl TurnDurableSink {
     fn admission_failure(&self, error: stratum_postgres::PostgresError) -> DurableEventSinkError {
         let kind = kind_of_postgres(&error);
         if let Some(admission) = &self.admission {
-            admission.signal.fail(ApiError::with_source(kind, error));
+            // The HTTP waiter needs only the stable classification. Keep the
+            // concrete storage source on the durable-sink failure that travels
+            // through the kernel error chain; moving it into the one-shot
+            // would discard that chain as soon as the request went away.
+            admission.signal.fail(ApiError::new(kind));
         }
-        DurableEventSinkError::backend(ApiError::new(kind))
+        DurableEventSinkError::backend(ApiError::with_source(kind, error))
     }
 }
 
@@ -350,7 +354,14 @@ impl TelemetryEventSink for TurnTelemetrySink {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let next = seqs.entry(llm_call_id.clone()).or_insert(0);
             let assigned = *next;
-            *next = next.saturating_add(1);
+            let Some(following) = next.checked_add(1) else {
+                tracing::warn!(
+                    llm_call_id = %llm_call_id,
+                    "telemetry sequence space is exhausted; dropping telemetry"
+                );
+                return;
+            };
+            *next = following;
             assigned
         };
         self.dispatcher.telemetry(

@@ -31,6 +31,12 @@ import { subscribeToAgentEvents } from "@/lib/stratum/event-stream"
 const HISTORY_PAGE_LIMIT = 50
 /** reconcile 反向补页的上限 */
 const RECONCILE_PAGE_LIMIT = 256
+/** 单次 AgentView/history fetch 的最大等待；每一页单独重置。 */
+const RECONCILE_FETCH_TIMEOUT_MS = 30_000
+/** cold bootstrap 最多暂存与 server SSE queue 相同数量的 durable frames */
+const COLD_BUFFER_MAX_FRAMES = 256
+/** 限制 parsed frame 对象在 bootstrap 期间占用的近似 JSON 字符数 */
+const COLD_BUFFER_MAX_CHARS = 4 * 1024 * 1024
 
 const STREAM_RESET_CODE = "stream_reset"
 
@@ -61,12 +67,10 @@ export async function runConversationSession(
 
   while (!input.signal.aborted) {
     try {
-      const done =
-        session.cursor === undefined
-          ? await coldBootstrap(dependencies, input, session)
-          : resumeTail(dependencies, input, session)
-      // live mode 已建立：等待 stream 结束，干净结束后携 cursor 重连
-      await done
+      // stream 干净结束后携 page-memory cursor 进入下一轮 retained tail。
+      if (session.cursor === undefined)
+        await coldBootstrap(dependencies, input, session)
+      else await resumeTail(dependencies, input, session)
     } catch (error) {
       if (input.signal.aborted) return
       if (
@@ -77,6 +81,14 @@ export async function runConversationSession(
         session.cursor = undefined
         dependencies.clearCursor(input.agentId)
         continue
+      }
+      if (isApiErrorCode(error, "realtime_unavailable")) {
+        // live / retained-tail 阶段的 NATS 失败只降级 realtime；已经加载的
+        // PG snapshot、历史与 transient UI 保持，后续由低频 reconcile 收敛。
+        dependencies.dispatch({ type: "realtime_degraded", degraded: true })
+        dependencies.dispatch({ type: "recovery_ready" })
+        await abortDriven(input.signal)
+        return
       }
       if (error instanceof ApiError && error.status === 404) {
         dependencies.dispatch({ type: "missing", error })
@@ -92,18 +104,19 @@ export async function runConversationSession(
 }
 
 /**
- * Cold bootstrap（无 cursor）。返回进入 live mode 后 stream 的完成 promise；
- * degraded（realtime_unavailable）时返回随外层 abort 结束的 promise。
+ * Cold bootstrap（无 cursor），随后持续到 live stream 结束；degraded
+ *（realtime_unavailable）时持续到外层 abort。
  */
 async function coldBootstrap(
   dependencies: RecoveryDependencies,
   input: { agentId: string; signal: AbortSignal },
   session: SessionState
-): Promise<Promise<void>> {
+): Promise<void> {
   const { agentId, signal } = input
   dependencies.dispatch({ type: "recovery_started", agentId })
 
   const buffered: DurableFrame[] = []
+  let bufferedChars = 0
   let live = false
   let sawReset = false
   let latestCursor: string | null = null
@@ -140,7 +153,23 @@ async function coldBootstrap(
       if (!live) {
         // bootstrap 期间只 buffer durable frame；telemetry 没有可证明完整的
         // call prefix，全部丢弃
-        if (frame.kind === "durable") buffered.push(frame)
+        if (frame.kind === "durable") {
+          const frameChars = JSON.stringify(frame).length
+          if (
+            buffered.length >= COLD_BUFFER_MAX_FRAMES ||
+            bufferedChars + frameChars > COLD_BUFFER_MAX_CHARS
+          ) {
+            // A slow PG snapshot must not turn the browser into an unbounded
+            // second event buffer. Treat local overflow exactly like the
+            // server reset contract and restart without a cursor.
+            sawReset = true
+            streamControl.abort()
+            readyReject(new ApiError(STREAM_RESET_CODE, 0, "stream reset"))
+            return
+          }
+          buffered.push(frame)
+          bufferedChars += frameChars
+        }
         return
       }
       if (frameCursor !== null) {
@@ -155,41 +184,60 @@ async function coldBootstrap(
     },
   })
 
-  const done = subscription.done.catch((error: unknown) => {
-    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
-    throw error
-  })
-  subscription.done.then(
+  // 立即把 stream 终止变成可竞争的 rejection。它不只保护 ready：ready
+  // 之后的 PG snapshot 也必须仍被同一条 live subscription 包围，否则在
+  // snapshot barrier 与下一条 DeliverPolicy::New subscription 之间会出现空洞。
+  const streamEnded: Promise<never> = subscription.done.then(
     () => {
-      if (!live && !sawReset)
-        readyReject(
-          new ApiError("stream_closed", 0, "event stream closed before ready")
-        )
+      if (!live) streamControl.abort()
+      throw new ApiError(
+        "stream_closed",
+        0,
+        "event stream closed during recovery"
+      )
     },
     (error: unknown) => {
-      if (!live) readyReject(error)
+      if (!live) streamControl.abort()
+      throw error
     }
   )
+  // 安装 rejection handler，避免 subscription 在 ready 之前失败时产生无人
+  // 消费的 rejected promise；snapshot 阶段另由 Promise.race 直接观察。
+  void streamEnded.catch((error: unknown) => {
+    if (!live && !sawReset) readyReject(error)
+  })
 
   try {
     // (1) 等 stream_ready：subscription 已建立、server 已开始 buffering
     await ready
   } catch (error) {
+    streamControl.abort()
     unlink()
     if (isApiErrorCode(error, "realtime_unavailable")) {
       // NATS 不可用：PG-only degraded bootstrap，核心命令不受影响
-      await loadSnapshot(dependencies, input)
+      dependencies.dispatch(await readSnapshot(dependencies, input))
       dependencies.dispatch({ type: "realtime_degraded", degraded: true })
       dependencies.dispatch({ type: "recovery_ready" })
       return abortDriven(signal)
     }
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
     throw error
   }
 
   try {
     // (2) 读 AgentView，以 snapshot_event_seq 为固定 through 读最新 history page
-    await loadSnapshot(dependencies, input)
+    const snapshot = await Promise.race([
+      readSnapshot(dependencies, {
+        agentId,
+        signal: streamControl.signal,
+      }),
+      streamEnded,
+    ])
     throwIfAborted(signal)
+    // reset 终止整个增量路径；即使 PG 请求已经完成，也不能提交该连接的
+    // snapshot、buffer 或 cursor。
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+    dependencies.dispatch(snapshot)
 
     // (3) 应用 buffered durable frames（reducer 跳过 event_seq <= barrier）
     for (const frame of buffered)
@@ -207,10 +255,16 @@ async function coldBootstrap(
     // bootstrap 失败不提交 cursor：断开 stream，由外层决定 cold 重试或报错
     streamControl.abort()
     unlink()
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
     throw error
   }
   // live 期间保持 abort 链路（外层 abort 必须断开 stream），done 落定后解绑
-  return done.finally(unlink)
+  return subscription.done
+    .catch((error: unknown) => {
+      if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+      throw error
+    })
+    .finally(unlink)
 }
 
 /** 页面内携 cursor 续传短 tail（resume within page），返回 stream 完成 promise */
@@ -259,30 +313,38 @@ function resumeTail(
 }
 
 /** cold bootstrap 第 (2) 步：AgentView + barrier 内最新一页 history */
-async function loadSnapshot(
+async function readSnapshot(
   dependencies: RecoveryDependencies,
   input: { agentId: string; signal: AbortSignal }
-): Promise<void> {
-  const view = await dependencies.api.getAgent(input.agentId)
-  throwIfAborted(input.signal)
-  const page = await dependencies.api.getHistory(input.agentId, {
-    throughSeq: view.snapshot_event_seq,
-    limit: HISTORY_PAGE_LIMIT,
+): Promise<Extract<ConversationAction, { type: "snapshot_loaded" }>> {
+  const view = await dependencies.api.getAgent(input.agentId, {
+    signal: input.signal,
   })
   throwIfAborted(input.signal)
-  dependencies.dispatch({
+  const page = await dependencies.api.getHistory(
+    input.agentId,
+    {
+      throughSeq: view.snapshot_event_seq,
+      limit: HISTORY_PAGE_LIMIT,
+    },
+    { signal: input.signal }
+  )
+  throwIfAborted(input.signal)
+  return {
     type: "snapshot_loaded",
     view,
     items: page.items,
     historyBefore: page.next_before_event_seq,
     historyHasMore: page.has_more,
-  })
+  }
 }
 
 export type ReconcileDependencies = {
   api: Pick<StratumApi, "getAgent" | "getHistory">
   /** 当前已应用 barrier；尚未完成 bootstrap 时返回 null（跳过本次 reconcile） */
   getBarrier(): string | null
+  /** 同 barrier 的 process-local advisory 也会变化；仅最新请求可提交 */
+  isCurrent(): boolean
   dispatch(action: ConversationAction): void
 }
 
@@ -293,31 +355,53 @@ export type ReconcileDependencies = {
  */
 export async function reconcileConversation(
   dependencies: ReconcileDependencies,
-  input: { agentId: string }
+  input: { agentId: string; signal?: AbortSignal }
 ): Promise<void> {
   const barrier = dependencies.getBarrier()
-  if (barrier === null) return
+  if (barrier === null || !dependencies.isCurrent()) return
 
   let view: AgentView
   try {
-    view = await dependencies.api.getAgent(input.agentId)
+    view = await withReconcileFetchDeadline(input.signal, (signal) =>
+      dependencies.api.getAgent(input.agentId, { signal })
+    )
   } catch (error) {
-    if (error instanceof ApiError && error.status === 404)
+    const currentBarrier = dependencies.getBarrier()
+    if (
+      error instanceof ApiError &&
+      error.status === 404 &&
+      dependencies.isCurrent() &&
+      currentBarrier !== null &&
+      compareEventSeq(currentBarrier, barrier) === 0
+    )
       dependencies.dispatch({ type: "missing", error })
     return
   }
-  if (dependencies.getBarrier() === null) return
+  const barrierAfterView = dependencies.getBarrier()
+  if (
+    !dependencies.isCurrent() ||
+    barrierAfterView === null ||
+    compareEventSeq(barrierAfterView, barrier) !== 0
+  )
+    return
 
   const items: AgentDurableRecordV1[] = []
   if (compareEventSeq(view.snapshot_event_seq, barrier) > 0) {
     let before: string | undefined
     try {
       for (;;) {
-        const page = await dependencies.api.getHistory(input.agentId, {
-          throughSeq: view.snapshot_event_seq,
-          beforeSeq: before,
-          limit: RECONCILE_PAGE_LIMIT,
-        })
+        const page = await withReconcileFetchDeadline(input.signal, (signal) =>
+          dependencies.api.getHistory(
+            input.agentId,
+            {
+              throughSeq: view.snapshot_event_seq,
+              beforeSeq: before,
+              limit: RECONCILE_PAGE_LIMIT,
+            },
+            { signal }
+          )
+        )
+        if (!dependencies.isCurrent()) return
         const fresh = page.items.filter(
           (item) => compareEventSeq(item.event_seq, barrier) > 0
         )
@@ -337,7 +421,64 @@ export async function reconcileConversation(
     }
   }
 
-  dependencies.dispatch({ type: "view_reconciled", view, items })
+  const currentBarrier = dependencies.getBarrier()
+  if (
+    !dependencies.isCurrent() ||
+    currentBarrier === null ||
+    compareEventSeq(currentBarrier, barrier) !== 0
+  )
+    return
+  dependencies.dispatch({
+    type: "view_reconciled",
+    baseBarrier: barrier,
+    view,
+    items,
+  })
+}
+
+async function withReconcileFetchDeadline<T>(
+  outerSignal: AbortSignal | undefined,
+  operation: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  if (outerSignal?.aborted)
+    throw abortReason(outerSignal, "reconcile fetch aborted")
+
+  const controller = new AbortController()
+  const onOuterAbort = () => controller.abort(outerSignal?.reason)
+  outerSignal?.addEventListener("abort", onOuterAbort, { once: true })
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException("reconcile fetch timed out", "AbortError")
+      ),
+    RECONCILE_FETCH_TIMEOUT_MS
+  )
+  let rejectAbort!: (error: unknown) => void
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  const onAbort = () =>
+    rejectAbort(abortReason(controller.signal, "reconcile fetch aborted"))
+  controller.signal.addEventListener("abort", onAbort, { once: true })
+
+  try {
+    // Start through a microtask so a synchronous throw from a mock/client is
+    // captured by the promise that already participates in the race. The
+    // losing operation stays observed by Promise.race, so a late rejection
+    // after timeout cannot become unhandled even when the client ignores abort.
+    const result = Promise.resolve().then(() => operation(controller.signal))
+    return await Promise.race([result, aborted])
+  } finally {
+    clearTimeout(timeout)
+    controller.signal.removeEventListener("abort", onAbort)
+    outerSignal?.removeEventListener("abort", onOuterAbort)
+  }
+}
+
+function abortReason(signal: AbortSignal, fallbackMessage: string): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException(fallbackMessage, "AbortError")
 }
 
 export type HistoryWindow = {
@@ -356,18 +497,22 @@ export type HistoryDependencies = {
 /** 向上滚动加载更旧一页：固定 through barrier + exclusive before cursor */
 export async function loadOlderHistoryPage(
   dependencies: HistoryDependencies,
-  input: { agentId: string }
+  input: { agentId: string; signal?: AbortSignal }
 ): Promise<void> {
   const window = dependencies.getWindow()
   if (window === null || !window.hasMore || window.loading) return
 
   dependencies.dispatch({ type: "history_page_started" })
   try {
-    const page = await dependencies.api.getHistory(input.agentId, {
-      throughSeq: window.through,
-      beforeSeq: window.before ?? undefined,
-      limit: HISTORY_PAGE_LIMIT,
-    })
+    const page = await dependencies.api.getHistory(
+      input.agentId,
+      {
+        throughSeq: window.through,
+        beforeSeq: window.before ?? undefined,
+        limit: HISTORY_PAGE_LIMIT,
+      },
+      { signal: input.signal }
+    )
     dependencies.dispatch({
       type: "history_page_loaded",
       items: page.items,
@@ -375,6 +520,7 @@ export async function loadOlderHistoryPage(
       historyHasMore: page.has_more,
     })
   } catch (error) {
+    if (input.signal?.aborted) return
     dependencies.dispatch({ type: "history_page_failed" })
     if (error instanceof ApiError && error.status === 404)
       dependencies.dispatch({ type: "missing", error })

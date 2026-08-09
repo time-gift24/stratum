@@ -14,6 +14,8 @@ mod error;
 mod subject;
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_nats::jetstream::{
     self,
@@ -40,6 +42,8 @@ pub type AgentTailStream =
 pub struct NatsAgentTail {
     jetstream: jetstream::Context,
     config: AgentTailConfig,
+    available: Arc<AtomicBool>,
+    stream_generation: i128,
 }
 
 impl NatsAgentTail {
@@ -58,12 +62,26 @@ impl NatsAgentTail {
             .map_err(AgentTailError::nats)?;
         let jetstream = jetstream::new(client);
 
-        jetstream
+        let stream = jetstream
             .create_or_update_stream(config.stream_config())
             .await
             .map_err(AgentTailError::nats)?;
+        let stream_generation = stream.created.unix_timestamp_nanos();
 
-        Ok(Self { jetstream, config })
+        Ok(Self {
+            jetstream,
+            config,
+            available: Arc::new(AtomicBool::new(true)),
+            stream_generation,
+        })
+    }
+
+    /// Reports whether the most recent runtime broker operation succeeded.
+    /// A later successful publish or subscription restores availability after
+    /// a transient failure.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
     }
 
     /// Publishes one opaque frame to one agent's tail and returns its cursor.
@@ -83,14 +101,19 @@ impl NatsAgentTail {
         payload: Bytes,
     ) -> Result<TailCursor, AgentTailError> {
         let subject = subject::agent_subject(&self.config.subject_prefix, agent_id);
-        let result = self
-            .jetstream
-            .publish(subject, payload)
-            .await
-            .map_err(AgentTailError::nats)?
-            .await
-            .map_err(AgentTailError::nats)
-            .map(|ack| TailCursor::from_transport_sequence(ack.sequence));
+        let result = async {
+            self.jetstream
+                .publish(subject, payload)
+                .await
+                .map_err(AgentTailError::nats)?
+                .await
+                .map_err(AgentTailError::nats)
+                .map(|ack| {
+                    TailCursor::from_transport(*agent_id, self.stream_generation, ack.sequence)
+                })
+        }
+        .await;
+        self.available.store(result.is_ok(), Ordering::Release);
 
         // No logging here: the typed error travels to the handling boundary
         // (the stratum-api dispatcher), which logs it exactly once.
@@ -115,8 +138,16 @@ impl NatsAgentTail {
         agent_id: &AgentId,
         after: Option<TailCursor>,
     ) -> Result<AgentTailStream, AgentTailError> {
-        if let Some(cursor) = after {
-            self.ensure_retained(cursor).await?;
+        if let Some(cursor) = after
+            && let Err(error) = self.ensure_retained(*agent_id, cursor).await
+        {
+            // Cursor expiry proves the broker query itself succeeded and
+            // therefore must not degrade runtime readiness.
+            self.available.store(
+                !matches!(&error, AgentTailError::Nats { .. }),
+                Ordering::Release,
+            );
+            return Err(error);
         }
         let deliver_subject = self.jetstream.client().new_inbox();
         let consumer = self
@@ -131,9 +162,19 @@ impl NatsAgentTail {
                 &self.config.stream_name,
             )
             .await
-            .map_err(AgentTailError::nats)?;
-        let messages = consumer.messages().await.map_err(AgentTailError::nats)?;
+            .map_err(|source| {
+                self.available.store(false, Ordering::Release);
+                AgentTailError::nats(source)
+            })?;
+        let messages = consumer.messages().await.map_err(|source| {
+            self.available.store(false, Ordering::Release);
+            AgentTailError::nats(source)
+        })?;
+        self.available.store(true, Ordering::Release);
 
+        let available = Arc::clone(&self.available);
+        let cursor_agent_id = *agent_id;
+        let stream_generation = self.stream_generation;
         let items = messages.scan(false, move |terminated, message| {
             if *terminated {
                 return future::ready(None);
@@ -144,7 +185,7 @@ impl NatsAgentTail {
                     .map_err(AgentTailError::nats)?
                     .stream_sequence;
                 Ok((
-                    TailCursor::from_transport_sequence(sequence),
+                    TailCursor::from_transport(cursor_agent_id, stream_generation, sequence),
                     message.message.payload,
                 ))
             });
@@ -152,6 +193,9 @@ impl NatsAgentTail {
                 // Terminate on the first error; the typed error travels to the
                 // handling boundary (stratum-api), which logs it exactly once.
                 *terminated = true;
+                available.store(false, Ordering::Release);
+            } else {
+                available.store(true, Ordering::Release);
             }
             future::ready(Some(item))
         });
@@ -159,13 +203,21 @@ impl NatsAgentTail {
         Ok(Box::pin(items) as AgentTailStream)
     }
 
-    async fn ensure_retained(&self, cursor: TailCursor) -> Result<(), AgentTailError> {
+    async fn ensure_retained(
+        &self,
+        agent_id: AgentId,
+        cursor: TailCursor,
+    ) -> Result<(), AgentTailError> {
         let stream = self
             .jetstream
             .get_stream(&self.config.stream_name)
             .await
             .map_err(AgentTailError::nats)?;
-        let state = &stream.cached_info().state;
+        let info = stream.cached_info();
+        if !cursor.belongs_to(agent_id, info.created.unix_timestamp_nanos()) {
+            return Err(AgentTailError::CursorExpired { cursor });
+        }
+        let state = &info.state;
         check_retained(state.first_sequence, state.last_sequence, cursor)
     }
 }
@@ -208,6 +260,10 @@ fn check_retained(
 mod tests {
     use super::*;
 
+    fn test_cursor(sequence: u64) -> TailCursor {
+        TailCursor::from_transport(AgentId::new(), 1, sequence)
+    }
+
     #[test]
     fn no_cursor_delivers_only_new_messages() {
         assert_eq!(deliver_policy(None), DeliverPolicy::New);
@@ -216,7 +272,7 @@ mod tests {
     #[test]
     fn cursor_resumes_after_its_transport_sequence() {
         assert_eq!(
-            deliver_policy(Some(TailCursor::from_transport_sequence(41))),
+            deliver_policy(Some(test_cursor(41))),
             DeliverPolicy::ByStartSequence { start_sequence: 42 }
         );
     }
@@ -224,22 +280,22 @@ mod tests {
     #[test]
     fn unadvanceable_cursor_falls_back_to_new_only() {
         assert_eq!(
-            deliver_policy(Some(TailCursor::from_transport_sequence(u64::MAX))),
+            deliver_policy(Some(test_cursor(u64::MAX))),
             DeliverPolicy::New
         );
     }
 
     #[test]
     fn cursor_at_or_after_earliest_retained_position_is_valid() {
-        let cursor = TailCursor::from_transport_sequence(9);
+        let cursor = test_cursor(9);
 
         assert!(check_retained(10, 50, cursor).is_ok());
-        assert!(check_retained(10, 50, TailCursor::from_transport_sequence(50)).is_ok());
+        assert!(check_retained(10, 50, test_cursor(50)).is_ok());
     }
 
     #[test]
     fn cursor_before_earliest_retained_position_is_expired() {
-        let cursor = TailCursor::from_transport_sequence(8);
+        let cursor = test_cursor(8);
 
         assert!(matches!(
             check_retained(10, 50, cursor),
@@ -249,14 +305,14 @@ mod tests {
 
     #[test]
     fn cursor_beyond_last_sequence_is_expired() {
-        let cursor = TailCursor::from_transport_sequence(51);
+        let cursor = test_cursor(51);
 
         assert!(matches!(
             check_retained(10, 50, cursor),
             Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor
         ));
         // A forged far-future cursor on a fresh stream is expired as well.
-        let forged = TailCursor::from_transport_sequence(u64::MAX);
+        let forged = test_cursor(u64::MAX);
         assert!(matches!(
             check_retained(1, 3, forged),
             Err(AgentTailError::CursorExpired { cursor: expired }) if expired == forged
@@ -266,7 +322,7 @@ mod tests {
     #[test]
     fn empty_stream_expires_every_cursor() {
         for sequence in [0, 1, 42] {
-            let cursor = TailCursor::from_transport_sequence(sequence);
+            let cursor = test_cursor(sequence);
             assert!(matches!(
                 check_retained(0, 0, cursor),
                 Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor

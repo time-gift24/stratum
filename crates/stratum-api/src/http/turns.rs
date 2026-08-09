@@ -202,10 +202,9 @@ pub(crate) async fn post_message(
     state
         .registry()
         .attach_task(agent_id, turn_id, claim.claim_id, handle);
-    // From here the managed task owns the claim: it removes only its own
-    // claim identity when it ends, and its handle stays in the registry drain
-    // set even when this request returns early — a shutdown race can never
-    // strand a started turn outside `take_tasks`.
+    // From here the process-owned JoinSet owns the managed task, while the
+    // task removes only its exact claim identity when it ends. Returning from
+    // this request cannot detach the task from shutdown drain ownership.
     cleanup.defuse();
 
     // Accepted only after the managed future is installed and the first user
@@ -313,7 +312,10 @@ async fn resume_preflight_and_spawn(
         .read_loop_started(agent_id, turn_id)
         .await
         .map_err(ApiError::from_postgres)?;
-    let base = started.event_seq.saturating_sub(1);
+    let base = started
+        .event_seq
+        .checked_sub(1)
+        .ok_or_else(|| ApiError::new(ErrorKind::DurableStateCorrupt))?;
     let slice = state
         .pg()
         .read_resume_slice(ResumeSliceQuery {
@@ -336,10 +338,17 @@ async fn resume_preflight_and_spawn(
         return Err(ApiError::new(ErrorKind::TurnNotRunning));
     }
 
+    // Establish the process-local publish frontier before any writer below can
+    // commit. If concurrent receipts arrive in reverse task order, this shared
+    // pre-commit barrier still makes the dispatcher scan every new row.
+    let dispatcher = state.dispatchers().ensure(agent_id, through);
+
     // Started-only reconciliation: atomically fail the Turn, then report the
     // incomplete preamble.
     if slice.len() == 1 {
-        match reconcile_started_only(state, agent_id, started.session_id, turn_id).await {
+        match reconcile_started_only(state, &dispatcher, agent_id, started.session_id, turn_id)
+            .await
+        {
             Err(error) => return Err(error),
             Ok(never) => match never {},
         }
@@ -370,7 +379,6 @@ async fn resume_preflight_and_spawn(
         session_id: started.session_id,
         turn_id,
     };
-    let dispatcher = state.dispatchers().ensure(agent_id, through);
     let hook_runtime = build_hook_runtime(state, ids, dispatcher.clone());
     if hook_runtime.extension_set_version() != Some(snapshot.extension_set_version_id) {
         return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
@@ -391,7 +399,20 @@ async fn resume_preflight_and_spawn(
         match &row.event {
             DurableAgentEvent::MessageAppended { .. } => lineage.record_message(row.event_seq),
             DurableAgentEvent::TranscriptCompacted { upto, .. } => lineage.apply_compaction(*upto),
-            _ => {}
+            DurableAgentEvent::ToolApprovalRequested { .. }
+            | DurableAgentEvent::ToolApprovalResolved { .. }
+            | DurableAgentEvent::ToolExecutionStarted { .. }
+            | DurableAgentEvent::HookInvocationPending { .. }
+            | DurableAgentEvent::HookInvocationCompleted { .. }
+            | DurableAgentEvent::HookInvocationFailed { .. }
+            | DurableAgentEvent::IterationCompleted { .. } => {}
+            DurableAgentEvent::LoopStarted { .. }
+            | DurableAgentEvent::LoopFinished { .. }
+            | DurableAgentEvent::LoopFailed { .. }
+            | DurableAgentEvent::LoopCancelled { .. } => {
+                return Err(ApiError::new(ErrorKind::DurableStateCorrupt));
+            }
+            _ => return Err(ApiError::new(ErrorKind::DurableStateCorrupt)),
         }
     }
 
@@ -407,7 +428,11 @@ async fn resume_preflight_and_spawn(
 
     // Replay window: the current LoopStarted, the historical baseline as
     // message events, then the exact current-Turn suffix in event order.
-    let mut window = Vec::with_capacity(slice.len() + baseline.messages.len());
+    let window_capacity = slice
+        .len()
+        .checked_add(baseline.messages.len())
+        .ok_or_else(|| ApiError::new(ErrorKind::Internal))?;
+    let mut window = Vec::with_capacity(window_capacity);
     window.push(slice[0].event.clone());
     window.extend(
         baseline
@@ -449,6 +474,7 @@ async fn resume_preflight_and_spawn(
 /// uncertain commit, re-read the exact Turn before answering.
 async fn reconcile_started_only(
     state: &AppState,
+    dispatcher: &crate::dispatcher::DispatcherHandle,
     agent_id: stratum_core::AgentId,
     session_id: SessionId,
     turn_id: TurnId,
@@ -470,7 +496,7 @@ async fn reconcile_started_only(
         .await;
     match result {
         Ok(receipt) => {
-            state.dispatchers().receipt(agent_id, receipt.event_seq);
+            dispatcher.receipt(receipt.event_seq);
             Err(ApiError::new(ErrorKind::TurnPreambleIncomplete))
         }
         Err(append_error) => {
@@ -592,6 +618,17 @@ pub(crate) async fn post_approval(
     Span::current().record("agent_id", field::display(agent_id));
     let body = json_request(request)?;
 
+    // The dispatcher must exist at a pre-commit PG barrier. Creating it from a
+    // later receipt would let two concurrently committed writers whose wakeups
+    // arrive in reverse order skip the earlier row as historical.
+    let frontier = state
+        .pg()
+        .read_agent_state(agent_id)
+        .await
+        .map_err(ApiError::from_postgres)?
+        .last_event_seq;
+    let dispatcher = state.dispatchers().ensure(agent_id, frontier);
+
     let outcome = state
         .pg()
         .resolve_approval(ResolveApproval {
@@ -605,7 +642,39 @@ pub(crate) async fn post_approval(
     if let ResolveApprovalOutcome::Resolved { receipt } = outcome {
         // Commit first, then best-effort notification and realtime receipt.
         state.waiters().notify(approval_id);
-        state.dispatchers().receipt(agent_id, receipt.event_seq);
+        dispatcher.receipt(receipt.event_seq);
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    fn assert_response_has_explicit_unit_body(
+        operation: utoipa::openapi::path::Operation,
+        status: &str,
+    ) {
+        let document = serde_json::to_value(operation).expect("OpenAPI operation serializes");
+        assert_eq!(
+            document.pointer(&format!(
+                "/responses/{status}/content/application~1json/schema/default"
+            )),
+            Some(&serde_json::Value::Null),
+            "response {status} must declare the explicit unit body: {document}"
+        );
+    }
+
+    #[test]
+    fn empty_success_responses_declare_explicit_unit_bodies() {
+        assert_response_has_explicit_unit_body(
+            <super::__path_post_resume as utoipa::Path>::operation(),
+            "204",
+        );
+        let cancel = <super::__path_post_cancel as utoipa::Path>::operation();
+        assert_response_has_explicit_unit_body(cancel.clone(), "202");
+        assert_response_has_explicit_unit_body(cancel, "204");
+        assert_response_has_explicit_unit_body(
+            <super::__path_post_approval as utoipa::Path>::operation(),
+            "204",
+        );
+    }
 }

@@ -1,8 +1,8 @@
 //! Process-local hosting registry.
 //!
 //! The registry tracks exact `(AgentId, TurnId)` claims: a unique claim
-//! identity, the `starting`/`running` state, the Turn cancellation token, and
-//! the managed task handle. Nothing here is persisted; Postgres remains the
+//! identity, the `starting`/`running` state, and the Turn cancellation token.
+//! Managed futures belong to the process runtime `JoinSet`. Nothing here is persisted; Postgres remains the
 //! only durable truth and every command revalidates durable state. The lock
 //! only guards the in-memory map and is never held across an `.await`.
 
@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use stratum_core::{AgentId, TurnId};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::turn::ManagedTurnTask;
 
 /// Lifecycle state of one process claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +25,6 @@ pub(crate) enum ClaimState {
 }
 
 /// One installed claim.
-#[allow(dead_code)] // fields are read through the registry API
 struct Claim {
     /// Unique identity of this claim installation.
     claim_id: Uuid,
@@ -32,8 +32,6 @@ struct Claim {
     state: ClaimState,
     /// Turn cancellation token signalled by the cancel endpoint.
     token: CancellationToken,
-    /// Managed task handle, attached right after spawn.
-    task: Option<JoinHandle<()>>,
 }
 
 /// A freshly installed claim, owned by the installing request.
@@ -72,7 +70,6 @@ impl TurnRegistry {
                     claim_id: Uuid::now_v7(),
                     state: ClaimState::Starting,
                     token: CancellationToken::new(),
-                    task: None,
                 };
                 let handle = ClaimHandle {
                     claim_id: claim.claim_id,
@@ -84,20 +81,23 @@ impl TurnRegistry {
         }
     }
 
-    /// Attaches the managed task handle to a claim installed by this request.
+    /// Acknowledges that the managed future was inserted into the process
+    /// task set. The marker is intentionally not stored: task ownership lives
+    /// in the shared `JoinSet`, while this registry retains exact claim state.
     pub(crate) fn attach_task(
         &self,
         agent_id: AgentId,
         turn_id: TurnId,
         claim_id: Uuid,
-        task: JoinHandle<()>,
+        _task: ManagedTurnTask,
     ) {
-        let mut claims = self.lock();
-        if let Some(claim) = claims.get_mut(&(agent_id, turn_id))
-            && claim.claim_id == claim_id
-        {
-            claim.task = Some(task);
-        }
+        let claims = self.lock();
+        debug_assert!(
+            claims
+                .get(&(agent_id, turn_id))
+                .is_some_and(|claim| claim.claim_id == claim_id),
+            "a managed turn task is attached only to its exact claim"
+        );
     }
 
     /// Marks a claim installed by this request as `running`.
@@ -139,16 +139,6 @@ impl TurnRegistry {
         {
             claims.remove(&(agent_id, turn_id));
         }
-    }
-
-    /// Takes every managed task handle for the bounded shutdown drain. The
-    /// claims themselves stay installed; their tokens are never signalled.
-    pub(crate) fn take_tasks(&self) -> Vec<JoinHandle<()>> {
-        let mut claims = self.lock();
-        claims
-            .values_mut()
-            .filter_map(|claim| claim.task.take())
-            .collect()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(AgentId, TurnId), Claim>> {

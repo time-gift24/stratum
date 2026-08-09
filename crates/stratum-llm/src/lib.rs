@@ -7,6 +7,7 @@ pub mod message;
 pub mod mock;
 pub mod protocol;
 pub mod structured_output;
+pub mod timeouts;
 pub mod tool_call;
 
 pub use definition::{
@@ -23,4 +24,5 @@ pub use protocol::deepseek::{
 pub use protocol::openai_compatible::OpenAICompatibleProvider;
 pub use stratum_core::ToolSpec;
 pub use structured_output::StructuredOutput;
+pub use timeouts::LlmTimeouts;
 pub use tool_call::{ToolCall, ToolCallDelta};

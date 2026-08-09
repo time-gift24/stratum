@@ -3,9 +3,10 @@
 //!
 //! Frames are the only public realtime wire shape. Durable frames carry the
 //! Agent-wide `event_seq` as a decimal string; telemetry frames carry the
-//! call-local `(llm_call_id, telemetry_seq)` identity. Raw durable payloads,
-//! runtime snapshots, hook journal rows, `ToolExecutionStarted`, and internal
-//! error sources are never serialized into a frame.
+//! call-local `(llm_call_id, telemetry_seq)` identity plus a decimal-string PG
+//! ordering watermark. Raw durable payloads, runtime snapshots, hook journal
+//! rows, `ToolExecutionStarted`, and internal error sources are never
+//! serialized into a frame.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,8 @@ use stratum_core::{
 };
 use stratum_postgres::{DurableEventRow, HistoryItem, encode_event_seq};
 use utoipa::ToSchema;
+
+use crate::error::PersistedVariantError;
 
 /// Protocol version of every frame this binary emits.
 pub const PROTOCOL_VERSION_V1: u8 = 1;
@@ -103,6 +106,10 @@ pub enum AgentStreamFrameV1 {
         turn_id: TurnId,
         /// Frame creation time.
         created_at: DateTime<Utc>,
+        /// Highest durable PG event sequence known before this telemetry was
+        /// enqueued, encoded as a decimal string. This is an ordering
+        /// watermark, not part of the telemetry identity.
+        durable_before_event_seq: String,
         /// LLM call identity.
         llm_call_id: LlmCallId,
         /// Call-local telemetry sequence, assigned from 0 per call.
@@ -169,26 +176,30 @@ impl AgentStreamFrameV1 {
         }
     }
 
-    /// Builds one telemetry frame.
+    /// Builds one telemetry frame when the v1 protocol has an explicit
+    /// projection for the typed event. A future unknown event is omitted;
+    /// it is never disguised as a known v1 event.
     #[must_use]
     pub fn telemetry(
         agent_id: AgentId,
         session_id: SessionId,
         turn_id: TurnId,
+        durable_before_event_seq: u64,
         llm_call_id: LlmCallId,
         telemetry_seq: u64,
         event: &AgentTelemetryEvent,
-    ) -> Self {
-        Self::Telemetry {
+    ) -> Option<Self> {
+        Some(Self::Telemetry {
             protocol_version: PROTOCOL_VERSION_V1,
             agent_id,
             session_id,
             turn_id,
             created_at: Utc::now(),
+            durable_before_event_seq: encode_event_seq(durable_before_event_seq),
             llm_call_id,
             telemetry_seq,
-            event: LlmTelemetryEventV1::from(event),
-        }
+            event: project_telemetry_event(event)?,
+        })
     }
 
     /// Serializes the frame for transport.
@@ -266,39 +277,39 @@ pub enum LlmTelemetryEventV1 {
     },
 }
 
-impl From<&AgentTelemetryEvent> for LlmTelemetryEventV1 {
-    fn from(event: &AgentTelemetryEvent) -> Self {
-        match event {
-            AgentTelemetryEvent::LlmStarted { .. } => Self::LlmStarted,
-            AgentTelemetryEvent::TextDelta { delta, .. } => Self::TextDelta {
+fn project_telemetry_event(event: &AgentTelemetryEvent) -> Option<LlmTelemetryEventV1> {
+    match event {
+        AgentTelemetryEvent::LlmStarted { .. } => Some(LlmTelemetryEventV1::LlmStarted),
+        AgentTelemetryEvent::TextDelta { delta, .. } => Some(LlmTelemetryEventV1::TextDelta {
+            delta: delta.clone(),
+        }),
+        AgentTelemetryEvent::ReasoningDelta { delta, .. } => {
+            Some(LlmTelemetryEventV1::ReasoningDelta {
                 delta: delta.clone(),
-            },
-            AgentTelemetryEvent::ReasoningDelta { delta, .. } => Self::ReasoningDelta {
-                delta: delta.clone(),
-            },
-            AgentTelemetryEvent::ToolCallDelta {
-                call_id,
-                name,
-                arguments_delta,
-                ..
-            } => Self::ToolCallDelta {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                arguments_delta: arguments_delta.clone(),
-            },
-            AgentTelemetryEvent::LlmFinished {
-                finish_reason,
-                usage,
-                ..
-            } => Self::LlmFinished {
-                finish_reason: finish_reason.clone(),
-                usage: *usage,
-            },
-            // stratum-core marks the telemetry union non-exhaustive; an
-            // unknown future variant degrades to a no-op started marker rather
-            // than leaking anything.
-            _ => Self::LlmStarted,
+            })
         }
+        AgentTelemetryEvent::ToolCallDelta {
+            call_id,
+            name,
+            arguments_delta,
+            ..
+        } => Some(LlmTelemetryEventV1::ToolCallDelta {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            arguments_delta: arguments_delta.clone(),
+        }),
+        AgentTelemetryEvent::LlmFinished {
+            finish_reason,
+            usage,
+            ..
+        } => Some(LlmTelemetryEventV1::LlmFinished {
+            finish_reason: finish_reason.clone(),
+            usage: *usage,
+        }),
+        // `AgentTelemetryEvent` is non-exhaustive across crates. Protocol v1
+        // fails closed: a future variant has no public representation until
+        // an explicit projection is added.
+        _ => None,
     }
 }
 
@@ -377,16 +388,23 @@ pub enum AgentProductEventV1 {
 
 /// Maps one typed durable event to its safe public projection.
 ///
-/// Returns `None` for internal events that must never be published:
+/// Returns `Ok(None)` for internal events that must never be published:
 /// `ToolExecutionStarted` and the hook invocation journal.
-#[must_use]
-pub fn product_event(event: &DurableAgentEvent) -> Option<AgentProductEventV1> {
+///
+/// # Errors
+///
+/// Returns [`PersistedVariantError`] when a future persisted variant has no
+/// explicit v1 projection. Callers must stop at that durable row rather than
+/// treating it as an internal event.
+pub(crate) fn product_event(
+    event: &DurableAgentEvent,
+) -> Result<Option<AgentProductEventV1>, PersistedVariantError> {
     match event {
-        DurableAgentEvent::LoopStarted { .. } => Some(AgentProductEventV1::LoopStarted),
+        DurableAgentEvent::LoopStarted { .. } => Ok(Some(AgentProductEventV1::LoopStarted)),
         DurableAgentEvent::MessageAppended { message } => {
-            Some(AgentProductEventV1::MessageAppended {
+            Ok(Some(AgentProductEventV1::MessageAppended {
                 message: message.clone(),
-            })
+            }))
         }
         DurableAgentEvent::ToolApprovalRequested {
             approval_id,
@@ -395,59 +413,67 @@ pub fn product_event(event: &DurableAgentEvent) -> Option<AgentProductEventV1> {
             arguments,
             tool_kind,
             danger_level,
-        } => Some(AgentProductEventV1::ToolApprovalRequested {
+        } => Ok(Some(AgentProductEventV1::ToolApprovalRequested {
             approval_id: *approval_id,
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             arguments: arguments.clone(),
             tool_kind: *tool_kind,
             danger_level: *danger_level,
-        }),
+        })),
         DurableAgentEvent::ToolApprovalResolved {
             approval_id,
             decision,
-        } => Some(AgentProductEventV1::ToolApprovalResolved {
-            approval_id: *approval_id,
-            decision: *decision,
-        }),
+        } => {
+            let decision = match decision {
+                ApprovalDecision::Approve => ApprovalDecision::Approve,
+                ApprovalDecision::Reject => ApprovalDecision::Reject,
+                _ => return Err(PersistedVariantError::UnsupportedApprovalDecision),
+            };
+            Ok(Some(AgentProductEventV1::ToolApprovalResolved {
+                approval_id: *approval_id,
+                decision,
+            }))
+        }
         DurableAgentEvent::TranscriptCompacted {
             summary,
             compacted_iteration,
             ..
-        } => Some(AgentProductEventV1::TranscriptCompacted {
+        } => Ok(Some(AgentProductEventV1::TranscriptCompacted {
             summary: summary.clone(),
             compacted_iteration: *compacted_iteration,
-        }),
+        })),
         DurableAgentEvent::IterationCompleted { iteration, usage } => {
-            Some(AgentProductEventV1::IterationCompleted {
+            Ok(Some(AgentProductEventV1::IterationCompleted {
                 iteration: *iteration,
                 usage: *usage,
-            })
+            }))
         }
         DurableAgentEvent::LoopFinished {
             finish_reason,
             usage,
             ..
-        } => Some(AgentProductEventV1::LoopFinished {
+        } => Ok(Some(AgentProductEventV1::LoopFinished {
             finish_reason: finish_reason.clone(),
             usage: *usage,
-        }),
+        })),
         DurableAgentEvent::LoopFailed {
             error_text, usage, ..
-        } => Some(AgentProductEventV1::LoopFailed {
+        } => Ok(Some(AgentProductEventV1::LoopFailed {
             error_text: error_text.clone(),
             usage: *usage,
-        }),
+        })),
         DurableAgentEvent::LoopCancelled { usage } => {
-            Some(AgentProductEventV1::LoopCancelled { usage: *usage })
+            Ok(Some(AgentProductEventV1::LoopCancelled { usage: *usage }))
         }
         // Internal facts never become product events.
         DurableAgentEvent::ToolExecutionStarted { .. }
         | DurableAgentEvent::HookInvocationPending { .. }
         | DurableAgentEvent::HookInvocationCompleted { .. }
-        | DurableAgentEvent::HookInvocationFailed { .. } => None,
-        // Unknown future variants fail closed: nothing is published.
-        _ => None,
+        | DurableAgentEvent::HookInvocationFailed { .. } => Ok(None),
+        // Persisted non-exhaustive variants must never masquerade as internal
+        // events: the dispatcher stops before advancing their sequence.
+        _ => Err(PersistedVariantError::UnsupportedDurableProductEvent),
     }
 }
 
@@ -455,10 +481,12 @@ pub fn product_event(event: &DurableAgentEvent) -> Option<AgentProductEventV1> {
 ///
 /// # Errors
 ///
-/// Returns `None` when the row's event has no product projection; the store's
-/// history filter already guarantees one, so a `None` here indicates an
-/// invariant violation and the caller maps it to an internal error.
-pub(crate) fn history_item_event(item: &HistoryItem) -> Option<AgentProductEventV1> {
+/// Returns `Ok(None)` when the row's event has no product projection; the
+/// store's history filter already guarantees one, so `Ok(None)` indicates an
+/// invariant violation. Future persisted variants retain their typed error.
+pub(crate) fn history_item_event(
+    item: &HistoryItem,
+) -> Result<Option<AgentProductEventV1>, PersistedVariantError> {
     product_event(&item.event)
 }
 
@@ -493,6 +521,48 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_frame_requires_a_decimal_durable_watermark_without_changing_identity() {
+        let llm_call_id = LlmCallId::from("call-1");
+        let event = AgentTelemetryEvent::TextDelta {
+            llm_call_id: llm_call_id.clone(),
+            delta: "hello".to_owned(),
+        };
+        let frame = AgentStreamFrameV1::telemetry(
+            AgentId::new(),
+            SessionId::new(),
+            TurnId::new(),
+            u64::MAX,
+            llm_call_id.clone(),
+            7,
+            &event,
+        )
+        .expect("known telemetry projects");
+        let json = frame_json(&frame);
+
+        assert_eq!(json["kind"], "telemetry");
+        assert_eq!(
+            json["durable_before_event_seq"],
+            json!(u64::MAX.to_string())
+        );
+        assert_eq!(json["llm_call_id"], json!(llm_call_id));
+        assert_eq!(json["telemetry_seq"], 7);
+        assert_eq!(json["event"]["type"], "text_delta");
+        assert_eq!(
+            serde_json::from_value::<AgentStreamFrameV1>(json.clone())
+                .expect("complete telemetry frame decodes"),
+            frame
+        );
+
+        let mut missing_watermark = json;
+        missing_watermark
+            .as_object_mut()
+            .expect("frame is an object")
+            .remove("durable_before_event_seq");
+        serde_json::from_value::<AgentStreamFrameV1>(missing_watermark)
+            .expect_err("v1 telemetry requires its durable watermark");
+    }
+
+    #[test]
     fn stream_reset_carries_no_session_or_turn_identity() {
         let frame = AgentStreamFrameV1::stream_reset(AgentId::new());
         let json = frame_json(&frame);
@@ -512,7 +582,9 @@ mod tests {
             summary: ChatMessage::system("summary"),
             compacted_iteration: 3,
         };
-        let product = product_event(&event).expect("compaction is a product event");
+        let product = product_event(&event)
+            .expect("known event projects")
+            .expect("compaction is a product event");
         let json = serde_json::to_value(product).expect("product serializes");
         assert_eq!(json["type"], "transcript_compacted");
         let text = json.to_string();
@@ -548,7 +620,9 @@ mod tests {
         ];
         for event in internal {
             assert!(
-                product_event(&event).is_none(),
+                product_event(&event)
+                    .expect("known internal event classifies")
+                    .is_none(),
                 "{} must never be published",
                 event.event_type()
             );
@@ -560,7 +634,9 @@ mod tests {
         let event = DurableAgentEvent::LoopStarted {
             extension_set_version_id: Some(ExtensionSetVersionId::new()),
         };
-        let product = product_event(&event).expect("loop_started is a product event");
+        let product = product_event(&event)
+            .expect("known event projects")
+            .expect("loop_started is a product event");
         let text = serde_json::to_string(&product).expect("product serializes");
         assert!(!text.contains("extension_set_version_id"));
     }
@@ -575,9 +651,32 @@ mod tests {
             tool_kind: ToolKind::Read,
             danger_level: DangerLevel::Low,
         };
-        let product = product_event(&event).expect("approval request is a product event");
+        let product = product_event(&event)
+            .expect("known event projects")
+            .expect("approval request is a product event");
         let json = serde_json::to_value(product).expect("product serializes");
         assert_eq!(json["type"], "tool_approval_requested");
         assert!(json["data"].get("hook_invocation_id").is_none());
+    }
+
+    #[test]
+    fn approval_resolution_projects_only_explicit_v1_decisions() {
+        for decision in [ApprovalDecision::Approve, ApprovalDecision::Reject] {
+            let event = DurableAgentEvent::ToolApprovalResolved {
+                approval_id: ApprovalId::new(),
+                decision,
+            };
+
+            let product = product_event(&event)
+                .expect("known decision projects")
+                .expect("approval resolution is a product event");
+            assert!(matches!(
+                product,
+                AgentProductEventV1::ToolApprovalResolved {
+                    decision: projected,
+                    ..
+                } if projected == decision
+            ));
+        }
     }
 }

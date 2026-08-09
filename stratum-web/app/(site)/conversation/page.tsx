@@ -430,7 +430,8 @@ export default function ConversationPage() {
     const sent =
       state.agentId === null ? createConversation(value) : sendMessage(value)
     void sent.then((ok) => {
-      if (ok) setComposerValue("")
+      // 请求期间用户可能已经继续输入；只清掉本次实际发送的原值。
+      if (ok) setComposerValue((current) => (current === value ? "" : current))
     })
   }
 

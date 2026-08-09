@@ -11,8 +11,8 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -32,6 +32,7 @@ const SSE_BUFFER_CAPACITY: usize = 256;
 
 /// Event stream query parameters.
 #[derive(Debug, serde::Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub(crate) struct EventsParams {
     /// Opaque tail cursor to continue from (alternative to `Last-Event-ID`).
@@ -68,13 +69,12 @@ pub(crate) async fn get_events(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
-    Query(params): Query<EventsParams>,
+    params: Result<Query<EventsParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let params = events_query(params)?;
     let agent_id = parse_agent_id(&agent_id)?;
     Span::current().record("agent_id", field::display(agent_id));
-    let last_event_id = headers
-        .get("Last-Event-ID")
-        .and_then(|value| value.to_str().ok());
+    let last_event_id = last_event_id(&headers)?;
     let cursor = parse_cursor(last_event_id, params.after_cursor.as_deref())?;
 
     // Idle Agents are subscribable; the read only proves existence and
@@ -98,7 +98,7 @@ pub(crate) async fn get_events(
     // The subscription is established before any header is sent; the pump
     // starts buffering immediately, then `stream_ready` is emitted.
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamItem>(SSE_BUFFER_CAPACITY);
-    tokio::spawn(pump_tail(
+    state.spawn_runtime_task(pump_tail(
         agent_id,
         subscription,
         tx,
@@ -138,10 +138,29 @@ pub(crate) async fn get_events(
     Ok(Sse::new(events)
         .keep_alive(
             KeepAlive::new()
-                .interval(Duration::from_secs(15))
+                .interval(state.sse_keep_alive())
                 .text("keep-alive"),
         )
         .into_response())
+}
+
+fn events_query(
+    params: Result<Query<EventsParams>, QueryRejection>,
+) -> Result<EventsParams, ApiError> {
+    params
+        .map(|Query(params)| params)
+        .map_err(|_| ApiError::new(ErrorKind::InvalidRequest))
+}
+
+fn last_event_id(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
+    headers
+        .get("Last-Event-ID")
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| ApiError::new(ErrorKind::InvalidCursor))
+        })
+        .transpose()
 }
 
 /// Serializes a locally produced control frame.
@@ -209,22 +228,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_accepts_exactly_one_decimal_source() {
+    fn cursor_accepts_exactly_one_opaque_source() {
         assert_eq!(parse_cursor(None, None).expect("no cursor"), None);
-        let cursor = parse_cursor(Some("42"), None)
+        let agent_id = stratum_core::AgentId::new();
+        let header = format!("v1.{agent_id}.123.42");
+        let query = format!("v1.{agent_id}.123.7");
+        let cursor = parse_cursor(Some(&header), None)
             .expect("header cursor parses")
             .expect("cursor present");
-        assert_eq!(cursor.to_string(), "42");
-        let cursor = parse_cursor(None, Some("7"))
+        assert_eq!(cursor.to_string(), header);
+        let cursor = parse_cursor(None, Some(&query))
             .expect("query cursor parses")
             .expect("cursor present");
-        assert_eq!(cursor.to_string(), "7");
+        assert_eq!(cursor.to_string(), query);
     }
 
     #[test]
     fn cursor_rejects_dual_sources_and_garbage() {
         for input in [
-            (Some("1"), Some("2")),
+            (Some("one"), Some("two")),
             (Some("abc"), None),
             (None, Some("")),
             (None, Some("-3")),
@@ -233,5 +255,42 @@ mod tests {
             let error = parse_cursor(input.0, input.1).expect_err("cursor rejected");
             assert_eq!(error.kind(), ErrorKind::InvalidCursor);
         }
+    }
+
+    #[test]
+    fn unknown_query_and_non_utf8_header_fail_closed() {
+        let uri: http::Uri = "/v1/agents/id/events?replay=all"
+            .parse()
+            .expect("test URI parses");
+        let query = Query::<EventsParams>::try_from_uri(&uri);
+        let error = events_query(query).expect_err("unknown query is rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidRequest);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Last-Event-ID",
+            http::HeaderValue::from_bytes(&[0xff]).expect("opaque header value is valid"),
+        );
+        let error = last_event_id(&headers).expect_err("non-UTF-8 cursor is rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidCursor);
+    }
+
+    #[tokio::test]
+    async fn quiet_tail_pump_stops_when_the_client_closes() {
+        let subscription = Box::pin(stream::pending()) as AgentTailStream;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pump_tail(
+                stratum_core::AgentId::new(),
+                subscription,
+                tx,
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("closed client stops the pump");
     }
 }

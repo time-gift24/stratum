@@ -159,6 +159,9 @@ pub struct AgentViewResponse {
     pub current_turn_id: Option<TurnId>,
     /// Snapshot barrier (`agent_state.last_event_seq`) as a decimal string.
     pub snapshot_event_seq: String,
+    /// Latest durable assistant-message sequence at the same barrier, as a
+    /// decimal string; `"0"` when no assistant message exists.
+    pub telemetry_floor_event_seq: String,
     /// Undecided approvals of the current Turn within the barrier.
     pub pending_approvals: Vec<PendingApprovalDto>,
     /// Usage of the most recent usage-carrying event of the current Turn.

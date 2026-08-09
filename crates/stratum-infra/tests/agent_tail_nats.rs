@@ -17,6 +17,8 @@ const EXPIRY_STREAM: &str = "AGENT_TAIL_TEST_EXPIRY";
 const FUTURE_STREAM: &str = "AGENT_TAIL_TEST_FUTURE";
 const EMPTY_STREAM: &str = "AGENT_TAIL_TEST_EMPTY";
 const ISOLATION_STREAM: &str = "AGENT_TAIL_TEST_ISOLATION";
+const CURSOR_SCOPE_STREAM: &str = "AGENT_TAIL_TEST_CURSOR_SCOPE";
+const RECREATE_STREAM: &str = "AGENT_TAIL_TEST_RECREATE";
 const RESTART_STREAM: &str = "AGENT_TAIL_TEST_RESTART";
 const NO_DELIVERY_GRACE: Duration = Duration::from_millis(500);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -127,12 +129,17 @@ async fn agent_tail_reports_future_cursor_as_expired() -> Result<(), Box<dyn Err
     let tail = connect(&config).await?;
     let agent_id = AgentId::new();
 
-    tail.publish(&agent_id, Bytes::from_static(b"frame-1"))
+    let current = tail
+        .publish(&agent_id, Bytes::from_static(b"frame-1"))
         .await?;
 
     // A cursor ahead of the tail (forged, or from a recreated stream) must
     // expire instead of silently waiting for future messages.
-    let forged: TailCursor = "999999".parse()?;
+    let encoded = current.to_string();
+    let (prefix, _) = encoded
+        .rsplit_once('.')
+        .ok_or_else(|| std::io::Error::other("cursor has sequence"))?;
+    let forged: TailCursor = format!("{prefix}.999999").parse()?;
     let result = tail.subscribe(&agent_id, Some(forged)).await;
     assert!(
         matches!(result, Err(AgentTailError::CursorExpired { cursor }) if cursor == forged),
@@ -146,16 +153,70 @@ async fn agent_tail_reports_future_cursor_as_expired() -> Result<(), Box<dyn Err
 async fn agent_tail_reports_any_cursor_as_expired_on_empty_stream() -> Result<(), Box<dyn Error>> {
     let config = test_config(EMPTY_STREAM, "events.agent.test.empty");
     reset_stream(&config).await?;
-    let tail = connect(&config).await?;
+    let old_tail = connect(&config).await?;
     let agent_id = AgentId::new();
 
-    // Nothing was ever published: no cursor can be retained.
-    let cursor: TailCursor = "0".parse()?;
+    let cursor = old_tail
+        .publish(&agent_id, Bytes::from_static(b"old-generation"))
+        .await?;
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    // The recreated stream is empty and cannot retain the old generation.
     let result = tail.subscribe(&agent_id, Some(cursor)).await;
     assert!(
         matches!(result, Err(AgentTailError::CursorExpired { cursor: expired }) if expired == cursor),
         "an empty stream must expire every cursor"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_tail_rejects_cursor_from_another_agent() -> Result<(), Box<dyn Error>> {
+    let config = test_config(CURSOR_SCOPE_STREAM, "events.agent.test.cursor_scope");
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let agent_a = AgentId::new();
+    let agent_b = AgentId::new();
+    let cursor_b = tail
+        .publish(&agent_b, Bytes::from_static(b"agent-b"))
+        .await?;
+
+    let result = tail.subscribe(&agent_a, Some(cursor_b)).await;
+
+    assert!(matches!(
+        result,
+        Err(AgentTailError::CursorExpired { cursor }) if cursor == cursor_b
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_tail_rejects_old_generation_after_sequence_overlap() -> Result<(), Box<dyn Error>> {
+    let config = test_config(RECREATE_STREAM, "events.agent.test.recreate");
+    reset_stream(&config).await?;
+    let old_tail = connect(&config).await?;
+    let agent_id = AgentId::new();
+    let old_cursor = old_tail
+        .publish(&agent_id, Bytes::from_static(b"old-1"))
+        .await?;
+
+    reset_stream(&config).await?;
+    let new_tail = connect(&config).await?;
+    new_tail
+        .publish(&agent_id, Bytes::from_static(b"new-1"))
+        .await?;
+    new_tail
+        .publish(&agent_id, Bytes::from_static(b"new-2"))
+        .await?;
+
+    let result = new_tail.subscribe(&agent_id, Some(old_cursor)).await;
+
+    assert!(matches!(
+        result,
+        Err(AgentTailError::CursorExpired { cursor }) if cursor == old_cursor
+    ));
     Ok(())
 }
 

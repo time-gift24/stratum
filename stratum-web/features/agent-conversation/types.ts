@@ -68,6 +68,8 @@ export type ToolProgress = {
 /** 进行中的 LLM call 的 volatile draft */
 export type DraftState = {
   llmCallId: string
+  /** 该 call 首个已见 telemetry 入队前观察到的 durable high-water */
+  durableBeforeEventSeq: string
   text: string
   reasoning: string
   /** 下一期待的 telemetry_seq（低于它是重复，高于它标记 incomplete） */
@@ -99,6 +101,12 @@ export type ConversationState = {
    * 内存）。closed call 的迟到 telemetry 一律忽略，不重新创建 draft。
    */
   closedLlmCallIds: ReadonlySet<string>
+  /**
+   * 已收敛的最新 assistant final event_seq。telemetry 帧携带其入队前观察到
+   * 的 durable watermark；低于此 floor 的帧属于该 final 之前的旧 call，
+   * 即使跨 PG/NATS 通道晚到也不得重建 draft。
+   */
+  telemetryFloorEventSeq: string
   tools: Readonly<Record<string, ToolProgress>>
   approvals: Readonly<Record<string, ApprovalRequest>>
   /** 向上分页的固定 through barrier（cold bootstrap 时确定） */
@@ -111,6 +119,8 @@ export type ConversationState = {
   realtimeDegraded: boolean
   /** cancel 202 已接受但 durable terminal 尚未确认 */
   cancelRequested: boolean
+  /** message 202 已接受、但 AgentView 或同一 Turn 的 exact durable loop_started/terminal frame 尚未证明 */
+  acceptedTurnId: string | null
   phase: "empty" | "recovering" | "ready" | "connection_error" | "missing"
   error: ApiError | null
 }
@@ -138,9 +148,12 @@ export type ConversationAction =
   | { type: "history_page_failed" }
   | { type: "durable_frame"; frame: DurableFrame }
   | { type: "telemetry_frame"; frame: TelemetryFrame }
-  /** 增量 reconcile：items 为 (旧 barrier, 新 barrier] 的可见 product items */
+  | { type: "turn_accepted"; agentId: string; turnId: string }
+  /** 增量 reconcile：items 为 (baseBarrier, 新 barrier] 的可见 product items */
   | {
       type: "view_reconciled"
+      /** 启动本次 reconcile 时观察到的 barrier；reducer 以它做原子 CAS */
+      baseBarrier: string
       view: AgentView
       items: readonly AgentDurableRecordV1[]
     }

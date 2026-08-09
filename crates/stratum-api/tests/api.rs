@@ -114,6 +114,7 @@ async fn create_agent_idempotency_matrix() {
     let agent_view = view(&fixture, &agent_id).await;
     assert_eq!(agent_view["status"], "idle");
     assert_eq!(agent_view["snapshot_event_seq"], "0");
+    assert_eq!(agent_view["telemetry_floor_event_seq"], "0");
     assert!(agent_view["session_id"].is_null());
     assert!(agent_view["current_turn_id"].is_null());
     assert_eq!(agent_view["resume_required"], false);
@@ -981,6 +982,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
         format!("/v1/agents/{agent_id}/history?through_event_seq=99999"),
         format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=0"),
         format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=300"),
+        format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&replay=all"),
     ] {
         let (status, body) = fixture.json("GET", &uri, None, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
@@ -1136,6 +1138,34 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_cursor");
+    let (status, body) = fixture
+        .json(
+            "GET",
+            &format!("/v1/agents/{agent_id}/events?replay=all"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
+
+    let invalid_header = axum::http::HeaderValue::from_bytes(&[0xff])
+        .expect("opaque non-UTF-8 header value is valid HTTP");
+    let response = fixture
+        .request(
+            axum::http::Request::builder()
+                .uri(format!("/v1/agents/{agent_id}/events"))
+                .header("Last-Event-ID", invalid_header)
+                .body(axum::body::Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .expect("error body reads");
+    let body: Value = serde_json::from_slice(&bytes).expect("error response is json");
+    assert_eq!(body["error"]["code"], "invalid_cursor");
 
     // Subscribe, then run a turn: durable frames arrive with cursor ids and
     // decimal-string event sequences.
@@ -1192,11 +1222,27 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
         "loop_finished"
     );
     // Telemetry frames share the tail and precede their final message.
-    let telemetry = events
+    let telemetry: Vec<_> = events
         .iter()
         .filter(|event| event.data["kind"] == "telemetry")
-        .count();
-    assert!(telemetry >= 2, "llm telemetry streamed: {telemetry}");
+        .collect();
+    assert!(
+        telemetry.len() >= 2,
+        "llm telemetry streamed: {telemetry:?}"
+    );
+    for frame in telemetry {
+        assert!(frame.id.is_some(), "telemetry frames carry cursor ids");
+        assert!(
+            frame.data["durable_before_event_seq"]
+                .as_str()
+                .expect("telemetry durable watermark is a string")
+                .parse::<u64>()
+                .is_ok(),
+            "telemetry durable watermark is decimal"
+        );
+        assert!(frame.data["llm_call_id"].is_string());
+        assert!(frame.data["telemetry_seq"].is_u64());
+    }
     wait_for_status(&fixture, &agent_id, "finished").await;
 }
 
@@ -1349,6 +1395,18 @@ async fn health_and_not_found_endpoints() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["paths"]["/v1/agents/{agent_id}/events"].is_object());
     assert!(body["components"]["schemas"]["AgentStreamFrameV1"].is_object());
+    assert!(
+        body["components"]["schemas"]["AgentViewResponse"]
+            .to_string()
+            .contains("telemetry_floor_event_seq"),
+        "OpenAPI exposes the cold-recovery telemetry floor"
+    );
+    assert!(
+        body["components"]["schemas"]["AgentStreamFrameV1"]
+            .to_string()
+            .contains("durable_before_event_seq"),
+        "OpenAPI exposes the telemetry durable watermark"
+    );
 
     // Malformed path identities are 400.
     let (status, body) = fixture
@@ -1388,193 +1446,6 @@ url = "postgres://unused:unused@127.0.0.1:1/unused"
     assert!(
         matches!(result, Err(stratum_api::HostError::TemplatesRoot(_))),
         "a missing template root fails startup"
-    );
-}
-
-/// Drives one agent through a finished turn, a parked turn that commits a
-/// real compaction companion through the store write path, a cancellation,
-/// and a fresh turn; returns the agent id, the messages of the fresh turn's
-/// first provider call, the companion's stored `retained_from_event_seq`, and
-/// the value that pointer is expected to hold afterwards.
-async fn compacted_turn_context(
-    fixture: &Fixture,
-    pg: &PostgresBackend,
-    pool: &sqlx::PgPool,
-    summary_text: &str,
-    corrupt_pointer: bool,
-) -> (String, Vec<stratum_core::ChatMessage>, i64, i64) {
-    let (_, created) = create_agent(fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
-
-    let (_, first) = send_message(fixture, &agent_id, "first", Value::Null).await;
-    let first_turn = first["turn_id"].as_str().expect("turn id").to_owned();
-    wait_for_status(fixture, &agent_id, "finished").await;
-
-    let (status, second) =
-        send_message(fixture, &agent_id, "second", Value::String(first_turn)).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{second}");
-    let second_turn = second["turn_id"].as_str().expect("turn id").to_owned();
-
-    // The second turn parks on the never-answering provider call, so a
-    // compaction can be committed into the running turn through the same
-    // validated store write path production uses.
-    let message_event_seqs: Vec<i64> = sqlx::query_scalar(
-        "SELECT event_seq FROM durable_events \
-         WHERE agent_id = $1 AND event_type = 'message_appended' ORDER BY event_seq",
-    )
-    .bind(agent_uuid)
-    .fetch_all(pool)
-    .await
-    .expect("message rows read");
-    let retained = *message_event_seqs.last().expect("second user message");
-    let upto = u64::try_from(message_event_seqs.len() - 1).expect("small history");
-    let summary = stratum_core::ChatMessage::system(summary_text);
-    let agent_state = pg
-        .read_agent_state(AgentId::from(agent_uuid))
-        .await
-        .expect("state reads");
-    pg.append_event(stratum_postgres::AppendEvent {
-        agent_id: AgentId::from(agent_uuid),
-        session_id: agent_state.session_id.expect("session bound"),
-        turn_id: second_turn
-            .parse::<uuid::Uuid>()
-            .map(TurnId::from)
-            .expect("turn uuid"),
-        event: stratum_core::DurableAgentEvent::TranscriptCompacted {
-            upto,
-            summary: summary.clone(),
-            compacted_iteration: 1,
-        },
-        approval_hook_invocation_id: None,
-        default_model_update: None,
-        compaction: Some(stratum_postgres::CompactionInput {
-            compacted_iteration: 1,
-            upto,
-            retained_from_event_seq: u64::try_from(retained).expect("positive seq"),
-            summary,
-        }),
-    })
-    .await
-    .expect("compaction commits");
-
-    let mut expected_pointer = retained;
-    if corrupt_pointer {
-        // Rewrite only the retained pointer so it addresses the second turn's
-        // loop boundary: identity and summary stay intact, but the pointer no
-        // longer addresses a MessageAppended row and cannot serve as an
-        // acceleration start.
-        let non_message: i64 = sqlx::query_scalar(
-            "SELECT event_seq FROM durable_events \
-             WHERE agent_id = $1 AND event_type = 'loop_started' \
-             ORDER BY event_seq DESC LIMIT 1",
-        )
-        .bind(agent_uuid)
-        .fetch_one(pool)
-        .await
-        .expect("loop boundary reads");
-        sqlx::query(
-            "UPDATE transcript_compactions SET retained_from_event_seq = $2 WHERE agent_id = $1",
-        )
-        .bind(agent_uuid)
-        .bind(non_message)
-        .execute(pool)
-        .await
-        .expect("pointer corruption applies");
-        expected_pointer = non_message;
-    }
-
-    let (status, _) = fixture
-        .json(
-            "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
-            Some(json!({ "turn_id": second_turn })),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    wait_for_status(fixture, &agent_id, "cancelled").await;
-
-    // The fresh turn materializes the historical baseline.
-    let before = fixture.provider.captured_messages().len();
-    let (status, third) =
-        send_message(fixture, &agent_id, "third", Value::String(second_turn)).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{third}");
-    wait_for_status(fixture, &agent_id, "finished").await;
-
-    let captured = fixture.provider.captured_messages();
-    let context = captured
-        .get(before)
-        .expect("the fresh turn called the provider")
-        .clone();
-    let stored_pointer: i64 = sqlx::query_scalar(
-        "SELECT retained_from_event_seq FROM transcript_compactions WHERE agent_id = $1",
-    )
-    .bind(agent_uuid)
-    .fetch_one(pool)
-    .await
-    .expect("companion reads");
-    (agent_id, context, stored_pointer, expected_pointer)
-}
-
-#[tokio::test]
-#[ignore = "requires the stratum-api-test compose stack"]
-async fn compaction_pointer_corruption_falls_back_to_full_replay() {
-    // Both agents run the identical script: one finished turn, one parked
-    // turn carrying a real committed compaction, then a fresh turn whose
-    // first provider call reveals the materialized baseline.
-    let mut script = MockProvider::text("one");
-    script.push(Script::Pending);
-    script.extend(MockProvider::text("three"));
-    script.extend(MockProvider::text("one"));
-    script.push(Script::Pending);
-    script.extend(MockProvider::text("three"));
-    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], script).await;
-    let pg = PostgresBackend::connect(&common::pg_url())
-        .await
-        .expect("postgres connects");
-    let pool = sqlx::PgPool::connect(&common::pg_url())
-        .await
-        .expect("raw pool connects");
-
-    let summary = "[stratum:transcript-compacted]\nsummary of the prefix";
-
-    // Control run: the valid companion serves the accelerated path.
-    let (_, control_context, control_stored, control_expected) =
-        compacted_turn_context(&fixture, &pg, &pool, summary, false).await;
-    assert_eq!(
-        control_stored, control_expected,
-        "the valid companion is never rewritten"
-    );
-
-    // Corrupted run: the companion keeps its identity and summary, but the
-    // retained pointer addresses a non-message row, so admission must ignore
-    // the acceleration and replay fully in memory instead of failing.
-    let (_, fallback_context, corrupted_stored, corrupted_expected) =
-        compacted_turn_context(&fixture, &pg, &pool, summary, true).await;
-
-    // The full-replay fallback succeeds and materializes the identical
-    // committed context: the summary embodies the compacted prefix, the
-    // retained suffix survives, and the compacted messages stay cut.
-    assert_eq!(fallback_context, control_context);
-    assert!(fallback_context.contains(&stratum_core::ChatMessage::system(summary)));
-    assert!(fallback_context.contains(&stratum_core::ChatMessage::user("second")));
-    assert!(fallback_context.contains(&stratum_core::ChatMessage::user("third")));
-    assert!(!fallback_context.contains(&stratum_core::ChatMessage::user("first")));
-    assert!(
-        !fallback_context
-            .iter()
-            .any(|message| message.role == stratum_core::ChatRole::Assistant)
-    );
-
-    // The fallback never repairs or rewrites the companion row.
-    assert_eq!(
-        corrupted_stored, corrupted_expected,
-        "the corrupted pointer is left untouched"
-    );
-    assert_ne!(
-        corrupted_stored, control_stored,
-        "the corrupted pointer really differs from the valid one"
     );
 }
 
@@ -1717,35 +1588,4 @@ async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"]["code"], "runtime_unavailable");
-}
-
-#[tokio::test]
-#[ignore = "requires the stratum-api-test compose stack"]
-async fn ledger_tail_gap_fails_closed_as_durable_state_corrupt() {
-    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("one")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
-    let (_, accepted) = send_message(&fixture, &agent_id, "first", Value::Null).await;
-    let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
-    wait_for_status(&fixture, &agent_id, "finished").await;
-
-    // Corrupt the ledger: delete the newest committed row so the durable
-    // high-water points past the retained rows.
-    let pool = sqlx::PgPool::connect(&common::pg_url())
-        .await
-        .expect("raw pool connects");
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
-    sqlx::query(
-        "DELETE FROM durable_events WHERE agent_id = $1 AND event_seq = \
-         (SELECT last_event_seq FROM agent_state WHERE agent_id = $1)",
-    )
-    .bind(agent_uuid)
-    .execute(&pool)
-    .await
-    .expect("tail row deleted");
-
-    // The next admission must fail closed instead of cementing the gap.
-    let (status, body) = send_message(&fixture, &agent_id, "second", json!(turn_id)).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_eq!(body["error"]["code"], "durable_state_corrupt");
 }

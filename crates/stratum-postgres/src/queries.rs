@@ -6,7 +6,8 @@
 
 use sqlx::{PgPool, Row};
 use stratum_core::{
-    AgentId, AgentVersionId, DurableAgentEvent, HookInvocationId, SessionId, TokenUsage, TurnId,
+    AgentId, AgentVersionId, ChatRole, DurableAgentEvent, HookInvocationId, SessionId, TokenUsage,
+    TurnId,
 };
 use uuid::Uuid;
 
@@ -16,13 +17,136 @@ use crate::types::{
     AgentStateView, AgentStatus, AgentView, ApprovalFacts, ApprovalLookup, ApprovalResolution,
     CreateKeyLookup, DurableEventRow, HISTORY_MAX_LIMIT, HISTORY_SOFT_PAGE_BUDGET_BYTES,
     HistoryItem, HistoryPage, HistoryQuery, HookInvocationLookup, LoopStartedRecord,
-    PendingApproval, ResumeSliceQuery, TranscriptCompaction,
+    PendingApproval, ResumeSliceQuery, TranscriptCompaction, u64_to_bigint,
 };
+
+const APPROVAL_DERIVATION_EVENT_TYPES: [&str; 3] = [
+    "tool_approval_requested",
+    "tool_approval_resolved",
+    "hook_invocation_completed",
+];
+const HOOK_DERIVATION_EVENT_TYPES: [&str; 3] = [
+    "hook_invocation_pending",
+    "hook_invocation_completed",
+    "hook_invocation_failed",
+];
+const TELEMETRY_FLOOR_SCAN_PAGE_SIZE: i64 = 32;
 
 /// Converts a persisted `bigint` sequence into the crate's `u64` domain.
 fn seq_from_i64(value: i64) -> Result<u64, PostgresError> {
     u64::try_from(value)
         .map_err(|_| PostgresError::corrupt_invariant("persisted bigint sequence is negative"))
+}
+
+/// Validates the version and one-to-zero companion relation of a specialized
+/// selector row whose event type is known to be non-compaction.
+pub(crate) fn decode_non_compaction_event_version(
+    row: &sqlx::postgres::PgRow,
+) -> Result<i32, PostgresError> {
+    let event_version: i32 = row
+        .try_get("event_version")
+        .map_err(PostgresError::StoreUnavailable)?;
+    codec::ensure_supported_event_version(event_version)?;
+    let has_compaction_companion: bool = row
+        .try_get("has_compaction_companion")
+        .map_err(PostgresError::StoreUnavailable)?;
+    codec::ensure_non_compaction_companion_absent(has_compaction_companion)?;
+    Ok(event_version)
+}
+
+/// Strictly decodes one non-compaction fact before a specialized derivation
+/// uses its JSON fields for inclusion or exclusion.
+fn decode_derivation_fact(row: &sqlx::postgres::PgRow) -> Result<(), PostgresError> {
+    let event_version = decode_non_compaction_event_version(row)?;
+    let event_type: String = row
+        .try_get("event_type")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let payload: serde_json::Value = row
+        .try_get("payload")
+        .map_err(PostgresError::StoreUnavailable)?;
+    match event_type.as_str() {
+        "tool_approval_requested" => {
+            codec::RequestedApprovalPayload::decode(event_version, payload)?;
+        }
+        "tool_approval_resolved" => {
+            codec::ResolvedApprovalPayload::decode(event_version, payload)?;
+        }
+        _ => {
+            codec::decode_event(&event_type, event_version, payload, None)?;
+        }
+    }
+    Ok(())
+}
+
+/// Guards every non-compaction fact participating in an existence-based
+/// derivation before a `NOT EXISTS` clause can hide it.
+async fn ensure_derivation_rows_compatible(
+    tx: &mut sqlx::PgConnection,
+    agent_id: AgentId,
+    turn_id: TurnId,
+    through_event_seq: Option<u64>,
+    event_types: &[&str],
+) -> Result<(), PostgresError> {
+    let through_event_seq = through_event_seq
+        .map(|value| u64_to_bigint(value, "derivation barrier exceeds bigint range"))
+        .transpose()?;
+    let rows = sqlx::query(
+        "SELECT d.event_type, d.event_version, d.payload, \
+             tc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events d \
+         LEFT JOIN transcript_compactions tc \
+             ON tc.agent_id = d.agent_id AND tc.event_seq = d.event_seq \
+         WHERE d.agent_id = $1 AND d.turn_id = $2 \
+             AND ($3::bigint IS NULL OR d.event_seq <= $3) \
+             AND d.event_type = ANY($4)",
+    )
+    .bind(agent_id.as_uuid())
+    .bind(turn_id.as_uuid())
+    .bind(through_event_seq)
+    .bind(event_types)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(PostgresError::StoreUnavailable)?;
+    for row in &rows {
+        decode_derivation_fact(row)?;
+    }
+    Ok(())
+}
+
+/// Strictly decodes one approval-request row selected by a specialized
+/// derivation.
+fn decode_requested_approval_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(u64, codec::RequestedApprovalPayload), PostgresError> {
+    let event_seq: i64 = row
+        .try_get("event_seq")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let event_version = decode_non_compaction_event_version(row)?;
+    let payload: serde_json::Value = row
+        .try_get("payload")
+        .map_err(PostgresError::StoreUnavailable)?;
+    Ok((
+        seq_from_i64(event_seq)?,
+        codec::RequestedApprovalPayload::decode(event_version, payload)?,
+    ))
+}
+
+/// Strictly decodes one approval-resolution row selected by a specialized
+/// derivation.
+fn decode_resolved_approval_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(u64, codec::ResolvedApprovalPayload), PostgresError> {
+    let event_seq: i64 = row
+        .try_get("event_seq")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let event_version = decode_non_compaction_event_version(row)?;
+    let payload: serde_json::Value = row
+        .try_get("payload")
+        .map_err(PostgresError::StoreUnavailable)?;
+    Ok((
+        seq_from_i64(event_seq)?,
+        codec::ResolvedApprovalPayload::decode(event_version, payload)?,
+    ))
 }
 
 /// Converts an optional persisted UUID identity.
@@ -83,7 +207,7 @@ fn decode_state_row(row: &sqlx::postgres::PgRow) -> Result<AgentStateView, Postg
 }
 
 /// Reads the Agent view in one MVCC snapshot: identity and thin state plus
-/// the barrier-derived pending approvals and latest usage.
+/// the barrier-derived pending approvals, latest usage and telemetry floor.
 #[tracing::instrument(skip_all, fields(agent_id = %agent_id))]
 pub(crate) async fn read_agent_view(
     pool: &PgPool,
@@ -118,14 +242,26 @@ pub(crate) async fn read_agent_view(
         (AgentStatus::Running, Some(turn_id)) => {
             read_pending_approvals(&mut tx, agent_id, turn_id, barrier).await?
         }
+        (AgentStatus::Running, None) => {
+            return Err(PostgresError::corrupt_invariant(
+                "running agent_state lacks current_turn_id",
+            ));
+        }
         // A terminal Turn invalidates every unconsumed approval; an idle
         // Agent never had one.
-        _ => Vec::new(),
+        (
+            AgentStatus::Idle
+            | AgentStatus::Finished
+            | AgentStatus::Failed
+            | AgentStatus::Cancelled,
+            _,
+        ) => Vec::new(),
     };
     let latest_usage = match state.current_turn_id {
         Some(turn_id) => read_latest_usage(&mut tx, agent_id, turn_id, barrier).await?,
         None => None,
     };
+    let telemetry_floor_event_seq = read_telemetry_floor(&mut tx, agent_id, barrier).await?;
 
     tx.commit().await.map_err(PostgresError::StoreUnavailable)?;
 
@@ -159,9 +295,65 @@ pub(crate) async fn read_agent_view(
         current_turn_id: state.current_turn_id,
         default_model_config: state.default_model_config,
         snapshot_event_seq: barrier,
+        telemetry_floor_event_seq,
         pending_approvals,
         latest_usage,
     })
+}
+
+/// Latest assistant `MessageAppended` sequence within the fixed AgentView
+/// barrier. Rows are decoded newest-first instead of filtering on JSON role:
+/// an unsupported or malformed newer message must fail closed rather than be
+/// skipped and produce a stale telemetry floor. Server-side keyset pages keep
+/// both PostgreSQL work per query and Rust allocation bounded for Agents with
+/// a long tool/user suffix.
+async fn read_telemetry_floor(
+    tx: &mut sqlx::PgConnection,
+    agent_id: AgentId,
+    barrier: u64,
+) -> Result<u64, PostgresError> {
+    let barrier = u64_to_bigint(barrier, "telemetry floor barrier exceeds bigint range")?;
+    let statement = format!(
+        "{EVENT_ROW_SELECT} \
+         WHERE d.agent_id = $1 AND d.event_seq <= $2 \
+             AND ($3::bigint IS NULL OR d.event_seq < $3) \
+             AND d.event_type = 'message_appended' \
+         ORDER BY d.event_seq DESC \
+         LIMIT $4"
+    );
+
+    let mut before_event_seq = None;
+    loop {
+        let rows = sqlx::query(&statement)
+            .bind(agent_id.as_uuid())
+            .bind(barrier)
+            .bind(before_event_seq)
+            .bind(TELEMETRY_FLOOR_SCAN_PAGE_SIZE)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(PostgresError::StoreUnavailable)?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let mut oldest_event_seq = None;
+        for row in &rows {
+            let decoded = decode_event_row(row)?;
+            oldest_event_seq = Some(u64_to_bigint(
+                decoded.event_seq,
+                "telemetry floor row sequence exceeds bigint range",
+            )?);
+            let DurableAgentEvent::MessageAppended { message } = decoded.event else {
+                return Err(PostgresError::corrupt_invariant(
+                    "telemetry floor query selected a non-message event",
+                ));
+            };
+            if message.role == ChatRole::Assistant {
+                return Ok(decoded.event_seq);
+            }
+        }
+        before_event_seq = oldest_event_seq;
+    }
 }
 
 /// Pending approvals of the current Turn: Requested minus Resolved minus
@@ -172,50 +364,52 @@ async fn read_pending_approvals(
     turn_id: TurnId,
     barrier: u64,
 ) -> Result<Vec<PendingApproval>, PostgresError> {
-    // The NOT EXISTS exclusions are existence-only: a matching
-    // Resolved/Completed row of ANY event_version counts as existing. That is
-    // the fail-closed direction — treating a decision or consumption written
-    // by a newer binary as effective hides the approval and denies further
-    // action, while ignoring it could surface an already-decided approval as
-    // still open and invite a duplicate decision. No field of the matching
-    // row is decoded here; every row whose payload IS decoded (the Requested
-    // rows below, and the Resolved row decoded by `resolve_approval` /
-    // `read_approval`) is version-checked before decode.
+    // Validate every fact that can participate in either exclusion first. An
+    // unsupported version or illegal companion must be explicit; it cannot
+    // silently hide an approval through raw JSON existence matching.
+    ensure_derivation_rows_compatible(
+        tx,
+        agent_id,
+        turn_id,
+        Some(barrier),
+        &APPROVAL_DERIVATION_EVENT_TYPES,
+    )
+    .await?;
     let rows = sqlx::query(
-        "SELECT r.event_seq, r.event_version, r.payload FROM durable_events r \
+        "SELECT r.event_seq, r.event_version, r.payload, \
+             rc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events r \
+         LEFT JOIN transcript_compactions rc \
+             ON rc.agent_id = r.agent_id AND rc.event_seq = r.event_seq \
          WHERE r.agent_id = $1 AND r.turn_id = $2 \
              AND r.event_type = 'tool_approval_requested' AND r.event_seq <= $3 \
              AND NOT EXISTS ( \
                  SELECT 1 FROM durable_events x \
-                 WHERE x.agent_id = r.agent_id AND x.event_type = 'tool_approval_resolved' \
+                 WHERE x.agent_id = r.agent_id AND x.turn_id = r.turn_id \
+                     AND x.event_type = 'tool_approval_resolved' \
                      AND x.payload ->> 'approval_id' = r.payload ->> 'approval_id') \
              AND NOT EXISTS ( \
                  SELECT 1 FROM durable_events c \
-                 WHERE c.agent_id = r.agent_id AND c.event_type = 'hook_invocation_completed' \
+                 WHERE c.agent_id = r.agent_id AND c.turn_id = r.turn_id \
+                     AND c.event_type = 'hook_invocation_completed' \
                      AND c.payload ->> 'invocation_id' = r.payload ->> 'hook_invocation_id') \
          ORDER BY r.event_seq ASC",
     )
     .bind(agent_id.as_uuid())
     .bind(turn_id.as_uuid())
-    .bind(barrier as i64)
+    .bind(u64_to_bigint(
+        barrier,
+        "approval barrier exceeds bigint range",
+    )?)
     .fetch_all(&mut *tx)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
 
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
-        let event_seq: i64 = row
-            .try_get("event_seq")
-            .map_err(PostgresError::StoreUnavailable)?;
-        let event_version: i32 = row
-            .try_get("event_version")
-            .map_err(PostgresError::StoreUnavailable)?;
-        let payload: serde_json::Value = row
-            .try_get("payload")
-            .map_err(PostgresError::StoreUnavailable)?;
-        let requested = codec::RequestedApprovalPayload::decode(event_version, payload)?;
+        let (requested_event_seq, requested) = decode_requested_approval_row(&row)?;
         approvals.push(PendingApproval {
-            requested_event_seq: seq_from_i64(event_seq)?,
+            requested_event_seq,
             approval_id: requested.approval_id,
             hook_invocation_id: requested.hook_invocation_id,
             call_id: requested.call_id,
@@ -237,14 +431,21 @@ async fn read_latest_usage(
     barrier: u64,
 ) -> Result<Option<TokenUsage>, PostgresError> {
     let row = sqlx::query(
-        "SELECT payload FROM durable_events \
-         WHERE agent_id = $1 AND turn_id = $2 AND event_seq <= $3 \
-             AND event_type = ANY($4) \
-         ORDER BY event_seq DESC LIMIT 1",
+        "SELECT d.event_type, d.event_version, d.payload, \
+             tc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events d \
+         LEFT JOIN transcript_compactions tc \
+             ON tc.agent_id = d.agent_id AND tc.event_seq = d.event_seq \
+         WHERE d.agent_id = $1 AND d.turn_id = $2 AND d.event_seq <= $3 \
+             AND d.event_type = ANY($4) \
+         ORDER BY d.event_seq DESC LIMIT 1",
     )
     .bind(agent_id.as_uuid())
     .bind(turn_id.as_uuid())
-    .bind(barrier as i64)
+    .bind(u64_to_bigint(
+        barrier,
+        "usage barrier exceeds bigint range",
+    )?)
     .bind(&codec::USAGE_EVENT_TYPES[..])
     .fetch_optional(&mut *tx)
     .await
@@ -253,17 +454,24 @@ async fn read_latest_usage(
     let Some(row) = row else {
         return Ok(None);
     };
+    let event_type: String = row
+        .try_get("event_type")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let event_version = decode_non_compaction_event_version(&row)?;
     let payload: serde_json::Value = row
         .try_get("payload")
         .map_err(PostgresError::StoreUnavailable)?;
-    let usage_value = payload
-        .get("usage")
-        .cloned()
-        .ok_or(PostgresError::corrupt_invariant(
-            "usage-carrying event payload lacks usage",
-        ))?;
-    let usage = serde_json::from_value(usage_value)
-        .map_err(|source| PostgresError::corrupt("usage payload failed v1 decode", source))?;
+    let usage = match codec::decode_event(&event_type, event_version, payload, None)? {
+        DurableAgentEvent::IterationCompleted { usage, .. }
+        | DurableAgentEvent::LoopFinished { usage, .. }
+        | DurableAgentEvent::LoopFailed { usage, .. }
+        | DurableAgentEvent::LoopCancelled { usage } => usage,
+        _ => {
+            return Err(PostgresError::corrupt_invariant(
+                "usage query selected a non-usage event",
+            ));
+        }
+    };
     Ok(Some(usage))
 }
 
@@ -275,24 +483,37 @@ pub(crate) async fn read_history_page(
     query: HistoryQuery,
 ) -> Result<HistoryPage, PostgresError> {
     let limit = query.limit.clamp(1, HISTORY_MAX_LIMIT);
+    let limit_usize = usize::try_from(limit)
+        .map_err(|_| PostgresError::InvalidCommand("history limit exceeds platform usize"))?;
+    let sql_limit = i64::from(limit)
+        .checked_add(1)
+        .ok_or(PostgresError::InvalidCommand("history limit overflow"))?;
+    let through_event_seq = u64_to_bigint(
+        query.through_event_seq,
+        "history barrier exceeds bigint range",
+    )?;
+    let before_event_seq = query
+        .before_event_seq
+        .map(|value| u64_to_bigint(value, "history cursor exceeds bigint range"))
+        .transpose()?;
     // One extra row distinguishes "exactly filled" from "more rows exist".
     let statement = history_statement();
     let rows = sqlx::query(&statement)
         .bind(query.agent_id.as_uuid())
-        .bind(query.through_event_seq as i64)
-        .bind(query.before_event_seq.map(|cursor| cursor as i64))
+        .bind(through_event_seq)
+        .bind(before_event_seq)
         .bind(&codec::HISTORY_EVENT_TYPES[..])
-        .bind(i64::from(limit) + 1)
+        .bind(sql_limit)
         .fetch_all(pool)
         .await
         .map_err(PostgresError::StoreUnavailable)?;
 
-    let mut page = Vec::with_capacity(rows.len().min(limit as usize));
+    let mut page = Vec::with_capacity(rows.len().min(limit_usize));
     for row in &rows {
         page.push(decode_event_row(row)?);
     }
-    let has_extra = page.len() > limit as usize;
-    page.truncate(limit as usize);
+    let has_extra = page.len() > limit_usize;
+    page.truncate(limit_usize);
 
     // Soft byte budget: accumulate from the newest item; the first item is
     // always kept whole even when it alone exceeds the budget.
@@ -300,11 +521,15 @@ pub(crate) async fn read_history_page(
     let mut budget_len = page.len();
     for (index, row) in page.iter().enumerate() {
         let size = event_size(&row.event);
-        if index > 0 && bytes + size > HISTORY_SOFT_PAGE_BUDGET_BYTES {
+        let Some(next_bytes) = bytes.checked_add(size) else {
+            budget_len = index.max(1);
+            break;
+        };
+        if index > 0 && next_bytes > HISTORY_SOFT_PAGE_BUDGET_BYTES {
             budget_len = index;
             break;
         }
-        bytes += size;
+        bytes = next_bytes;
     }
     let budget_trimmed = budget_len < page.len();
     page.truncate(budget_len);
@@ -353,9 +578,13 @@ pub(crate) async fn read_loop_started(
     turn_id: TurnId,
 ) -> Result<LoopStartedRecord, PostgresError> {
     let row = sqlx::query(
-        "SELECT event_seq, session_id, runtime_snapshot_version, runtime_snapshot, created_at \
-         FROM durable_events \
-         WHERE agent_id = $1 AND turn_id = $2 AND event_type = 'loop_started'",
+        "SELECT d.event_seq, d.session_id, d.event_version, d.runtime_snapshot_version, \
+             d.runtime_snapshot, d.created_at, \
+             tc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events d \
+         LEFT JOIN transcript_compactions tc \
+             ON tc.agent_id = d.agent_id AND tc.event_seq = d.event_seq \
+         WHERE d.agent_id = $1 AND d.turn_id = $2 AND d.event_type = 'loop_started'",
     )
     .bind(agent_id.as_uuid())
     .bind(turn_id.as_uuid())
@@ -363,6 +592,8 @@ pub(crate) async fn read_loop_started(
     .await
     .map_err(PostgresError::StoreUnavailable)?
     .ok_or(PostgresError::TurnNotFound { agent_id, turn_id })?;
+
+    decode_non_compaction_event_version(&row)?;
 
     let event_seq: i64 = row
         .try_get("event_seq")
@@ -410,14 +641,24 @@ pub(crate) async fn read_resume_slice(
     )
     .await?;
 
-    if rows.len() as u64 != query.through_event_seq - query.base_event_seq {
+    let expected_len = query
+        .through_event_seq
+        .checked_sub(query.base_event_seq)
+        .ok_or(PostgresError::InvalidCommand(
+            "resume through sequence precedes base sequence",
+        ))?;
+    let actual_len = u64::try_from(rows.len())
+        .map_err(|_| PostgresError::corrupt_invariant("resume truth slice length exceeds u64"))?;
+    if actual_len != expected_len {
         return Err(PostgresError::corrupt_invariant(
             "current-turn truth slice has missing rows",
         ));
     }
     let mut expected_seq = query.base_event_seq;
     for row in &rows {
-        expected_seq += 1;
+        expected_seq = expected_seq.checked_add(1).ok_or_else(|| {
+            PostgresError::corrupt_invariant("current-turn truth sequence overflowed")
+        })?;
         if row.event_seq != expected_seq {
             return Err(PostgresError::corrupt_invariant(
                 "current-turn truth slice is not gapless",
@@ -450,6 +691,8 @@ pub(crate) async fn read_events_range(
     from_event_seq: u64,
     to_event_seq: u64,
 ) -> Result<Vec<DurableEventRow>, PostgresError> {
+    let from_event_seq_db = u64_to_bigint(from_event_seq, "range start exceeds bigint range")?;
+    let to_event_seq_db = u64_to_bigint(to_event_seq, "range end exceeds bigint range")?;
     if from_event_seq >= to_event_seq {
         return Ok(Vec::new());
     }
@@ -460,8 +703,8 @@ pub(crate) async fn read_events_range(
     );
     let rows = sqlx::query(&statement)
         .bind(agent_id.as_uuid())
-        .bind(from_event_seq as i64)
-        .bind(to_event_seq as i64)
+        .bind(from_event_seq_db)
+        .bind(to_event_seq_db)
         .fetch_all(pool)
         .await
         .map_err(PostgresError::StoreUnavailable)?;
@@ -483,14 +726,18 @@ pub(crate) async fn read_latest_companion(
 ) -> Result<Option<TranscriptCompaction>, PostgresError> {
     let row = sqlx::query(
         "SELECT c.event_seq, c.turn_id, c.compacted_iteration, c.upto, c.retained_from_event_seq, \
-             c.summary, c.created_at, d.turn_id AS discriminator_turn_id, d.event_type \
+             c.summary, c.created_at, d.turn_id AS discriminator_turn_id, d.event_type, \
+             d.event_version, d.payload \
          FROM transcript_compactions c \
          JOIN durable_events d ON d.agent_id = c.agent_id AND d.event_seq = c.event_seq \
          WHERE c.agent_id = $1 AND c.event_seq <= $2 \
          ORDER BY c.event_seq DESC LIMIT 1",
     )
     .bind(agent_id.as_uuid())
-    .bind(base_event_seq as i64)
+    .bind(u64_to_bigint(
+        base_event_seq,
+        "companion barrier exceeds bigint range",
+    )?)
     .fetch_optional(pool)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
@@ -523,9 +770,43 @@ fn decode_companion_row(
         ));
     }
 
+    let compacted_iteration = seq_from_i64(
+        row.try_get("compacted_iteration")
+            .map_err(PostgresError::StoreUnavailable)?,
+    )?;
+    let upto = seq_from_i64(
+        row.try_get("upto")
+            .map_err(PostgresError::StoreUnavailable)?,
+    )?;
     let summary: serde_json::Value = row
         .try_get("summary")
         .map_err(PostgresError::StoreUnavailable)?;
+    let event_version: i32 = row
+        .try_get("event_version")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let payload: serde_json::Value = row
+        .try_get("payload")
+        .map_err(PostgresError::StoreUnavailable)?;
+    let event = codec::decode_event(
+        codec::TYPE_TRANSCRIPT_COMPACTED,
+        event_version,
+        payload,
+        Some(CompanionFacts {
+            upto,
+            compacted_iteration,
+            summary,
+        }),
+    )?;
+    let DurableAgentEvent::TranscriptCompacted {
+        upto,
+        summary,
+        compacted_iteration,
+    } = event
+    else {
+        return Err(PostgresError::corrupt_invariant(
+            "compaction discriminator decoded as a different event",
+        ));
+    };
     Ok(TranscriptCompaction {
         agent_id,
         event_seq: seq_from_i64(
@@ -533,19 +814,13 @@ fn decode_companion_row(
                 .map_err(PostgresError::StoreUnavailable)?,
         )?,
         turn_id: TurnId::from(turn_id),
-        compacted_iteration: seq_from_i64(
-            row.try_get("compacted_iteration")
-                .map_err(PostgresError::StoreUnavailable)?,
-        )?,
-        upto: seq_from_i64(
-            row.try_get("upto")
-                .map_err(PostgresError::StoreUnavailable)?,
-        )?,
+        compacted_iteration,
+        upto,
         retained_from_event_seq: seq_from_i64(
             row.try_get("retained_from_event_seq")
                 .map_err(PostgresError::StoreUnavailable)?,
         )?,
-        summary: codec::decode_summary(summary)?,
+        summary,
         created_at: row
             .try_get("created_at")
             .map_err(PostgresError::StoreUnavailable)?,
@@ -562,73 +837,100 @@ pub(crate) async fn read_approval(
 ) -> Result<Option<ApprovalFacts>, PostgresError> {
     let (clause, key) = match lookup {
         ApprovalLookup::ByApprovalId(approval_id) => (
-            "payload ->> 'approval_id'",
+            "r.payload ->> 'approval_id'",
             approval_id.as_uuid().to_string(),
         ),
         ApprovalLookup::ByHookInvocationId(hook_invocation_id) => (
-            "payload ->> 'hook_invocation_id'",
+            "r.payload ->> 'hook_invocation_id'",
             hook_invocation_id.as_uuid().to_string(),
         ),
     };
     let statement = format!(
-        "SELECT event_seq, event_version, payload FROM durable_events \
-         WHERE agent_id = $1 AND turn_id = $2 AND event_type = 'tool_approval_requested' \
+        "SELECT r.event_seq, r.event_version, r.payload, \
+             rc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events r \
+         LEFT JOIN transcript_compactions rc \
+             ON rc.agent_id = r.agent_id AND rc.event_seq = r.event_seq \
+         WHERE r.agent_id = $1 AND r.turn_id = $2 \
+             AND r.event_type = 'tool_approval_requested' \
              AND {clause} = $3"
     );
-    let requested = sqlx::query(&statement)
+    let requested_rows = sqlx::query(&statement)
         .bind(agent_id.as_uuid())
         .bind(turn_id.as_uuid())
         .bind(key)
-        .fetch_optional(pool)
+        .fetch_all(pool)
         .await
         .map_err(PostgresError::StoreUnavailable)?;
-
-    let Some(requested) = requested else {
+    let mut requested_match = None;
+    for row in requested_rows {
+        let (event_seq, requested) = decode_requested_approval_row(&row)?;
+        let identity_matches = match lookup {
+            ApprovalLookup::ByApprovalId(approval_id) => requested.approval_id == approval_id,
+            ApprovalLookup::ByHookInvocationId(hook_invocation_id) => {
+                requested.hook_invocation_id == hook_invocation_id
+            }
+        };
+        if !identity_matches {
+            return Err(PostgresError::corrupt_invariant(
+                "approval lookup index disagrees with decoded identity",
+            ));
+        }
+        if requested_match.replace((event_seq, requested)).is_some() {
+            return Err(PostgresError::corrupt_invariant(
+                "approval lookup matched multiple request rows",
+            ));
+        }
+    }
+    let Some((requested_seq, requested)) = requested_match else {
         return Ok(None);
     };
-    let requested_seq: i64 = requested
-        .try_get("event_seq")
-        .map_err(PostgresError::StoreUnavailable)?;
-    let event_version: i32 = requested
-        .try_get("event_version")
-        .map_err(PostgresError::StoreUnavailable)?;
-    let payload: serde_json::Value = requested
-        .try_get("payload")
-        .map_err(PostgresError::StoreUnavailable)?;
-    let requested = codec::RequestedApprovalPayload::decode(event_version, payload)?;
 
-    let resolved = sqlx::query(
-        "SELECT event_seq, event_version, payload FROM durable_events \
-         WHERE agent_id = $1 AND event_type = 'tool_approval_resolved' \
-             AND payload ->> 'approval_id' = $2",
+    let resolved_rows = sqlx::query(
+        "SELECT r.event_seq, r.turn_id, r.event_version, r.payload, \
+             rc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events r \
+         LEFT JOIN transcript_compactions rc \
+             ON rc.agent_id = r.agent_id AND rc.event_seq = r.event_seq \
+         WHERE r.agent_id = $1 AND r.event_type = 'tool_approval_resolved' \
+             AND r.payload ->> 'approval_id' = $2",
     )
     .bind(agent_id.as_uuid())
     .bind(requested.approval_id.as_uuid().to_string())
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
-
-    let resolution = resolved
-        .map(|row| {
-            let resolved_seq: i64 = row
-                .try_get("event_seq")
-                .map_err(PostgresError::StoreUnavailable)?;
-            let event_version: i32 = row
-                .try_get("event_version")
-                .map_err(PostgresError::StoreUnavailable)?;
-            let payload: serde_json::Value = row
-                .try_get("payload")
-                .map_err(PostgresError::StoreUnavailable)?;
-            let resolution = codec::ResolvedApprovalPayload::decode(event_version, payload)?;
-            Ok(ApprovalResolution {
-                resolved_event_seq: seq_from_i64(resolved_seq)?,
-                decision: resolution.decision,
+    let mut resolution = None;
+    for row in resolved_rows {
+        let resolved_turn_id: Uuid = row
+            .try_get("turn_id")
+            .map_err(PostgresError::StoreUnavailable)?;
+        if resolved_turn_id != turn_id.as_uuid() {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolution belongs to a different turn",
+            ));
+        }
+        let (resolved_event_seq, resolved) = decode_resolved_approval_row(&row)?;
+        if resolved.approval_id != requested.approval_id {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolution index disagrees with decoded identity",
+            ));
+        }
+        if resolution
+            .replace(ApprovalResolution {
+                resolved_event_seq,
+                decision: resolved.decision,
             })
-        })
-        .transpose()?;
+            .is_some()
+        {
+            return Err(PostgresError::corrupt_invariant(
+                "approval lookup matched multiple resolution rows",
+            ));
+        }
+    }
 
     Ok(Some(ApprovalFacts {
-        requested_event_seq: seq_from_i64(requested_seq)?,
+        requested_event_seq: requested_seq,
         approval_id: requested.approval_id,
         hook_invocation_id: requested.hook_invocation_id,
         call_id: requested.call_id,
@@ -685,55 +987,93 @@ pub(crate) async fn read_open_hook_invocation(
     lookup: HookInvocationLookup,
 ) -> Result<Option<HookInvocationId>, PostgresError> {
     let point = serde_json::to_value(lookup.point)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
+        .map_err(|source| PostgresError::EventEncode {
+            event_type: "hook_point",
+            source,
+        })?
+        .as_str()
+        .map(str::to_owned)
         .ok_or(PostgresError::corrupt_invariant(
             "hook point did not serialize to its wire name",
         ))?;
+    let iteration = lookup.iteration.to_string();
     let call_id = lookup.call_id.as_ref().map(ToString::to_string);
-    // The Pending row participates in the derivation, so its declared version
-    // is checked before its invocation identity is read. The NOT EXISTS
-    // exclusion is existence-only: a matching Completed/Failed row of ANY
-    // event_version counts as consumption. That is the fail-closed direction
-    // — an invocation consumed by a newer binary stays closed (the Handler
-    // finds no open invocation instead of re-driving a consumed one); no
-    // field of the matching row is decoded here.
-    let row = sqlx::query(
-        "SELECT p.event_version, p.payload ->> 'invocation_id' AS invocation_id \
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(PostgresError::StoreUnavailable)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PostgresError::StoreUnavailable)?;
+    // Validate Pending and every fact that can consume it in the same snapshot
+    // used by the NOT EXISTS derivation. Unknown versions and illegal
+    // companions are explicit errors, never silent consumption.
+    ensure_derivation_rows_compatible(
+        &mut tx,
+        lookup.agent_id,
+        lookup.turn_id,
+        None,
+        &HOOK_DERIVATION_EVENT_TYPES,
+    )
+    .await?;
+    let rows = sqlx::query(
+        "SELECT p.event_version, p.payload, \
+             pc.event_seq IS NOT NULL AS has_compaction_companion \
          FROM durable_events p \
+         LEFT JOIN transcript_compactions pc \
+             ON pc.agent_id = p.agent_id AND pc.event_seq = p.event_seq \
          WHERE p.agent_id = $1 AND p.turn_id = $2 AND p.event_type = 'hook_invocation_pending' \
              AND p.payload ->> 'point' = $3 \
-             AND (p.payload ->> 'iteration')::bigint = $4 \
+             AND p.payload ->> 'iteration' = $4 \
              AND COALESCE(p.payload ->> 'call_id', '') = COALESCE($5, '') \
              AND NOT EXISTS ( \
                  SELECT 1 FROM durable_events c \
-                 WHERE c.agent_id = p.agent_id \
+                 WHERE c.agent_id = p.agent_id AND c.turn_id = p.turn_id \
                      AND c.event_type IN ('hook_invocation_completed', 'hook_invocation_failed') \
                      AND c.payload ->> 'invocation_id' = p.payload ->> 'invocation_id') \
-         ORDER BY p.event_seq DESC LIMIT 1",
+         ORDER BY p.event_seq ASC",
     )
     .bind(lookup.agent_id.as_uuid())
     .bind(lookup.turn_id.as_uuid())
     .bind(point)
-    .bind(lookup.iteration as i64)
+    .bind(iteration)
     .bind(call_id)
-    .fetch_optional(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
-
-    row.map(|row| {
-        let event_version: i32 = row
-            .try_get("event_version")
+    let mut invocation = None;
+    for row in rows {
+        let event_version = decode_non_compaction_event_version(&row)?;
+        let payload: serde_json::Value = row
+            .try_get("payload")
             .map_err(PostgresError::StoreUnavailable)?;
-        codec::ensure_supported_event_version(event_version)?;
-        let invocation_id: String = row
-            .try_get("invocation_id")
-            .map_err(PostgresError::StoreUnavailable)?;
-        Uuid::parse_str(&invocation_id)
-            .map(HookInvocationId::from)
-            .map_err(|_| PostgresError::corrupt_invariant("hook invocation id is not a valid uuid"))
-    })
-    .transpose()
+        let event = codec::decode_event("hook_invocation_pending", event_version, payload, None)?;
+        let DurableAgentEvent::HookInvocationPending {
+            invocation_id,
+            point,
+            iteration,
+            call_id,
+            ..
+        } = event
+        else {
+            return Err(PostgresError::corrupt_invariant(
+                "pending-hook query decoded as a different event",
+            ));
+        };
+        if point != lookup.point || iteration != lookup.iteration || call_id != lookup.call_id {
+            return Err(PostgresError::corrupt_invariant(
+                "open-hook address index disagrees with decoded payload",
+            ));
+        }
+        if invocation.replace(invocation_id).is_some() {
+            return Err(PostgresError::corrupt_invariant(
+                "multiple open hook invocations share one address",
+            ));
+        }
+    }
+    tx.commit().await.map_err(PostgresError::StoreUnavailable)?;
+    Ok(invocation)
 }
 
 /// Shared SELECT list joining each `TranscriptCompacted` discriminator with

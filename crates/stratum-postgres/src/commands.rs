@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::codec;
 use crate::error::PostgresError;
 use crate::types::{
-    AppendEvent, BeginTurn, CommitReceipt, CreateAgent, CreateAgentOutcome, ResolveApproval,
-    ResolveApprovalOutcome,
+    AppendEvent, BeginTurn, CommitReceipt, CreateAgent, CreateAgentOutcome, EVENT_SEQ_MAX,
+    ResolveApproval, ResolveApprovalOutcome, u64_to_bigint,
 };
 
 /// Constraint names produced by the baseline migration, used to map unique
@@ -25,6 +25,7 @@ mod constraints {
     pub(crate) const IDEMPOTENCY_KEY: &str = "agents_idempotency_key_key";
     pub(crate) const RUNNING_SESSION: &str = "agent_state_running_session_unique";
     pub(crate) const APPROVAL_REQUESTED: &str = "durable_events_approval_requested_unique";
+    pub(crate) const APPROVAL_ID: &str = "durable_events_approval_requested_by_approval";
 }
 
 /// Locked `agent_state` row: the allocator and serialization point.
@@ -40,11 +41,15 @@ impl LockedState {
     /// The sequence the next append assigns; the Agent-wide space ends at
     /// `i64::MAX`.
     fn next_event_seq(&self, agent_id: AgentId) -> Result<u64, PostgresError> {
-        if self.last_event_seq == i64::MAX {
+        let current = u64::try_from(self.last_event_seq).map_err(|_| {
+            PostgresError::corrupt_invariant("agent_state.last_event_seq is negative")
+        })?;
+        if current == EVENT_SEQ_MAX {
             return Err(PostgresError::SequenceOverflow { agent_id });
         }
-        // last_event_seq >= 0 per schema CHECK.
-        Ok((self.last_event_seq + 1) as u64)
+        current
+            .checked_add(1)
+            .ok_or(PostgresError::SequenceOverflow { agent_id })
     }
 }
 
@@ -263,6 +268,7 @@ pub(crate) async fn begin_turn(
     }
 
     let event_seq = state.next_event_seq(command.agent_id)?;
+    let event_seq_db = u64_to_bigint(event_seq, "event sequence exceeds bigint range")?;
     let event = DurableAgentEvent::LoopStarted {
         extension_set_version_id: Some(command.snapshot.extension_set_version_id),
     };
@@ -275,7 +281,7 @@ pub(crate) async fn begin_turn(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(command.agent_id.as_uuid())
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .bind(command.session_id.as_uuid())
     .bind(command.turn_id.as_uuid())
     .bind(encoded.event_type)
@@ -295,7 +301,7 @@ pub(crate) async fn begin_turn(
     .bind(command.agent_id.as_uuid())
     .bind(command.session_id.as_uuid())
     .bind(command.turn_id.as_uuid())
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .execute(&mut *tx)
     .await;
     match updated {
@@ -320,6 +326,7 @@ pub(crate) async fn append_event(
     command: AppendEvent,
 ) -> Result<CommitReceipt, PostgresError> {
     validate_append_shape(&command)?;
+    let terminal_status = terminal_status_of(&command.event)?;
 
     let mut tx = pool
         .begin()
@@ -349,6 +356,7 @@ pub(crate) async fn append_event(
     }
 
     let event_seq = state.next_event_seq(command.agent_id)?;
+    let event_seq_db = u64_to_bigint(event_seq, "event sequence exceeds bigint range")?;
     let encoded = codec::encode_event(&command.event, command.approval_hook_invocation_id)?;
 
     // Fail closed before any write when the retained pointer cannot address a
@@ -367,7 +375,10 @@ pub(crate) async fn append_event(
              WHERE agent_id = $1 AND event_seq = $2 AND event_type = 'message_appended')",
         )
         .bind(command.agent_id.as_uuid())
-        .bind(compaction.retained_from_event_seq as i64)
+        .bind(u64_to_bigint(
+            compaction.retained_from_event_seq,
+            "compaction retained sequence exceeds bigint range",
+        )?)
         .fetch_one(&mut *tx)
         .await
         .map_err(PostgresError::StoreUnavailable)?;
@@ -385,7 +396,7 @@ pub(crate) async fn append_event(
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(command.agent_id.as_uuid())
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .bind(command.session_id.as_uuid())
     .bind(command.turn_id.as_uuid())
     .bind(encoded.event_type)
@@ -402,6 +413,17 @@ pub(crate) async fn append_event(
                         "approval uniqueness violation without an invocation id",
                     ))?;
             return Err(PostgresError::ApprovalAlreadyRequested { hook_invocation_id });
+        }
+        if codec::is_unique_violation_on(&source, constraints::APPROVAL_ID) {
+            let approval_id = match &command.event {
+                DurableAgentEvent::ToolApprovalRequested { approval_id, .. } => *approval_id,
+                _ => {
+                    return Err(PostgresError::corrupt_invariant(
+                        "approval identity constraint rejected a non-request event",
+                    ));
+                }
+            };
+            return Err(PostgresError::ApprovalIdConflict { approval_id });
         }
         return Err(PostgresError::StoreUnavailable(source));
     }
@@ -421,11 +443,20 @@ pub(crate) async fn append_event(
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(command.agent_id.as_uuid())
-        .bind(event_seq as i64)
+        .bind(event_seq_db)
         .bind(command.turn_id.as_uuid())
-        .bind(compaction.compacted_iteration as i64)
-        .bind(compaction.upto as i64)
-        .bind(compaction.retained_from_event_seq as i64)
+        .bind(u64_to_bigint(
+            compaction.compacted_iteration,
+            "compaction iteration exceeds bigint range",
+        )?)
+        .bind(u64_to_bigint(
+            compaction.upto,
+            "compaction cut exceeds bigint range",
+        )?)
+        .bind(u64_to_bigint(
+            compaction.retained_from_event_seq,
+            "compaction retained sequence exceeds bigint range",
+        )?)
         .bind(summary)
         .execute(&mut *tx)
         .await
@@ -434,7 +465,6 @@ pub(crate) async fn append_event(
 
     // Only the state fields owned by this event change; the high-water always
     // advances in the same commit.
-    let terminal_status = terminal_status_of(&command.event);
     let default_model_update = match &command.default_model_update {
         Some(model) => {
             let current = codec::decode_model_config(
@@ -466,7 +496,7 @@ pub(crate) async fn append_event(
     .bind(command.agent_id.as_uuid())
     .bind(terminal_status)
     .bind(default_model_update)
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .execute(&mut *tx)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
@@ -503,14 +533,24 @@ fn validate_append_shape(command: &AppendEvent) -> Result<(), PostgresError> {
 }
 
 /// Terminal status owned by an event, when the event is terminal.
-fn terminal_status_of(event: &DurableAgentEvent) -> Option<&'static str> {
+fn terminal_status_of(event: &DurableAgentEvent) -> Result<Option<&'static str>, PostgresError> {
     match event {
-        DurableAgentEvent::LoopFinished { .. } => Some("finished"),
-        DurableAgentEvent::LoopFailed { .. } => Some("failed"),
-        DurableAgentEvent::LoopCancelled { .. } => Some("cancelled"),
-        // Unknown and future variants are non-terminal by construction;
-        // adding a new terminal variant must update this function.
-        _ => None,
+        DurableAgentEvent::LoopFinished { .. } => Ok(Some("finished")),
+        DurableAgentEvent::LoopFailed { .. } => Ok(Some("failed")),
+        DurableAgentEvent::LoopCancelled { .. } => Ok(Some("cancelled")),
+        DurableAgentEvent::LoopStarted { .. }
+        | DurableAgentEvent::MessageAppended { .. }
+        | DurableAgentEvent::ToolApprovalRequested { .. }
+        | DurableAgentEvent::ToolApprovalResolved { .. }
+        | DurableAgentEvent::ToolExecutionStarted { .. }
+        | DurableAgentEvent::HookInvocationPending { .. }
+        | DurableAgentEvent::HookInvocationCompleted { .. }
+        | DurableAgentEvent::HookInvocationFailed { .. }
+        | DurableAgentEvent::TranscriptCompacted { .. }
+        | DurableAgentEvent::IterationCompleted { .. } => Ok(None),
+        _ => Err(PostgresError::InvalidCommand(
+            "unsupported durable event variant",
+        )),
     }
 }
 
@@ -538,40 +578,47 @@ pub(crate) async fn resolve_approval(
         });
     }
 
-    let requested = sqlx::query(
-        "SELECT event_version, payload FROM durable_events \
-         WHERE agent_id = $1 AND turn_id = $2 AND event_type = 'tool_approval_requested' \
-             AND payload ->> 'approval_id' = $3",
+    let requested_rows = sqlx::query(
+        "SELECT r.event_version, r.payload, \
+             rc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events r \
+         LEFT JOIN transcript_compactions rc \
+             ON rc.agent_id = r.agent_id AND rc.event_seq = r.event_seq \
+         WHERE r.agent_id = $1 AND r.turn_id = $2 \
+             AND r.event_type = 'tool_approval_requested' \
+             AND r.payload ->> 'approval_id' = $3 \
+         ORDER BY r.event_seq ASC",
     )
     .bind(command.agent_id.as_uuid())
     .bind(command.turn_id.as_uuid())
     .bind(command.approval_id.as_uuid().to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(PostgresError::StoreUnavailable)?
-    .ok_or(PostgresError::ApprovalNotFound {
-        approval_id: command.approval_id,
-    })?;
-    // Decode eagerly so an unsupported version or a malformed request payload
-    // fails closed (runtime-incompatible / corrupt) before any decision.
-    let event_version: i32 = requested
-        .try_get("event_version")
-        .map_err(PostgresError::StoreUnavailable)?;
-    let payload: serde_json::Value = requested
-        .try_get("payload")
-        .map_err(PostgresError::StoreUnavailable)?;
-    codec::RequestedApprovalPayload::decode(event_version, payload)?;
-
-    let resolved = sqlx::query(
-        "SELECT event_version, payload FROM durable_events \
-         WHERE agent_id = $1 AND event_type = 'tool_approval_resolved' \
-             AND payload ->> 'approval_id' = $2",
-    )
-    .bind(command.agent_id.as_uuid())
-    .bind(command.approval_id.as_uuid().to_string())
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
+    let mut request_exists = false;
+    for row in requested_rows {
+        let event_version = crate::queries::decode_non_compaction_event_version(&row)?;
+        let payload: serde_json::Value = row
+            .try_get("payload")
+            .map_err(PostgresError::StoreUnavailable)?;
+        let requested = codec::RequestedApprovalPayload::decode(event_version, payload)?;
+        if requested.approval_id != command.approval_id {
+            return Err(PostgresError::corrupt_invariant(
+                "approval request index disagrees with decoded identity",
+            ));
+        }
+        if request_exists {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolve matched multiple request rows",
+            ));
+        }
+        request_exists = true;
+    }
+    if !request_exists {
+        return Err(PostgresError::ApprovalNotFound {
+            approval_id: command.approval_id,
+        });
+    }
 
     // Terminal wins over every other outcome, including an earlier decision.
     // A Turn matching current_turn_id with a non-running status is terminal:
@@ -582,15 +629,49 @@ pub(crate) async fn resolve_approval(
         });
     }
 
-    if let Some(resolved) = resolved {
-        let event_version: i32 = resolved
-            .try_get("event_version")
-            .map_err(PostgresError::StoreUnavailable)?;
-        let payload: serde_json::Value = resolved
+    let resolved_rows = sqlx::query(
+        "SELECT r.turn_id, r.event_version, r.payload, \
+             rc.event_seq IS NOT NULL AS has_compaction_companion \
+         FROM durable_events r \
+         LEFT JOIN transcript_compactions rc \
+             ON rc.agent_id = r.agent_id AND rc.event_seq = r.event_seq \
+         WHERE r.agent_id = $1 AND r.event_type = 'tool_approval_resolved' \
+             AND r.payload ->> 'approval_id' = $2 \
+         ORDER BY r.event_seq ASC",
+    )
+    .bind(command.agent_id.as_uuid())
+    .bind(command.approval_id.as_uuid().to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(PostgresError::StoreUnavailable)?;
+    let mut existing_resolution = None;
+    for row in resolved_rows {
+        let event_version = crate::queries::decode_non_compaction_event_version(&row)?;
+        let payload: serde_json::Value = row
             .try_get("payload")
             .map_err(PostgresError::StoreUnavailable)?;
         let resolution = codec::ResolvedApprovalPayload::decode(event_version, payload)?;
-        return if resolution.decision == command.decision {
+        if resolution.approval_id != command.approval_id {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolution index disagrees with decoded identity",
+            ));
+        }
+        let resolved_turn_id: Uuid = row
+            .try_get("turn_id")
+            .map_err(PostgresError::StoreUnavailable)?;
+        if resolved_turn_id != command.turn_id.as_uuid() {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolution belongs to a different turn",
+            ));
+        }
+        if existing_resolution.replace(resolution.decision).is_some() {
+            return Err(PostgresError::corrupt_invariant(
+                "approval resolve matched multiple resolution rows",
+            ));
+        }
+    }
+    if let Some(decision) = existing_resolution {
+        return if decision == command.decision {
             Ok(ResolveApprovalOutcome::AlreadyResolvedSame)
         } else {
             Err(PostgresError::ApprovalAlreadyResolved {
@@ -605,6 +686,7 @@ pub(crate) async fn resolve_approval(
         decision: command.decision,
     };
     let encoded = codec::encode_event(&event, None)?;
+    let event_seq_db = u64_to_bigint(event_seq, "event sequence exceeds bigint range")?;
 
     sqlx::query(
         "INSERT INTO durable_events (agent_id, event_seq, session_id, turn_id, event_type, \
@@ -612,7 +694,7 @@ pub(crate) async fn resolve_approval(
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(command.agent_id.as_uuid())
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .bind(state.session_id.ok_or(PostgresError::corrupt_invariant(
         "running state without a bound session",
     ))?)
@@ -628,7 +710,7 @@ pub(crate) async fn resolve_approval(
         "UPDATE agent_state SET last_event_seq = $2, updated_at = now() WHERE agent_id = $1",
     )
     .bind(command.agent_id.as_uuid())
-    .bind(event_seq as i64)
+    .bind(event_seq_db)
     .execute(&mut *tx)
     .await
     .map_err(PostgresError::StoreUnavailable)?;
@@ -637,4 +719,73 @@ pub(crate) async fn resolve_approval(
     Ok(ResolveApprovalOutcome::Resolved {
         receipt: CommitReceipt { event_seq },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use stratum_core::{ChatMessage, TokenUsage};
+
+    use super::*;
+
+    fn state_with_sequence(last_event_seq: i64) -> LockedState {
+        LockedState {
+            status: crate::types::AgentStatus::Running,
+            session_id: None,
+            current_turn_id: None,
+            default_model_config: serde_json::Value::Null,
+            last_event_seq,
+        }
+    }
+
+    #[test]
+    fn next_event_sequence_rejects_negative_and_exhausted_state() {
+        let agent_id = AgentId::new();
+        assert!(matches!(
+            state_with_sequence(-1).next_event_seq(agent_id),
+            Err(PostgresError::DurableStateCorrupt { .. })
+        ));
+        assert!(matches!(
+            state_with_sequence(i64::MAX).next_event_seq(agent_id),
+            Err(PostgresError::SequenceOverflow { .. })
+        ));
+        assert_eq!(
+            state_with_sequence(0)
+                .next_event_seq(agent_id)
+                .expect("available sequence advances"),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_status_classification_is_explicit() {
+        let usage = TokenUsage::default();
+        assert_eq!(
+            terminal_status_of(&DurableAgentEvent::LoopFinished {
+                finish_reason: "stop".to_owned(),
+                usage,
+            })
+            .expect("known event classifies"),
+            Some("finished")
+        );
+        assert_eq!(
+            terminal_status_of(&DurableAgentEvent::LoopFailed {
+                error_text: "safe error".to_owned(),
+                usage,
+            })
+            .expect("known event classifies"),
+            Some("failed")
+        );
+        assert_eq!(
+            terminal_status_of(&DurableAgentEvent::LoopCancelled { usage })
+                .expect("known event classifies"),
+            Some("cancelled")
+        );
+        assert_eq!(
+            terminal_status_of(&DurableAgentEvent::MessageAppended {
+                message: ChatMessage::user("hello"),
+            })
+            .expect("known event classifies"),
+            None
+        );
+    }
 }

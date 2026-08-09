@@ -2,10 +2,18 @@ import {
   ApiError,
   apiErrorFromResponse,
   isEventSeq,
+  type AgentProductEventV1,
   type AgentStreamFrameV1,
+  type ChatMessage,
+  type LlmTelemetryEventV1,
+  type TokenUsage,
+  type ToolCall,
 } from "@/lib/stratum/api"
 
 export type SseEvent = { id: string | null; event: string; data: string }
+
+/** One NATS frame is bounded by the broker; keep parser memory bounded too. */
+const MAX_SSE_EVENT_CHARS = 2 * 1024 * 1024
 
 export async function readSseStream(
   stream: ReadableStream<Uint8Array>,
@@ -17,15 +25,23 @@ export async function readSseStream(
   let id: string | null = null
   let event = "message"
   let data: string[] = []
+  let dataChars = 0
 
   const dispatch = () => {
     if (data.length > 0) onEvent({ id, event, data: data.join("\n") })
     id = null
     event = "message"
     data = []
+    dataChars = 0
   }
 
   const readLine = (line: string) => {
+    if (line.length > MAX_SSE_EVENT_CHARS)
+      throw new ApiError(
+        "stream_frame_too_large",
+        0,
+        "event stream frame is too large"
+      )
     if (line === "") {
       dispatch()
       return
@@ -37,8 +53,16 @@ export async function readSseStream(
     const value =
       separator === -1 ? "" : line.slice(separator + 1).replace(/^ /, "")
 
-    if (field === "data") data.push(value)
-    else if (field === "event") event = value || "message"
+    if (field === "data") {
+      dataChars += value.length + (data.length === 0 ? 0 : 1)
+      if (dataChars > MAX_SSE_EVENT_CHARS)
+        throw new ApiError(
+          "stream_frame_too_large",
+          0,
+          "event stream frame is too large"
+        )
+      data.push(value)
+    } else if (field === "event") event = value || "message"
     else if (field === "id" && !value.includes("\0")) id = value
   }
 
@@ -64,39 +88,28 @@ export async function readSseStream(
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       consumeLines()
+      if (buffer.length > MAX_SSE_EVENT_CHARS)
+        throw new ApiError(
+          "stream_frame_too_large",
+          0,
+          "event stream frame is too large"
+        )
     }
     buffer += decoder.decode()
     consumeLines(true)
+  } catch (error) {
+    // A parser or callback failure owns this response body: cancel it now so
+    // the fetch connection cannot continue buffering after the caller exits.
+    try {
+      await reader.cancel()
+    } catch {
+      // The stream may already have been aborted by its AbortSignal.
+    }
+    throw error
   } finally {
     reader.releaseLock()
   }
 }
-
-const PRODUCT_EVENT_TYPES = new Set([
-  "loop_started",
-  "message_appended",
-  "tool_approval_requested",
-  "tool_approval_resolved",
-  "transcript_compacted",
-  "iteration_completed",
-  "loop_finished",
-  "loop_failed",
-  "loop_cancelled",
-])
-
-const TELEMETRY_EVENT_TYPES = new Set([
-  "llm_started",
-  "text_delta",
-  "reasoning_delta",
-  "tool_call_delta",
-  "llm_finished",
-])
-
-// unit variants：serde 序列化不携带 `data` key（loop_started / llm_started），
-// 其余 variant 必须携带 object data。缺失 data 的 data-variant 与携带 data 的
-// unit-variant 都不是合法 wire 形状，一律拒绝。
-const UNIT_PRODUCT_EVENT_TYPES = new Set(["loop_started"])
-const UNIT_TELEMETRY_EVENT_TYPES = new Set(["llm_started"])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -104,22 +117,132 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isNullableString = (value: unknown): value is string | null =>
   value === null || typeof value === "string"
 
-/**
- * per-variant 校验 event 的 data 形状：unit variant 必须没有 data key，
- * data variant 必须是 object。
- */
-const hasValidEventDataShape = (
-  event: Record<string, unknown>,
-  eventType: string,
-  unitTypes: ReadonlySet<string>
-): boolean =>
-  unitTypes.has(eventType) ? event.data === undefined : isRecord(event.data)
+const isNonNegativeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+
+const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(value, key)
+
+function isTokenUsage(value: unknown): value is TokenUsage {
+  return (
+    isRecord(value) &&
+    isNonNegativeInteger(value.input_tokens) &&
+    isNonNegativeInteger(value.output_tokens) &&
+    isNonNegativeInteger(value.total_tokens)
+  )
+}
+
+function isToolCall(value: unknown): value is ToolCall {
+  return (
+    isRecord(value) &&
+    typeof value.call_id === "string" &&
+    typeof value.name === "string" &&
+    hasOwn(value, "arguments")
+  )
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!isRecord(value) || !isRecord(value.content)) return false
+  const validRole =
+    value.role === "user" ||
+    value.role === "assistant" ||
+    value.role === "tool" ||
+    value.role === "system"
+  const validContent =
+    (value.content.type === "text" && typeof value.content.data === "string") ||
+    (value.content.type === "json" && hasOwn(value.content, "data"))
+  return (
+    validRole &&
+    validContent &&
+    (value.tool_calls === undefined ||
+      (Array.isArray(value.tool_calls) &&
+        value.tool_calls.every(isToolCall))) &&
+    (value.reasoning_content === undefined ||
+      typeof value.reasoning_content === "string") &&
+    (value.tool_call_id === undefined || typeof value.tool_call_id === "string")
+  )
+}
+
+function isProductEvent(event: unknown): event is AgentProductEventV1 {
+  if (!isRecord(event) || typeof event.type !== "string") return false
+  if (event.type === "loop_started") return event.data === undefined
+  if (!isRecord(event.data)) return false
+  const data = event.data
+
+  switch (event.type) {
+    case "message_appended":
+      return isChatMessage(data.message)
+    case "tool_approval_requested":
+      return (
+        typeof data.approval_id === "string" &&
+        typeof data.call_id === "string" &&
+        typeof data.tool_name === "string" &&
+        hasOwn(data, "arguments") &&
+        (data.tool_kind === "read" || data.tool_kind === "write") &&
+        (data.danger_level === "low" ||
+          data.danger_level === "medium" ||
+          data.danger_level === "high")
+      )
+    case "tool_approval_resolved":
+      return (
+        typeof data.approval_id === "string" &&
+        (data.decision === "approve" || data.decision === "reject")
+      )
+    case "transcript_compacted":
+      return (
+        isChatMessage(data.summary) &&
+        isNonNegativeInteger(data.compacted_iteration)
+      )
+    case "iteration_completed":
+      return isNonNegativeInteger(data.iteration) && isTokenUsage(data.usage)
+    case "loop_finished":
+      return typeof data.finish_reason === "string" && isTokenUsage(data.usage)
+    case "loop_failed":
+      return typeof data.error_text === "string" && isTokenUsage(data.usage)
+    case "loop_cancelled":
+      return isTokenUsage(data.usage)
+    default:
+      return false
+  }
+}
+
+function isTelemetryEvent(event: unknown): event is LlmTelemetryEventV1 {
+  if (!isRecord(event) || typeof event.type !== "string") return false
+  if (event.type === "llm_started") return event.data === undefined
+  if (!isRecord(event.data)) return false
+  const data = event.data
+
+  switch (event.type) {
+    case "text_delta":
+    case "reasoning_delta":
+      return typeof data.delta === "string"
+    case "tool_call_delta":
+      return (
+        typeof data.call_id === "string" &&
+        typeof data.arguments_delta === "string" &&
+        (data.name === undefined ||
+          data.name === null ||
+          typeof data.name === "string")
+      )
+    case "llm_finished":
+      return (
+        typeof data.finish_reason === "string" &&
+        (data.usage === undefined ||
+          data.usage === null ||
+          isTokenUsage(data.usage))
+      )
+    default:
+      return false
+  }
+}
 
 /**
  * 解析并校验一条 `AgentStreamFrameV1`。未知 protocol_version、未知 kind 或
  * 未知 event variant 一律拒绝（返回 undefined），不按 v1 猜测。
  */
-export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefined {
+export function parseAgentStreamFrame(
+  data: string
+): AgentStreamFrameV1 | undefined {
   let value: unknown
   try {
     value = JSON.parse(data)
@@ -130,57 +253,73 @@ export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefi
   if (value.protocol_version !== 1) return undefined
   if (typeof value.agent_id !== "string") return undefined
   if (typeof value.created_at !== "string") return undefined
-  if (!isNullableString(value.session_id ?? null)) return undefined
-  if (!isNullableString(value.turn_id ?? null)) return undefined
+  const sessionId = value.session_id === undefined ? null : value.session_id
+  const turnId = value.turn_id === undefined ? null : value.turn_id
+  if (!isNullableString(sessionId) || !isNullableString(turnId))
+    return undefined
+  if ((sessionId === null) !== (turnId === null)) return undefined
   if (!isRecord(value.event) || typeof value.event.type !== "string")
     return undefined
 
-  const identity = {
+  const baseIdentity = {
     protocol_version: 1 as const,
     agent_id: value.agent_id,
-    session_id: (value.session_id ?? null) as string | null,
-    turn_id: (value.turn_id ?? null) as string | null,
     created_at: value.created_at,
   }
   const event = value.event
-  const eventType = event.type as string
 
   switch (value.kind) {
     case "control": {
-      if (eventType === "stream_ready")
-        return { ...identity, kind: "control", event: { type: "stream_ready" } }
-      if (eventType === "stream_reset" && event.reason === "buffer_overflow")
+      if (event.type === "stream_ready" && event.data === undefined)
         return {
-          ...identity,
+          ...baseIdentity,
           kind: "control",
+          session_id: sessionId,
+          turn_id: turnId,
+          event: { type: "stream_ready" },
+        }
+      if (
+        event.type === "stream_reset" &&
+        event.data === undefined &&
+        event.reason === "buffer_overflow"
+      )
+        return {
+          ...baseIdentity,
+          kind: "control",
+          session_id: sessionId,
+          turn_id: turnId,
           event: { type: "stream_reset", reason: "buffer_overflow" },
         }
       return undefined
     }
     case "durable": {
       if (
+        typeof sessionId !== "string" ||
+        typeof turnId !== "string" ||
         !isEventSeq(value.event_seq) ||
         typeof value.event_version !== "number" ||
-        !PRODUCT_EVENT_TYPES.has(eventType) ||
-        !hasValidEventDataShape(event, eventType, UNIT_PRODUCT_EVENT_TYPES)
+        !Number.isSafeInteger(value.event_version) ||
+        value.event_version <= 0 ||
+        !isProductEvent(event)
       )
         return undefined
       return {
-        ...identity,
+        ...baseIdentity,
         kind: "durable",
+        session_id: sessionId,
+        turn_id: turnId,
         event_seq: value.event_seq,
         event_version: value.event_version,
-        event: event as unknown as Extract<
-          AgentStreamFrameV1,
-          { kind: "durable" }
-        >["event"],
+        event,
       }
     }
     case "telemetry": {
       if (
+        typeof sessionId !== "string" ||
+        typeof turnId !== "string" ||
         typeof value.llm_call_id !== "string" ||
-        !TELEMETRY_EVENT_TYPES.has(eventType) ||
-        !hasValidEventDataShape(event, eventType, UNIT_TELEMETRY_EVENT_TYPES)
+        !isEventSeq(value.durable_before_event_seq) ||
+        !isTelemetryEvent(event)
       )
         return undefined
       // telemetry_seq 是 call-local 序号；容忍十进制字符串或 number
@@ -192,14 +331,14 @@ export function parseAgentStreamFrame(data: string): AgentStreamFrameV1 | undefi
             : Number.NaN
       if (!Number.isSafeInteger(seq) || seq < 0) return undefined
       return {
-        ...identity,
+        ...baseIdentity,
         kind: "telemetry",
+        session_id: sessionId,
+        turn_id: turnId,
         llm_call_id: value.llm_call_id,
         telemetry_seq: seq,
-        event: event as unknown as Extract<
-          AgentStreamFrameV1,
-          { kind: "telemetry" }
-        >["event"],
+        durable_before_event_seq: value.durable_before_event_seq,
+        event,
       }
     }
     default:

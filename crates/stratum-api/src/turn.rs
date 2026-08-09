@@ -20,7 +20,6 @@ use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::LlmProvider;
 use stratum_postgres::AgentView;
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
-use tokio::task::JoinHandle;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -122,6 +121,7 @@ pub(crate) fn build_hook_runtime(
         ids.turn_id,
         Arc::clone(state.waiters()),
         dispatcher,
+        state.approval_poll_interval(),
     ))]))
 }
 
@@ -168,6 +168,11 @@ pub(crate) enum TurnRun {
     Resume(PreparedResume),
 }
 
+/// Proof returned after the Turn future has been inserted into the
+/// process-owned runtime `JoinSet`. The registry keeps claim/token state only;
+/// this marker preserves the existing install-before-defuse call sequence.
+pub(crate) struct ManagedTurnTask;
+
 /// Spawns the managed future of one Turn and returns its handle. The future
 /// runs inside a `turn.run` span carrying the typed Agent/Session/Turn
 /// identity, so kernel and LLM spans nest under the admitting HTTP request
@@ -178,8 +183,8 @@ pub(crate) fn spawn_managed_turn(
     claim: &ClaimHandle,
     run: TurnRun,
     admission: Option<AdmissionSignal>,
-) -> JoinHandle<()> {
-    let state = Arc::clone(state);
+) -> ManagedTurnTask {
+    let task_state = Arc::clone(state);
     let claim_id = claim.claim_id;
     let token = claim.token.clone();
     let span = tracing::info_span!(
@@ -188,7 +193,7 @@ pub(crate) fn spawn_managed_turn(
         session_id = %ids.session_id,
         turn_id = %ids.turn_id,
     );
-    tokio::spawn(
+    state.spawn_runtime_task(
         async move {
             let result = match run {
                 TurnRun::Fresh {
@@ -223,12 +228,13 @@ pub(crate) fn spawn_managed_turn(
                     }
                 }
             }
-            state
+            task_state
                 .registry()
                 .compare_remove(ids.agent_id, ids.turn_id, claim_id);
         }
         .instrument(span),
-    )
+    );
+    ManagedTurnTask
 }
 
 /// Stable classification of a kernel failure, used for logs and as the

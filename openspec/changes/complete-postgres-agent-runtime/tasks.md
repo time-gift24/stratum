@@ -29,7 +29,7 @@
 
 - [x] 4.1 定义窄领域 newtype 与 enum，覆盖 Agent status、schema/event/protocol version、history cursor、approval identity/decision 和对外 decimal-string sequence，且不依赖已删除的 store contract
 - [x] 4.2 在 `stratum-postgres` 中实现窄而具体的 execution command/query 接口；保持单实现且不引入 trait，只暴露 `stratum-api` 装配/运行时编排与 durable sink adapter 所需操作
-- [x] 4.3 为 resolved definition、durable event payload、runtime snapshot 与 API stream frame 实现严格 v1 解码；不支持的已声明版本返回 runtime-incompatible，受支持版本的畸形数据返回 durable-state-corrupt，不引入 upcaster framework
+- [x] 4.3 为 resolved definition、durable event payload、runtime snapshot 与 API stream frame 实现严格 v1 解码；durable typed shape须canonical round-trip相等，approval store扩展走exact deny-unknown wire DTO；不支持的已声明版本返回 runtime-incompatible，受支持版本的未知字段/非canonical或畸形数据返回 durable-state-corrupt，不引入 upcaster framework
 - [x] 4.4 仅在 LoopStarted durable row 上持久化和读取现有六字段 Turn runtime snapshot：Agent version、effective model、Tool-set fingerprint、Skill-set version、Extension-set version 与有序 Hook-handler versions
 - [x] 4.5 从`agents`、`agent_state`与`durable_events`实现Agent cold read：令`snapshot_event_seq`直接等于同一MVCC snapshot中的`agent_state.last_event_seq`且不另存第二个cursor，从exact local process registry派生`resume_required`，从ledger events派生pending approvals，从当前Turn派生latest usage；不得返回或持久化outcome
 - [x] 4.6 直接在过滤后的 `durable_events` 上为 MessageAppended、TranscriptCompacted、安全的 LoopFailed 与 LoopCancelled 实现 history pagination，支持固定 through barrier、exclusive before cursor、升序响应、默认/最大 limit 与 1 MiB soft page budget
@@ -92,16 +92,16 @@
 
 ## 9. NATS Tail、SSE 与 Web 恢复
 
-- [x] 9.1 定义 API-owned `AgentStreamFrameV1` control/durable/telemetry variants；control封闭为`stream_ready`与`stream_reset { reason: buffer_overflow }`，其余包含protocol version、Agent identity、可选Session/Turn identity、decimal-string durable event sequence与call-local telemetry identity；不得因transport需求修改kernel event type
+- [x] 9.1 定义 API-owned `AgentStreamFrameV1` control/durable/telemetry variants；control封闭为`stream_ready`与`stream_reset { reason: buffer_overflow }`，其余包含protocol version、Agent identity、可选Session/Turn identity、decimal-string durable event sequence、telemetry的decimal-string `durable_before_event_seq` ordering watermark与call-local telemetry identity；不得因transport需求修改kernel event type
 - [x] 9.2 配置 Agent-scoped NATS tail，使用明确且可配置的短 age/byte/message 上限与 discard-old retention；不得编码固定历史保留保证，也不得把 NATS 用作 durable history
-- [x] 9.3 实现 volatile per-Agent ordered publisher：从启动 high-water 初始化，在收到 receipt 后扫描已提交 PG row，使 product event 按 event-sequence 顺序发布；跳过仅 PG 可见的 Hook row、`ToolExecutionStarted`与其他internal fact，不引入outbox或跨重启backlog
-- [x] 9.4 在 bounded queue 前为 API `TelemetryEventSink` 的 LlmStarted/delta/LlmFinished 分配 call-local `(llm_call_id,telemetry_seq)`，保留可检测 gap，但不分配 durable sequence
+- [x] 9.3 实现 volatile per-Agent ordered publisher：从启动 high-water 初始化，在收到 receipt 后扫描已提交 PG row，使 product event 按 event-sequence 顺序发布；满队列的 durable wake 合并进单调 high-water，coalesced flush 先 snapshot target、再确认 accepted queue 为空且只 flush 旧 snapshot，之后推进的 target 留给下一次 drain/idle 循环并在 idle 退休前追平，不以 realtime 背压阻塞PG acknowledgement；跳过仅 PG 可见的 Hook row、`ToolExecutionStarted`与其他internal fact，不引入outbox或跨重启backlog
+- [x] 9.4 在 bounded queue 前为 API `TelemetryEventSink` 的 LlmStarted/delta/LlmFinished 分配 call-local `(llm_call_id,telemetry_seq)`并冻结当时PG high-water；frame以`durable_before_event_seq`公开该ordering watermark，保留可检测 gap但不改变telemetry identity或分配durable sequence
 - [x] 9.5 实现 Agent SSE current-tail 与 retained-cursor mode；只有 subscription 生效后才发送 `stream_ready`；transport cursor 过期在建流前返回410；建流后的bounded-buffer overflow直接发送不带SSE id且不进入NATS/PG的`stream_reset(reason=buffer_overflow)`并关闭连接；删除public Session SSE与legacy replay parameter
-- [x] 9.6 更新 Web client：NATS cursor 只保存在当前页面内存；等待 `stream_ready`；cold bootstrap 期间 buffer；通过 `snapshot_event_seq` 读取 AgentView/history；只应用 barrier 之后的 buffered durable event；丢弃全部 cold-buffer telemetry；收到`stream_reset`时主动关闭原EventSource并丢弃buffer、draft与cursor，禁止携旧Last-Event-ID自动重连，改为无cursor cold bootstrap
-- [x] 9.7 实现 Web reducer：以 `(agent_id,event_seq)` 作为 durable identity，以 `(llm_call_id,telemetry_seq)` 作为 transient draft identity，支持 gap detection、final assistant replacement、late-delta suppression，并在每一种 terminal state 下清理 draft 与 interrupted Tool
+- [x] 9.6 更新 Web client：NATS cursor 只保存在当前页面内存；等待 `stream_ready`；cold bootstrap 期间 buffer；通过 `snapshot_event_seq` 读取 AgentView/history，并用 barrier-governed `telemetry_floor_event_seq` 初始化已收敛 assistant final floor而非只靠最新history page；只应用 barrier 之后的 buffered durable event；丢弃全部 cold-buffer telemetry；收到`stream_reset`时主动关闭原EventSource并丢弃buffer、draft与cursor，禁止携旧Last-Event-ID自动重连，改为无cursor cold bootstrap
+- [x] 9.7 实现 Web reducer：以 `(agent_id,event_seq)` 作为 durable identity，以 `(llm_call_id,telemetry_seq)` 作为 transient draft identity，支持 gap detection、final assistant replacement与late-delta suppression；cold AgentView 以ledger派生的`telemetry_floor_event_seq`覆盖最新history页外的final，PG reconcile先应用assistant final时以`durable_before_event_seq`拒绝final前旧tail但保留final后新call；accepted Turn优先、否则running current Turn的exact identity fence拒绝跨Turn backlog，并在每一种terminal state下清理draft与interrupted Tool
 - [x] 9.8 首次只加载最新 history page，仅在确实需要向上滚动时请求 exclusive-before page，保持升序渲染，并展示 TranscriptCompacted summary 与安全 failed/cancelled marker，不删除原始 message
-- [x] 9.9 refresh 后从 PG 恢复 pending approvals，保持 approval resolve 与 resume 分离，暴露 advisory `resume_required`；command 完成或页面 focus 后立即 reconcile AgentView，仅在 running 或存在 pending approval 时低频 reconcile
-- [x] 9.10 增加in-process dispatcher unit tests与real NATS/API/Web integration tests，覆盖subscription readiness、Agent isolation、commit-before-publish、writer顺序、publish loss、cursor continuation/expiry、丢弃cold-buffer telemetry、overflow restart、durable/telemetry gap、terminal convergence、approval refresh、pagination与PG reconciliation
+- [x] 9.9 refresh 后从 PG 恢复 pending approvals，保持 approval resolve 与 resume 分离，暴露 advisory `resume_required`；message 202 后保留 exact accepted Turn，直到 AgentView 或同一 Turn 的 exact durable `LoopStarted`/terminal product frame 证明，command 完成、accepted Turn 首次可读或页面 focus 后立即 reconcile；running、accepted/cancel待确认、realtime degraded或存在 pending approval 时以 single-flight + coalesced rerun 低频 reconcile
+- [ ] 9.10 增加in-process dispatcher unit tests与real NATS/API/Web integration tests，覆盖subscription readiness、Agent isolation、commit-before-publish、writer顺序、publish loss、cursor continuation/expiry、丢弃cold-buffer telemetry、overflow restart、durable/telemetry gap、terminal convergence、approval refresh、pagination与PG reconciliation
 
 ## 10. 删除旧 Store、Filesystem Execution、CAS、Bus 与配置
 
@@ -118,10 +118,10 @@
 
 - [x] 11.1 为全部最终 route、request/response/error、Idempotency-Key、decimal event sequence、包含stream-ready/reset control的AgentStreamFrameV1、history page、approval view与已删除Session/replay surface重新生成OpenAPI
 - [x] 11.2 更新 schema、runtime、recovery、approval、cancellation、NATS retention、template、destructive reset 与 operator 文档，并明确保持 scheduler 与 template management 延期
-- [x] 11.3 为最终设计的每个 transaction、crash window、race、严格 version boundary 与 typed error 增加聚焦 Rust unit test 和 ignored crate-local Postgres/NATS integration test
+- [ ] 11.3 为最终设计的每个 transaction、crash window、race、严格 version boundary 与 typed error 增加聚焦 Rust unit test 和 ignored crate-local Postgres/NATS integration test
 - [x] 11.4 对 create、streaming draft、approval refresh、recovery、terminal cleanup 与 upward pagination 运行 Web typecheck、lint、unit/component test 与 production build
-- [x] 11.5 在真实 Postgres 与 NATS 上验证完整端到端路径：create → message → durable stream → Tool result/approval → cancel 或 resume → process restart → refresh → history pagination
-- [x] 11.6 验证两个 preamble boundary、terminal commit 不确定、resolver/kernel 并发 append、NATS loss、expired cursor、bounded-buffer overflow、stale task cleanup，以及不使用 projection rebuild 的 compaction pointer-only fallback
+- [ ] 11.5 在真实 Postgres 与 NATS 上验证完整端到端路径：create → message → durable stream → Tool result/approval → cancel 或 resume → process restart → refresh → history pagination
+- [ ] 11.6 验证两个 preamble boundary、terminal commit 不确定、resolver/kernel 并发 append、NATS loss、expired cursor、bounded-buffer overflow、stale task cleanup，以及不使用 projection rebuild 的 compaction pointer-only fallback
 - [x] 11.7 对 production code、manifest、config、test 与 docs 运行 `rg`，证明已删除 `AgentStore`、`stratum-store`、filesystem execution/CAS symbol、legacy sink/bus/SSE、compact.jsonl、beta projection/claim table、message_seq/per-Turn seq、replay parameter、旧 root 与 backend fallback
 - [x] 11.8 审计完整 diff 的 kernel restraint：不得让 Postgres、Session、hosting、pagination、scheduler、approval projection 或 frontend state 进入 `stratum-agent`；允许纯 prepared-resume split 与已批准删除旧 `StreamEnvelope`、`RuntimeEvent`、`AgentEvent` 等 transport DTO，除此之外不得改变 kernel 行为
 - [x] 11.9 运行 `cargo fmt --all -- --check`、`cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets` 与全部 crate-local ignored integration suites，不得通过压制 lint 规避失败

@@ -8,7 +8,7 @@
   `last_event_seq` high-water）、`durable_events`（append-only ledger）、
   `transcript_compactions`（压缩 summary companion）。不建 Session 表、message/approval
   projection 表、outbox 或 rebuild metadata；所有视图（AgentView、history、pending
-  approvals、latest usage）都从 ledger 派生读取。
+  approvals、latest usage、latest assistant telemetry floor）都从 ledger 派生读取。
 - 本 crate 暴露窄的 concrete command/query 接口（create/admission/append/query/resolve），
   单实现、不引入 trait；storage DTO、状态类型与错误都在 crate 内，错误集中在独立
   `error.rs`（`thiserror::Error`，保留 source chain）。只有装配层 `stratum-api` 允许
@@ -49,11 +49,20 @@
   未知的新版本表示数据合法但当前 binary 不支持，返回 `runtime_incompatible`；已知版本
   无法解码或违反字段不变量，返回 `durable_state_corrupt`。不实现 upcaster，不通过字符串
   解析分类错误。
-- 所有专门化派生读取（pending approvals、`read_approval`、`resolve_approval`、
-  `read_open_hook_invocation`）必须选中并校验每一参与行的 `event_version`，禁止把未知
-  版本 payload 静默按 v1 解码。纯存在性的 NOT EXISTS 子查询（Resolved/Consumed/
-  Completed 匹配）对任意版本的匹配行按存在计——invalidate/consume 方向本身就是 fail
-  closed，该选择已在各查询注释中记录。
+- 所有专门化派生读取（pending approvals、latest usage、`read_latest_companion`、
+  `read_approval`、`resolve_approval`、`read_open_hook_invocation`）必须选中并校验每一
+  参与行的 `event_version` 及 compaction companion 关系，禁止把未知版本 payload
+  静默按 v1 解码，也禁止非 `TranscriptCompacted` row 关联 companion。用于
+  Resolved/Consumed/Completed 匹配的 `NOT EXISTS` 行必须在语义排除前通过同一检查；
+  未知版本或非法 companion 必须返回 typed error，不能静默改变派生真相。
+- AgentView 的 `telemetry_floor_event_seq` 在同一 MVCC barrier 内，从最新到最旧以
+  server-side `LIMIT` + keyset 分页严格解码 `MessageAppended`，取第一个 assistant row 的
+  Agent-wide sequence；不存在时为0。禁止用 JSON role predicate 跳过未知/畸形的新 row，
+  也不得依赖 Rust 提前 drop 无 `LIMIT` 的 sqlx stream 伪装数据库资源边界；不新增 projection。
+- ledger v1 解码必须把 typed event 重新编码为 canonical v1 并与输入逐值相等；core serde
+  会忽略的未知字段、别名或非 canonical 默认字段都属于 `durable_state_corrupt`。唯一例外是
+  `ToolApprovalRequested` 的 store-owned `hook_invocation_id`，由 exact deny-unknown wire DTO
+  严格解码后再投影为 kernel event。
 - 缺少必需 compaction companion/summary 或 identity 不一致属于 durable truth 不完整：
   `durable_state_corrupt` fail closed，绝不修表或提供 rebuild API；只有加速指针
   （locator/`retained_from_event_seq`）无效时才回退内存 full replay。

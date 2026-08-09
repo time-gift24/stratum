@@ -12,9 +12,10 @@ use thiserror::Error;
 pub struct ApiKey(SecretString);
 
 impl ApiKey {
-    /// Creates a new API key wrapper from a revealed value; callers reveal
-    /// configured secrets with [`ExposeSecret::expose_secret`] at the
-    /// provider construction boundary only.
+    /// Creates a new API key wrapper from an owned plaintext value (for
+    /// example, a process environment variable). Existing `SecretString`
+    /// values should use [`From<SecretString>`] without revealing a temporary
+    /// ordinary `String`.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(SecretString::from(value.into()))
@@ -24,6 +25,12 @@ impl ApiKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.expose_secret()
+    }
+}
+
+impl From<SecretString> for ApiKey {
+    fn from(value: SecretString) -> Self {
+        Self(value)
     }
 }
 

@@ -1,7 +1,8 @@
 //! Shared application state and the shutdown admission gate.
 
-use std::sync::Arc;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use stratum_config::Config;
@@ -9,6 +10,7 @@ use stratum_infra::NatsAgentTail;
 use stratum_llm::LlmProviderManager;
 use stratum_postgres::PostgresBackend;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::ApprovalWaiters;
@@ -17,6 +19,11 @@ use crate::error::{ApiError, ErrorKind};
 use crate::host_error::HostError;
 use crate::registry::TurnRegistry;
 use crate::templates::TemplateCatalog;
+
+/// Process-owned background tasks (dispatchers and SSE tail pumps). Every
+/// spawned task stays in this set until it is joined during normal operation
+/// or shutdown; dropping the set aborts any unfinished task.
+pub(crate) type RuntimeTasks = Arc<Mutex<JoinSet<()>>>;
 
 /// Shared state of the assembled API host.
 pub struct AppState {
@@ -30,6 +37,9 @@ pub struct AppState {
     allowed_origins: Vec<String>,
     shutdown: CancellationToken,
     admission: AdmissionGate,
+    runtime_tasks: RuntimeTasks,
+    sse_keep_alive: Duration,
+    approval_poll_interval: Duration,
 }
 
 impl AppState {
@@ -46,13 +56,21 @@ impl AppState {
         config: Config,
     ) -> Result<Self, HostError> {
         let shutdown = CancellationToken::new();
+        let runtime_tasks = Arc::new(Mutex::new(JoinSet::new()));
+        let api = config.api.clone().unwrap_or_default();
         let templates = TemplateCatalog::new(&config.agent.templates_root, config.clone()).await?;
         let allowed_origins = config
             .api
             .as_ref()
             .map_or_else(Vec::new, |api| api.allowed_origins.clone());
         Ok(Self {
-            dispatchers: DispatcherHub::new(pg.clone(), tail.clone(), shutdown.clone()),
+            dispatchers: DispatcherHub::new(
+                pg.clone(),
+                tail.clone(),
+                shutdown.clone(),
+                Arc::clone(&runtime_tasks),
+                Duration::from_secs(api.dispatcher_idle_timeout_seconds),
+            ),
             pg,
             tail,
             registry: TurnRegistry::default(),
@@ -62,6 +80,9 @@ impl AppState {
             allowed_origins,
             shutdown,
             admission: AdmissionGate::default(),
+            runtime_tasks,
+            sse_keep_alive: Duration::from_secs(api.sse_keep_alive_seconds),
+            approval_poll_interval: Duration::from_secs(api.approval_poll_interval_seconds),
         })
     }
 
@@ -115,6 +136,22 @@ impl AppState {
         &self.admission
     }
 
+    /// Configured SSE keep-alive interval.
+    pub(crate) const fn sse_keep_alive(&self) -> Duration {
+        self.sse_keep_alive
+    }
+
+    /// Configured durable approval fallback polling interval.
+    pub(crate) const fn approval_poll_interval(&self) -> Duration {
+        self.approval_poll_interval
+    }
+
+    /// Spawns one process-owned background task and opportunistically joins
+    /// tasks that have already completed.
+    pub(crate) fn spawn_runtime_task(&self, task: impl Future<Output = ()> + Send + 'static) {
+        spawn_runtime_task(&self.runtime_tasks, task);
+    }
+
     /// Begins shutdown: closes admission, ends SSE streams, and unblocks
     /// admission waits. Turn tokens are never signalled and no terminal event
     /// is written on behalf of the process.
@@ -123,26 +160,58 @@ impl AppState {
         self.shutdown.cancel();
     }
 
-    /// Bounded wait for managed turn tasks after shutdown starts; tasks that
-    /// outlive the bound stay durable `running` for an explicit resume.
-    pub(crate) async fn drain_managed_tasks(&self, bound: Duration) {
-        let tasks = self.registry.take_tasks();
+    /// Boundedly joins managed Turns, dispatchers, and SSE pumps. A timeout
+    /// aborts and joins the remainder; unfinished Turns stay durable `running`
+    /// for explicit resume and no task is detached from process ownership.
+    pub(crate) async fn drain_runtime_tasks(&self, bound: Duration) {
+        let mut tasks = {
+            let mut owned = self
+                .runtime_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *owned)
+        };
         if tasks.is_empty() {
             return;
         }
         let drained = async {
-            for task in tasks {
-                if task.await.is_err() {
-                    tracing::warn!("a managed turn task panicked during shutdown");
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(
+                        task.panicked = error.is_panic(),
+                        "a runtime task failed during shutdown"
+                    );
                 }
             }
         };
         if tokio::time::timeout(bound, drained).await.is_err() {
-            tracing::warn!(
-                "managed turn drain timed out; unfinished turns stay durable running for resume"
-            );
+            tracing::warn!("runtime task drain timed out; aborting remaining tasks");
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
         }
     }
+}
+
+/// Adds a task to the shared process task set. This is a function rather than
+/// a manager abstraction because both the state-owned SSE path and the
+/// dispatcher hub need the same concrete `JoinSet` ownership boundary.
+pub(crate) fn spawn_runtime_task(
+    tasks: &RuntimeTasks,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    let mut tasks = tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while let Some(result) = tasks.try_join_next() {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            tracing::warn!(task.panicked = error.is_panic(), "a runtime task failed");
+        }
+    }
+    tasks.spawn(task);
 }
 
 /// Atomic admission gate: create/message/resume enter before any durable or
@@ -192,8 +261,18 @@ impl AdmissionGate {
 
     /// Waits until every entered admission has left.
     pub(crate) async fn wait_drained(&self) {
-        while self.in_flight.load(Ordering::Acquire) > 0 {
-            self.drained.notified().await;
+        // `Notify::notify_waiters` stores no permit. Register and enable the
+        // waiter before reading the counter so the final guard drop cannot
+        // land between the load and waiter registration.
+        let notified = self.drained.notified();
+        tokio::pin!(notified);
+        loop {
+            notified.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.as_mut().await;
+            notified.set(self.drained.notified());
         }
     }
 
@@ -240,5 +319,34 @@ mod tests {
         tokio::task::yield_now().await;
         drop(guard);
         drained.await.expect("drain completes");
+    }
+
+    #[tokio::test]
+    async fn empty_gate_reports_drained_without_waiting_for_a_notification() {
+        let gate = AdmissionGate::default();
+
+        tokio::time::timeout(Duration::from_millis(50), gate.wait_drained())
+            .await
+            .expect("an empty gate drains immediately");
+    }
+
+    #[tokio::test]
+    async fn final_guard_drop_cannot_be_lost_while_a_drain_waiter_registers() {
+        for _ in 0..256 {
+            let gate = Arc::new(AdmissionGate::default());
+            let guard = gate.enter().expect("gate is open");
+            let waiting = Arc::clone(&gate);
+            let waiter = tokio::spawn(async move {
+                waiting.wait_drained().await;
+            });
+
+            tokio::task::yield_now().await;
+            drop(guard);
+
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("drain waiter observes the final guard drop")
+                .expect("drain waiter joins");
+        }
     }
 }

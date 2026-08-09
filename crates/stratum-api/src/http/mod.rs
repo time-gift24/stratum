@@ -10,10 +10,13 @@ use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{MatchedPath, Request, State};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use stratum_core::AgentId;
+use stratum_infra::NatsAgentTail;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{Span, field, info_span};
@@ -89,6 +92,7 @@ struct ApiDoc;
 
 /// Builds the HTTP API router for one assembled state.
 pub fn router(state: Arc<AppState>) -> Router {
+    let shutdown = state.shutdown_token();
     let origins = state
         .allowed_origins()
         .iter()
@@ -119,6 +123,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health/ready", get(readiness))
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(JSON_BODY_LIMIT))
+        .layer(axum::middleware::from_fn_with_state(
+            shutdown,
+            reject_during_shutdown,
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request| {
@@ -161,6 +169,25 @@ pub fn router(state: Arc<AppState>) -> Router {
     }
 }
 
+/// Cancels an in-flight handler future when process shutdown begins. Axum's
+/// graceful server can then finish its connection tasks instead of waiting on
+/// an unbounded Postgres, NATS, or provider operation. This is a hosting
+/// concern only: it never signals a Turn token or writes a business terminal
+/// event.
+async fn reject_during_shutdown(
+    State(shutdown): State<CancellationToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {
+            ApiError::new(ErrorKind::ServiceUnavailable).into_response()
+        }
+        response = next.run(request) => response,
+    }
+}
+
 /// Parses a JSON body, mapping size and shape failures to the stable codes.
 pub(crate) fn json_request<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     request.map(|Json(value)| value).map_err(|rejection| {
@@ -200,7 +227,7 @@ async fn liveness() -> Json<LivenessResponse> {
     )
 )]
 async fn readiness(State(state): State<Arc<AppState>>) -> Response {
-    let realtime = if state.tail().is_some() {
+    let realtime = if state.tail().is_some_and(NatsAgentTail::is_available) {
         "ok"
     } else {
         "degraded"
@@ -225,5 +252,72 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::routing::get;
+    use serde_json::json;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+
+    use super::reject_during_shutdown;
+
+    #[tokio::test]
+    async fn shutdown_drops_a_hanging_handler_and_returns_the_stable_envelope() {
+        let shutdown = CancellationToken::new();
+        let entered = Arc::new(Notify::new());
+        let handler_entered = Arc::clone(&entered);
+        let app = Router::new()
+            .route(
+                "/",
+                get(move || {
+                    let entered = Arc::clone(&handler_entered);
+                    async move {
+                        entered.notify_one();
+                        pending::<&'static str>().await
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                shutdown.clone(),
+                reject_during_shutdown,
+            ));
+        let response_task = tokio::spawn(
+            app.oneshot(
+                http::Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("test request is valid"),
+            ),
+        );
+        entered.notified().await;
+
+        shutdown.cancel();
+
+        let response = response_task
+            .await
+            .expect("request task joins")
+            .expect("router is infallible");
+        assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("response body is readable");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("body is json"),
+            json!({
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "the service is shutting down"
+                }
+            })
+        );
     }
 }

@@ -27,8 +27,10 @@ pagination must never enter this crate.
   polling in `AgentLoop`; the same token is passed to hook and tool
   operations. Cancellation is cooperative: after `ToolExecutionStarted`, the
   caller must keep polling the loop so it can await and record the outcome.
-  A durable start without a result is an unknown outcome and is never retried
-  automatically by the kernel.
+  During the live run the kernel never guesses or proactively retries a durable
+  start without a result. On explicit resume, the missing durable result suffix
+  re-executes under the at-least-once contract; idempotency belongs to the Tool
+  or external service, with side-effect protection owned by composition.
 - `ToolExecutor` is pure mechanics: lookup, validation, durable
   `ToolExecutionStarted`, and dispatch. `execute` is `pub(crate)` and takes the
   resolved tool handle plus the decide-approved final call; its body is only

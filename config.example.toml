@@ -10,6 +10,10 @@ default = "deepseek:deepseek-v4-flash"
 [llm.deepseek]
 api_key = "replace-with-your-api-key"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+connect_timeout_seconds = 10
+request_timeout_seconds = 120
+first_response_timeout_seconds = 30
+stream_idle_timeout_seconds = 60
 # Optional endpoint override (e.g. an LLM gateway or compatible API); when
 # omitted the provider's well-known public endpoint is used. Blank is rejected.
 # base_url = "https://api.deepseek.com"
@@ -17,6 +21,10 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 [api]
 bind = "127.0.0.1:8080"
 allowed_origins = ["http://localhost:5173"]
+shutdown_drain_timeout_seconds = 10
+sse_keep_alive_seconds = 15
+approval_poll_interval_seconds = 15
+dispatcher_idle_timeout_seconds = 60
 
 [nats]
 # Connection and short Agent-scoped realtime tail limits. The tail is
@@ -28,6 +36,7 @@ replicas = 1
 max_age_seconds = 3600
 max_bytes = 268435456
 max_messages = 100000
+connect_timeout_seconds = 5
 
 [postgres]
 # Postgres is the only execution-fact store; there is no backend selector

@@ -25,7 +25,6 @@ flowchart LR
     H2 --> H25["H2.5：Hook 输入公共信封"]
     H25 --> H3["H3a：Hook 存储与恢复"]
     H3 --> H3B["H3b：Postgres 统一执行层存储"]
-    H3 --> H4["H4：Tool 幂等与恢复"]
     H3 --> H5["H5：上下文压缩"]
     H3 --> S2["S2：Deno / Python 扩展宿主"]
     H3 --> R3["R3：Rust SDK 与 Hook Service"]
@@ -82,23 +81,24 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 
 ## 5. 工作线 A：Agent DIY
 
-### H1：四个核心 Hook 合同
+### H1：五个核心 Hook 合同
 
 **依赖：** M0。
 
 - [x] 定义 `transform_context` 输入与决策。
-- [x] 定义 `before_tool_call` 的继续、修改和阻断决策。
+- [x] 定义 `transform_tool_call` 的继续与修改决策。
+- [x] 定义 `decide_tool_call` 的允许与阻断决策。
 - [x] 定义 `after_tool_call` 的结果替换决策。
 - [x] 定义 `prepare_next_turn` 的继续、停止和注入消息决策。
 - [x] 提供无处理器时保持现有行为的 No-op Runtime。
 - [x] 通过 `AgentLoopBuilder` 注入单一 Hook Runtime。
 - [x] 将取消和 Deadline 传入每次 Hook 调用。
-- [x] 保持 Hook 决策与 EventBus 观察路径分离。
+- [x] 保持 Hook 决策与 `TelemetryEventSink` 观察路径分离。
 
 **验收条件：**
 
 - [x] No-op Runtime 下现有 Agent 测试行为不变。
-- [x] 四个 Hook 均有正常、错误、超时和取消测试。
+- [x] 五个 Hook 均有正常、错误、超时和取消测试。
 - [x] Block 不执行 Tool，并生成模型可见的类型化结果。
 
 ### H2：有序执行器、工具校验与审批
@@ -135,12 +135,14 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 新增公共字段只改 `HookSnapshot` 一处即可被全部 Hook 点继承（以一次模拟新增字段验证）。
 - [x] 信封化后所有既有 hook 行为测试保持不变。
 
-### H3a：Hook 存储与恢复（filesystem 与内核 resume）
+### H3a：Hook 存储与恢复（历史 filesystem 实现已被取代，内核 resume 保留）
 
 **依赖：** H2、P1。
 
-- [x] 等实际 Hook 能运行后，再确定 Hook 记录的存储后端和目录结构（filesystem per-run 目录；生产统一 Postgres，见 H3b）。
-- [x] Hook 记录归 Session/Turn 执行状态，不写进 Agent 消息或 EventBus（经 `DurableAgentEvent` 的 invocation 变体，作为执行状态而非观测）。
+- [x] 历史决策曾使用 filesystem per-run 目录；该执行后端已被
+  `complete-postgres-agent-runtime` 彻底取代并删除，当前 Hook 记录只进入统一
+  Postgres durable ledger（见 H3b）。
+- [x] Hook 记录归 Session/Turn 执行事实，不写进 Agent 消息或 telemetry；它们经 `DurableAgentEvent` invocation 变体进入 Postgres ledger。
 - [x] 固定 ExtensionSet 和 Handler 版本与顺序（H2 已覆盖：`ChainHookRuntime` 构造即定序，`ExtensionSetVersionId` 随 `LoopStarted` 落盘，resume 比对不匹配 fail closed）。
 - [x] 保存每次 Hook 的 ID、输入摘要、决定和最终状态。
 - [x] 调用 Handler 前先保存 Pending，应用决定前先保存 Completed。
@@ -149,7 +151,6 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] Tool 执行前保存最终参数或 Block 决定。
 - [x] Tool Message 提交前保存 `after_tool_call` 结果。
 - [x] 进入下一次迭代前保存 Stop/Inject 决定。
-- [ ] 定义记录大小、保留时间和清理方式（H3b）。
 
 **验收条件：**
 
@@ -157,43 +158,36 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 恢复时不会重新执行已经完成的 Hook。
 - [x] Extension 更新不会改变正在运行或恢复的 Turn（链版本随 `LoopStarted` 固定，resume 只认落盘版本）。
 
-### H3b：Postgres 统一执行层存储与保留策略
+### H3b：Postgres 统一执行层存储
 
-**依赖：** H3a。**变更说明：** 原方案（sqlite per-session）已否决——N 库文件迁移、无跨 session 查询、server 语境并发调优、三引擎碎片，维护成本不可接受。改为统一 Postgres 承载全部执行事实（journal、agent state、消息历史）；filesystem 保留定义层与 dev/test/嵌入后端。change：`add-postgres-execution-storage`（已归档并被 `complete-postgres-agent-runtime` 取代：filesystem 执行后端、backend selector 与消息投影一并删除，Postgres 成为唯一执行真相，最终为四表模型，见 `docs/runtime.md`）。
+**依赖：** H3a。**历史变更说明：** 原 sqlite per-session 方案因 N 库文件迁移、无跨
+session 查询、server 语境并发调优和三引擎碎片被否决。后续已归档的
+`add-postgres-execution-storage` 方案曾保留 filesystem 定义层与 dev/test/嵌入式执行后端；
+该方案又已被当前 `complete-postgres-agent-runtime` 取代。当前不存在 filesystem
+执行后端或 backend selector：Postgres 是唯一执行真相，最终为四表模型（见
+`docs/runtime.md`）。
 
 - [ ] ~~新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。~~（已由 `complete-postgres-agent-runtime` 取代：concrete `PostgresBackend` + 内嵌 sqlx baseline，四表 `agents`/`agent_state`/`durable_events`/`transcript_compactions`，无 `agent_messages` 投影表。）
 - [ ] ~~`append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。~~（已取代：无消息投影；集中 append 事务以 `agent_state` 行锁分配无空洞 agent-wide `event_seq`。）
 - [ ] ~~`stratum-store` 纯合同化；filesystem 后端迁 `stratum-infra`（独立 commit）。~~（已取代：`stratum-store` crate 与 filesystem 执行后端均已整体删除。）
 - [ ] ~~组合根显式 `backend = "postgres" | "filesystem"`，无静默回退；生产默认 postgres。~~（已取代：不存在 backend selector，Postgres 是唯一执行存储。）
 - [ ] ~~双后端行为对齐：同一事件序列两种后端 replay，resume 结果逐事件一致。~~（已取代：双后端与 dual-backend replay 测试已删除。）
-- [ ] 定义记录大小、保留时间和清理方式（等真实 SLO；`created_at` 列已预留，届时走 declarative partition + DROP PARTITION）。
 - [ ] 评估 per-handler 粒度 journal（依赖 H2 链式 Runner 落地）。
 
-**为后续阶段解锁的原语：** H4 幂等键 = unique constraint + 事务；W2 持久化队列 = `FOR UPDATE SKIP LOCKED`。
+**为后续阶段解锁的原语：** W2 持久化队列 = `FOR UPDATE SKIP LOCKED`。
 
 ### H3a 收尾修正（下个 patch 处理）
 
 **来源：** PR #40 的 constitution-review 报告。
 
-- [x] 补齐 §4 tracing：journal 写入、resume 重放、filesystem sink append/read 等新增关键路径加 `#[tracing::instrument]`，fail-closed 拒绝至少 `warn!`。
+- [x] 补齐 §4 tracing：journal 写入、resume 重放等保留关键路径加
+  `#[tracing::instrument]`，fail-closed 拒绝至少 `warn!`。当时同步处理的 filesystem
+  sink append/read 路径已随执行后端整体删除。
 - [x] CI 增加 `cargo audit` 与 `cargo deny check`（§6 强制项，存量缺失）。
 - [x] 修正 CONSTITUTION.md 条文矛盾与空白：§2 expect 不变量豁免 vs 附录一票否决；§5 文件网关 vs §1 分层（耐久后端允许落 stratum-infra 并直接用 std::fs）；Mutex 条款区分 std 与 tokio::Mutex；metrics 强制项需先引入 facade 基础设施；journal 载荷敏感度与保留策略条款；持久层读回的 non_exhaustive 枚举 `_` 分支必须 fail-closed。
-- [x] 顺带处理 review suggestions：filesystem.rs 的 JoinError 来源保留、`#[from]`/`#[source]` 冗余、resume.rs 显式列出 legacy 审批事件变体、`index as u64` 改 try_from。
-
-### H4：Tool 幂等与恢复
-
-**依赖：** H3。
-
-- [ ] Hook 存储稳定后，再设计 Tool 的幂等规则。
-- [ ] 为一次 Tool 执行定义稳定的幂等键。
-- [ ] 保存 Tool 开始执行和执行结果。
-- [ ] Resume 时复用已经保存的 Tool 结果。
-- [ ] Tool 状态不确定时停止，不直接重复执行。
-
-**验收条件：**
-
-- [ ] 进程崩溃不会让 Tool 被静默执行两次。
-- [ ] 无法确认 Tool 结果时 Fail Closed。
+- [x] 顺带处理当时的 review suggestions：`#[from]`/`#[source]` 冗余、resume.rs
+  显式列出 composition-owned 审批事实变体、`index as u64` 改 `try_from`。
+  当时涉及的 `filesystem.rs`/JoinError 实现已随执行后端删除。
 
 ### H5：上下文压缩
 
@@ -202,7 +196,11 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - [x] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
 - [x] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"并携带摘要，写回由 kernel 代执行。
 - [x] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记（`COMPACTION_MARKER_PREFIX`），不得伪装成用户或助手消息。
-- [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume 从压缩基线恢复；派生检查点索引 `compact.jsonl` 提供快速路径（可重建、损坏回退全量）。（`compact.jsonl` 已随 `complete-postgres-agent-runtime` 删除；快速路径改由 Postgres `transcript_compactions` companion 的 `retained_from_event_seq` 指针承担，指针无效时回退内存 full replay。）
+- [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume
+  从压缩基线恢复。历史 `compact.jsonl` 检查点快速路径已随
+  `complete-postgres-agent-runtime` 删除；当前快速路径只由 Postgres
+  `transcript_compactions` companion 的 `retained_from_event_seq` 指针承担，指针无效时
+  回退内存 full replay。
 - [x] 摘要算力归属：handler 自带（决策记录含摘要，journal 固化非确定性；kernel 不引入 summarizer 组件）。
 - [x] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
 
@@ -386,7 +384,6 @@ M0 完成后，Agent DIY、Workflow 和平台基础三条线可以并行。语�
 - Tool 参数修改 → 最终校验 → 用户审批 → Tool 执行。
 - Hook 输入公共信封（H2.5）冻结后，才能冻结 H3 输入摘要与 S2 Hook Wire Protocol。
 - Hook 存储和版本固定完成后，才能接入 Script/Rust 远程执行。
-- Hook 存储完成后，才能实现 Tool 幂等与恢复。
 - 上下文压缩只能在迭代边界切割，禁止在 tool cycle 中间改写历史。
 - Session 与版本身份基线确定后，才能固化 Workflow 持久化协议。
 - 节点状态可持久化后，才能实现 Queue Resume。

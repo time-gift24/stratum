@@ -37,10 +37,14 @@
 - A no-cursor subscription delivers only new frames from subscription time (`DeliverPolicy::New`);
   a cursor resumes after its position while retained, and a discarded position fails with the
   typed `AgentTailError::CursorExpired` before any delivery — never a silent fallback to full
-  replay. A cursor ahead of the current tail (forged or from a recreated stream) and any cursor
-  on an empty stream expire the same way, forcing the caller's cold bootstrap.
-- `TailCursor` is an opaque transport position (string-encoded for SSE `id`); it must never be
-  compared with `event_seq`/telemetry sequences or persisted as business state.
+  replay. A cursor ahead of the current tail, from another Agent, from an old recreated-stream
+  generation, or applied to an empty stream expires before headers and forces cold bootstrap.
+- `TailCursor` is an opaque versioned transport position binding `AgentId + JetStream stream
+  creation generation + stream sequence` (string-encoded for SSE `id`); it must never be compared
+  with `event_seq`/telemetry sequences or persisted as business state.
+- `NatsAgentTail::is_available` reflects runtime operations, not just startup construction:
+  publish/subscribe/delivery failures degrade readiness and subsequent successful broker work
+  restores it. Cursor-expiry validation is a successful broker query and does not mark NATS down.
 
 ## Safety and observability
 

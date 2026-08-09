@@ -94,13 +94,11 @@ pub(crate) async fn materialize_baseline(
     if let Some(companion) = companion {
         let pointer = companion.retained_from_event_seq;
         if pointer >= 1 && pointer <= base_event_seq {
-            let rows = read_checked_range(pg, agent_id, pointer - 1, base_event_seq).await?;
-            let starts_at_retained_message = matches!(
-                rows.first(),
-                Some(row) if row.event_seq == pointer
-                    && matches!(row.event, DurableAgentEvent::MessageAppended { .. })
-            );
-            if starts_at_retained_message {
+            let window_from = pointer
+                .checked_sub(1)
+                .ok_or_else(|| ApiError::new(ErrorKind::DurableStateCorrupt))?;
+            let rows = read_checked_range(pg, agent_id, window_from, base_event_seq).await?;
+            if retained_window_is_usable(pointer, base_event_seq, &rows) {
                 return assemble(rows, Some(companion.summary), ReplayMode::Accelerated)
                     .map_err(corrupt);
             }
@@ -110,6 +108,23 @@ pub(crate) async fn materialize_baseline(
         }
     }
     full_replay(pg, agent_id, base_event_seq).await
+}
+
+/// Whether a companion's retained pointer can start an accelerated replay
+/// window. Invalid pointers are locators only: callers fall back to full
+/// in-memory replay and never repair durable state.
+fn retained_window_is_usable(
+    retained_from_event_seq: u64,
+    base_event_seq: u64,
+    rows: &[LedgerEvent],
+) -> bool {
+    retained_from_event_seq >= 1
+        && retained_from_event_seq <= base_event_seq
+        && matches!(
+            rows.first(),
+            Some(row) if row.event_seq == retained_from_event_seq
+                && matches!(row.event, DurableAgentEvent::MessageAppended { .. })
+        )
 }
 
 /// In-memory full replay from the ledger start.
@@ -153,7 +168,9 @@ fn check_gapless(
 ) -> Result<(), BaselineCorrupt> {
     let mut expected = from_event_seq;
     for row in events {
-        expected += 1;
+        expected = expected.checked_add(1).ok_or(BaselineCorrupt(
+            "historical truth range sequence overflowed",
+        ))?;
         if row.event_seq != expected {
             return Err(BaselineCorrupt("historical truth range has missing rows"));
         }
@@ -231,7 +248,10 @@ pub(crate) fn assemble(
                     messages.splice(..upto, std::iter::once(summary.clone()));
                     origins.splice(..upto, std::iter::once(None));
                     segment_start = if segment_start >= upto {
-                        segment_start - upto + 1
+                        segment_start
+                            .checked_sub(upto)
+                            .and_then(|start| start.checked_add(1))
+                            .ok_or(BaselineCorrupt("historical baseline index overflowed"))?
                     } else {
                         1
                     };
@@ -314,7 +334,11 @@ fn close_segment(
             let tool_calls = message.tool_calls.clone();
             let mut committed = 0_usize;
             while committed < tool_calls.len() {
-                let Some(result) = messages.get(index + 1 + committed) else {
+                let result_index = index
+                    .checked_add(1)
+                    .and_then(|next| next.checked_add(committed))
+                    .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
+                let Some(result) = messages.get(result_index) else {
                     break;
                 };
                 if result.role != ChatRole::Tool {
@@ -325,13 +349,19 @@ fn close_segment(
                         "tool result does not match the expected call order",
                     ));
                 }
-                committed += 1;
+                committed = committed
+                    .checked_add(1)
+                    .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
             }
+            let group_end = index
+                .checked_add(1)
+                .and_then(|next| next.checked_add(committed))
+                .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
             if committed == tool_calls.len() {
-                index += 1 + committed;
+                index = group_end;
                 continue;
             }
-            let trailing = index + 1 + committed == messages.len();
+            let trailing = group_end == messages.len();
             let recoverable = matches!(terminal, TerminalKind::Failed | TerminalKind::Cancelled);
             if !trailing || !recoverable {
                 return Err(BaselineCorrupt(
@@ -348,7 +378,9 @@ fn close_segment(
             }
             return Ok(());
         }
-        index += 1;
+        index = index
+            .checked_add(1)
+            .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
     }
     Ok(())
 }
@@ -443,6 +475,23 @@ mod tests {
         assert!(check_gapless(0, 3, &[message(1, user("a")), message(2, user("b"))]).is_err());
         // An empty window exactly at the frontier is valid.
         assert!(check_gapless(3, 3, &[]).is_ok());
+        // Arithmetic overflow cannot wrap continuity back to zero.
+        assert!(check_gapless(u64::MAX, u64::MAX, &[message(0, user("x"))]).is_err());
+    }
+
+    #[test]
+    fn retained_pointer_only_accelerates_from_its_exact_message_row() {
+        let valid = vec![
+            message(4, user("retained")),
+            terminal(5, TerminalKind::Finished),
+        ];
+        assert!(retained_window_is_usable(4, 5, &valid));
+        assert!(!retained_window_is_usable(0, 5, &valid));
+        assert!(!retained_window_is_usable(6, 5, &valid));
+        assert!(!retained_window_is_usable(3, 5, &valid));
+
+        let non_message = vec![loop_started(4), message(5, user("retained"))];
+        assert!(!retained_window_is_usable(4, 5, &non_message));
     }
 
     #[test]

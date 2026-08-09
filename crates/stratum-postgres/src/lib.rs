@@ -66,12 +66,6 @@ impl PostgresBackend {
         Ok(Self { pool })
     }
 
-    /// Returns the shared connection pool.
-    #[must_use]
-    pub const fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
     /// Liveness probe for the core readiness dependency: a trivial round-trip
     /// against the migrated schema.
     ///
@@ -157,6 +151,7 @@ impl PostgresBackend {
     /// [`PostgresError::SessionMismatch`], [`PostgresError::StaleTurn`],
     /// [`PostgresError::TurnNotRunning`],
     /// [`PostgresError::ApprovalAlreadyRequested`],
+    /// [`PostgresError::ApprovalIdConflict`],
     /// [`PostgresError::InvalidCompactionPointer`], or
     /// [`PostgresError::InvalidCommand`] on validation failure and
     /// [`PostgresError::StoreUnavailable`] on storage failure.

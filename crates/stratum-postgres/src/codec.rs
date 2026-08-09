@@ -9,11 +9,11 @@
 //! fails to decode or violates an invariant maps to
 //! [`PostgresError::DurableStateCorrupt`]. There is no upcasting.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use stratum_core::{
-    ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, DurableAgentEvent,
-    HookInvocationId, ToolKind, ToolName, TurnRuntimeSnapshot,
+    ApprovalDecision, ApprovalId, CallId, DangerLevel, DurableAgentEvent, HookInvocationId,
+    ToolKind, ToolName, TurnRuntimeSnapshot,
 };
 
 use crate::error::{PostgresError, VersionedKind};
@@ -43,6 +43,7 @@ pub(crate) const KNOWN_EVENT_TYPES: [&str; 13] = [
 ];
 
 pub(crate) const TYPE_TRANSCRIPT_COMPACTED: &str = "transcript_compacted";
+const TYPE_TOOL_APPROVAL_REQUESTED: &str = "tool_approval_requested";
 
 /// Product-visible event types covered by the filtered history index.
 pub(crate) const HISTORY_EVENT_TYPES: [&str; 4] = [
@@ -147,6 +148,19 @@ pub(crate) fn ensure_supported_event_version(event_version: i32) -> Result<(), P
     Ok(())
 }
 
+/// Rejects a compaction companion attached to a row whose discriminator is
+/// known to be a non-compaction event.
+pub(crate) fn ensure_non_compaction_companion_absent(
+    has_compaction_companion: bool,
+) -> Result<(), PostgresError> {
+    if has_compaction_companion {
+        return Err(PostgresError::corrupt_invariant(
+            "non-compaction durable event has a transcript companion row",
+        ));
+    }
+    Ok(())
+}
+
 /// Decodes one ledger row into a typed event with strict v1 rules.
 ///
 /// `companion` must be `Some` exactly when `event_type` is
@@ -163,6 +177,9 @@ pub(crate) fn decode_event(
         return Err(PostgresError::corrupt_invariant(
             "durable event_type outside the known closed set",
         ));
+    }
+    if event_type != TYPE_TRANSCRIPT_COMPACTED {
+        ensure_non_compaction_companion_absent(companion.is_some())?;
     }
 
     let data = if event_type == TYPE_TRANSCRIPT_COMPACTED {
@@ -183,8 +200,46 @@ pub(crate) fn decode_event(
         payload
     };
 
-    serde_json::from_value(json!({ "type": event_type, "data": data }))
-        .map_err(|source| PostgresError::corrupt("durable event payload failed v1 decode", source))
+    // Approval requests carry one storage-owned identity that the kernel event
+    // deliberately does not know. Decode that exact wire shape strictly, then
+    // project only the kernel fields; every other event must round-trip through
+    // the core type without changing its canonical v1 value.
+    if event_type == TYPE_TOOL_APPROVAL_REQUESTED {
+        let requested = RequestedApprovalPayload::decode(event_version, data)?;
+        return Ok(DurableAgentEvent::ToolApprovalRequested {
+            approval_id: requested.approval_id,
+            call_id: requested.call_id,
+            tool_name: requested.tool_name,
+            arguments: requested.arguments,
+            tool_kind: requested.tool_kind,
+            danger_level: requested.danger_level,
+        });
+    }
+
+    strict_v1_from_value(
+        json!({ "type": event_type, "data": data }),
+        "durable event payload failed v1 decode",
+        "durable event payload does not match canonical v1 shape",
+    )
+}
+
+/// Deserializes a persisted v1 shape and requires byte-independent semantic
+/// equality with the domain type's canonical serialization. This catches
+/// fields that serde would silently ignore, including inside nested enums.
+fn strict_v1_from_value<T: DeserializeOwned + Serialize>(
+    value: Value,
+    decode_context: &'static str,
+    noncanonical_context: &'static str,
+) -> Result<T, PostgresError> {
+    let decoded: T = serde_json::from_value(value.clone())
+        .map_err(|source| PostgresError::corrupt(decode_context, source))?;
+    let canonical = serde_json::to_value(&decoded).map_err(|source| {
+        PostgresError::corrupt("durable event payload failed canonical v1 encode", source)
+    })?;
+    if canonical != value {
+        return Err(PostgresError::corrupt_invariant(noncanonical_context));
+    }
+    Ok(decoded)
 }
 
 /// Encodes a v1 runtime snapshot for the `LoopStarted` envelope columns.
@@ -208,8 +263,11 @@ pub(crate) fn decode_runtime_snapshot(
             version,
         });
     }
-    serde_json::from_value(snapshot)
-        .map_err(|source| PostgresError::corrupt("runtime snapshot failed v1 decode", source))
+    strict_v1_from_value(
+        snapshot,
+        "runtime snapshot failed v1 decode",
+        "runtime snapshot does not match canonical v1 shape",
+    )
 }
 
 /// Postgres SQLSTATE of a unique-constraint violation.
@@ -240,7 +298,11 @@ pub(crate) fn decode_model_config(
     value: Value,
     context: &'static str,
 ) -> Result<stratum_core::ModelConfig, PostgresError> {
-    serde_json::from_value(value).map_err(|source| PostgresError::corrupt(context, source))
+    strict_v1_from_value(
+        value,
+        context,
+        "persisted model config does not match canonical v1 shape",
+    )
 }
 
 /// Decodes an optional `ModelConfig` jsonb column.
@@ -253,15 +315,10 @@ pub(crate) fn decode_optional_model_config(
         .transpose()
 }
 
-/// Strict decode of a compaction companion `summary` column.
-pub(crate) fn decode_summary(value: Value) -> Result<ChatMessage, PostgresError> {
-    serde_json::from_value(value)
-        .map_err(|source| PostgresError::corrupt("compaction summary failed v1 decode", source))
-}
-
 /// Wire shape of a `tool_approval_requested` payload (core fields plus the
 /// store-injected `hook_invocation_id`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RequestedApprovalPayload {
     pub(crate) approval_id: ApprovalId,
     pub(crate) hook_invocation_id: HookInvocationId,
@@ -277,18 +334,18 @@ impl RequestedApprovalPayload {
     /// declared version must be supported before any v1 field is read.
     pub(crate) fn decode(event_version: i32, payload: Value) -> Result<Self, PostgresError> {
         ensure_supported_event_version(event_version)?;
-        serde_json::from_value(payload).map_err(|source| {
-            PostgresError::corrupt("approval request payload failed v1 decode", source)
-        })
+        strict_v1_from_value(
+            payload,
+            "approval request payload failed v1 decode",
+            "approval request payload does not match canonical v1 shape",
+        )
     }
 }
 
 /// Wire shape of a `tool_approval_resolved` payload.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ResolvedApprovalPayload {
-    // Kept for the explicit wire shape; rows are always fetched filtered by
-    // approval id, so the value is never read back.
-    #[allow(dead_code)]
     pub(crate) approval_id: ApprovalId,
     pub(crate) decision: ApprovalDecision,
 }
@@ -298,9 +355,11 @@ impl ResolvedApprovalPayload {
     /// declared version must be supported before any v1 field is read.
     pub(crate) fn decode(event_version: i32, payload: Value) -> Result<Self, PostgresError> {
         ensure_supported_event_version(event_version)?;
-        serde_json::from_value(payload).map_err(|source| {
-            PostgresError::corrupt("approval resolution payload failed v1 decode", source)
-        })
+        strict_v1_from_value(
+            payload,
+            "approval resolution payload failed v1 decode",
+            "approval resolution payload does not match canonical v1 shape",
+        )
     }
 }
 
@@ -471,6 +530,29 @@ mod tests {
     }
 
     #[test]
+    fn non_compaction_event_rejects_a_companion_row() {
+        let event = DurableAgentEvent::MessageAppended {
+            message: ChatMessage::user("hello"),
+        };
+        let encoded = encode_event(&event, None).expect("event encodes");
+        let companion = CompanionFacts {
+            upto: 1,
+            compacted_iteration: 1,
+            summary: serde_json::to_value(ChatMessage::system("summary")).expect("summary encodes"),
+        };
+
+        let error = decode_event(
+            encoded.event_type,
+            encoded.event_version,
+            encoded.payload,
+            Some(companion),
+        )
+        .expect_err("non-compaction companion is corrupt");
+
+        assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+    }
+
+    #[test]
     fn unsupported_event_version_maps_to_runtime_incompatible() {
         let error = decode_event("message_appended", 2, json!({}), None)
             .expect_err("newer version is incompatible");
@@ -492,6 +574,62 @@ mod tests {
             std::error::Error::source(&error).is_some(),
             "decode failures keep the source chain"
         );
+    }
+
+    #[test]
+    fn supported_event_version_rejects_unknown_fields_at_every_typed_depth() {
+        let top_level = decode_event(
+            "loop_finished",
+            EVENT_VERSION_V1,
+            json!({
+                "finish_reason": "stop",
+                "usage": usage(),
+                "future_field": true,
+            }),
+            None,
+        )
+        .expect_err("an unknown variant field is corrupt");
+        assert!(matches!(
+            top_level,
+            PostgresError::DurableStateCorrupt { .. }
+        ));
+
+        let message = DurableAgentEvent::MessageAppended {
+            message: ChatMessage::assistant("complete"),
+        };
+        let mut encoded = encode_event(&message, None).expect("message encodes");
+        encoded.payload["message"]["future_field"] = json!(true);
+        let nested = decode_event(
+            encoded.event_type,
+            encoded.event_version,
+            encoded.payload,
+            None,
+        )
+        .expect_err("an unknown nested message field is corrupt");
+        assert!(matches!(nested, PostgresError::DurableStateCorrupt { .. }));
+
+        let request = DurableAgentEvent::ToolApprovalRequested {
+            approval_id: ApprovalId::new(),
+            call_id: CallId::from("call-unknown-field"),
+            tool_name: ToolName::from("echo"),
+            arguments: json!({ "arbitrary_tool_field": true }),
+            tool_kind: ToolKind::Read,
+            danger_level: DangerLevel::Low,
+        };
+        let mut encoded = encode_event(&request, Some(HookInvocationId::new()))
+            .expect("approval request encodes");
+        encoded.payload["future_field"] = json!(true);
+        let request_error = decode_event(
+            encoded.event_type,
+            encoded.event_version,
+            encoded.payload,
+            None,
+        )
+        .expect_err("only the exact store extension is accepted");
+        assert!(matches!(
+            request_error,
+            PostgresError::DurableStateCorrupt { .. }
+        ));
     }
 
     #[test]
@@ -556,6 +694,42 @@ mod tests {
     }
 
     #[test]
+    fn specialized_approval_decodes_reject_unknown_v1_fields() {
+        let requested = RequestedApprovalPayload::decode(
+            EVENT_VERSION_V1,
+            json!({
+                "approval_id": ApprovalId::new(),
+                "hook_invocation_id": HookInvocationId::new(),
+                "call_id": "call-1",
+                "tool_name": "echo",
+                "arguments": {},
+                "tool_kind": "read",
+                "danger_level": "low",
+                "future_field": true,
+            }),
+        )
+        .expect_err("unknown request fields are corrupt");
+        assert!(matches!(
+            requested,
+            PostgresError::DurableStateCorrupt { .. }
+        ));
+
+        let resolved = ResolvedApprovalPayload::decode(
+            EVENT_VERSION_V1,
+            json!({
+                "approval_id": ApprovalId::new(),
+                "decision": "approve",
+                "future_field": true,
+            }),
+        )
+        .expect_err("unknown resolution fields are corrupt");
+        assert!(matches!(
+            resolved,
+            PostgresError::DurableStateCorrupt { .. }
+        ));
+    }
+
+    #[test]
     fn event_version_guard_accepts_only_v1() {
         assert!(ensure_supported_event_version(EVENT_VERSION_V1).is_ok());
         for version in [0, 2, 7] {
@@ -601,6 +775,19 @@ mod tests {
         let corrupt = decode_runtime_snapshot(RUNTIME_SNAPSHOT_VERSION_V1, json!({ "model": 1 }))
             .expect_err("malformed v1 is corrupt");
         assert!(matches!(corrupt, PostgresError::DurableStateCorrupt { .. }));
+
+        let mut noncanonical = encode_runtime_snapshot(&snapshot).expect("snapshot re-encodes");
+        noncanonical["model"]["future_field"] = json!(true);
+        let unknown = decode_runtime_snapshot(RUNTIME_SNAPSHOT_VERSION_V1, noncanonical)
+            .expect_err("unknown nested snapshot fields are corrupt");
+        assert!(matches!(unknown, PostgresError::DurableStateCorrupt { .. }));
+
+        let model = serde_json::to_value(&snapshot.model).expect("model encodes");
+        let mut noncanonical_model = model;
+        noncanonical_model["future_field"] = json!(true);
+        let unknown = decode_model_config(noncanonical_model, "model failed v1 decode")
+            .expect_err("unknown persisted model fields are corrupt");
+        assert!(matches!(unknown, PostgresError::DurableStateCorrupt { .. }));
     }
 
     fn error_kind(error: &PostgresError) -> &'static str {

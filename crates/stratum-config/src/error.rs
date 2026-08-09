@@ -19,6 +19,9 @@ pub enum ConfigError {
     /// A configured CORS origin was a wildcard or invalid HTTP header value.
     #[error("api allowed origin is invalid")]
     InvalidAllowedOrigin,
+    /// An API operational timeout was zero.
+    #[error("invalid api configuration field `{field}`")]
+    InvalidApiConfig { field: &'static str },
     /// A template prompt was empty after trimming.
     #[error("agent prompt must not be empty")]
     EmptyPrompt,
@@ -34,6 +37,12 @@ pub enum ConfigError {
     /// A provider base URL override was blank.
     #[error("base url for provider `{provider}` must not be blank")]
     InvalidProviderBaseUrl { provider: &'static str },
+    /// A provider operational timeout was zero.
+    #[error("invalid `{field}` for provider `{provider}`")]
+    InvalidProviderTimeout {
+        provider: &'static str,
+        field: &'static str,
+    },
     /// A provider listed the same model more than once.
     #[error("duplicate model `{model}` for provider `{provider}`")]
     DuplicateModel {

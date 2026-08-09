@@ -123,8 +123,9 @@ CREATE UNIQUE INDEX durable_events_approval_resolved_unique
     ON durable_events (agent_id, (payload ->> 'approval_id'))
     WHERE event_type = 'tool_approval_resolved';
 
--- Approval lookup by approval identity (Requested side).
-CREATE INDEX durable_events_approval_requested_by_approval
+-- Approval identity itself is unique on the Requested side and is also the
+-- resolver/read lookup index.
+CREATE UNIQUE INDEX durable_events_approval_requested_by_approval
     ON durable_events (agent_id, (payload ->> 'approval_id'))
     WHERE event_type = 'tool_approval_requested';
 
@@ -134,7 +135,7 @@ CREATE INDEX durable_events_hook_completed_by_invocation
     WHERE event_type = 'hook_invocation_completed';
 
 -- Per-turn ordered reads (approval ledger scans, turn inspection).
-CREATE INDEX durable_events_turn_seq_idx
+CREATE INDEX durable_events_by_turn_event_seq_idx
     ON durable_events (agent_id, turn_id, event_seq);
 
 -- Product history reads only product-visible event types.

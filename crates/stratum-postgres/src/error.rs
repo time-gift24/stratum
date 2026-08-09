@@ -125,6 +125,12 @@ pub enum PostgresError {
         /// Hook invocation with an existing request.
         hook_invocation_id: HookInvocationId,
     },
+    /// A generated approval identity is already bound to another request.
+    #[error("approval {approval_id} is already bound to a durable request")]
+    ApprovalIdConflict {
+        /// Conflicting approval identity.
+        approval_id: ApprovalId,
+    },
     /// The compaction retained pointer does not address a real earlier
     /// `MessageAppended` of the same Agent; the append fails closed.
     #[error(

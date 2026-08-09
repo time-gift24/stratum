@@ -13,6 +13,8 @@ test-integration:
 	cargo test -p stratum-infra --test agent_tail_nats agent_tail_reports_expired_cursor_after_retention_eviction -- --ignored --exact; \
 	cargo test -p stratum-infra --test agent_tail_nats agent_tail_reports_future_cursor_as_expired -- --ignored --exact; \
 	cargo test -p stratum-infra --test agent_tail_nats agent_tail_reports_any_cursor_as_expired_on_empty_stream -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_rejects_cursor_from_another_agent -- --ignored --exact; \
+	cargo test -p stratum-infra --test agent_tail_nats agent_tail_rejects_old_generation_after_sequence_overlap -- --ignored --exact; \
 	cargo test -p stratum-infra --test agent_tail_nats agent_tail_isolates_frames_per_agent -- --ignored --exact; \
 	cargo test -p stratum-infra --test agent_tail_nats agent_tail_seed_frames_before_restart -- --ignored --exact; \
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) restart nats-stream; \

@@ -27,6 +27,7 @@ function makeView(overrides: Partial<AgentView> = {}): AgentView {
     session_id: "session-1",
     current_turn_id: "turn-1",
     snapshot_event_seq: "10",
+    telemetry_floor_event_seq: "0",
     pending_approvals: [],
     latest_usage: null,
     resume_required: false,
@@ -34,7 +35,9 @@ function makeView(overrides: Partial<AgentView> = {}): AgentView {
   }
 }
 
-function readyState(overrides: Partial<ConversationState> = {}): ConversationState {
+function readyState(
+  overrides: Partial<ConversationState> = {}
+): ConversationState {
   return {
     ...initialConversationState,
     agentId: AGENT_ID,
@@ -76,7 +79,8 @@ function durableFrame(
 function telemetryFrame(
   llmCallId: string,
   telemetrySeq: number,
-  event: TelemetryFrame["event"]
+  event: TelemetryFrame["event"],
+  durableBeforeEventSeq = "10"
 ): TelemetryFrame {
   return {
     protocol_version: 1,
@@ -87,6 +91,7 @@ function telemetryFrame(
     created_at: "2026-01-01T00:00:00.000Z",
     llm_call_id: llmCallId,
     telemetry_seq: telemetrySeq,
+    durable_before_event_seq: durableBeforeEventSeq,
     event,
   }
 }
@@ -116,6 +121,7 @@ describe("view_reconciled bundle application", () => {
 
     const next = conversationReducer(state, {
       type: "view_reconciled",
+      baseBarrier: "10",
       view: staleView,
       items: [historyItem("9", { type: "loop_started" })],
     })
@@ -135,16 +141,20 @@ describe("view_reconciled bundle application", () => {
 
     const next = conversationReducer(state, {
       type: "view_reconciled",
+      baseBarrier: "12",
       view: freshView,
       items: [
         historyItem("13", {
           type: "message_appended",
           data: { message: textMessage("hi", "user") },
         }),
-        historyItem("14", { type: "loop_finished", data: {
-          finish_reason: "stop",
-          usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
-        } }),
+        historyItem("14", {
+          type: "loop_finished",
+          data: {
+            finish_reason: "stop",
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
       ],
     })
 
@@ -164,6 +174,7 @@ describe("view_reconciled bundle application", () => {
 
     const next = conversationReducer(state, {
       type: "view_reconciled",
+      baseBarrier: "12",
       view,
       items: [],
     })
@@ -171,9 +182,179 @@ describe("view_reconciled bundle application", () => {
     expect(next.barrier).toBe("12")
     expect(next.view).toBe(view)
   })
+
+  it("discards a bundle when realtime advanced after reconcile started", () => {
+    const state = readyState({
+      barrier: "12",
+      view: makeView({ status: "finished", snapshot_event_seq: "12" }),
+    })
+    const fetchedBeforeRealtime = makeView({
+      status: "running",
+      snapshot_event_seq: "12",
+      resume_required: true,
+    })
+
+    const next = conversationReducer(state, {
+      type: "view_reconciled",
+      baseBarrier: "10",
+      view: fetchedBeforeRealtime,
+      items: [],
+    })
+
+    expect(next).toBe(state)
+  })
 })
 
 describe("telemetry gap handling", () => {
+  it("seeds the cold telemetry floor even when the final is outside the latest page", () => {
+    const snapshot = conversationReducer(
+      {
+        ...initialConversationState,
+        agentId: AGENT_ID,
+        phase: "recovering",
+      },
+      {
+        type: "snapshot_loaded",
+        view: makeView({
+          snapshot_event_seq: "100",
+          telemetry_floor_event_seq: "40",
+        }),
+        items: [],
+        historyBefore: "80",
+        historyHasMore: true,
+      }
+    )
+
+    expect(snapshot.telemetryFloorEventSeq).toBe("40")
+    const lateOldCall = conversationReducer(snapshot, {
+      type: "telemetry_frame",
+      frame: telemetryFrame(
+        "old-call",
+        1,
+        {
+          type: "text_delta",
+          data: { delta: "late" },
+        },
+        "39"
+      ),
+    })
+    expect(lateOldCall).toBe(snapshot)
+
+    const nextCall = conversationReducer(snapshot, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("next-call", 0, { type: "llm_started" }, "40"),
+    })
+    expect(nextCall.activeLlmCallId).toBe("next-call")
+  })
+
+  it("rejects old-call telemetry when PG reconcile observes the final first", () => {
+    const reconciled = conversationReducer(readyState(), {
+      type: "view_reconciled",
+      baseBarrier: "10",
+      view: makeView({ snapshot_event_seq: "11" }),
+      items: [
+        historyItem("11", {
+          type: "message_appended",
+          data: { message: textMessage("complete", "assistant") },
+        }),
+      ],
+    })
+
+    expect(reconciled.telemetryFloorEventSeq).toBe("11")
+    const lateOldCall = conversationReducer(reconciled, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("old-call", 0, { type: "llm_started" }, "10"),
+    })
+    expect(lateOldCall).toBe(reconciled)
+
+    // 下一 call 在 final receipt 后入队，watermark 不低于 final，可以正常流式。
+    const nextCall = conversationReducer(reconciled, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("next-call", 0, { type: "llm_started" }, "11"),
+    })
+    expect(nextCall.activeLlmCallId).toBe("next-call")
+    expect(nextCall.drafts["next-call"]).toBeDefined()
+
+    const duplicateKnownFinal = conversationReducer(nextCall, {
+      type: "durable_frame",
+      frame: durableFrame("11", {
+        type: "message_appended",
+        data: { message: textMessage("complete", "assistant") },
+      }),
+    })
+    expect(duplicateKnownFinal).toBe(nextCall)
+  })
+
+  it("uses the reconciled floor when the corresponding final is outside the fetched interval", () => {
+    const streaming = conversationReducer(readyState(), {
+      type: "telemetry_frame",
+      frame: telemetryFrame("old-call", 0, { type: "llm_started" }, "10"),
+    })
+    const reconciled = conversationReducer(streaming, {
+      type: "view_reconciled",
+      baseBarrier: "10",
+      view: makeView({
+        snapshot_event_seq: "10",
+        telemetry_floor_event_seq: "9",
+      }),
+      items: [],
+    })
+    expect(reconciled.activeLlmCallId).toBe("old-call")
+
+    const advanced = conversationReducer(reconciled, {
+      type: "view_reconciled",
+      baseBarrier: "10",
+      view: makeView({
+        snapshot_event_seq: "12",
+        telemetry_floor_event_seq: "11",
+      }),
+      // A specialized/current page can omit the assistant item; the view
+      // floor remains sufficient convergence evidence.
+      items: [],
+    })
+    expect(advanced.activeLlmCallId).toBeNull()
+    expect(advanced.telemetryFloorEventSeq).toBe("11")
+  })
+
+  it("uses an ordered duplicate final when the cold history page omitted it", () => {
+    const snapshot = readyState({
+      barrier: "100",
+      view: makeView({ snapshot_event_seq: "100" }),
+      telemetryFloorEventSeq: "0",
+    })
+    const ghost = conversationReducer(snapshot, {
+      type: "telemetry_frame",
+      frame: telemetryFrame(
+        "old-call",
+        1,
+        { type: "text_delta", data: { delta: "late" } },
+        "39"
+      ),
+    })
+    expect(ghost.activeLlmCallId).toBe("old-call")
+
+    // Dispatcher publishes this duplicate only after the queued old-call
+    // telemetry. It is below the PG barrier, so it converges transient state
+    // without appending a second timeline item.
+    const converged = conversationReducer(ghost, {
+      type: "durable_frame",
+      frame: durableFrame("40", {
+        type: "message_appended",
+        data: { message: textMessage("complete", "assistant") },
+      }),
+    })
+    expect(converged.activeLlmCallId).toBeNull()
+    expect(converged.drafts).toEqual({})
+    expect(converged.telemetryFloorEventSeq).toBe("40")
+    expect(converged.timeline).toEqual(snapshot.timeline)
+
+    const nextCall = conversationReducer(converged, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("next-call", 0, { type: "llm_started" }, "40"),
+    })
+    expect(nextCall.activeLlmCallId).toBe("next-call")
+  })
+
   it("creates an INCOMPLETE draft when llm_started was lost (first delta has a gap)", () => {
     const state = readyState()
 
@@ -298,6 +479,156 @@ describe("telemetry gap handling", () => {
       }),
     })
     expect(late).toBe(state)
+  })
+
+  it("rejects a previous Turn's queued telemetry after the next Turn is running", () => {
+    const nextTurn = readyState({
+      barrier: "14",
+      view: makeView({
+        status: "running",
+        current_turn_id: "turn-2",
+        snapshot_event_seq: "14",
+      }),
+    })
+    const latePreviousTurn = conversationReducer(nextTurn, {
+      type: "telemetry_frame",
+      frame: {
+        ...telemetryFrame(
+          "old-call",
+          1,
+          { type: "text_delta", data: { delta: "late" } },
+          "10"
+        ),
+        turn_id: "turn-1",
+      },
+    })
+
+    expect(latePreviousTurn).toBe(nextTurn)
+  })
+})
+
+describe("accepted Turn convergence", () => {
+  it("keeps polling intent across cold recovery until AgentView confirms the Turn", () => {
+    const oldView = makeView({
+      status: "finished",
+      current_turn_id: "turn-1",
+      snapshot_event_seq: "10",
+    })
+    const accepted = conversationReducer(readyState({ view: oldView }), {
+      type: "turn_accepted",
+      agentId: AGENT_ID,
+      turnId: "turn-2",
+    })
+    expect(accepted.acceptedTurnId).toBe("turn-2")
+
+    const recovering = conversationReducer(accepted, {
+      type: "recovery_started",
+      agentId: AGENT_ID,
+    })
+    const staleSnapshot = conversationReducer(recovering, {
+      type: "snapshot_loaded",
+      view: oldView,
+      items: [],
+      historyBefore: null,
+      historyHasMore: false,
+    })
+    expect(staleSnapshot.acceptedTurnId).toBe("turn-2")
+
+    const confirmed = conversationReducer(staleSnapshot, {
+      type: "view_reconciled",
+      baseBarrier: "10",
+      view: makeView({
+        status: "running",
+        current_turn_id: "turn-2",
+        snapshot_event_seq: "12",
+      }),
+      items: [],
+    })
+    expect(confirmed.acceptedTurnId).toBeNull()
+  })
+
+  it("does not arm convergence when realtime already confirmed the Turn", () => {
+    const state = readyState({
+      view: makeView({ current_turn_id: "turn-2" }),
+    })
+    const next = conversationReducer(state, {
+      type: "turn_accepted",
+      agentId: AGENT_ID,
+      turnId: "turn-2",
+    })
+    expect(next).toBe(state)
+  })
+
+  it("accepts telemetry for the exact accepted Turn while the old view is terminal", () => {
+    const oldView = makeView({ status: "finished", current_turn_id: "turn-1" })
+    const accepted = conversationReducer(readyState({ view: oldView }), {
+      type: "turn_accepted",
+      agentId: AGENT_ID,
+      turnId: "turn-2",
+    })
+    const next = conversationReducer(accepted, {
+      type: "telemetry_frame",
+      frame: {
+        ...telemetryFrame("call-2", 0, { type: "llm_started" }),
+        turn_id: "turn-2",
+      },
+    })
+
+    expect(next.activeLlmCallId).toBe("call-2")
+    expect(next.acceptedTurnId).toBe("turn-2")
+  })
+
+  it("lets an accepted Turn supersede telemetry from a stale running view", () => {
+    const accepted = conversationReducer(readyState(), {
+      type: "turn_accepted",
+      agentId: AGENT_ID,
+      turnId: "turn-2",
+    })
+    const latePreviousTurn = conversationReducer(accepted, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("old-call", 0, { type: "llm_started" }),
+    })
+
+    expect(latePreviousTurn).toBe(accepted)
+  })
+
+  it("uses an exact terminal frame to confirm and close the accepted Turn", () => {
+    const accepted = conversationReducer(
+      readyState({
+        view: makeView({ status: "finished", current_turn_id: "turn-1" }),
+      }),
+      { type: "turn_accepted", agentId: AGENT_ID, turnId: "turn-2" }
+    )
+    const terminal = conversationReducer(accepted, {
+      type: "durable_frame",
+      frame: {
+        ...durableFrame("11", {
+          type: "loop_finished",
+          data: {
+            finish_reason: "stop",
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+        turn_id: "turn-2",
+      },
+    })
+
+    expect(terminal.acceptedTurnId).toBeNull()
+    expect(terminal.view).toMatchObject({
+      status: "finished",
+      current_turn_id: "turn-2",
+    })
+    const late = conversationReducer(terminal, {
+      type: "telemetry_frame",
+      frame: {
+        ...telemetryFrame("call-2", 2, {
+          type: "text_delta",
+          data: { delta: "late" },
+        }),
+        turn_id: "turn-2",
+      },
+    })
+    expect(late).toBe(terminal)
   })
 })
 

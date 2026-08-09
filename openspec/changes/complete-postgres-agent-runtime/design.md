@@ -286,7 +286,7 @@ waiter 使用 register-then-read：先按 ApprovalId 注册本机 waiter，再�
 
 ### 10. HTTP cold view、history 与稳定错误直接映射 ledger
 
-`GET /v1/agents/{id}` 返回 API DTO，而不是数据库 row：Agent identity/name、status、default model、nullable Session/current Turn、`snapshot_event_seq`、pending approvals、current Turn latest usage与 advisory `resume_required`。`snapshot_event_seq`不是新状态字段，必须等于同一MVCC snapshot中读取的`agent_state.last_event_seq`。公开 `outcome` 删除。除 registry-derived advisory 外，barrier、status、usage和approvals来自同一PG snapshot。所有对外event sequence（view barrier、history cursor/item与durable frame）统一编码为十进制字符串，避免JavaScript number精度改变identity。
+`GET /v1/agents/{id}` 返回 API DTO，而不是数据库 row：Agent identity/name、status、default model、nullable Session/current Turn、`snapshot_event_seq`、`telemetry_floor_event_seq`、pending approvals、current Turn latest usage与 advisory `resume_required`。`snapshot_event_seq`不是新状态字段，必须等于同一MVCC snapshot中读取的`agent_state.last_event_seq`；barrier-governed `telemetry_floor_event_seq` 是该 snapshot 内最新一个通过严格解码的 assistant `MessageAppended.event_seq`，不存在时为0。公开 `outcome` 删除。除 registry-derived advisory 外，barrier、telemetry floor、status、usage和approvals来自同一PG snapshot。所有对外event sequence（view barrier、telemetry floor、history cursor/item与durable frame）统一编码为十进制字符串，避免JavaScript number精度改变identity。
 
 `GET /v1/agents/{id}/history` 直接查询 `durable_events` partial index，不使用 message projection。必填 `through_event_seq`，可选 exclusive `before_event_seq` 与 limit；默认 50、最大 256，1 MiB soft page budget，首条自身超限仍完整返回。数据库反向取页，响应按 event_seq 升序并带 `next_before_event_seq/has_more`。可见 history items为 `MessageAppended`、`TranscriptCompacted`、安全的 `LoopFailed/LoopCancelled` marker；Tool result作为 role=tool message。History 与 SSE durable frame复用 API-owned `AgentProductEventV1` typed union，绝不直接暴露 raw durable payload。
 
@@ -319,10 +319,12 @@ AgentStreamFrameV1
 
   control: stream_ready | stream_reset { reason: buffer_overflow }
   durable: event_seq, event_version, AgentProductEventV1
-  telemetry: llm_call_id, telemetry_seq, typed LLM event
+  telemetry: durable_before_event_seq, llm_call_id, telemetry_seq, typed LLM event
 ```
 
 idle Agent可订阅，因此 control frame的 Session/Turn可以为空；Turn durable frame必须完整。任何存在的SSE id都只是不透明 NATS cursor，不能与 event_seq/telemetry_seq比较或持久化为业务状态。API只有在 NATS subscription已经建立并开始buffer后才发 `stream_ready`，客户端收到后才读取 PG cold snapshot。`stream_reset` 是 API 在单条已建立 SSE 上本地产生的控制信号，不写PG、不发NATS，也不携带SSE id。
+
+每条telemetry在进入dispatcher bounded queue时冻结当时已知的PG durable high-water，并以十进制字符串`durable_before_event_seq`公开。dispatcher在发布该telemetry前先flush到该watermark。它只说明“这条telemetry排在这些durable facts之后”，不分配新的durable sequence，也不改变`(llm_call_id,telemetry_seq)` identity。若PG reconcile先应用了event_seq为F的assistant final，则随后到达且`durable_before_event_seq < F`的telemetry属于该final之前的旧tail，必须忽略；`durable_before_event_seq >= F`的下一call telemetry不能仅因此前final而被丢弃。
 
 无 cursor从当前 tail开始；有 cursor只继续仍保留的短 tail。cursor仅在当前页面内存保存；页面刷新不恢复它。cursor过期在建流前返回410；建流后的server buffer overflow发送无id的`stream_reset(reason=buffer_overflow)`并关闭连接。Web收到reset后必须主动关闭原EventSource，丢弃该连接的buffer、draft与cursor，阻止浏览器携旧Last-Event-ID自动短重连，并从无cursor cold bootstrap重新开始。NATS retention使用可配置的短 age/bytes/messages上限，不承担 durable history或跨重启补发。
 
@@ -330,13 +332,13 @@ cold bootstrap 固定为：
 
 1. 建立并 buffer Agent SSE，等待 `stream_ready`。
 2. 读取 AgentView和 barrier内最新 history page。
-3. 应用 PG snapshot；durable frame `<= barrier` 跳过，`> barrier` 按 event_seq应用。
+3. 应用 PG snapshot，并用 `AgentView.telemetry_floor_event_seq` 初始化已收敛 assistant final floor，不能只靠最新 history page推导；durable frame `<= barrier` 跳过，`> barrier` 按 event_seq应用。
 4. bootstrap期间buffered telemetry全部丢弃，因为没有可证明完整的call prefix。
 5. bootstrap成功后才提交最新NATS cursor并进入live mode。
 
-正常 reconcile是增量的：旧 barrier B 到新 barrier T时，从history反向分页直到越过B，只合并 `(B,T]` product events，并替换status/pending approvals；exact Turn仍running时保留已有telemetry draft，若新view已经terminal则执行和terminal frame相同的draft/未完成Tool UI清理。running或pending approval期间低频reconcile，窗口聚焦和每个command后立即reconcile。仅页面刷新、cursor过期、overflow或手动硬重置做cold rebuild。
+正常 reconcile是增量的：旧 barrier B 到新 barrier T时，从history反向分页直到越过B，只合并 `(B,T]` product events，并替换status/pending approvals等barrier-governed字段，包括用新view的`telemetry_floor_event_seq`推进已收敛assistant final floor；exact Turn仍running时保留已有telemetry draft，若新view已经terminal则执行和terminal frame相同的draft/未完成Tool UI清理。message 202 的exact accepted Turn保留到 AgentView 或同一 Turn 的 exact durable `LoopStarted`/terminal product frame 证明，避免并发cold snapshot仍是旧idle/terminal时停止轮询；accepted Turn存在时只接收该Turn的telemetry，否则只接收running AgentView的current Turn，防止上一Turn的NATS backlog复活draft。进入ready后立即reconcile。running、accepted/cancel待确认、realtime degraded或pending approval期间低频reconcile，窗口聚焦和每个command后立即reconcile。reconcile采用single-flight并把并发timer/focus/command合并成至多一次补跑，不能取消慢分页形成livelock。仅页面刷新、cursor过期、overflow或手动硬重置做cold rebuild。
 
-当前每Turn只有一个active LLM call。统一per-Agent realtime dispatcher保证该call telemetry先于其final durable assistant message，final message关闭draft，下一call之后才开始；无需把 `llm_call_id` 写进kernel message。closed call的迟到telemetry忽略。terminal event清空未闭合draft，并把无result的实时tool UI标为interrupted，不伪造result。
+当前每Turn只有一个active LLM call。统一per-Agent realtime dispatcher保证该call telemetry先于其final durable assistant message，final message关闭draft，下一call之后才开始；无需把 `llm_call_id` 写进kernel message。满队列的 durable wake 只推进单调 high-water；coalesced flush 必须先 snapshot target、再确认 accepted queue 为空，且只 flush 这个旧 snapshot，之后推进的 target 留给下一次 drain/idle 循环并在 idle 退休前追平。正常NATS顺序下按closed call忽略迟到telemetry；PG reconcile抢先看到final时按上述durable watermark区分旧call tail与final之后的新call。terminal event清空未闭合draft，并把无result的实时tool UI标为interrupted，不伪造result。
 
 若NATS无法订阅，SSE返回 `503 realtime_unavailable`，Web显示克制的“实时连接降级”，核心commands继续工作并使用PG reconcile。durable publish失败也不改变command或kernel结果。
 

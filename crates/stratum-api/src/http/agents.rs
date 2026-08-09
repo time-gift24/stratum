@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -237,21 +238,32 @@ pub(crate) fn agent_view_response(
     state: &AppState,
     view: &AgentView,
 ) -> Result<AgentViewResponse, ApiError> {
-    let resume_required = match (view.status, view.current_turn_id) {
-        (stratum_postgres::AgentStatus::Running, Some(turn_id)) => state
+    let status = map_status(view.status)?;
+    let resume_required = match (status, view.current_turn_id) {
+        (AgentStatusDto::Running, Some(turn_id)) => state
             .registry()
             .claim_state(view.agent_id, turn_id)
             .is_none(),
-        _ => false,
+        (AgentStatusDto::Running, None) => {
+            return Err(ApiError::new(ErrorKind::DurableStateCorrupt));
+        }
+        (
+            AgentStatusDto::Idle
+            | AgentStatusDto::Finished
+            | AgentStatusDto::Failed
+            | AgentStatusDto::Cancelled,
+            _,
+        ) => false,
     };
     Ok(AgentViewResponse {
         agent_id: view.agent_id,
         agent_name: view.source_template_name.clone(),
-        status: map_status(view.status)?,
+        status,
         model_config: view.default_model_config.clone(),
         session_id: view.session_id,
         current_turn_id: view.current_turn_id,
         snapshot_event_seq: encode_event_seq(view.snapshot_event_seq),
+        telemetry_floor_event_seq: encode_event_seq(view.telemetry_floor_event_seq),
         pending_approvals: view
             .pending_approvals
             .iter()
@@ -285,6 +297,7 @@ fn map_status(status: stratum_postgres::AgentStatus) -> Result<AgentStatusDto, A
 
 /// History query parameters; all sequences are decimal strings.
 #[derive(Debug, serde::Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub(crate) struct HistoryParams {
     /// Inclusive barrier of the fixed window (required).
@@ -314,8 +327,9 @@ pub(crate) struct HistoryParams {
 pub(crate) async fn get_history(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
-    Query(params): Query<HistoryParams>,
+    params: Result<Query<HistoryParams>, QueryRejection>,
 ) -> Result<Json<HistoryResponse>, ApiError> {
+    let params = history_query(params)?;
     let agent_id = parse_agent_id(&agent_id)?;
     Span::current().record("agent_id", field::display(agent_id));
 
@@ -362,6 +376,7 @@ pub(crate) async fn get_history(
     let mut items = Vec::with_capacity(page.items.len());
     for item in &page.items {
         let event = history_item_event(item)
+            .map_err(|source| ApiError::with_source(ErrorKind::DurableStateCorrupt, source))?
             .ok_or_else(|| ApiError::new(ErrorKind::DurableStateCorrupt))?;
         items.push(HistoryItemDto {
             event_seq: encode_event_seq(item.event_seq),
@@ -379,4 +394,29 @@ pub(crate) async fn get_history(
         next_before_event_seq: page.next_before_event_seq.map(encode_event_seq),
         has_more: page.has_more,
     }))
+}
+
+fn history_query(
+    params: Result<Query<HistoryParams>, QueryRejection>,
+) -> Result<HistoryParams, ApiError> {
+    params
+        .map(|Query(params)| params)
+        .map_err(|_| ApiError::new(ErrorKind::InvalidHistoryQuery))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_query_rejects_unknown_fields_with_the_stable_kind() {
+        let uri: http::Uri = "/v1/agents/id/history?through_event_seq=4&replay=all"
+            .parse()
+            .expect("test URI parses");
+
+        let error = history_query(Query::<HistoryParams>::try_from_uri(&uri))
+            .expect_err("unknown query is rejected");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidHistoryQuery);
+    }
 }

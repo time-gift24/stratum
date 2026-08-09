@@ -21,8 +21,9 @@ Postgres 是 Agent 执行事实的**唯一**持久化存储，没有 backend sel
   对外（API/history/SSE frame）一律编码为十进制字符串。payload 为 variant-only JSON，
   显式 `event_version`；runtime snapshot 只附着在 `LoopStarted` row。
 - `transcript_compactions`：与 `TranscriptCompacted` discriminator 同事务写入的
-  durable companion，只保存单一 typed summary、`upto` 与 `retained_from_event_seq`
-  保留指针。原始 durable messages 永久保留，压缩不改写历史。
+  durable companion，只保存单一 typed summary、`upto`、`compacted_iteration`
+  与 `retained_from_event_seq` 保留指针。原始 durable messages 永久保留，
+  压缩不改写历史。
 
 没有 projection 表：AgentView、history 分页、pending approvals、latest usage 全部
 从 ledger 派生读取。核心资产没有 delete API，外键一律 `RESTRICT`。
@@ -46,11 +47,15 @@ schema/config/NATS，不能只回滚应用。
   且可读（空目录允许）；服务绝不自动创建该目录。
 - `[nats]`：连接与 Agent-scoped 短 tail 上限——`url`、`stream_name`、
   `subject_prefix`、`replicas`（1..=5）、`max_age_seconds`、`max_bytes`、
-  `max_messages`（有限上限 + discard-old）。
+  `max_messages`（有限上限 + discard-old）与 `connect_timeout_seconds`。
 - `[llm]`：默认模型与各 provider 的 `api_key`/`models`；默认模型与 template 选择的
-  模型必须属于对应 provider 的 `models` 列表。
+  模型必须属于对应 provider 的 `models` 列表。每个 provider 显式配置 connect、
+  non-stream request、stream first-response 与 stream chunk-idle timeout；长流允许持续，
+  但任一 chunk 静默超过 idle bound 会以 typed transport error 结束。非流成功体、provider
+  error body 与单个 SSE event 另有固定安全 byte cap，避免无限聚合；不限制长流累计长度。
 - `[api]`：`bind`（省略时固定 `127.0.0.1:8080`）与 `allowed_origins`（CORS，拒绝
-  `*`）。所有 JSON request body 硬限制 64 KiB。
+  `*`），以及 shutdown drain、SSE keepalive、approval fallback poll、dispatcher idle
+  timeout。所有 timeout 是正秒数，零值启动失败。所有 JSON request body 硬限制 64 KiB。
 
 ## 3. 健康检查与 readiness 语义
 
@@ -63,7 +68,10 @@ schema/config/NATS，不能只回滚应用。
 ## 4. 优雅关闭
 
 进程收到 shutdown 信号后：关闭 admission gate（新 durable work 返回安全稳定的
-503），结束 SSE 连接，在固定时限内 drain 已准入请求，再有界等待终态持久化。
+503）；state-aware middleware 立即 drop 尚未返回 response 的 handler future，使挂起的
+Postgres/NATS/provider 请求释放 admission guard；结束 SSE 连接。Axum graceful server、
+admission 与 process-owned Turn/dispatcher/SSE task set 共享一个配置化总 deadline，不为每个
+阶段重新计时；deadline 到达后剩余 managed tasks 会 abort 并 join，任务不会 detached。
 
 **shutdown 绝不转化为业务取消**：managed Turn 的 CancellationToken 在 shutdown 时
 从不被 signal。超时未能完成的 Turn 在 Postgres 中保持 `running` 且不伪造终态，由
@@ -94,12 +102,15 @@ discard-old，**不是** durable history，也不保证跨重启补发；恢复�
 ledger。持久化顺序固定为 PG commit 先于 NATS publish；publish 丢失只记录一次安全
 错误，由 PG snapshot/history 收敛。
 
-SSE cursor（SSE `id` / `Last-Event-ID` / `after_cursor`）是不透明 NATS 位置，不得与
-`event_seq` 比较或持久化为业务状态：
+SSE cursor（SSE `id` / `Last-Event-ID` / `after_cursor`）绑定 AgentId、JetStream stream
+creation generation 与 stream sequence，是不透明 NATS 位置，不得与 `event_seq` 比较或
+持久化为业务状态：
 
 - cursor 仍在 retention 内：从其后继续 tail；
 - cursor 已被淘汰：建流前返回 **410 `cursor_expired`**，客户端必须无 cursor cold
   bootstrap；
+- cursor 属于另一 Agent 或旧 stream generation：同样在建流前返回 410，绝不把全局
+  stream sequence 静默套到当前 Agent；
 - 建流后服务端有界 buffer 溢出：发送无 SSE id 的
   `stream_reset { reason: "buffer_overflow" }` 后主动关闭连接，客户端丢弃 buffer、
   draft 与 cursor 重新 cold bootstrap；

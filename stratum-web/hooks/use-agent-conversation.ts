@@ -18,6 +18,11 @@ import {
   reconcileConversation,
   runConversationSession,
 } from "@/features/agent-conversation/recovery"
+import {
+  resolveMessageIntent,
+  sameModelConfig,
+  type PendingMessageIntent,
+} from "@/features/agent-conversation/message-intent"
 import type { ConversationState } from "@/features/agent-conversation/types"
 import {
   loadRecentAgents,
@@ -117,6 +122,13 @@ export function useAgentConversation(): AgentConversation {
   const cursorsRef = useRef(new Map<string, string>())
   // 结果未确定的 create 保留同一 Idempotency-Key；新 intent 才生成新 key
   const pendingCreateRef = useRef<PendingCreate | null>(null)
+  // message 没有独立幂等键：响应不确定时，同一 intent 必须复用原 exact CAS。
+  const pendingMessageRef = useRef<PendingMessageIntent | null>(null)
+  // reconcile 串行执行；timer / focus / command 只合并一次补跑，
+  // 避免大分页请求被下一次轮询反复取消。
+  const reconcileAbortRef = useRef<AbortController | null>(null)
+  const reconcileRerunRef = useRef(false)
+  const historyAbortRef = useRef<AbortController | null>(null)
   // reconcile/pagination 读取最新 reducer state（命令回调里的闭包读不到）
   const stateRef = useRef(state)
   useEffect(() => {
@@ -130,8 +142,7 @@ export function useAgentConversation(): AgentConversation {
     void Promise.allSettled([api.getAgentTemplates(), api.getModels()]).then(
       ([templates, modelDescriptors]) => {
         if (cancelled) return
-        if (templates.status === "fulfilled")
-          setAgentTemplates(templates.value)
+        if (templates.status === "fulfilled") setAgentTemplates(templates.value)
         if (modelDescriptors.status === "fulfilled")
           setModels(modelDescriptors.value)
         const failure =
@@ -184,14 +195,31 @@ export function useAgentConversation(): AgentConversation {
   }, [])
 
   const selectAgent = useCallback((agentId: string | null) => {
+    reconcileRerunRef.current = false
+    reconcileAbortRef.current?.abort()
+    reconcileAbortRef.current = null
+    historyAbortRef.current?.abort()
+    historyAbortRef.current = null
     selectionGeneration.current += 1
     selectedAgentRef.current = agentId
     // 切换会话 = state 全量重置：page cursor 一并作废，重新 cold bootstrap
     cursorsRef.current.clear()
+    if (pendingMessageRef.current?.agentId !== agentId)
+      pendingMessageRef.current = null
     if (agentId === null) setSelectedTemplate(null)
     setSelectedAgentId(agentId)
     dispatch({ type: "agent_selected", agentId })
   }, [])
+
+  useEffect(
+    () => () => {
+      reconcileRerunRef.current = false
+      reconcileAbortRef.current?.abort()
+      reconcileAbortRef.current = null
+      historyAbortRef.current?.abort()
+    },
+    []
+  )
 
   // 默认 template 派生而非 effect：未选中 agent 且未显式选择时取第一个
   const effectiveTemplate =
@@ -256,6 +284,11 @@ export function useAgentConversation(): AgentConversation {
 
   const reconnect = useCallback(() => {
     if (selectedAgentRef.current === null) return
+    reconcileRerunRef.current = false
+    reconcileAbortRef.current?.abort()
+    reconcileAbortRef.current = null
+    historyAbortRef.current?.abort()
+    historyAbortRef.current = null
     // 手动重连 = hard reset：清 page cursor，从无 cursor cold bootstrap 重来
     cursorsRef.current.delete(selectedAgentRef.current)
     selectionGeneration.current += 1
@@ -266,23 +299,59 @@ export function useAgentConversation(): AgentConversation {
   const reconcileNow = useCallback(() => {
     const agentId = selectedAgentRef.current
     if (agentId === null) return
+
+    // 活跃请求不可被 timer / focus / command 取消；多个触发只需
+    // 在它完成后补跑一次，以最新 reducer barrier 收敛。
+    if (reconcileAbortRef.current !== null) {
+      reconcileRerunRef.current = true
+      return
+    }
+
     const generation = selectionGeneration.current
-    const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
-    void reconcileConversation(
-      {
-        api,
-        getBarrier: () => {
-          const current = stateRef.current
-          return current.agentId === agentId && current.phase === "ready"
-            ? current.barrier
-            : null
+
+    const run = () => {
+      if (
+        selectedAgentRef.current !== agentId ||
+        generation !== selectionGeneration.current
+      )
+        return
+
+      const controller = new AbortController()
+      reconcileAbortRef.current = controller
+      const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
+      const isCurrent = () =>
+        !controller.signal.aborted &&
+        reconcileAbortRef.current === controller &&
+        selectedAgentRef.current === agentId &&
+        generation === selectionGeneration.current
+
+      void reconcileConversation(
+        {
+          api,
+          getBarrier: () => {
+            const current = stateRef.current
+            return current.agentId === agentId && current.phase === "ready"
+              ? current.barrier
+              : null
+          },
+          isCurrent,
+          dispatch: (action) => {
+            if (isCurrent()) dispatch(action)
+          },
         },
-        dispatch: (action) => {
-          if (generation === selectionGeneration.current) dispatch(action)
-        },
-      },
-      { agentId }
-    )
+        { agentId, signal: controller.signal }
+      ).finally(() => {
+        // Agent switch / hard reset / unmount 会先换掉这个 handle；旧请求
+        // 不得清理新 Agent 的状态，也不得触发补跑。
+        if (reconcileAbortRef.current !== controller) return
+        reconcileAbortRef.current = null
+        if (!reconcileRerunRef.current) return
+        reconcileRerunRef.current = false
+        run()
+      })
+    }
+
+    run()
   }, [])
 
   // 窗口重新获得焦点立即 reconcile
@@ -296,13 +365,17 @@ export function useAgentConversation(): AgentConversation {
     state.phase === "ready" &&
     state.agentId !== null &&
     (state.view?.status === "running" ||
+      state.acceptedTurnId !== null ||
       state.cancelRequested ||
       state.realtimeDegraded ||
       Object.keys(state.approvals).length > 0)
 
-  // running / 待决审批 / realtime 降级期间的低频 PG reconcile
+  // 进入需要 PG 收敛的状态时立即跑一次，之后才低频轮询。首创 Agent 的
+  // message 202 可能早于 cold bootstrap ready；acceptedTurnId 会把这次
+  // immediate reconcile 延迟到 barrier 可读时，而不是等第一个 interval。
   useEffect(() => {
     if (!polling) return
+    reconcileNow()
     const timer = setInterval(reconcileNow, RECONCILE_POLL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [polling, reconcileNow])
@@ -310,6 +383,11 @@ export function useAgentConversation(): AgentConversation {
   const loadOlderHistory = useCallback(() => {
     const agentId = selectedAgentRef.current
     if (agentId === null) return
+    // The reducer flag is updated on the next render; this ref also closes the
+    // same-tick double-click window and owns cancellation on Agent switches.
+    if (historyAbortRef.current !== null) return
+    const controller = new AbortController()
+    historyAbortRef.current = controller
     const generation = selectionGeneration.current
     const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
     void loadOlderHistoryPage(
@@ -330,8 +408,10 @@ export function useAgentConversation(): AgentConversation {
           if (generation === selectionGeneration.current) dispatch(action)
         },
       },
-      { agentId }
-    )
+      { agentId, signal: controller.signal }
+    ).finally(() => {
+      if (historyAbortRef.current === controller) historyAbortRef.current = null
+    })
   }, [])
 
   const createConversation = useCallback(
@@ -356,8 +436,10 @@ export function useAgentConversation(): AgentConversation {
       const generation = selectionGeneration.current
       const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
       const modelConfig = requestedModelConfig ?? undefined
-      // selectAgent 会推进 generation：create 之后的失败不能按 stale 吞掉
-      let agentSelected = false
+      // selectAgent 会推进 generation；记录推进后的值，既不把自身切换误判为
+      // stale，也不允许随后用户切换 Agent 时由旧请求污染新会话。
+      let selectedGeneration: number | null = null
+      let createdAgentId: string | null = null
       try {
         // 同一 pending intent 复用 Idempotency-Key；只有新 intent 才生成新 key
         let pending = pendingCreateRef.current
@@ -378,7 +460,8 @@ export function useAgentConversation(): AgentConversation {
           modelConfig: pending.modelConfig,
           idempotencyKey: pending.key,
         })
-        pendingCreateRef.current = null
+        if (pendingCreateRef.current === pending)
+          pendingCreateRef.current = null
         if (generation !== selectionGeneration.current) return false
 
         rememberRecentAgent({
@@ -388,27 +471,54 @@ export function useAgentConversation(): AgentConversation {
           lastOpenedAt: new Date().toISOString(),
         })
         selectAgent(created.agent_id)
-        agentSelected = true
+        createdAgentId = created.agent_id
+        selectedGeneration = selectionGeneration.current
 
-        // 首个 Turn：idle Agent 的 CAS 是 expected_current_turn_id = null；
-        // 只对同一 Agent 发送首条消息，不再 create
-        await api.sendMessage(created.agent_id, {
+        const messageIntent: PendingMessageIntent = {
+          agentId: created.agent_id,
           text,
           expectedCurrentTurnId: null,
           modelConfig,
+        }
+        pendingMessageRef.current = messageIntent
+
+        // 首个 Turn：idle Agent 的 CAS 是 expected_current_turn_id = null；
+        // 只对同一 Agent 发送首条消息，不再 create
+        const accepted = await api.sendMessage(created.agent_id, {
+          text: messageIntent.text,
+          expectedCurrentTurnId: messageIntent.expectedCurrentTurnId,
+          modelConfig: messageIntent.modelConfig,
         })
         if (
-          modelConfig !== undefined &&
+          selectedGeneration !== selectionGeneration.current ||
+          selectedAgentRef.current !== created.agent_id
+        )
+          return false
+        dispatch({
+          type: "turn_accepted",
+          agentId: created.agent_id,
+          turnId: accepted.turn_id,
+        })
+        if (pendingMessageRef.current === messageIntent)
+          pendingMessageRef.current = null
+        if (
+          messageIntent.modelConfig !== undefined &&
           selectedAgentRef.current === created.agent_id
         ) {
-          setAcceptedModelConfig(modelConfig)
+          setAcceptedModelConfig(messageIntent.modelConfig)
           setRequestedModelConfig((pendingConfig) =>
-            pendingConfig === modelConfig ? null : pendingConfig
+            sameModelConfig(
+              pendingConfig ?? undefined,
+              messageIntent.modelConfig
+            )
+              ? null
+              : pendingConfig
           )
         }
+        reconcileNow()
         return true
       } catch (error) {
-        if (!agentSelected) {
+        if (selectedGeneration === null || createdAgentId === null) {
           if (generation !== selectionGeneration.current) return false
           // key 命中但请求不同 = 新 intent：清掉 pending key，下次生成新 key
           if (isApiErrorCode(error, "idempotency_key_conflict"))
@@ -416,13 +526,18 @@ export function useAgentConversation(): AgentConversation {
           reportError(error)
           return false
         }
+        if (
+          selectedGeneration !== selectionGeneration.current ||
+          selectedAgentRef.current !== createdAgentId
+        )
+          return false
         // 首条消息失败（selectAgent 已推进 generation）：必须显式 surface，
         // 不能静默返回。新 agent 的 recovery session 会 cold bootstrap 收敛
         // view；stale_turn 表示消息可能已提交但响应丢失——只 reconcile，
         // 绝不重发创建第二个 Turn
         if (isApiErrorCode(error, "stale_turn")) {
           reconcileNow()
-          return true
+          return false
         }
         reportError(error)
         reconcileNow()
@@ -464,27 +579,62 @@ export function useAgentConversation(): AgentConversation {
       }
 
       const view = state.view
-      if (state.phase === "recovering" || view === null || view.status === "running")
-        return false
+      if (state.phase === "recovering" || view === null) return false
 
       const client = selectedClient()
       if (!client) return false
 
       const selectedConfig = requestedModelConfig
+      const existingIntent = pendingMessageRef.current
+      // create 后 hook 会按 Agent 切换规则重置 requestedModelConfig；这不是用户
+      // 新 intent。同 Agent + 同原文且没有新的显式 override 时继续沿用 pending
+      // intent 的完整模型配置与 CAS。
+      const submittedModelConfig =
+        existingIntent?.agentId === client.agentId &&
+        existingIntent.text === text &&
+        selectedConfig === null
+          ? existingIntent.modelConfig
+          : (selectedConfig ?? undefined)
+      const messageIntent = resolveMessageIntent(existingIntent, {
+        agentId: client.agentId,
+        text,
+        expectedCurrentTurnId: view.current_turn_id,
+        modelConfig: submittedModelConfig,
+      })
+      const retryingPendingIntent = messageIntent === existingIntent
+      if (view.status === "running" && !retryingPendingIntent) return false
+      pendingMessageRef.current = messageIntent
       try {
-        await client.api.sendMessage(client.agentId, {
-          text,
+        const accepted = await client.api.sendMessage(client.agentId, {
+          text: messageIntent.text,
           // exact current-Turn CAS：terminal 后携带最近 TurnId 才能开新 Turn
-          expectedCurrentTurnId: view.current_turn_id,
-          modelConfig: selectedConfig ?? undefined,
+          expectedCurrentTurnId: messageIntent.expectedCurrentTurnId,
+          modelConfig: messageIntent.modelConfig,
         })
         if (
-          selectedConfig !== null &&
+          client.generation !== selectionGeneration.current ||
+          selectedAgentRef.current !== client.agentId
+        )
+          return false
+        dispatch({
+          type: "turn_accepted",
+          agentId: client.agentId,
+          turnId: accepted.turn_id,
+        })
+        if (pendingMessageRef.current === messageIntent)
+          pendingMessageRef.current = null
+        if (
+          messageIntent.modelConfig !== undefined &&
           client.generation === selectionGeneration.current
         ) {
-          setAcceptedModelConfig(selectedConfig)
+          setAcceptedModelConfig(messageIntent.modelConfig)
           setRequestedModelConfig((pendingConfig) =>
-            pendingConfig === selectedConfig ? null : pendingConfig
+            sameModelConfig(
+              pendingConfig ?? undefined,
+              messageIntent.modelConfig
+            )
+              ? null
+              : pendingConfig
           )
         }
         reconcileNow()
@@ -643,7 +793,10 @@ export function useAgentConversation(): AgentConversation {
       )
       setRequestedModelConfig(
         carry !== null && supported
-          ? { ...config, parameters: withThinkingLevel(config.parameters, carry) }
+          ? {
+              ...config,
+              parameters: withThinkingLevel(config.parameters, carry),
+            }
           : config
       )
     },
@@ -710,17 +863,6 @@ function browserStorage(): StorageLike | undefined {
 
 function isApiErrorCode(error: unknown, code: string): boolean {
   return error instanceof ApiError && error.code === code
-}
-
-function sameModelConfig(
-  left: ModelConfig | undefined,
-  right: ModelConfig | undefined
-): boolean {
-  if (left === undefined || right === undefined) return left === right
-  return (
-    left.model === right.model &&
-    JSON.stringify(left.parameters) === JSON.stringify(right.parameters)
-  )
 }
 
 function toApiError(error: unknown): ApiError {

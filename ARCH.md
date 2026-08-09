@@ -91,7 +91,7 @@ Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
 Agent 可以作为工作流中的一种节点，也可以直接在 Session 中运行。直接对话不是隐式工作流：Session 是长期、共享且与图结构无关的核心资产，Workflow 图及其版本可以变化，Session 身份保持不变。Agent 作为节点运行时使用 `AgentLocation::WorkflowNode` 保留 Workflow version 与 node 身份；直接运行时使用 `AgentLocation::Direct`。
 
-一期只允许每个 Session 同时存在一个活跃操作。这是一阶段的简化设计，不是永久产品限制；在真正引入并发前不增加 attempt 或 node-execution 身份。
+当前只在 Agent runtime 边界内保证同一 Session 最多有一个 running Agent；这不协调 Workflow 或其他未来的调度 owner。跨 runtime 并发、ownership 与 fencing 由后续 scheduler 模块设计，在此之前不增加 attempt 或 node-execution 身份。
 
 ### 3. Agent ReAct Loop 与 Hook
 
@@ -106,16 +106,17 @@ Agent 内核只负责稳定的执行机制：
 → 继续或结束 Turn
 ```
 
-策略通过四个核心 Hook 进入循环：
+策略通过五个核心 Hook 进入循环：
 
 - `transform_context`
-- `before_tool_call`
+- `transform_tool_call`
+- `decide_tool_call`
 - `after_tool_call`
 - `prepare_next_turn`
 
 多个 Hook Handler 按固定版本和顺序执行。会影响 Resume 的参数修改、阻断、结果变换和下一轮决策以 journal 事件变体住在 Postgres durable ledger 内部（没有第二个耐久边界），恢复时按语义 invocation identity 复用。journal 与 NATS 观察流分离。
 
-Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 注册能力，Event 只用于观察，Port 用于替换外部实现。
+Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 注册能力，`DurableAgentEvent` 记录正确性事实与 resume 真相，`AgentTelemetryEvent` 只用于观察，Port 用于替换外部实现。
 
 ### 4. 三档 Agent DIY
 
@@ -137,7 +138,7 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 | 运行时持久化 | 否 | Postgres 四表 durable ledger、事务一致性、幂等和恢复 |
 | 制品存储 | 否 | 不可变版本、内容摘要和分发 |
 
-本地开发时三者可以使用同一物理文件系统，但接口、命名空间和 ACL 保持隔离。NATS 只提供短期、可丢失的实时 tail，永远不是运行状态、Agent 历史或 Hook 决策的持久化存储。
+本地开发时，Agent 工作区与制品可以使用同一物理文件系统，但接口、命名空间和 ACL 保持隔离；运行时执行事实即使在本地也只写入 Postgres。NATS 只提供短期、可丢失的实时 tail，永远不是运行状态、Agent 历史或 Hook 决策的持久化存储。
 
 ### 6. Postgres 执行存储（唯一执行真相）
 
@@ -146,13 +147,13 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 - `agents`：immutable Agent identity 与创建时固化的 resolved definition snapshot（prompt、按序 tools、creation-time effective model）。
 - `agent_state`：薄状态——durable status、绑定的 Session/current Turn、mutable default model 与 `last_event_seq` high-water；不复制 outcome、usage、snapshot、approval 或 hosting。
 - `durable_events`：append-only ledger；agent-wide、无空洞的 `event_seq` 是唯一 durable 顺序，由 `agent_state` 行锁（`FOR UPDATE`）在集中 append 事务中分配并串行化同 Agent writer。
-- `transcript_compactions`：与 `TranscriptCompacted` discriminator 同事务写入的 companion，只保存单一 typed summary 与 `retained_from_event_seq` 保留指针；原始 durable messages 永久保留。
+- `transcript_compactions`：与 `TranscriptCompacted` discriminator 同事务写入的 companion，只保存单一 typed summary、`upto`、`compacted_iteration` 与 `retained_from_event_seq` 保留指针；原始 durable messages 永久保留。
 
 其他不变量：
 
 - hosting 是进程内 exact `(AgentId, TurnId)` registry 的易失观察，永不持久化；进程重启后 registry 为空，恢复靠显式 resume。
 - 持久化顺序固定为 Postgres commit 先于 NATS publish；NATS 只是 Agent-scoped 的短实时 tail，发布丢失由 PG snapshot/history 收敛。
-- kernel（`stratum-core` / `stratum-agent`）只见 typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；Postgres、HTTP、Session、hosting、scheduler 与分页永不进入 kernel，Postgres 编排全部放在装配层 `stratum-api`。
+- AgentLoop kernel（`stratum-agent`）只见 scope-free typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；Postgres、HTTP、Session、hosting、scheduler 与分页永不进入 AgentLoop。`stratum-core` 只提供共享领域身份和上下文类型，Postgres 编排全部放在装配层 `stratum-api`。
 
 ### 7. 可观测性与安全
 

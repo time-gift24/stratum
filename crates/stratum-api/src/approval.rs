@@ -31,11 +31,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::dispatcher::DispatcherHandle;
-
-/// Fallback ledger re-read interval while waiting for a decision. Process
-/// notifications are the fast path; this poll bounds the damage of a lost
-/// notification without making the channel a truth source.
-const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(15);
+use crate::error::PersistedVariantError;
 
 /// One registered waiter: its unique registration identity and notify half.
 type WaiterEntry = (Uuid, oneshot::Sender<()>);
@@ -133,6 +129,7 @@ pub(crate) struct ApprovalHandler {
     turn_id: TurnId,
     waiters: Arc<ApprovalWaiters>,
     dispatcher: DispatcherHandle,
+    poll_interval: Duration,
 }
 
 impl ApprovalHandler {
@@ -145,6 +142,7 @@ impl ApprovalHandler {
         turn_id: TurnId,
         waiters: Arc<ApprovalWaiters>,
         dispatcher: DispatcherHandle,
+        poll_interval: Duration,
     ) -> Self {
         Self {
             pg,
@@ -153,6 +151,7 @@ impl ApprovalHandler {
             turn_id,
             waiters,
             dispatcher,
+            poll_interval,
         }
     }
 
@@ -177,16 +176,33 @@ impl ApprovalHandler {
 
     /// Maps a durable decision to the hook decision: approve executes, reject
     /// blocks with a safe fixed reason.
-    fn map_decision(decision: ApprovalDecision) -> DecideToolCallDecision {
+    fn map_decision(
+        decision: ApprovalDecision,
+    ) -> Result<DecideToolCallDecision, PersistedVariantError> {
         match decision {
-            ApprovalDecision::Approve => DecideToolCallDecision::Execute,
-            ApprovalDecision::Reject => DecideToolCallDecision::Block {
+            ApprovalDecision::Approve => Ok(DecideToolCallDecision::Execute),
+            ApprovalDecision::Reject => Ok(DecideToolCallDecision::Block {
                 reason: "the user rejected this tool call".to_owned(),
-            },
-            _ => DecideToolCallDecision::Block {
-                reason: "the tool call was not approved".to_owned(),
-            },
+            }),
+            _ => Err(PersistedVariantError::UnsupportedApprovalDecision),
         }
+    }
+
+    /// Converts the typed persisted-variant error at the hook boundary without
+    /// fabricating a permissive or rejecting decision.
+    fn resolved_decision(
+        &self,
+        decision: ApprovalDecision,
+    ) -> Result<DecideToolCallDecision, HookFailure> {
+        Self::map_decision(decision).map_err(|error| {
+            tracing::error!(
+                agent_id = %self.agent_id,
+                turn_id = %self.turn_id,
+                error = %error,
+                "persisted approval decision is unsupported"
+            );
+            HookFailure::HandlerFailed
+        })
     }
 }
 
@@ -248,7 +264,7 @@ impl HookHandler for ApprovalHandler {
         {
             Some(facts) => {
                 if let Some(resolution) = facts.resolution {
-                    return Ok(Self::map_decision(resolution.decision));
+                    return self.resolved_decision(resolution.decision);
                 }
                 facts.approval_id
             }
@@ -268,7 +284,7 @@ impl HookHandler for ApprovalHandler {
             .await?
             && let Some(resolution) = facts.resolution
         {
-            return Ok(Self::map_decision(resolution.decision));
+            return self.resolved_decision(resolution.decision);
         }
 
         loop {
@@ -283,7 +299,7 @@ impl HookHandler for ApprovalHandler {
                     unreachable!("a cancelled approval wait never resumes");
                 }
                 _ = &mut waiter => {}
-                () = tokio::time::sleep(APPROVAL_POLL_INTERVAL) => {}
+                () = tokio::time::sleep(self.poll_interval) => {}
             }
             match self
                 .read_facts(ApprovalLookup::ByApprovalId(approval_id))
@@ -291,7 +307,7 @@ impl HookHandler for ApprovalHandler {
             {
                 Ok(Some(facts)) => {
                     if let Some(resolution) = facts.resolution {
-                        return Ok(Self::map_decision(resolution.decision));
+                        return self.resolved_decision(resolution.decision);
                     }
                 }
                 Ok(None) => {
@@ -415,5 +431,18 @@ mod tests {
             HookHandlerVersionId::from(APPROVAL_HANDLER_VERSION),
             HookHandlerVersionId::from(APPROVAL_HANDLER_VERSION)
         );
+    }
+
+    #[test]
+    fn persisted_approval_decisions_require_explicit_mapping() {
+        assert!(matches!(
+            ApprovalHandler::map_decision(ApprovalDecision::Approve),
+            Ok(DecideToolCallDecision::Execute)
+        ));
+        assert!(matches!(
+            ApprovalHandler::map_decision(ApprovalDecision::Reject),
+            Ok(DecideToolCallDecision::Block { reason })
+                if reason == "the user rejected this tool call"
+        ));
     }
 }
