@@ -1,0 +1,85 @@
+/**
+ * Excalidraw 主题映射：把 Excalidraw 的 CSS 变量改接到产品语义 token
+ * （globals.css 唯一来源），亮暗两态共用一套规则、随 .dark 自动切换。
+ * 不写死任何色值；hover/active/选中 tint 用 color-mix 从 token 派生。
+ *
+ * 特异性说明：Excalidraw 亮色变量定义在 .excalidraw（0,1,0），暗色在同名
+ * 变量上经 .excalidraw.theme--dark（0,2,0）重定义；本模块对两个选择器写
+ * 同一份声明，其中 .theme--dark 复合选择器达（0,3,0），稳压两者。
+ * 规则不进 @layer（与 prose-medium.module.css 同约定），保证压过三方样式。
+ *
+ * 画布背景：两处编辑器都以 viewBackgroundColor: "transparent" 渲染，
+ * 画布透出容器底色（editor 页 = --background，对话卡片 = --card），
+ * 暗色下 canvas 的 invert 滤镜对透明像素无影响，元素颜色仍随滤镜翻转。
+ */
+
+.theme :global(.excalidraw),
+.theme :global(.excalidraw.theme--dark) {
+  /* 字体与圆角：贴产品体系 */
+  --ui-font: var(--font-sans), system-ui, sans-serif;
+  --border-radius-lg: var(--radius);
+  --border-radius-md: calc(var(--radius) - 0.25rem);
+
+  /* 浮岛 / 弹层 / 侧栏表面 */
+  --island-bg-color: var(--popover);
+  --popup-bg-color: var(--popover);
+  --popup-secondary-bg-color: var(--muted);
+  --popup-text-color: var(--popover-foreground);
+  --color-surface-lowest: var(--background);
+  --color-surface-low: var(--muted);
+  --color-surface-mid: var(--muted);
+  --color-surface-high: color-mix(in oklch, var(--foreground) 8%, var(--popover));
+  --color-on-surface: var(--foreground);
+  --text-primary-color: var(--foreground);
+  --overlay-bg-color: color-mix(in oklch, var(--background) 88%, transparent);
+
+  /* 描边 */
+  --default-border-color: var(--border);
+  --dialog-border-color: var(--border);
+  --sidebar-border-color: var(--border);
+  --input-border-color: var(--input);
+  --color-border-outline: var(--muted-foreground);
+  --color-border-outline-variant: var(--border);
+
+  /* 输入与次级文字 */
+  --input-bg-color: var(--background);
+  --input-hover-bg-color: color-mix(in oklch, var(--foreground) 5%, var(--background));
+  --input-label-color: var(--muted-foreground);
+  --keybinding-color: var(--muted-foreground);
+
+  /* 主行动色：Excalidraw 紫 → 产品绿（primary），hover/active 向
+     primary-foreground（深绿）收拢，亮暗两态各有正确方向 */
+  --color-primary: var(--primary);
+  --color-primary-hover: color-mix(in oklch, var(--primary) 78%, var(--primary-foreground));
+  --color-primary-darker: color-mix(in oklch, var(--primary) 85%, var(--primary-foreground));
+  --color-primary-darkest: color-mix(in oklch, var(--primary) 70%, var(--primary-foreground));
+  --color-brand-hover: color-mix(in oklch, var(--primary) 78%, var(--primary-foreground));
+  --color-brand-active: color-mix(in oklch, var(--primary) 65%, var(--primary-foreground));
+  --color-primary-light: color-mix(in oklch, var(--primary) 22%, var(--popover));
+  --color-primary-light-darker: color-mix(in oklch, var(--primary) 32%, var(--popover));
+  --color-on-primary-container: var(--primary-foreground);
+  --color-surface-primary-container: color-mix(in oklch, var(--primary) 18%, var(--popover));
+  --color-selection: var(--primary);
+  --select-highlight-color: var(--primary);
+  --focus-highlight-color: var(--ring);
+  --link-color: var(--primary);
+  --color-promo: var(--primary);
+  --color-logo-icon: var(--primary);
+  --color-logo-text: var(--foreground);
+
+  /* 画布背景色板的预览色（实际画布透明，透出容器底色） */
+  --default-bg-color: var(--background);
+
+  /* 滚动条 */
+  --scrollbar-thumb: color-mix(in oklch, var(--foreground) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 35%, transparent);
+
+  /* 滑轨（透明度等 slider） */
+  --color-slider-track: color-mix(in oklch, var(--primary) 30%, var(--muted));
+  --color-slider-thumb: var(--foreground);
+
+  /* 危险语义 */
+  --color-danger: var(--destructive);
+  --button-destructive-color: var(--destructive);
+  --button-destructive-bg-color: color-mix(in oklch, var(--destructive) 15%, var(--popover));
+}
