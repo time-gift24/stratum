@@ -1,7 +1,7 @@
 //! Committed-context provenance lineage.
 //!
 //! The per-turn sink mirrors the kernel's committed context: every entry is
-//! the origin agent-wide `event_seq` of the `MessageAppended` the context
+//! the origin AgentRuntime-wide `event_seq` of the `MessageAppended` the context
 //! message came from, or `None` for synthetic summary markers (which have no
 //! durable message origin). When the kernel appends `TranscriptCompacted`,
 //! the lineage resolves the first retained message's durable pointer from the

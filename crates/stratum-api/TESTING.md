@@ -21,7 +21,7 @@ Brings up `docker-compose.test.yml` (Postgres 17 on 45433, NATS `-js` on 44228; 
 the real router (tower `oneshot`) against real Postgres/NATS with a scripted mock LLM provider and
 covers: the create idempotency matrix, admission CAS/session rules, started-only reconciliation,
 full turns, the approval lifecycle, cancel races, history pagination and compaction markers, the
-AgentView derivation, crash-resume with approval reuse, and the SSE contract (stream_ready, cursor
-validation/expiry, buffer-overflow reset, realtime degradation).
+AgentRuntimeView derivation, crash-resume with approval reuse, and the SSE contract
+(`stream_ready`, cursor validation/expiry, buffer-overflow reset, realtime degradation).
 
 Override endpoints with `STRATUM_API_TEST_PG_URL` / `STRATUM_API_TEST_NATS_URL` when needed.

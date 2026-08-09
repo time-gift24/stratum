@@ -1,23 +1,14 @@
 import type {
-  AgentDurableRecordV1,
-  AgentStreamFrameV1,
-  AgentView,
+  AgentRuntimeDurableRecordV1,
+  AgentRuntimeStreamFrameV1,
+  AgentRuntimeView,
   ApiError,
 } from "@/lib/stratum/api"
 
-/**
- * agent-conversation 状态模型（Postgres-first 协议投影，UI 无关）。
- *
- * - durable identity = (agentId, eventSeq 十进制字符串)：去重 + 容忍可见序号间隔。
- * - telemetry identity = (llmCallId, telemetrySeq)：volatile draft，
- *   final durable assistant message 是 draft 的唯一 truth。
- * - timeline 混合 message / compaction marker / 安全 terminal marker，
- *   全部按 eventSeq 升序。
- */
+/** UI-independent projection of one AgentRuntime conversation. */
 
 export type StableMessage = {
-  agentId: string
-  /** 十进制字符串 durable 序号 */
+  agentRuntimeId: string
   eventSeq: string
   role: "user" | "assistant" | "tool" | "system"
   text: string | null
@@ -27,18 +18,16 @@ export type StableMessage = {
   timestamp: string
 }
 
-/** TranscriptCompacted 的可折叠 marker（summary 完整保留，原消息不删除） */
 export type CompactionMarker = {
-  agentId: string
+  agentRuntimeId: string
   eventSeq: string
   summary: string
   compactedIteration: number
   timestamp: string
 }
 
-/** 安全 terminal marker（failed / cancelled；finished 由最终 assistant 消息自然收尾） */
 export type TerminalMarker = {
-  agentId: string
+  agentRuntimeId: string
   eventSeq: string
   terminal: "failed" | "cancelled"
   errorText: string | null
@@ -52,28 +41,23 @@ export type TimelineEntry =
 
 export type ToolProgress = {
   callId: string
+  turnId: string
   llmCallId: string | null
   name: string | null
   argumentsText: string
   result: unknown | null
   errorText: string | null
-  /**
-   * streaming：等待 durable tool message；finished：已收到 role=tool 的最终
-   * 结果；failed：保留给显式错误结果；interrupted：terminal 时仍无结果
-   * （不伪造 result）。
-   */
   status: "streaming" | "finished" | "failed" | "interrupted"
 }
 
-/** 进行中的 LLM call 的 volatile draft */
 export type DraftState = {
   llmCallId: string
-  /** 该 call 首个已见 telemetry 入队前观察到的 durable high-water */
+  turnId: string
   durableBeforeEventSeq: string
   text: string
   reasoning: string
-  /** 下一期待的 telemetry_seq（低于它是重复，高于它标记 incomplete） */
-  nextTelemetrySeq: number
+  /** Next expected call-local unsigned decimal telemetry sequence. */
+  nextTelemetrySeq: string
   incomplete: boolean
 }
 
@@ -86,78 +70,78 @@ export type ApprovalRequest = {
   dangerLevel: "low" | "medium" | "high"
 }
 
+export type DurableFrame = Extract<
+  AgentRuntimeStreamFrameV1,
+  { kind: "durable" }
+>
+export type TelemetryFrame = Extract<
+  AgentRuntimeStreamFrameV1,
+  { kind: "telemetry" }
+>
+
 export type ConversationState = {
+  /** Long-lived conversation/runtime identity. */
+  agentRuntimeId: string | null
+  /** Immutable template-version fence learned from the PG view. */
   agentId: string | null
-  view: AgentView | null
-  /** 已应用的 durable barrier（十进制字符串），初始 "0" */
-  barrier: string
+  view: AgentRuntimeView | null
+  /** Only successful PG snapshot/reconcile may advance this barrier. */
+  pgConfirmedEventSeq: string
+  /** Realtime product frames above the PG-confirmed barrier. */
+  unconfirmedDurableFrames: Readonly<Record<string, DurableFrame>>
   timeline: readonly TimelineEntry[]
-  /** 已应用的 durable event_seq 集合（去重；仅页面内存） */
   appliedEventSeqs: ReadonlySet<string>
   drafts: Readonly<Record<string, DraftState>>
   activeLlmCallId: string | null
-  /**
-   * 已被 durable final 收敛或 terminal 清理关闭的 llm_call_id 集合（仅页面
-   * 内存）。closed call 的迟到 telemetry 一律忽略，不重新创建 draft。
-   */
   closedLlmCallIds: ReadonlySet<string>
-  /**
-   * 已收敛的最新 assistant final event_seq。telemetry 帧携带其入队前观察到
-   * 的 durable watermark；低于此 floor 的帧属于该 final 之前的旧 call，
-   * 即使跨 PG/NATS 通道晚到也不得重建 draft。
-   */
   telemetryFloorEventSeq: string
   tools: Readonly<Record<string, ToolProgress>>
   approvals: Readonly<Record<string, ApprovalRequest>>
-  /** 向上分页的固定 through barrier（cold bootstrap 时确定） */
   historyThrough: string | null
-  /** 下一页的 exclusive before cursor */
   historyBefore: string | null
   historyHasMore: boolean
   historyLoading: boolean
-  /** NATS 不可用等导致的实时降级；核心命令与 PG reconcile 继续工作 */
   realtimeDegraded: boolean
-  /** cancel 202 已接受但 durable terminal 尚未确认 */
   cancelRequested: boolean
-  /** message 202 已接受、但 AgentView 或同一 Turn 的 exact durable loop_started/terminal frame 尚未证明 */
+  /** Message 202 accepted, not yet proven by view or exact durable Turn frame. */
   acceptedTurnId: string | null
   phase: "empty" | "recovering" | "ready" | "connection_error" | "missing"
   error: ApiError | null
 }
 
-export type DurableFrame = Extract<AgentStreamFrameV1, { kind: "durable" }>
-export type TelemetryFrame = Extract<AgentStreamFrameV1, { kind: "telemetry" }>
-
 export type ConversationAction =
-  | { type: "agent_selected"; agentId: string | null }
-  | { type: "recovery_started"; agentId: string }
+  | { type: "runtime_selected"; agentRuntimeId: string | null }
+  | { type: "recovery_started"; agentRuntimeId: string }
   | {
       type: "snapshot_loaded"
-      view: AgentView
-      items: readonly AgentDurableRecordV1[]
+      view: AgentRuntimeView
+      items: readonly AgentRuntimeDurableRecordV1[]
       historyBefore: string | null
       historyHasMore: boolean
     }
   | { type: "history_page_started" }
   | {
       type: "history_page_loaded"
-      items: readonly AgentDurableRecordV1[]
+      items: readonly AgentRuntimeDurableRecordV1[]
       historyBefore: string | null
       historyHasMore: boolean
     }
   | { type: "history_page_failed" }
   | { type: "durable_frame"; frame: DurableFrame }
   | { type: "telemetry_frame"; frame: TelemetryFrame }
-  | { type: "turn_accepted"; agentId: string; turnId: string }
-  /** 增量 reconcile：items 为 (baseBarrier, 新 barrier] 的可见 product items */
+  | {
+      type: "turn_accepted"
+      agentRuntimeId: string
+      agentId: string
+      turnId: string
+    }
   | {
       type: "view_reconciled"
-      /** 启动本次 reconcile 时观察到的 barrier；reducer 以它做原子 CAS */
-      baseBarrier: string
-      view: AgentView
-      items: readonly AgentDurableRecordV1[]
+      basePgConfirmedEventSeq: string
+      view: AgentRuntimeView
+      /** Complete public product window `(base,T]`, in event order. */
+      items: readonly AgentRuntimeDurableRecordV1[]
     }
-  /** approval resolve 204 后的本地先行移除（reconcile 随后确认） */
   | { type: "approval_resolved"; approvalId: string }
   | { type: "cancel_requested" }
   | { type: "realtime_degraded"; degraded: boolean }

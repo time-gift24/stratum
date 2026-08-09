@@ -11,15 +11,17 @@ use common::{
 };
 use serde_json::{Value, json};
 use stratum_core::{
-    AgentId, AgentVersionId, ExtensionSetVersionId, ModelConfig, ModelId, SessionId,
+    AgentId, AgentRuntimeId, ExtensionSetVersionId, ModelConfig, ModelId, SessionId,
     SkillSetVersionId, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_postgres::{BeginTurn, PostgresBackend};
 
-const TEMPLATE: &str = r#"prompt = "You are a helpful test agent."
+const TEMPLATE: &str = r#"version = "test-v1"
+prompt = "You are a helpful test agent."
 "#;
 
-const TOOL_TEMPLATE: &str = r#"tools = ["echo"]
+const TOOL_TEMPLATE: &str = r#"version = "test-tools-v1"
+tools = ["echo"]
 prompt = "You are a helpful test agent with tools."
 "#;
 
@@ -46,11 +48,11 @@ fn model_config() -> Value {
     json!({ "model": TEST_MODEL, "parameters": {} })
 }
 
-async fn create_agent(fixture: &Fixture, key: &str, name: &str) -> (StatusCode, Value) {
+async fn create_runtime(fixture: &Fixture, key: &str, name: &str) -> (StatusCode, Value) {
     fixture
         .json(
             "POST",
-            "/v1/agents",
+            "/v1/agent-runtimes",
             Some(json!({ "agent_name": name })),
             Some(key),
         )
@@ -59,23 +61,23 @@ async fn create_agent(fixture: &Fixture, key: &str, name: &str) -> (StatusCode, 
 
 async fn send_message(
     fixture: &Fixture,
-    agent_id: &str,
+    agent_runtime_id: &str,
     text: &str,
     expected: Value,
 ) -> (StatusCode, Value) {
     fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/messages"),
+            &format!("/v1/agent-runtimes/{agent_runtime_id}/messages"),
             Some(json!({ "text": text, "expected_current_turn_id": expected })),
             None,
         )
         .await
 }
 
-async fn wait_for_status(fixture: &Fixture, agent_id: &str, expected: &str) -> Value {
+async fn wait_for_status(fixture: &Fixture, agent_runtime_id: &str, expected: &str) -> Value {
     wait_until(10, || async {
-        let latest = view(fixture, agent_id).await;
+        let latest = view(fixture, agent_runtime_id).await;
         (latest["status"] == expected).then_some(latest)
     })
     .await
@@ -83,34 +85,40 @@ async fn wait_for_status(fixture: &Fixture, agent_id: &str, expected: &str) -> V
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
-async fn create_agent_idempotency_matrix() {
+async fn create_agent_runtime_idempotency_matrix() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE), ("agent-b", TOOL_TEMPLATE)], vec![]).await;
 
     // Missing or malformed key.
     let (status, body) = fixture
         .json(
             "POST",
-            "/v1/agents",
+            "/v1/agent-runtimes",
             Some(json!({ "agent_name": "agent-a" })),
             None,
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_request");
-    let (status, _) = create_agent(&fixture, "not-a-uuid", "agent-a").await;
+    let (status, _) = create_runtime(&fixture, "not-a-uuid", "agent-a").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Unknown template.
-    let (status, body) = create_agent(&fixture, &uuid_v7(), "missing").await;
+    let (status, body) = create_runtime(&fixture, &uuid_v7(), "missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "template_not_found");
+    assert_eq!(body["error"]["code"], "agent_template_not_found");
 
     // Pure create: 201, Location, idle, no turn.
     let key = uuid_v7();
-    let (status, created) = create_agent(&fixture, &key, "agent-a").await;
+    let (status, created) = create_runtime(&fixture, &key, "agent-a").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     assert_eq!(created["agent_name"], "agent-a");
+    assert!(created["agent_id"].is_string());
+    assert_eq!(created["agent_version"], "test-v1");
+    assert_eq!(created.as_object().expect("created object").len(), 5);
     let agent_view = view(&fixture, &agent_id).await;
     assert_eq!(agent_view["status"], "idle");
     assert_eq!(agent_view["snapshot_event_seq"], "0");
@@ -120,31 +128,81 @@ async fn create_agent_idempotency_matrix() {
     assert_eq!(agent_view["resume_required"], false);
 
     // Identical replay: same key and request, even after the template changed.
-    fixture.write_template("agent-a", "prompt = \"A changed prompt.\"\n");
-    let (status, replay) = create_agent(&fixture, &key, "agent-a").await;
+    fixture.write_template(
+        "agent-a",
+        "version = \"test-v1\"\nprompt = \"A changed prompt.\"\n",
+    );
+    let (status, replay) = create_runtime(&fixture, &key, "agent-a").await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replay, created, "replay returns the identical body");
 
-    // Same key with a different request conflicts.
-    let (status, body) = create_agent(&fixture, &key, "agent-b").await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "idempotency_key_conflict");
-    let (status, body) = fixture
+    // The key is command identity: a different retry body still replays.
+    let (status, replay) = create_runtime(&fixture, &key, "agent-b").await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replay, created);
+    let (status, replay) = fixture
         .json(
             "POST",
-            "/v1/agents",
+            "/v1/agent-runtimes",
             Some(json!({ "agent_name": "agent-a", "model_config": model_config() })),
             Some(&key),
         )
         .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replay, created);
+
+    // A new key cannot reuse the exact tag for changed canonical content.
+    let (status, body) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "idempotency_key_conflict");
+    assert_eq!(body["error"]["code"], "agent_version_conflict");
+    fixture.write_template("agent-a", TEMPLATE);
+
+    // A new key creates another runtime while reusing the same immutable
+    // Agent definition; a different author tag creates a new definition.
+    let (status, same_definition) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    assert_eq!(status, StatusCode::CREATED, "{same_definition}");
+    assert_ne!(
+        same_definition["agent_runtime_id"],
+        created["agent_runtime_id"]
+    );
+    assert_eq!(same_definition["agent_id"], created["agent_id"]);
+    fixture.write_template(
+        "agent-a",
+        "version = \"test-v2\"\nprompt = \"You are a helpful test agent.\"\n",
+    );
+    let (status, new_version) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    assert_eq!(status, StatusCode::CREATED, "{new_version}");
+    assert_eq!(new_version["agent_version"], "test-v2");
+    assert_ne!(new_version["agent_id"], created["agent_id"]);
+    fixture.write_template("agent-a", TEMPLATE);
+
+    // A create-time model override initializes runtime state but never
+    // changes the immutable Agent definition or creation response shape.
+    let create_override = json!({ "model": TEST_MODEL, "parameters": { "test_mode": "create" } });
+    let (status, overridden) = fixture
+        .json(
+            "POST",
+            "/v1/agent-runtimes",
+            Some(json!({ "agent_name": "agent-b", "model_config": create_override.clone() })),
+            Some(&uuid_v7()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{overridden}");
+    assert_eq!(overridden.as_object().expect("created object").len(), 5);
+    let overridden_view = view(
+        &fixture,
+        overridden["agent_runtime_id"]
+            .as_str()
+            .expect("agent runtime id"),
+    )
+    .await;
+    assert_eq!(overridden_view["model_config"], create_override);
 
     // Unknown body fields (including credential-shaped ones) are rejected.
     let (status, body) = fixture
         .json(
             "POST",
-            "/v1/agents",
+            "/v1/agent-runtimes",
             Some(json!({ "agent_name": "agent-a", "api_key": "sk-secret" })),
             Some(&uuid_v7()),
         )
@@ -153,21 +211,21 @@ async fn create_agent_idempotency_matrix() {
     assert_eq!(body["error"]["code"], "invalid_request");
 
     // Invalid template and model preflight failures.
-    fixture.write_template("broken", "prompt = 42\n");
-    let (status, body) = create_agent(&fixture, &uuid_v7(), "broken").await;
+    fixture.write_template("broken", "version = \"broken-v1\"\nprompt = 42\n");
+    let (status, body) = create_runtime(&fixture, &uuid_v7(), "broken").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_agent_template");
     fixture.write_template(
         "bad-model",
-        "model = \"openai:not-configured\"\nprompt = \"x\"\n",
+        "version = \"bad-model-v1\"\nmodel = \"openai:not-configured\"\nprompt = \"x\"\n",
     );
-    let (status, body) = create_agent(&fixture, &uuid_v7(), "bad-model").await;
+    let (status, body) = create_runtime(&fixture, &uuid_v7(), "bad-model").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "model_not_configured");
     let (status, body) = fixture
         .json(
             "POST",
-            "/v1/agents",
+            "/v1/agent-runtimes",
             Some(
                 json!({ "agent_name": "agent-a", "model_config": { "model": TEST_MODEL, "parameters": { "temperature": 1 } } }),
             ),
@@ -179,10 +237,10 @@ async fn create_agent_idempotency_matrix() {
 
     // A failed create never consumes the key.
     let retry_key = uuid_v7();
-    let (status, _) = create_agent(&fixture, &retry_key, "broken").await;
+    let (status, _) = create_runtime(&fixture, &retry_key, "broken").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     fixture.write_template("broken", TEMPLATE);
-    let (status, created) = create_agent(&fixture, &retry_key, "broken").await;
+    let (status, created) = create_runtime(&fixture, &retry_key, "broken").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 }
 
@@ -196,6 +254,7 @@ async fn template_catalog_is_all_or_nothing_and_safe() {
     let templates = body["templates"].as_array().expect("templates list");
     assert_eq!(templates.len(), 1);
     assert_eq!(templates[0]["agent_name"], "agent-a");
+    assert_eq!(templates[0]["version"], "test-v1");
     assert_eq!(templates[0]["model_config"]["model"], TEST_MODEL);
     let raw = body.to_string();
     assert!(
@@ -205,7 +264,7 @@ async fn template_catalog_is_all_or_nothing_and_safe() {
     assert!(!raw.contains(&fixture.root.to_string_lossy().to_string()));
 
     // One invalid template fails the whole catalog.
-    fixture.write_template("broken", "prompt = 1\n");
+    fixture.write_template("broken", "version = \"broken-v1\"\nprompt = 1\n");
     let (status, body) = fixture.json("GET", "/v1/agent-templates", None, None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_agent_template");
@@ -232,14 +291,17 @@ async fn models_endpoint_lists_configured_models_with_schemas() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn message_admission_cas_and_session_rules() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("first answer")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
 
     // The expected key is required; empty text is rejected.
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/messages"),
+            &format!("/v1/agent-runtimes/{agent_id}/messages"),
             Some(json!({ "text": "hello" })),
             None,
         )
@@ -255,6 +317,8 @@ async fn message_admission_cas_and_session_rules() {
     // First turn: admitted, session generated server-side.
     let (status, accepted) = send_message(&fixture, &agent_id, "hello", Value::Null).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    assert_eq!(accepted["agent_runtime_id"], json!(agent_id));
+    assert_eq!(accepted["agent_id"], created["agent_id"]);
     let turn_one = accepted["turn_id"].as_str().expect("turn id").to_owned();
     assert!(accepted["session_id"].is_string());
     let finished = wait_for_status(&fixture, &agent_id, "finished").await;
@@ -271,7 +335,7 @@ async fn message_admission_cas_and_session_rules() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/messages"),
+            &format!("/v1/agent-runtimes/{agent_id}/messages"),
             Some(
                 json!({ "text": "hi", "expected_current_turn_id": turn_one, "session_id": uuid_v7() }),
             ),
@@ -286,16 +350,19 @@ async fn message_admission_cas_and_session_rules() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn busy_hosted_and_unhosted_running_turns_reject_new_messages() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![Script::Pending]).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (status, accepted) = send_message(&fixture, &agent_id, "hello", Value::Null).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
-    // Hosted running turn: agent_busy.
+    // Hosted running turn: agent_runtime_busy.
     let (status, body) = send_message(&fixture, &agent_id, "again", json!(turn_id)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "agent_busy");
+    assert_eq!(body["error"]["code"], "agent_runtime_busy");
 
     // Restarted host (empty registry): resume_required, and the view carries
     // the advisory.
@@ -311,7 +378,7 @@ async fn busy_hosted_and_unhosted_running_turns_reject_new_messages() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -329,15 +396,21 @@ async fn session_allows_only_one_running_agent() {
     )
     .await;
     let session = uuid_v7();
-    let (_, first) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let (_, second) = create_agent(&fixture, &uuid_v7(), "agent-b").await;
-    let first_id = first["agent_id"].as_str().expect("agent id").to_owned();
-    let second_id = second["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, first) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let (_, second) = create_runtime(&fixture, &uuid_v7(), "agent-b").await;
+    let first_id = first["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let second_id = second["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
 
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{first_id}/messages"),
+            &format!("/v1/agent-runtimes/{first_id}/messages"),
             Some(json!({ "text": "hi", "expected_current_turn_id": null, "session_id": session })),
             None,
         )
@@ -347,7 +420,7 @@ async fn session_allows_only_one_running_agent() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{second_id}/messages"),
+            &format!("/v1/agent-runtimes/{second_id}/messages"),
             Some(json!({ "text": "hi", "expected_current_turn_id": null, "session_id": session })),
             None,
         )
@@ -360,19 +433,24 @@ async fn session_allows_only_one_running_agent() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn started_only_turn_is_reconciled_by_resume() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("recovered")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let pinned_agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
 
     // Simulate the crash window directly through the store: a committed
     // LoopStarted without the first user message.
     let pg = PostgresBackend::connect(&common::pg_url())
         .await
         .expect("postgres connects");
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
+    let agent_runtime_uuid = agent_id.parse::<uuid::Uuid>().expect("agent runtime uuid");
+    let pinned_agent_uuid = pinned_agent_id.parse::<uuid::Uuid>().expect("agent uuid");
     let turn_id = TurnId::new();
     let session_id = SessionId::new();
     let snapshot = TurnRuntimeSnapshot::new(
-        AgentVersionId::new(),
+        AgentId::from(pinned_agent_uuid),
         ModelConfig::new(
             ModelId::new("openai", "test-model").expect("model id is valid"),
             serde_json::Map::new(),
@@ -383,7 +461,7 @@ async fn started_only_turn_is_reconciled_by_resume() {
         Vec::new(),
     );
     pg.begin_turn(BeginTurn {
-        agent_id: AgentId::from(agent_uuid),
+        agent_runtime_id: AgentRuntimeId::from(agent_runtime_uuid),
         expected_current_turn_id: None,
         turn_id,
         session_id,
@@ -395,7 +473,7 @@ async fn started_only_turn_is_reconciled_by_resume() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/resume"),
+            &format!("/v1/agent-runtimes/{agent_id}/resume"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -407,7 +485,7 @@ async fn started_only_turn_is_reconciled_by_resume() {
     assert_eq!(failed["status"], "failed");
     assert_eq!(failed["current_turn_id"], json!(turn_id));
 
-    // The next turn starts from the original default model and succeeds.
+    // The next turn starts from the runtime's unchanged model and succeeds.
     let (status, accepted) = send_message(&fixture, &agent_id, "hello", json!(turn_id)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
     wait_for_status(&fixture, &agent_id, "finished").await;
@@ -415,24 +493,21 @@ async fn started_only_turn_is_reconciled_by_resume() {
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
-async fn model_override_replaces_the_default_after_the_first_message() {
+async fn model_override_replaces_the_runtime_model_after_the_first_message() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("answer")).await;
-    let override_model = json!({ "model": TEST_MODEL, "parameters": {} });
-    let (_, created) = fixture
-        .json(
-            "POST",
-            "/v1/agents",
-            Some(json!({ "agent_name": "agent-a", "model_config": override_model })),
-            Some(&uuid_v7()),
-        )
-        .await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
-    assert_eq!(created["model_config"], override_model);
+    let override_model = json!({ "model": TEST_MODEL, "parameters": { "test_mode": "alternate" } });
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let before = view(&fixture, &agent_id).await;
+    assert_eq!(before["model_config"], model_config());
 
     let (status, accepted) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/messages"),
+            &format!("/v1/agent-runtimes/{agent_id}/messages"),
             Some(
                 json!({ "text": "hi", "expected_current_turn_id": null, "model_config": override_model }),
             ),
@@ -469,8 +544,11 @@ async fn approval_request_resolve_consume_lifecycle() {
         ],
     )
     .await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (status, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
@@ -500,7 +578,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": uuid_v7(), "decision": "approve" })),
             None,
         )
@@ -510,7 +588,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{}", uuid_v7()),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{}", uuid_v7()),
             Some(json!({ "turn_id": turn_id, "decision": "approve" })),
             None,
         )
@@ -523,7 +601,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "approve" })),
             None,
         )
@@ -535,7 +613,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "approve" })),
             None,
         )
@@ -544,7 +622,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "reject" })),
             None,
         )
@@ -565,7 +643,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{second_pending}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{second_pending}"),
             Some(json!({ "turn_id": turn_id, "decision": "reject" })),
             None,
         )
@@ -585,7 +663,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "approve" })),
             None,
         )
@@ -598,7 +676,7 @@ async fn approval_request_resolve_consume_lifecycle() {
     let (status, history) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}"),
+            &format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}"),
             None,
             None,
         )
@@ -622,8 +700,11 @@ async fn reject_maps_to_a_blocked_tool_result_and_the_turn_continues() {
         MockProvider::tool_call_then_text("call-9", r#"{"text":"x"}"#, "continued after block"),
     )
     .await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
@@ -643,7 +724,7 @@ async fn reject_maps_to_a_blocked_tool_result_and_the_turn_continues() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "reject" })),
             None,
         )
@@ -663,8 +744,11 @@ async fn cancel_races_are_stable() {
         vec![Script::Pending, Script::Pending],
     )
     .await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &agent_id, "hello", Value::Null).await;
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
@@ -672,7 +756,7 @@ async fn cancel_races_are_stable() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": uuid_v7() })),
             None,
         )
@@ -684,7 +768,7 @@ async fn cancel_races_are_stable() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -696,7 +780,7 @@ async fn cancel_races_are_stable() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -704,15 +788,18 @@ async fn cancel_races_are_stable() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Unhosted running turn: turn_not_hosted.
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let second = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let second = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &second, "hello", Value::Null).await;
     let second_turn = accepted["turn_id"].as_str().expect("turn id").to_owned();
     let restarted = restarted(&fixture, vec![]).await;
     let (status, body) = restarted
         .json(
             "POST",
-            &format!("/v1/agents/{second}/cancel"),
+            &format!("/v1/agent-runtimes/{second}/cancel"),
             Some(json!({ "turn_id": second_turn })),
             None,
         )
@@ -724,7 +811,7 @@ async fn cancel_races_are_stable() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{second}/cancel"),
+            &format!("/v1/agent-runtimes/{second}/cancel"),
             Some(json!({ "turn_id": second_turn })),
             None,
         )
@@ -734,7 +821,7 @@ async fn cancel_races_are_stable() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{second}/cancel"),
+            &format!("/v1/agent-runtimes/{second}/cancel"),
             Some(json!({ "turn_id": second_turn })),
             None,
         )
@@ -761,8 +848,11 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
         ])],
     )
     .await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
@@ -785,19 +875,21 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
     let (status, accepted) = restarted
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/resume"),
+            &format!("/v1/agent-runtimes/{agent_id}/resume"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
         .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    assert_eq!(accepted["agent_runtime_id"], json!(agent_id));
+    assert_eq!(accepted["agent_id"], created["agent_id"]);
     assert_eq!(accepted["turn_id"], json!(turn_id));
 
     // Already hosted: a second resume is a 204.
     let (status, _) = restarted
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/resume"),
+            &format!("/v1/agent-runtimes/{agent_id}/resume"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -809,7 +901,7 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
     let pg = PostgresBackend::connect(&common::pg_url())
         .await
         .expect("postgres connects");
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
+    let agent_runtime_uuid = agent_id.parse::<uuid::Uuid>().expect("agent runtime uuid");
     let agent_view = view(&restarted, &agent_id).await;
     let barrier: u64 = agent_view["snapshot_event_seq"]
         .as_str()
@@ -817,7 +909,7 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
         .parse()
         .expect("barrier parses");
     let rows = pg
-        .read_events_range(AgentId::from(agent_uuid), 0, barrier)
+        .read_events_range(AgentRuntimeId::from(agent_runtime_uuid), 0, barrier)
         .await
         .expect("events read");
     let requested = rows
@@ -840,7 +932,7 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
     let (status, _) = restarted
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/approvals/{approval_id}"),
+            &format!("/v1/agent-runtimes/{agent_id}/approvals/{approval_id}"),
             Some(json!({ "turn_id": turn_id, "decision": "approve" })),
             None,
         )
@@ -854,14 +946,17 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn resume_rejects_stale_and_not_running_turns() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("done")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
 
     // Idle agent: the turn is not the current one.
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/resume"),
+            &format!("/v1/agent-runtimes/{agent_id}/resume"),
             Some(json!({ "turn_id": uuid_v7() })),
             None,
         )
@@ -876,7 +971,7 @@ async fn resume_rejects_stale_and_not_running_turns() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/resume"),
+            &format!("/v1/agent-runtimes/{agent_id}/resume"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -905,8 +1000,11 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
         ],
     )
     .await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
 
     let (_, first) = send_message(&fixture, &agent_id, "first", Value::Null).await;
     let first_turn = first["turn_id"].as_str().expect("turn id").to_owned();
@@ -914,7 +1012,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
     let (_, second) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/messages"),
+            &format!("/v1/agent-runtimes/{agent_id}/messages"),
             Some(json!({ "text": "second", "expected_current_turn_id": first_turn })),
             None,
         )
@@ -935,14 +1033,15 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
     let pg = PostgresBackend::connect(&common::pg_url())
         .await
         .expect("postgres connects");
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
-    let agent_state = pg
-        .read_agent_state(AgentId::from(agent_uuid))
+    let agent_runtime_uuid = agent_id.parse::<uuid::Uuid>().expect("agent runtime uuid");
+    let runtime_state = pg
+        .read_agent_runtime_state(AgentRuntimeId::from(agent_runtime_uuid))
         .await
         .expect("state reads");
     pg.append_event(stratum_postgres::AppendEvent {
-        agent_id: AgentId::from(agent_uuid),
-        session_id: agent_state.session_id.expect("session bound"),
+        agent_runtime_id: AgentRuntimeId::from(agent_runtime_uuid),
+        agent_id: runtime_state.agent_id,
+        session_id: runtime_state.session_id.expect("session bound"),
         turn_id: second_turn
             .parse::<uuid::Uuid>()
             .map(TurnId::from)
@@ -955,7 +1054,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
             compacted_iteration: 1,
         },
         approval_hook_invocation_id: None,
-        default_model_update: None,
+        model_config_update: None,
         compaction: Some(stratum_postgres::CompactionInput {
             compacted_iteration: 1,
             upto: 1,
@@ -976,13 +1075,15 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
 
     // Invalid windows.
     for uri in [
-        format!("/v1/agents/{agent_id}/history"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq=abc"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&before_event_seq=99999"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq=99999"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=0"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=300"),
-        format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&replay=all"),
+        format!("/v1/agent-runtimes/{agent_id}/history"),
+        format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq=abc"),
+        format!(
+            "/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&before_event_seq=99999"
+        ),
+        format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq=99999"),
+        format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&limit=0"),
+        format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&limit=300"),
+        format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&replay=all"),
     ] {
         let (status, body) = fixture.json("GET", &uri, None, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
@@ -993,7 +1094,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
     let (status, page) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=2"),
+            &format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&limit=2"),
             None,
             None,
         )
@@ -1023,7 +1124,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
         .json(
             "GET",
             &format!(
-                "/v1/agents/{agent_id}/history?through_event_seq={barrier}&before_event_seq={before}&limit=50"
+                "/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&before_event_seq={before}&limit=50"
             ),
             None,
             None,
@@ -1050,7 +1151,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
     let all = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/history?through_event_seq={barrier}&limit=50"),
+            &format!("/v1/agent-runtimes/{agent_id}/history?through_event_seq={barrier}&limit=50"),
             None,
             None,
         )
@@ -1071,7 +1172,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": second_turn })),
             None,
         )
@@ -1084,8 +1185,11 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn request_bodies_are_capped_at_64_kib() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![]).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let big = "x".repeat(128 * 1024);
     let (status, body) = send_message(&fixture, &agent_id, &big, Value::Null).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -1096,15 +1200,19 @@ async fn request_bodies_are_capped_at_64_kib() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn sse_streams_ready_then_durable_frames_with_cursors() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], MockProvider::text("streamed")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let pinned_agent_id = created["agent_id"].clone();
 
     // Idle agent: subscription works, first frame is stream_ready without an
     // SSE id and without session/turn identity.
     let response = fixture
         .request(
             axum::http::Request::builder()
-                .uri(format!("/v1/agents/{agent_id}/events"))
+                .uri(format!("/v1/agent-runtimes/{agent_id}/events"))
                 .body(axum::body::Body::empty())
                 .expect("request builds"),
         )
@@ -1114,6 +1222,8 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     assert_eq!(events[0].data["kind"], "control");
     assert_eq!(events[0].data["event"]["type"], "stream_ready");
     assert_eq!(events[0].data["protocol_version"], 1);
+    assert_eq!(events[0].data["agent_runtime_id"], json!(agent_id));
+    assert_eq!(events[0].data["agent_id"], pinned_agent_id);
     assert!(events[0].id.is_none());
     assert!(events[0].data.get("session_id").is_none());
 
@@ -1121,17 +1231,17 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     let (status, body) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{}/events", uuid_v7()),
+            &format!("/v1/agent-runtimes/{}/events", uuid_v7()),
             None,
             None,
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert_eq!(body["error"]["code"], "agent_runtime_not_found");
     let (status, body) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/events?after_cursor=abc"),
+            &format!("/v1/agent-runtimes/{agent_id}/events?after_cursor=abc"),
             None,
             None,
         )
@@ -1141,7 +1251,7 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     let (status, body) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/events?replay=all"),
+            &format!("/v1/agent-runtimes/{agent_id}/events?replay=all"),
             None,
             None,
         )
@@ -1154,7 +1264,7 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     let response = fixture
         .request(
             axum::http::Request::builder()
-                .uri(format!("/v1/agents/{agent_id}/events"))
+                .uri(format!("/v1/agent-runtimes/{agent_id}/events"))
                 .header("Last-Event-ID", invalid_header)
                 .body(axum::body::Body::empty())
                 .expect("request builds"),
@@ -1172,7 +1282,7 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     let response = fixture
         .request(
             axum::http::Request::builder()
-                .uri(format!("/v1/agents/{agent_id}/events"))
+                .uri(format!("/v1/agent-runtimes/{agent_id}/events"))
                 .body(axum::body::Body::empty())
                 .expect("request builds"),
         )
@@ -1196,6 +1306,8 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     assert!(durable.len() >= 4, "durable frames arrive: {durable:?}");
     for frame in &durable {
         assert!(frame.id.is_some(), "durable frames carry cursor ids");
+        assert_eq!(frame.data["agent_runtime_id"], json!(agent_id));
+        assert_eq!(frame.data["agent_id"], pinned_agent_id);
         assert_eq!(frame.data["session_id"], json!(session_id));
         assert_eq!(frame.data["turn_id"], json!(turn_id));
         assert!(
@@ -1232,6 +1344,8 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
     );
     for frame in telemetry {
         assert!(frame.id.is_some(), "telemetry frames carry cursor ids");
+        assert_eq!(frame.data["agent_runtime_id"], json!(agent_id));
+        assert_eq!(frame.data["agent_id"], pinned_agent_id);
         assert!(
             frame.data["durable_before_event_seq"]
                 .as_str()
@@ -1241,7 +1355,7 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
             "telemetry durable watermark is decimal"
         );
         assert!(frame.data["llm_call_id"].is_string());
-        assert!(frame.data["telemetry_seq"].is_u64());
+        assert!(frame.data["telemetry_seq"].is_string());
     }
     wait_for_status(&fixture, &agent_id, "finished").await;
 }
@@ -1249,29 +1363,33 @@ async fn sse_streams_ready_then_durable_frames_with_cursors() {
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn sse_cursor_expiry_and_buffer_overflow() {
-    use stratum_infra::{AgentTailConfig, NatsAgentTail};
+    use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 
     // Expiry: a tiny retention stream discards the cursor position.
-    let tail = NatsAgentTail::connect(AgentTailConfig {
-        url: common::nats_url(),
-        stream_name: "AGENT_TAIL_EXPIRY".to_owned(),
-        subject_prefix: "events.expiry".to_owned(),
-        replicas: 1,
-        max_age: std::time::Duration::from_secs(3600),
-        max_bytes: 67_108_864,
-        max_messages: 5,
-    })
-    .await
-    .expect("expiry tail connects");
+    let mut expiry_config = AgentRuntimeTailConfig::default();
+    expiry_config.url = common::nats_url();
+    expiry_config.stream_name = "AGENT_RUNTIME_TAIL_EXPIRY".to_owned();
+    expiry_config.subject_prefix = "events.expiry".to_owned();
+    expiry_config.replicas = 1;
+    expiry_config.max_age = std::time::Duration::from_secs(3600);
+    expiry_config.max_bytes = 67_108_864;
+    expiry_config.max_messages = 5;
+    let tail = NatsAgentRuntimeTail::connect(expiry_config)
+        .await
+        .expect("expiry tail connects");
     let fixture = Fixture::with_tail(&[("agent-a", TEMPLATE)], vec![], Some(tail.clone())).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
-    let agent_uuid = AgentId::from(agent_id.parse::<uuid::Uuid>().expect("agent uuid"));
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let agent_runtime_uuid =
+        AgentRuntimeId::from(agent_id.parse::<uuid::Uuid>().expect("agent runtime uuid"));
     let mut first_cursor = None;
     for index in 0..8 {
         let cursor = tail
             .publish(
-                &agent_uuid,
+                &agent_runtime_uuid,
                 bytes::Bytes::from(format!("{{\"index\":{index}}}")),
             )
             .await
@@ -1282,7 +1400,7 @@ async fn sse_cursor_expiry_and_buffer_overflow() {
     let (status, body) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{agent_id}/events?after_cursor={expired}"),
+            &format!("/v1/agent-runtimes/{agent_id}/events?after_cursor={expired}"),
             None,
             None,
         )
@@ -1293,27 +1411,30 @@ async fn sse_cursor_expiry_and_buffer_overflow() {
     // Overflow: publish more frames than the bounded buffer while the client
     // is not reading; the connection ends with a no-id stream_reset.
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![]).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
-    let agent_uuid = AgentId::from(agent_id.parse::<uuid::Uuid>().expect("agent uuid"));
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
+    let agent_runtime_uuid =
+        AgentRuntimeId::from(agent_id.parse::<uuid::Uuid>().expect("agent runtime uuid"));
     let response = fixture
         .request(
             axum::http::Request::builder()
-                .uri(format!("/v1/agents/{agent_id}/events"))
+                .uri(format!("/v1/agent-runtimes/{agent_id}/events"))
                 .body(axum::body::Body::empty())
                 .expect("request builds"),
         )
         .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let tail = NatsAgentTail::connect(AgentTailConfig {
-        url: common::nats_url(),
-        ..AgentTailConfig::default()
-    })
-    .await
-    .expect("default tail connects");
+    let mut tail_config = AgentRuntimeTailConfig::default();
+    tail_config.url = common::nats_url();
+    let tail = NatsAgentRuntimeTail::connect(tail_config)
+        .await
+        .expect("default tail connects");
     for index in 0..300 {
         tail.publish(
-            &agent_uuid,
+            &agent_runtime_uuid,
             bytes::Bytes::from(format!("{{\"index\":{index}}}")),
         )
         .await
@@ -1334,11 +1455,19 @@ async fn sse_cursor_expiry_and_buffer_overflow() {
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn realtime_unavailable_keeps_core_commands_working() {
     let fixture = Fixture::without_nats(&[("agent-a", TEMPLATE)], MockProvider::text("ok")).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
 
     let (status, body) = fixture
-        .json("GET", &format!("/v1/agents/{agent_id}/events"), None, None)
+        .json(
+            "GET",
+            &format!("/v1/agent-runtimes/{agent_id}/events"),
+            None,
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "realtime_unavailable");
@@ -1367,42 +1496,42 @@ async fn health_and_not_found_endpoints() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["realtime"], "degraded");
 
-    // Unknown agents are 404 across read and command endpoints.
+    // Unknown AgentRuntimes are 404 across read and command endpoints.
     let missing = uuid_v7();
     let (status, body) = fixture
-        .json("GET", &format!("/v1/agents/{missing}"), None, None)
+        .json("GET", &format!("/v1/agent-runtimes/{missing}"), None, None)
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert_eq!(body["error"]["code"], "agent_runtime_not_found");
     let (status, body) = send_message(&fixture, &missing, "hello", Value::Null).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert_eq!(body["error"]["code"], "agent_runtime_not_found");
     let (status, body) = fixture
         .json(
             "GET",
-            &format!("/v1/agents/{missing}/history?through_event_seq=0"),
+            &format!("/v1/agent-runtimes/{missing}/history?through_event_seq=0"),
             None,
             None,
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert_eq!(body["error"]["code"], "agent_runtime_not_found");
 
     // The OpenAPI document is served.
     let (status, body) = fixture
         .json("GET", "/api-docs/openapi.json", None, None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["paths"]["/v1/agents/{agent_id}/events"].is_object());
-    assert!(body["components"]["schemas"]["AgentStreamFrameV1"].is_object());
+    assert!(body["paths"]["/v1/agent-runtimes/{agent_runtime_id}/events"].is_object());
+    assert!(body["components"]["schemas"]["AgentRuntimeStreamFrameV1"].is_object());
     assert!(
-        body["components"]["schemas"]["AgentViewResponse"]
+        body["components"]["schemas"]["AgentRuntimeView"]
             .to_string()
             .contains("telemetry_floor_event_seq"),
         "OpenAPI exposes the cold-recovery telemetry floor"
     );
     assert!(
-        body["components"]["schemas"]["AgentStreamFrameV1"]
+        body["components"]["schemas"]["AgentRuntimeStreamFrameV1"]
             .to_string()
             .contains("durable_before_event_seq"),
         "OpenAPI exposes the telemetry durable watermark"
@@ -1410,7 +1539,7 @@ async fn health_and_not_found_endpoints() {
 
     // Malformed path identities are 400.
     let (status, body) = fixture
-        .json("GET", "/v1/agents/not-a-uuid", None, None)
+        .json("GET", "/v1/agent-runtimes/not-a-uuid", None, None)
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_request");
@@ -1453,8 +1582,11 @@ url = "postgres://unused:unused@127.0.0.1:1/unused"
 #[ignore = "requires the stratum-api-test compose stack"]
 async fn stale_expected_turn_wins_over_busy_and_resume_required() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![Script::Pending]).await;
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_id = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_id = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (status, accepted) = send_message(&fixture, &agent_id, "hello", Value::Null).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
@@ -1467,7 +1599,7 @@ async fn stale_expected_turn_wins_over_busy_and_resume_required() {
     assert_eq!(body["error"]["code"], "stale_turn");
     let (status, body) = send_message(&fixture, &agent_id, "again", json!(turn_id)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "agent_busy");
+    assert_eq!(body["error"]["code"], "agent_runtime_busy");
 
     // Unhosted running turn (restarted host): stale still wins over
     // resume_required, and the correct current value still requires resume.
@@ -1483,7 +1615,7 @@ async fn stale_expected_turn_wins_over_busy_and_resume_required() {
     let (status, _) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_id}/cancel"),
+            &format!("/v1/agent-runtimes/{agent_id}/cancel"),
             Some(json!({ "turn_id": turn_id })),
             None,
         )
@@ -1497,21 +1629,26 @@ async fn stale_expected_turn_wins_over_busy_and_resume_required() {
 /// returns the new turn id.
 async fn begin_tampered_turn(
     pg: &PostgresBackend,
-    agent_id: &str,
+    agent_runtime_id: &str,
     source_turn: &str,
     tamper: impl FnOnce(&mut TurnRuntimeSnapshot),
 ) -> String {
-    let agent_uuid = agent_id.parse::<uuid::Uuid>().expect("agent uuid");
+    let agent_runtime_uuid = agent_runtime_id
+        .parse::<uuid::Uuid>()
+        .expect("agent runtime uuid");
     let source_uuid = source_turn.parse::<uuid::Uuid>().expect("turn uuid");
     let started = pg
-        .read_loop_started(AgentId::from(agent_uuid), TurnId::from(source_uuid))
+        .read_loop_started(
+            AgentRuntimeId::from(agent_runtime_uuid),
+            TurnId::from(source_uuid),
+        )
         .await
         .expect("source loop_started reads");
     let mut snapshot = started.snapshot;
     tamper(&mut snapshot);
     let turn_id = TurnId::new();
     pg.begin_turn(BeginTurn {
-        agent_id: AgentId::from(agent_uuid),
+        agent_runtime_id: AgentRuntimeId::from(agent_runtime_uuid),
         expected_current_turn_id: Some(TurnId::from(source_uuid)),
         turn_id,
         session_id: started.session_id,
@@ -1520,14 +1657,19 @@ async fn begin_tampered_turn(
     .await
     .expect("tampered turn commits");
     pg.append_event(stratum_postgres::AppendEvent {
-        agent_id: AgentId::from(agent_uuid),
+        agent_runtime_id: AgentRuntimeId::from(agent_runtime_uuid),
+        agent_id: pg
+            .read_agent_runtime_state(AgentRuntimeId::from(agent_runtime_uuid))
+            .await
+            .expect("state reads")
+            .agent_id,
         session_id: started.session_id,
         turn_id,
         event: stratum_core::DurableAgentEvent::MessageAppended {
             message: stratum_core::ChatMessage::user("hi"),
         },
         approval_hook_invocation_id: None,
-        default_model_update: None,
+        model_config_update: None,
         compaction: None,
     })
     .await
@@ -1547,8 +1689,11 @@ async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
 
     // Agent A: the persisted skill set identity does not match the runtime
     // this binary rebuilds.
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_a = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_a = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &agent_a, "first", Value::Null).await;
     let turn_a = accepted["turn_id"].as_str().expect("turn id").to_owned();
     wait_for_status(&fixture, &agent_a, "finished").await;
@@ -1559,7 +1704,7 @@ async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_a}/resume"),
+            &format!("/v1/agent-runtimes/{agent_a}/resume"),
             Some(json!({ "turn_id": tampered })),
             None,
         )
@@ -1569,8 +1714,11 @@ async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
 
     // Agent B: the persisted ordered hook handler versions do not match the
     // chain this binary rebuilds.
-    let (_, created) = create_agent(&fixture, &uuid_v7(), "agent-a").await;
-    let agent_b = created["agent_id"].as_str().expect("agent id").to_owned();
+    let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    let agent_b = created["agent_runtime_id"]
+        .as_str()
+        .expect("agent runtime id")
+        .to_owned();
     let (_, accepted) = send_message(&fixture, &agent_b, "first", Value::Null).await;
     let turn_b = accepted["turn_id"].as_str().expect("turn id").to_owned();
     wait_for_status(&fixture, &agent_b, "finished").await;
@@ -1581,7 +1729,7 @@ async fn resume_rejects_snapshot_skill_and_hook_mismatches() {
     let (status, body) = fixture
         .json(
             "POST",
-            &format!("/v1/agents/{agent_b}/resume"),
+            &format!("/v1/agent-runtimes/{agent_b}/resume"),
             Some(json!({ "turn_id": tampered })),
             None,
         )

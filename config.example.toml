@@ -23,11 +23,10 @@ bind = "127.0.0.1:8080"
 allowed_origins = ["http://localhost:5173"]
 shutdown_drain_timeout_seconds = 10
 sse_keep_alive_seconds = 15
-approval_poll_interval_seconds = 15
 dispatcher_idle_timeout_seconds = 60
 
 [nats]
-# Connection and short Agent-scoped realtime tail limits. The tail is
+# Connection and short AgentRuntime-scoped realtime tail limits. The tail is
 # lossy and never carries durable history.
 url = "nats://127.0.0.1:4222"
 stream_name = "AGENT_EVENTS"

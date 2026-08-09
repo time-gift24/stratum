@@ -1,6 +1,6 @@
 //! Configuration errors.
 
-use stratum_core::ModelId;
+use stratum_core::{AgentVersionTagParseError, ModelId};
 use thiserror::Error;
 
 /// Error returned while parsing or validating Stratum configuration.
@@ -25,6 +25,12 @@ pub enum ConfigError {
     /// A template prompt was empty after trimming.
     #[error("agent prompt must not be empty")]
     EmptyPrompt,
+    /// A template omitted its author-provided version tag.
+    #[error("agent version tag is required")]
+    MissingAgentVersion,
+    /// A template version tag violated its validated string boundary.
+    #[error("invalid agent version tag")]
+    InvalidAgentVersion(#[source] AgentVersionTagParseError),
     /// A template listed the same tool more than once.
     #[error("duplicate tool `{tool}`")]
     DuplicateTool { tool: String },
@@ -55,7 +61,7 @@ pub enum ConfigError {
     /// A caller required an optional section that was not configured.
     #[error("missing required configuration section `{section}`")]
     MissingSection { section: &'static str },
-    /// A NATS field was not valid for the short Agent-scoped tail.
+    /// A NATS field was not valid for the short AgentRuntime-scoped tail.
     #[error("invalid nats configuration field `{field}`")]
     InvalidNatsConfig { field: &'static str },
     /// A Postgres field was not valid.

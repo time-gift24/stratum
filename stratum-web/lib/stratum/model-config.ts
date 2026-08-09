@@ -15,6 +15,8 @@ export type ModelDescriptor = {
 
 export type AgentTemplateView = {
   agent_name: string
+  /** Template author supplied tag; case-sensitive and not sortable. */
+  version: string
   model_config: ModelConfig
 }
 
@@ -98,7 +100,10 @@ export function currentThinkingLevel(
   if (!isRecord(thinking)) return null
 
   if (thinking.type === "disabled") return "disabled"
-  if (thinking.type === "enabled" && typeof thinking.reasoning_effort === "string")
+  if (
+    thinking.type === "enabled" &&
+    typeof thinking.reasoning_effort === "string"
+  )
     return thinking.reasoning_effort
   return null
 }

@@ -13,7 +13,7 @@
 项目按能力分层，依赖方向必须保持 DAG，禁止下层依赖上层：
 
 - **核心层**：`stratum-core`（+ `stratum-macros`）——领域类型、ID newtype、事件、错误、trait 定义；不得依赖任何其他 stratum crate。
-- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，只依赖核心层。
+- **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，默认只依赖核心层；只有当一个能力明确通过另一个能力的公开边界完成自身职责时才允许窄向依赖。当前唯一批准的同层依赖是 `stratum-tools -> stratum-filesystem`，用于注入受控虚拟文件能力；不得反向依赖或形成环。
 - **存储后端层**：`stratum-postgres`——具体执行存储边界，暴露具体的 command/query 接口、类型与 `thiserror` 错误；只允许被装配层 `stratum-api` 调用，组合层及以下不得依赖。
 - **组合层**：`stratum-agent`——编排能力层，不得被能力层依赖；kernel/`stratum-agent` 不得依赖 Postgres、HTTP、Session、hosting、scheduler 或分页。
 - **装配层**：`stratum-api`（HTTP/进程入口）——最上层、唯一装配 crate；`stratum-api` 是唯一含 `main.rs` 的 crate，`main.rs` 必须保持薄，可复用逻辑放 `lib.rs`。
@@ -46,8 +46,10 @@
 - API 文档以 **utoipa 生成的 OpenAPI** 为唯一权威；`docs/PROTOCOL.md` 废弃，不再作为协议依据。
 - 每个 Handler 必须有 `#[utoipa::path(...)]` 注解；每个 DTO 必须 `#[derive(ToSchema)]`；每个响应状态码必须有描述和 `body` 类型。
 - 事件流端点（`/events`）的 envelope 类型同样必须纳入 `ToSchema`。
-- HTTP API 统一 `/v1` 前缀；资源用名词复数（`/v1/agents/{agent_id}`）。
-- 非 CRUD 的生命周期操作允许动词子路径（`/v1/agents/{id}/resume`、`/cancel`）；禁止为 CRUD 造动词路径（如 `/agents/create`）。
+- HTTP API 统一 `/v1` 前缀；资源用名词复数。运行聚合使用
+  `/v1/agent-runtimes/{agent_runtime_id}`；`/v1/agents/{agent_id}` 只表示不可变 Agent
+  template version resource，不得再次承载运行状态。
+- 非 CRUD 的生命周期操作允许动词子路径（`/v1/agent-runtimes/{id}/resume`、`/cancel`）；禁止为 CRUD 造动词路径（如 `/agent-runtimes/create`）。
 - Handler 输入/输出必须是独立 DTO，禁止直接暴露领域类型；领域 ID 使用 newtype（`SessionId`、`AgentId`、`TurnId` 等），禁止 stringly typed 穿越边界。
 
 ### REST 设计

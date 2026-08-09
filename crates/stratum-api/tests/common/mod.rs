@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use stratum_api::{AppState, router};
 use stratum_config::Config;
 use stratum_core::{ChatMessage, ModelConfig, ModelId};
-use stratum_infra::{AgentTailConfig, NatsAgentTail};
+use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, LlmError,
     LlmProvider, LlmProviderManager,
@@ -181,7 +181,12 @@ impl LlmProvider for MockProvider {
 
 impl ConfigurableLlmProvider for MockProvider {
     fn parameter_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "additionalProperties": false, "default": {}})
+        serde_json::json!({
+            "type": "object",
+            "properties": { "test_mode": { "type": "string" } },
+            "additionalProperties": false,
+            "default": {}
+        })
     }
 
     fn default_model_config(&self) -> ModelConfig {
@@ -192,7 +197,11 @@ impl ConfigurableLlmProvider for MockProvider {
         &self,
         parameters: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-        if parameters.is_empty() {
+        let valid_test_override = parameters.len() == 1
+            && parameters
+                .get("test_mode")
+                .is_some_and(serde_json::Value::is_string);
+        if parameters.is_empty() || valid_test_override {
             // The configured provider shares the script queue, so a resumed
             // turn continues where the crashed one stopped.
             Ok(Arc::new(self.clone()))
@@ -227,7 +236,7 @@ impl Fixture {
     pub async fn with_tail(
         templates: &[(&str, &str)],
         script: Vec<Script>,
-        tail: Option<NatsAgentTail>,
+        tail: Option<NatsAgentRuntimeTail>,
     ) -> Self {
         let root = std::env::temp_dir().join(format!("stratum-api-test-{}", uuid_v7()));
         std::fs::create_dir_all(&root).expect("temporary template root is created");
@@ -346,13 +355,10 @@ pub async fn restarted(fixture: &Fixture, script: Vec<Script>) -> Fixture {
 }
 
 /// Connects the default test tail (shared stream).
-pub async fn default_tail_config() -> Option<NatsAgentTail> {
-    NatsAgentTail::connect(AgentTailConfig {
-        url: nats_url(),
-        ..AgentTailConfig::default()
-    })
-    .await
-    .ok()
+pub async fn default_tail_config() -> Option<NatsAgentRuntimeTail> {
+    let mut config = AgentRuntimeTailConfig::default();
+    config.url = nats_url();
+    NatsAgentRuntimeTail::connect(config).await.ok()
 }
 
 fn test_config(root: &Path) -> Config {
@@ -373,7 +379,7 @@ bind = "127.0.0.1:0"
 
 [nats]
 url = "nats://127.0.0.1:44228"
-stream_name = "AGENT_TAIL"
+stream_name = "AGENT_RUNTIME_TAIL"
 subject_prefix = "events.agent"
 replicas = 1
 max_age_seconds = 3600
@@ -407,10 +413,15 @@ pub async fn wait_until<T>(deadline_secs: u64, mut probe: impl AsyncFnMut() -> O
     }
 }
 
-/// Reads the Agent view JSON.
-pub async fn view(fixture: &Fixture, agent_id: &str) -> serde_json::Value {
+/// Reads the AgentRuntime view JSON.
+pub async fn view(fixture: &Fixture, agent_runtime_id: &str) -> serde_json::Value {
     let (status, body) = fixture
-        .json("GET", &format!("/v1/agents/{agent_id}"), None, None)
+        .json(
+            "GET",
+            &format!("/v1/agent-runtimes/{agent_runtime_id}"),
+            None,
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "view loads: {body}");
     body

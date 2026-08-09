@@ -18,7 +18,7 @@ use stratum_core::{
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::LlmProvider;
-use stratum_postgres::AgentView;
+use stratum_postgres::{AgentRuntimeView, ResolvedDefinitionV1};
 use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 use tracing::Instrument;
 use uuid::Uuid;
@@ -29,9 +29,6 @@ use crate::error::{ApiError, ErrorKind};
 use crate::registry::ClaimHandle;
 use crate::sink::{AdmissionSignal, TurnIds};
 use crate::state::AppState;
-
-/// Definition schema version this binary writes and reads.
-pub(crate) const DEFINITION_SCHEMA_VERSION_V1: i32 = 1;
 
 /// No skill system exists yet; the snapshot pins the nil skill set identity.
 const NO_SKILL_SET: Uuid = Uuid::nil();
@@ -51,21 +48,6 @@ pub(crate) fn pinned_hook_handler_versions() -> Vec<stratum_core::HookHandlerVer
     )]
 }
 
-/// Immutable resolved definition persisted in `agents.resolved_definition`
-/// (definition schema v1).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ResolvedDefinitionV1 {
-    /// Agent name.
-    pub(crate) agent_name: String,
-    /// Creation-time effective model configuration.
-    pub(crate) model: ModelConfig,
-    /// Ordered tools exposed to the Agent.
-    pub(crate) tools: Vec<ToolName>,
-    /// System prompt.
-    pub(crate) prompt: String,
-}
-
 /// Decodes the immutable resolved definition of one Agent view.
 ///
 /// # Errors
@@ -73,12 +55,8 @@ pub(crate) struct ResolvedDefinitionV1 {
 /// Returns [`ErrorKind::RuntimeIncompatible`] for an unsupported definition
 /// schema version and [`ErrorKind::DurableStateCorrupt`] for a malformed v1
 /// definition.
-pub(crate) fn decode_definition(view: &AgentView) -> Result<ResolvedDefinitionV1, ApiError> {
-    if view.definition_schema_version != DEFINITION_SCHEMA_VERSION_V1 {
-        return Err(ApiError::new(ErrorKind::RuntimeIncompatible));
-    }
-    serde_json::from_value(view.resolved_definition.clone())
-        .map_err(|source| ApiError::with_source(ErrorKind::DurableStateCorrupt, source))
+pub(crate) fn decode_definition(view: &AgentRuntimeView) -> Result<ResolvedDefinitionV1, ApiError> {
+    Ok(view.resolved_definition.clone())
 }
 
 /// Builds the builtin tool registry for one definition.
@@ -116,12 +94,12 @@ pub(crate) fn build_hook_runtime(
 ) -> Arc<ChainHookRuntime> {
     Arc::new(ChainHookRuntime::new(vec![Arc::new(ApprovalHandler::new(
         state.pg().clone(),
+        ids.agent_runtime_id,
         ids.agent_id,
         ids.session_id,
         ids.turn_id,
         Arc::clone(state.waiters()),
         dispatcher,
-        state.approval_poll_interval(),
     ))]))
 }
 
@@ -132,7 +110,7 @@ pub(crate) fn build_hook_runtime(
 /// Returns [`ErrorKind::Internal`] when the tool-set fingerprint cannot be
 /// computed or the chain reports no extension set version.
 pub(crate) fn runtime_snapshot(
-    view: &AgentView,
+    view: &AgentRuntimeView,
     model: ModelConfig,
     registry: &Arc<dyn ToolRegistry>,
     hook_runtime: &ChainHookRuntime,
@@ -144,7 +122,7 @@ pub(crate) fn runtime_snapshot(
         .extension_set_version()
         .ok_or_else(|| ApiError::new(ErrorKind::Internal))?;
     Ok(TurnRuntimeSnapshot::new(
-        view.agent_version_id,
+        view.agent_id,
         model,
         fingerprint,
         pinned_skill_set_version(),
@@ -189,6 +167,7 @@ pub(crate) fn spawn_managed_turn(
     let token = claim.token.clone();
     let span = tracing::info_span!(
         "turn.run",
+        agent_runtime_id = %ids.agent_runtime_id,
         agent_id = %ids.agent_id,
         session_id = %ids.session_id,
         turn_id = %ids.turn_id,
@@ -204,33 +183,36 @@ pub(crate) fn spawn_managed_turn(
                 TurnRun::Resume(prepared) => prepared.run(token).await,
             };
             if let Err(error) = result {
-                if let Some(signal) = &admission {
-                    // A no-op when the sink already signalled the precise error.
-                    signal.fail(ApiError::new(loop_error_kind(&error)));
-                }
                 let kind = loop_error_kind(&error);
-                match kind {
-                    ErrorKind::StoreUnavailable => {
-                        tracing::error!(
-                            agent_id = %ids.agent_id,
-                            turn_id = %ids.turn_id,
-                            error.kind = kind.code(),
-                            "managed turn ended with a durability error"
-                        );
-                    }
-                    _ => {
-                        tracing::warn!(
-                            agent_id = %ids.agent_id,
-                            turn_id = %ids.turn_id,
-                            error.kind = kind.code(),
-                            "managed turn ended"
-                        );
+                let reported_to_http = admission
+                    .as_ref()
+                    .is_some_and(|signal| signal.fail(ApiError::new(kind)));
+                if !reported_to_http {
+                    match kind {
+                        ErrorKind::StoreUnavailable => {
+                            tracing::error!(
+                                agent_runtime_id = %ids.agent_runtime_id,
+                                agent_id = %ids.agent_id,
+                                turn_id = %ids.turn_id,
+                                error.kind = kind.code(),
+                                "managed turn ended with a durability error"
+                            );
+                        }
+                        _ => {
+                            tracing::warn!(
+                                agent_runtime_id = %ids.agent_runtime_id,
+                                agent_id = %ids.agent_id,
+                                turn_id = %ids.turn_id,
+                                error.kind = kind.code(),
+                                "managed turn ended"
+                            );
+                        }
                     }
                 }
             }
             task_state
                 .registry()
-                .compare_remove(ids.agent_id, ids.turn_id, claim_id);
+                .compare_remove(ids.agent_runtime_id, ids.turn_id, claim_id);
         }
         .instrument(span),
     );
@@ -281,7 +263,6 @@ mod tests {
     #[test]
     fn resolved_definition_round_trips_and_rejects_unknown_fields() {
         let definition = ResolvedDefinitionV1 {
-            agent_name: "agent".to_owned(),
             model: ModelConfig::new(
                 stratum_core::ModelId::new("openai", "test-model").expect("model id is valid"),
                 serde_json::Map::new(),

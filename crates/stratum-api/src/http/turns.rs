@@ -9,13 +9,16 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use stratum_agent::{HookRuntime, LoopContext};
-use stratum_core::{ApprovalId, ChatMessage, DurableAgentEvent, SessionId, TokenUsage, TurnId};
+use stratum_core::{
+    AgentId, AgentRuntimeId, ApprovalId, ChatMessage, DurableAgentEvent, SessionId, TokenUsage,
+    TurnId,
+};
 use stratum_postgres::{
-    AgentView, AppendEvent, ResolveApproval, ResolveApprovalOutcome, ResumeSliceQuery,
+    AgentRuntimeView, AppendEvent, ResolveApproval, ResolveApprovalOutcome, ResumeSliceQuery,
 };
 use tracing::{Span, field};
 
-use super::{json_request, parse_agent_id};
+use super::{json_request, parse_agent_runtime_id};
 use crate::baseline::materialize_baseline;
 use crate::dto::{
     ApprovalResolveRequest, CancelRequest, MessageRequest, ResumeRequest, TurnAccepted,
@@ -34,7 +37,7 @@ use crate::turn::{
 /// removed.
 struct ClaimCleanup<'a> {
     state: &'a AppState,
-    agent_id: stratum_core::AgentId,
+    agent_runtime_id: AgentRuntimeId,
     turn_id: TurnId,
     claim_id: uuid::Uuid,
     armed: bool,
@@ -49,9 +52,11 @@ impl ClaimCleanup<'_> {
 impl Drop for ClaimCleanup<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.state
-                .registry()
-                .compare_remove(self.agent_id, self.turn_id, self.claim_id);
+            self.state.registry().compare_remove(
+                self.agent_runtime_id,
+                self.turn_id,
+                self.claim_id,
+            );
         }
     }
 }
@@ -59,14 +64,14 @@ impl Drop for ClaimCleanup<'_> {
 /// Admits a new Turn with an exact current-Turn CAS.
 #[utoipa::path(
     post,
-    path = "/v1/agents/{agent_id}/messages",
-    params(("agent_id" = String, Path, description = "agent identity")),
+    path = "/v1/agent-runtimes/{agent_runtime_id}/messages",
+    params(("agent_runtime_id" = String, Path, description = "agent runtime identity")),
     request_body = MessageRequest,
     responses(
         (status = 202, description = "turn admitted; loop started and first user message committed", body = TurnAccepted),
-        (status = 400, description = "invalid request body or agent identity", body = ErrorResponse),
-        (status = 404, description = "agent not found", body = ErrorResponse),
-        (status = 409, description = "stale turn, busy agent, resume required, or session conflict", body = ErrorResponse),
+        (status = 400, description = "invalid request body or runtime identity", body = ErrorResponse),
+        (status = 404, description = "agent runtime not found", body = ErrorResponse),
+        (status = 409, description = "stale turn, busy runtime, resume required, or session conflict", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
         (status = 422, description = "model is not configured or parameters are invalid", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt or an internal error occurred", body = ErrorResponse),
@@ -75,12 +80,12 @@ impl Drop for ClaimCleanup<'_> {
 )]
 pub(crate) async fn post_message(
     State(state): State<Arc<AppState>>,
-    Path(agent_id): Path<String>,
+    Path(agent_runtime_id): Path<String>,
     request: Result<Json<MessageRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let _admission = state.admission().enter()?;
-    let agent_id = parse_agent_id(&agent_id)?;
-    Span::current().record("agent_id", field::display(agent_id));
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let body = json_request(request)?;
     if body.text.trim().is_empty() {
         return Err(ApiError::new(ErrorKind::InvalidRequest));
@@ -88,9 +93,10 @@ pub(crate) async fn post_message(
 
     let view = state
         .pg()
-        .read_agent_view(agent_id)
+        .read_agent_runtime_view(agent_runtime_id)
         .await
         .map_err(ApiError::from_postgres)?;
+    Span::current().record("agent_id", field::display(view.agent_id));
     let definition = decode_definition(&view)?;
 
     // Durable state pre-checks; the admission CAS stays authoritative. An
@@ -106,10 +112,12 @@ pub(crate) async fn post_message(
             let current = view
                 .current_turn_id
                 .ok_or_else(|| ApiError::new(ErrorKind::DurableStateCorrupt))?;
-            return Err(match state.registry().claim_state(agent_id, current) {
-                Some(_) => ApiError::new(ErrorKind::AgentBusy),
-                None => ApiError::new(ErrorKind::ResumeRequired),
-            });
+            return Err(
+                match state.registry().claim_state(agent_runtime_id, current) {
+                    Some(_) => ApiError::new(ErrorKind::AgentRuntimeBusy),
+                    None => ApiError::new(ErrorKind::ResumeRequired),
+                },
+            );
         }
         stratum_postgres::AgentStatus::Idle
         | stratum_postgres::AgentStatus::Finished
@@ -132,7 +140,7 @@ pub(crate) async fn post_message(
             super::agents::validate_model_override(&state, overridden)?;
             overridden.clone()
         }
-        None => view.default_model_config.clone(),
+        None => view.model_config.clone(),
     };
     let provider = state
         .providers()
@@ -142,27 +150,31 @@ pub(crate) async fn post_message(
 
     let turn_id = TurnId::new();
     let ids = TurnIds {
-        agent_id,
+        agent_runtime_id,
+        agent_id: view.agent_id,
         session_id,
         turn_id,
     };
-    let claim = match state.registry().try_claim(agent_id, turn_id) {
+    let claim = match state.registry().try_claim(agent_runtime_id, turn_id) {
         ClaimOutcome::Claimed(claim) => claim,
         // A fresh TurnId can never collide; this is an internal invariant.
         ClaimOutcome::Exists => return Err(ApiError::new(ErrorKind::Internal)),
     };
     let cleanup = ClaimCleanup {
         state: &state,
-        agent_id,
+        agent_runtime_id,
         turn_id,
         claim_id: claim.claim_id,
         armed: true,
     };
 
-    let baseline = materialize_baseline(state.pg(), agent_id, view.snapshot_event_seq).await?;
+    let baseline =
+        materialize_baseline(state.pg(), agent_runtime_id, view.snapshot_event_seq).await?;
     let dispatcher = state
         .dispatchers()
-        .ensure(agent_id, view.snapshot_event_seq);
+        .ensure(agent_runtime_id)
+        .await
+        .map_err(ApiError::from_postgres)?;
     let hook_runtime = build_hook_runtime(&state, ids, dispatcher.clone());
     let snapshot = runtime_snapshot(&view, effective_model.clone(), &registry, &hook_runtime)?;
 
@@ -173,7 +185,8 @@ pub(crate) async fn post_message(
         crate::sink::FreshTurnAdmission {
             expected_current_turn_id: body.expected_current_turn_id,
             snapshot,
-            effective_model,
+            model_config_update: (effective_model != view.model_config)
+                .then_some(effective_model.clone()),
             signal: signal.clone(),
         },
         baseline.lineage.clone(),
@@ -201,7 +214,7 @@ pub(crate) async fn post_message(
     );
     state
         .registry()
-        .attach_task(agent_id, turn_id, claim.claim_id, handle);
+        .attach_task(agent_runtime_id, turn_id, claim.claim_id, handle);
     // From here the process-owned JoinSet owns the managed task, while the
     // task removes only its exact claim identity when it ends. Returning from
     // this request cannot detach the task from shutdown drain ownership.
@@ -211,7 +224,7 @@ pub(crate) async fn post_message(
     // message is committed.
     let shutdown = state.shutdown_token();
     let outcome = tokio::select! {
-        () = shutdown.cancelled() => Err(ApiError::new(ErrorKind::ServiceUnavailable)),
+        () = shutdown.cancelled() => Err(ApiError::new(ErrorKind::ServiceShuttingDown)),
         outcome = admission_result => match outcome {
             Ok(outcome) => outcome,
             Err(_) => Err(ApiError::new(ErrorKind::Internal)),
@@ -220,13 +233,14 @@ pub(crate) async fn post_message(
     outcome?;
     state
         .registry()
-        .mark_running(agent_id, turn_id, claim.claim_id);
+        .mark_running(agent_runtime_id, turn_id, claim.claim_id);
     Span::current().record("session_id", field::display(session_id));
     Span::current().record("turn_id", field::display(turn_id));
     Ok((
         StatusCode::ACCEPTED,
         Json(TurnAccepted {
-            agent_id,
+            agent_runtime_id,
+            agent_id: view.agent_id,
             session_id,
             turn_id,
         }),
@@ -237,14 +251,14 @@ pub(crate) async fn post_message(
 /// Takes over an exact unhosted running Turn.
 #[utoipa::path(
     post,
-    path = "/v1/agents/{agent_id}/resume",
-    params(("agent_id" = String, Path, description = "agent identity")),
+    path = "/v1/agent-runtimes/{agent_runtime_id}/resume",
+    params(("agent_runtime_id" = String, Path, description = "agent runtime identity")),
     request_body = ResumeRequest,
     responses(
         (status = 202, description = "turn resumed under this process", body = TurnAccepted),
         (status = 204, description = "the exact turn is already starting or running here", body = ()),
-        (status = 400, description = "invalid request body or agent identity", body = ErrorResponse),
-        (status = 404, description = "agent not found", body = ErrorResponse),
+        (status = 400, description = "invalid request body or runtime identity", body = ErrorResponse),
+        (status = 404, description = "agent runtime not found", body = ErrorResponse),
         (status = 409, description = "stale turn, not running, preamble incomplete, or incompatible runtime", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt", body = ErrorResponse),
@@ -253,19 +267,20 @@ pub(crate) async fn post_message(
 )]
 pub(crate) async fn post_resume(
     State(state): State<Arc<AppState>>,
-    Path(agent_id): Path<String>,
+    Path(agent_runtime_id): Path<String>,
     request: Result<Json<ResumeRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let _admission = state.admission().enter()?;
-    let agent_id = parse_agent_id(&agent_id)?;
-    Span::current().record("agent_id", field::display(agent_id));
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let body = json_request(request)?;
 
     let view = state
         .pg()
-        .read_agent_view(agent_id)
+        .read_agent_runtime_view(agent_runtime_id)
         .await
         .map_err(ApiError::from_postgres)?;
+    Span::current().record("agent_id", field::display(view.agent_id));
     if view.current_turn_id != Some(body.turn_id) {
         return Err(ApiError::new(ErrorKind::StaleTurn));
     }
@@ -274,18 +289,18 @@ pub(crate) async fn post_resume(
     }
     if state
         .registry()
-        .claim_state(agent_id, body.turn_id)
+        .claim_state(agent_runtime_id, body.turn_id)
         .is_some()
     {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    let claim = match state.registry().try_claim(agent_id, body.turn_id) {
+    let claim = match state.registry().try_claim(agent_runtime_id, body.turn_id) {
         ClaimOutcome::Claimed(claim) => claim,
         ClaimOutcome::Exists => return Ok(StatusCode::NO_CONTENT.into_response()),
     };
     let cleanup = ClaimCleanup {
         state: &state,
-        agent_id,
+        agent_runtime_id,
         turn_id: body.turn_id,
         claim_id: claim.claim_id,
         armed: true,
@@ -301,15 +316,15 @@ pub(crate) async fn post_resume(
 /// durable `running` and unhosted.
 async fn resume_preflight_and_spawn(
     state: &Arc<AppState>,
-    view: &AgentView,
+    view: &AgentRuntimeView,
     turn_id: TurnId,
     claim: &ClaimHandle,
 ) -> Result<Response, ApiError> {
-    let agent_id = view.agent_id;
+    let agent_runtime_id = view.agent_runtime_id;
     let through = view.snapshot_event_seq;
     let started = state
         .pg()
-        .read_loop_started(agent_id, turn_id)
+        .read_loop_started(agent_runtime_id, turn_id)
         .await
         .map_err(ApiError::from_postgres)?;
     let base = started
@@ -319,7 +334,7 @@ async fn resume_preflight_and_spawn(
     let slice = state
         .pg()
         .read_resume_slice(ResumeSliceQuery {
-            agent_id,
+            agent_runtime_id,
             session_id: started.session_id,
             turn_id,
             base_event_seq: base,
@@ -338,26 +353,35 @@ async fn resume_preflight_and_spawn(
         return Err(ApiError::new(ErrorKind::TurnNotRunning));
     }
 
-    // Establish the process-local publish frontier before any writer below can
-    // commit. If concurrent receipts arrive in reverse task order, this shared
-    // pre-commit barrier still makes the dispatcher scan every new row.
-    let dispatcher = state.dispatchers().ensure(agent_id, through);
-
     // Started-only reconciliation: atomically fail the Turn, then report the
     // incomplete preamble.
     if slice.len() == 1 {
-        match reconcile_started_only(state, &dispatcher, agent_id, started.session_id, turn_id)
+        // This branch is itself a durable writer, so establish its generation
+        // immediately before the reconciliation transaction.
+        let dispatcher = state
+            .dispatchers()
+            .ensure(agent_runtime_id)
             .await
+            .map_err(ApiError::from_postgres)?;
+        match reconcile_started_only(
+            state,
+            &dispatcher,
+            agent_runtime_id,
+            view.agent_id,
+            started.session_id,
+            turn_id,
+        )
+        .await
         {
             Err(error) => return Err(error),
             Ok(never) => match never {},
         }
     }
 
-    let baseline = materialize_baseline(state.pg(), agent_id, base).await?;
+    let baseline = materialize_baseline(state.pg(), agent_runtime_id, base).await?;
     let definition = decode_definition(view)?;
     let snapshot = started.snapshot;
-    if snapshot.agent_version_id != view.agent_version_id {
+    if snapshot.agent_id != view.agent_id {
         return Err(ApiError::new(ErrorKind::DurableStateCorrupt));
     }
 
@@ -374,15 +398,6 @@ async fn resume_preflight_and_spawn(
         return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
     }
 
-    let ids = TurnIds {
-        agent_id,
-        session_id: started.session_id,
-        turn_id,
-    };
-    let hook_runtime = build_hook_runtime(state, ids, dispatcher.clone());
-    if hook_runtime.extension_set_version() != Some(snapshot.extension_set_version_id) {
-        return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
-    }
     // The six-field snapshot also pins the skill set identity and the ordered
     // hook handler versions; both must match the rebuilt runtime exactly or
     // the pinned runtime component is unavailable to this binary.
@@ -416,16 +431,6 @@ async fn resume_preflight_and_spawn(
         }
     }
 
-    let sink = TurnDurableSink::resumed(state.pg().clone(), ids, lineage, dispatcher.clone());
-    let telemetry = TurnTelemetrySink::new(ids, dispatcher);
-    let agent_loop = Arc::new(build_agent_loop(
-        provider,
-        registry,
-        Arc::new(sink),
-        hook_runtime,
-        Arc::new(telemetry),
-    )?);
-
     // Replay window: the current LoopStarted, the historical baseline as
     // message events, then the exact current-Turn suffix in event order.
     let window_capacity = slice
@@ -443,6 +448,36 @@ async fn resume_preflight_and_spawn(
     );
     window.extend(slice[1..].iter().map(|row| row.event.clone()));
 
+    // Durable reads, definition/provider/tool validation, lineage reduction,
+    // and replay-window construction have now succeeded. Establish the live
+    // dispatcher generation before the API-owned sinks are bound; pure kernel
+    // replay validation follows and any failure drops this handle without a
+    // durable write or external action.
+    let dispatcher = state
+        .dispatchers()
+        .ensure(agent_runtime_id)
+        .await
+        .map_err(ApiError::from_postgres)?;
+    let ids = TurnIds {
+        agent_runtime_id,
+        agent_id: view.agent_id,
+        session_id: started.session_id,
+        turn_id,
+    };
+    let hook_runtime = build_hook_runtime(state, ids, dispatcher.clone());
+    if hook_runtime.extension_set_version() != Some(snapshot.extension_set_version_id) {
+        return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
+    }
+    let sink = TurnDurableSink::resumed(state.pg().clone(), ids, lineage, dispatcher.clone());
+    let telemetry = TurnTelemetrySink::new(ids, dispatcher);
+    let agent_loop = Arc::new(build_agent_loop(
+        provider,
+        registry,
+        Arc::new(sink),
+        hook_runtime,
+        Arc::new(telemetry),
+    )?);
+
     let prepared = agent_loop
         .prepare_resume(definition.prompt.clone(), window)
         .map_err(|error| match error {
@@ -452,17 +487,27 @@ async fn resume_preflight_and_spawn(
             other => ApiError::with_source(ErrorKind::DurableStateCorrupt, other),
         })?;
 
+    // The fixed replay work above is intentionally lock-free. Immediately
+    // before installing the managed task, take the short state-row lock and
+    // revalidate the exact runtime/Session/Turn/running fence.
+    state
+        .pg()
+        .revalidate_resume(agent_runtime_id, view.agent_id, started.session_id, turn_id)
+        .await
+        .map_err(ApiError::from_postgres)?;
+
     let handle = spawn_managed_turn(state, ids, claim, TurnRun::Resume(prepared), None);
     state
         .registry()
-        .attach_task(agent_id, turn_id, claim.claim_id, handle);
+        .attach_task(agent_runtime_id, turn_id, claim.claim_id, handle);
     state
         .registry()
-        .mark_running(agent_id, turn_id, claim.claim_id);
+        .mark_running(agent_runtime_id, turn_id, claim.claim_id);
     Ok((
         StatusCode::ACCEPTED,
         Json(TurnAccepted {
-            agent_id,
+            agent_runtime_id,
+            agent_id: view.agent_id,
             session_id: started.session_id,
             turn_id,
         }),
@@ -475,13 +520,15 @@ async fn resume_preflight_and_spawn(
 async fn reconcile_started_only(
     state: &AppState,
     dispatcher: &crate::dispatcher::DispatcherHandle,
-    agent_id: stratum_core::AgentId,
+    agent_runtime_id: AgentRuntimeId,
+    agent_id: AgentId,
     session_id: SessionId,
     turn_id: TurnId,
 ) -> Result<std::convert::Infallible, ApiError> {
     let result = state
         .pg()
         .append_event(AppendEvent {
+            agent_runtime_id,
             agent_id,
             session_id,
             turn_id,
@@ -490,7 +537,7 @@ async fn reconcile_started_only(
                 usage: TokenUsage::default(),
             },
             approval_hook_invocation_id: None,
-            default_model_update: None,
+            model_config_update: None,
             compaction: None,
         })
         .await;
@@ -502,7 +549,7 @@ async fn reconcile_started_only(
         Err(append_error) => {
             let reread = state
                 .pg()
-                .read_agent_state(agent_id)
+                .read_agent_runtime_state(agent_runtime_id)
                 .await
                 .map_err(ApiError::from_postgres)?;
             if reread.current_turn_id != Some(turn_id) {
@@ -529,14 +576,14 @@ async fn reconcile_started_only(
 /// Signals the in-memory cancellation token of an exact hosted Turn.
 #[utoipa::path(
     post,
-    path = "/v1/agents/{agent_id}/cancel",
-    params(("agent_id" = String, Path, description = "agent identity")),
+    path = "/v1/agent-runtimes/{agent_runtime_id}/cancel",
+    params(("agent_runtime_id" = String, Path, description = "agent runtime identity")),
     request_body = CancelRequest,
     responses(
         (status = 202, description = "cancellation signal accepted by the hosted turn", body = ()),
         (status = 204, description = "the exact turn is already cancelled", body = ()),
-        (status = 400, description = "invalid request body or agent identity", body = ErrorResponse),
-        (status = 404, description = "agent not found", body = ErrorResponse),
+        (status = 400, description = "invalid request body or runtime identity", body = ErrorResponse),
+        (status = 404, description = "agent runtime not found", body = ErrorResponse),
         (status = 409, description = "stale turn, turn not running/hosted, or turn still starting", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
         (status = 503, description = "store unavailable or service shutting down", body = ErrorResponse),
@@ -544,36 +591,36 @@ async fn reconcile_started_only(
 )]
 pub(crate) async fn post_cancel(
     State(state): State<Arc<AppState>>,
-    Path(agent_id): Path<String>,
+    Path(agent_runtime_id): Path<String>,
     request: Result<Json<CancelRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let _admission = state.admission().enter()?;
-    let agent_id = parse_agent_id(&agent_id)?;
-    Span::current().record("agent_id", field::display(agent_id));
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let body = json_request(request)?;
 
-    let agent_state = state
+    let runtime_state = state
         .pg()
-        .read_agent_state(agent_id)
+        .read_agent_runtime_state(agent_runtime_id)
         .await
         .map_err(ApiError::from_postgres)?;
-    if agent_state.current_turn_id != Some(body.turn_id) {
+    if runtime_state.current_turn_id != Some(body.turn_id) {
         return Err(ApiError::new(ErrorKind::StaleTurn));
     }
-    match agent_state.status {
+    match runtime_state.status {
         stratum_postgres::AgentStatus::Cancelled => Ok(StatusCode::NO_CONTENT.into_response()),
         stratum_postgres::AgentStatus::Finished | stratum_postgres::AgentStatus::Failed => {
             Err(ApiError::new(ErrorKind::TurnNotRunning))
         }
         stratum_postgres::AgentStatus::Running => {
-            match state.registry().claim_state(agent_id, body.turn_id) {
+            match state.registry().claim_state(agent_runtime_id, body.turn_id) {
                 Some(crate::registry::ClaimState::Starting) => {
                     Err(ApiError::new(ErrorKind::TurnStarting))
                 }
                 Some(crate::registry::ClaimState::Running) => {
                     let token = state
                         .registry()
-                        .running_token(agent_id, body.turn_id)
+                        .running_token(agent_runtime_id, body.turn_id)
                         .ok_or_else(|| ApiError::new(ErrorKind::Internal))?;
                     // In-memory signal only: no durable intent, no abort.
                     token.cancel();
@@ -589,16 +636,16 @@ pub(crate) async fn post_cancel(
 /// Resolves one durable approval request; resolve never resumes implicitly.
 #[utoipa::path(
     post,
-    path = "/v1/agents/{agent_id}/approvals/{approval_id}",
+    path = "/v1/agent-runtimes/{agent_runtime_id}/approvals/{approval_id}",
     params(
-        ("agent_id" = String, Path, description = "agent identity"),
+        ("agent_runtime_id" = String, Path, description = "agent runtime identity"),
         ("approval_id" = String, Path, description = "approval request identity"),
     ),
     request_body = ApprovalResolveRequest,
     responses(
         (status = 204, description = "decision committed (or an identical decision already exists)", body = ()),
         (status = 400, description = "invalid request body or path identity", body = ErrorResponse),
-        (status = 404, description = "agent or approval not found", body = ErrorResponse),
+        (status = 404, description = "agent runtime or approval not found", body = ErrorResponse),
         (status = 409, description = "stale turn, opposite decision exists, or approval invalidated", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt", body = ErrorResponse),
@@ -607,32 +654,52 @@ pub(crate) async fn post_cancel(
 )]
 pub(crate) async fn post_approval(
     State(state): State<Arc<AppState>>,
-    Path((agent_id, approval_id)): Path<(String, String)>,
+    Path((agent_runtime_id, approval_id)): Path<(String, String)>,
     request: Result<Json<ApprovalResolveRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let _admission = state.admission().enter()?;
-    let agent_id = parse_agent_id(&agent_id)?;
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
     let approval_uuid = uuid::Uuid::parse_str(&approval_id)
         .map_err(|_| ApiError::new(ErrorKind::InvalidRequest))?;
     let approval_id = ApprovalId::from(approval_uuid);
-    Span::current().record("agent_id", field::display(agent_id));
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let body = json_request(request)?;
+
+    let runtime = state
+        .pg()
+        .read_agent_runtime_state(agent_runtime_id)
+        .await
+        .map_err(ApiError::from_postgres)?;
+    // For the exact current Turn, derive the expected immutable definition
+    // from its durable LoopStarted snapshot rather than trusting the mutable
+    // state row alone. A stale Turn still reaches the resolver so it preserves
+    // the stable stale_turn classification.
+    let expected_agent_id = if runtime.current_turn_id == Some(body.turn_id) {
+        state
+            .pg()
+            .read_loop_started(agent_runtime_id, body.turn_id)
+            .await
+            .map_err(ApiError::from_postgres)?
+            .snapshot
+            .agent_id
+    } else {
+        runtime.agent_id
+    };
 
     // The dispatcher must exist at a pre-commit PG barrier. Creating it from a
     // later receipt would let two concurrently committed writers whose wakeups
     // arrive in reverse order skip the earlier row as historical.
-    let frontier = state
-        .pg()
-        .read_agent_state(agent_id)
+    let dispatcher = state
+        .dispatchers()
+        .ensure(agent_runtime_id)
         .await
-        .map_err(ApiError::from_postgres)?
-        .last_event_seq;
-    let dispatcher = state.dispatchers().ensure(agent_id, frontier);
+        .map_err(ApiError::from_postgres)?;
 
     let outcome = state
         .pg()
         .resolve_approval(ResolveApproval {
-            agent_id,
+            agent_runtime_id,
+            agent_id: expected_agent_id,
             approval_id,
             turn_id: body.turn_id,
             decision: body.decision,
@@ -641,7 +708,7 @@ pub(crate) async fn post_approval(
         .map_err(ApiError::from_postgres)?;
     if let ResolveApprovalOutcome::Resolved { receipt } = outcome {
         // Commit first, then best-effort notification and realtime receipt.
-        state.waiters().notify(approval_id);
+        state.waiters().notify(agent_runtime_id, approval_id);
         dispatcher.receipt(receipt.event_seq);
     }
     Ok(StatusCode::NO_CONTENT.into_response())

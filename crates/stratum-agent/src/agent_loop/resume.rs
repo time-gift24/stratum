@@ -103,7 +103,7 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
     let mut activity_after_frontier = false;
     let mut journal = HookJournal::default();
     let mut extension_set_version_id = None;
-    for (event_index, event) in events.into_iter().enumerate() {
+    for event in events {
         let event_type = event.event_type();
         if !matches!(
             event,
@@ -116,11 +116,6 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 extension_set_version_id: recorded,
             } => {
                 if seen_loop_started {
-                    tracing::warn!(
-                        event_index,
-                        event_type,
-                        "refusing resume: duplicate loop_started"
-                    );
                     return Err(ResumeError::UnexpectedLoopStarted);
                 }
                 seen_loop_started = true;
@@ -178,11 +173,6 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 } else {
                     // A zero cut with a non-empty rebuilt context is
                     // corruption the kernel never writes.
-                    tracing::warn!(
-                        event_index,
-                        event_type,
-                        "refusing resume: compaction cut exceeds the rebuilt context"
-                    );
                     return Err(ResumeError::CorruptedCompaction);
                 }
                 compacted_iterations.insert(compacted_iteration);
@@ -191,11 +181,6 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
             DurableAgentEvent::LoopFinished { .. }
             | DurableAgentEvent::LoopFailed { .. }
             | DurableAgentEvent::LoopCancelled { .. } => {
-                tracing::warn!(
-                    event_index,
-                    event_type,
-                    "refusing resume: stream contains a terminal event"
-                );
                 return Err(ResumeError::TerminalEvent);
             }
             DurableAgentEvent::HookInvocationPending {
@@ -205,55 +190,25 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 call_id,
                 input_digest,
             } => {
-                journal
-                    .record_pending(
-                        HookAddress::new(iteration, point, call_id),
-                        invocation_id,
-                        input_digest,
-                    )
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_pending(
+                    HookAddress::new(iteration, point, call_id),
+                    invocation_id,
+                    input_digest,
+                )?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::HookInvocationCompleted {
                 invocation_id,
                 decision,
             } => {
-                journal
-                    .record_completed(&invocation_id, decision)
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_completed(&invocation_id, decision)?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::HookInvocationFailed {
                 invocation_id,
                 failure,
             } => {
-                journal
-                    .record_failed(&invocation_id, failure)
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_failed(&invocation_id, failure)?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::ToolExecutionStarted { .. } => {
@@ -270,17 +225,11 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
             // cannot rebuild; refuse the resume closed instead of silently
             // dropping it.
             _ => {
-                tracing::warn!(
-                    event_index,
-                    event_type,
-                    "refusing resume: stream contains an unsupported event type"
-                );
                 return Err(ResumeError::UnsupportedEvent { event_type });
             }
         }
     }
     if !seen_loop_started {
-        tracing::warn!("refusing resume: stream has no loop_started event");
         return Err(ResumeError::MissingLoopStarted);
     }
     let continuation = if activity_after_frontier {
@@ -310,10 +259,6 @@ fn reconcile_tool_results(
         let message = &messages[index];
         if message.role == ChatRole::Tool {
             // A tool result outside an assistant tool-call group.
-            tracing::warn!(
-                message_index = index,
-                "refusing resume: tool result outside its assistant tool-call group"
-            );
             return Err(ResumeError::ToolResultMismatch);
         }
         if message.role == ChatRole::Assistant && !message.tool_calls.is_empty() {
@@ -328,11 +273,6 @@ fn reconcile_tool_results(
                 }
                 if result.tool_call_id.as_ref() != Some(&tool_calls[committed].call_id) {
                     // Unknown, duplicated, or out-of-order result.
-                    tracing::warn!(
-                        message_index = index + 1 + committed,
-                        expected_call_id = %tool_calls[committed].call_id,
-                        "refusing resume: tool result does not match the expected call"
-                    );
                     return Err(ResumeError::ToolResultMismatch);
                 }
                 committed += 1;
@@ -340,10 +280,6 @@ fn reconcile_tool_results(
             if committed < tool_calls.len() {
                 if index + 1 + committed != messages.len() {
                     // A sparse group: results missing in the middle of history.
-                    tracing::warn!(
-                        message_index = index + 1 + committed,
-                        "refusing resume: tool results missing in the middle of history"
-                    );
                     return Err(ResumeError::ToolResultMismatch);
                 }
                 return Ok(Some(ResumeContinuation::ToolSuffix(

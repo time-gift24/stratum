@@ -53,7 +53,10 @@ tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 # OTLP trace export (CONSTITUTION §4): activated only when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set; the reqwest-blocking HTTP transport
-# keeps the tree free of the tonic gRPC stack.
+# keeps the tree free of the tonic gRPC stack. The OpenTelemetry crates are
+# Apache-2.0 and tracing-opentelemetry is MIT; default features stay disabled
+# on the exporter to limit protocol/dependency surface, and it receives only
+# the already-redacted tracing spans emitted by this process.
 opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }

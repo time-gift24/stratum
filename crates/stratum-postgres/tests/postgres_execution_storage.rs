@@ -12,16 +12,17 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use stratum_core::{
-    AgentId, AgentVersionId, ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel,
-    DecideToolCallDecisionRecord, DurableAgentEvent, ExtensionSetVersionId, HookDecisionRecord,
-    HookHandlerVersionId, HookInputDigest, HookInvocationId, HookPoint, ModelConfig, ModelId,
-    SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName, ToolSetFingerprint, TurnId,
-    TurnRuntimeSnapshot,
+    AgentId, AgentRuntimeId, AgentVersionTag, ApprovalDecision, ApprovalId, CallId, ChatMessage,
+    DangerLevel, DecideToolCallDecisionRecord, DurableAgentEvent, ExtensionSetVersionId,
+    HookDecisionRecord, HookHandlerVersionId, HookInputDigest, HookInvocationId, HookPoint,
+    ModelConfig, ModelId, SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName,
+    ToolSetFingerprint, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_postgres::{
-    AppendEvent, ApprovalLookup, BeginTurn, CompactionInput, CreateAgent, CreateAgentOutcome,
-    EVENT_SEQ_MAX, HistoryQuery, HookInvocationLookup, PostgresBackend, PostgresError,
-    ResolveApproval, ResolveApprovalOutcome, ResumeSliceQuery, VersionedKind,
+    AppendEvent, ApprovalLookup, BeginTurn, CompactionInput, CreateAgentRuntime,
+    CreateAgentRuntimeOutcome, EVENT_SEQ_MAX, HistoryQuery, HookInvocationLookup, PostgresBackend,
+    PostgresError, ResolveApproval, ResolveApprovalOutcome, ResolvedDefinitionV1, ResumeSliceQuery,
+    VersionedKind,
 };
 use tokio::sync::Barrier;
 use uuid::Uuid;
@@ -45,7 +46,7 @@ async fn reset_backend() -> PostgresBackend {
         .await
         .expect("postgres backend connects and migrates");
     let pool = raw_pool().await;
-    sqlx::query("TRUNCATE transcript_compactions, durable_events, agent_state, agents")
+    sqlx::query("TRUNCATE transcript_compactions, durable_events, agent_states, agents")
         .execute(&pool)
         .await
         .expect("tables truncate");
@@ -66,9 +67,9 @@ fn fingerprint(byte: char) -> ToolSetFingerprint {
         .expect("fingerprint is valid")
 }
 
-fn snapshot(model: ModelConfig) -> TurnRuntimeSnapshot {
+fn snapshot(agent_id: AgentId, model: ModelConfig) -> TurnRuntimeSnapshot {
     TurnRuntimeSnapshot::new(
-        AgentVersionId::new(),
+        agent_id,
         model,
         fingerprint('a'),
         SkillSetVersionId::new(),
@@ -77,50 +78,65 @@ fn snapshot(model: ModelConfig) -> TurnRuntimeSnapshot {
     )
 }
 
-fn create_command(template: &str, key: Uuid, model_override: Option<ModelConfig>) -> CreateAgent {
-    let effective = model_override
-        .clone()
-        .unwrap_or_else(|| model_config("default-model"));
-    CreateAgent {
-        agent_id: AgentId::new(),
-        agent_version_id: AgentVersionId::new(),
+fn create_command(
+    template: &str,
+    key: Uuid,
+    model_override: Option<ModelConfig>,
+) -> CreateAgentRuntime {
+    let template_model = model_config("default-model");
+    let effective = model_override.unwrap_or_else(|| template_model.clone());
+    CreateAgentRuntime {
         idempotency_key: key,
-        source_template_name: template.to_owned(),
-        creation_model_override: model_override,
-        resolved_definition: json!({
-            "name": template,
-            "system_prompt": "you are a test agent",
-            "tools": ["echo"],
-            "model": effective,
-        }),
-        default_model_config: effective,
+        name: template.to_owned(),
+        version: AgentVersionTag::new("v1").expect("static version tag is valid"),
+        resolved_definition: ResolvedDefinitionV1 {
+            prompt: "you are a test agent".to_owned(),
+            tools: vec![ToolName::from("echo")],
+            model: template_model,
+        },
+        model_config: effective,
     }
 }
 
-async fn create_agent(backend: &PostgresBackend, template: &str) -> AgentId {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TestRuntime {
+    agent_runtime_id: AgentRuntimeId,
+    agent_id: AgentId,
+}
+
+impl TestRuntime {
+    fn as_uuid(self) -> Uuid {
+        self.agent_runtime_id.as_uuid()
+    }
+}
+
+async fn create_agent(backend: &PostgresBackend, template: &str) -> TestRuntime {
     let outcome = backend
-        .create_agent(create_command(template, Uuid::now_v7(), None))
+        .create_agent_runtime(create_command(template, Uuid::now_v7(), None))
         .await
         .expect("create commits");
     match outcome {
-        CreateAgentOutcome::Created { agent_id } => agent_id,
+        CreateAgentRuntimeOutcome::Created(runtime) => TestRuntime {
+            agent_runtime_id: runtime.agent_runtime_id,
+            agent_id: runtime.agent_id,
+        },
         _ => panic!("fresh key must create"),
     }
 }
 
 fn begin_command(
-    agent_id: AgentId,
+    runtime: TestRuntime,
     expected: Option<TurnId>,
     session_id: SessionId,
 ) -> (BeginTurn, TurnId) {
     let turn_id = TurnId::new();
     (
         BeginTurn {
-            agent_id,
+            agent_runtime_id: runtime.agent_runtime_id,
             expected_current_turn_id: expected,
             turn_id,
             session_id,
-            snapshot: snapshot(model_config("turn-model")),
+            snapshot: snapshot(runtime.agent_id, model_config("turn-model")),
         },
         turn_id,
     )
@@ -128,9 +144,9 @@ fn begin_command(
 
 /// Creates an agent and admits its first turn; returns
 /// `(session_id, turn_id)` with `LoopStarted` at sequence 1.
-async fn running_turn(backend: &PostgresBackend, agent_id: AgentId) -> (SessionId, TurnId) {
+async fn running_turn(backend: &PostgresBackend, runtime: TestRuntime) -> (SessionId, TurnId) {
     let session_id = SessionId::new();
-    let (command, turn_id) = begin_command(agent_id, None, session_id);
+    let (command, turn_id) = begin_command(runtime, None, session_id);
     let receipt = backend
         .begin_turn(command)
         .await
@@ -140,32 +156,33 @@ async fn running_turn(backend: &PostgresBackend, agent_id: AgentId) -> (SessionI
 }
 
 fn append_command(
-    agent_id: AgentId,
+    runtime: TestRuntime,
     session_id: SessionId,
     turn_id: TurnId,
     event: DurableAgentEvent,
 ) -> AppendEvent {
     AppendEvent {
-        agent_id,
+        agent_runtime_id: runtime.agent_runtime_id,
+        agent_id: runtime.agent_id,
         session_id,
         turn_id,
         event,
         approval_hook_invocation_id: None,
-        default_model_update: None,
+        model_config_update: None,
         compaction: None,
     }
 }
 
 async fn append_message(
     backend: &PostgresBackend,
-    agent_id: AgentId,
+    runtime: TestRuntime,
     session_id: SessionId,
     turn_id: TurnId,
     text: &str,
 ) -> u64 {
     backend
         .append_event(append_command(
-            agent_id,
+            runtime,
             session_id,
             turn_id,
             DurableAgentEvent::MessageAppended {
@@ -197,13 +214,14 @@ fn approval_request(approval_id: ApprovalId) -> DurableAgentEvent {
 }
 
 fn resolve_command(
-    agent_id: AgentId,
+    runtime: TestRuntime,
     turn_id: TurnId,
     approval_id: ApprovalId,
     decision: ApprovalDecision,
 ) -> ResolveApproval {
     ResolveApproval {
-        agent_id,
+        agent_runtime_id: runtime.agent_runtime_id,
+        agent_id: runtime.agent_id,
         approval_id,
         turn_id,
         decision,
@@ -225,7 +243,7 @@ async fn baseline_applies_and_forbidden_beta_schema_is_absent() {
     .expect("tables list");
     for expected in [
         "agents",
-        "agent_state",
+        "agent_states",
         "durable_events",
         "transcript_compactions",
     ] {
@@ -252,7 +270,7 @@ async fn baseline_applies_and_forbidden_beta_schema_is_absent() {
     .expect("columns list");
     // No per-turn sequence frontier and no message sequence allocator.
     assert!(!columns.contains(&"durable_events.seq".to_owned()));
-    assert!(!columns.contains(&"agent_state.next_message_seq".to_owned()));
+    assert!(!columns.contains(&"agent_states.next_message_seq".to_owned()));
     assert!(
         !columns
             .iter()
@@ -262,68 +280,157 @@ async fn baseline_applies_and_forbidden_beta_schema_is_absent() {
 
 #[tokio::test]
 #[ignore = "requires the compose Postgres stack"]
-async fn create_is_idempotent_per_key_and_conflicts_on_different_requests() {
+async fn create_is_key_only_idempotent_and_versions_are_immutable() {
     let backend = reset_backend().await;
     let key = Uuid::now_v7();
     let command = create_command("alpha", key, None);
 
     let first = backend
-        .create_agent(command.clone())
+        .create_agent_runtime(command.clone())
         .await
         .expect("first create commits");
-    let CreateAgentOutcome::Created { agent_id } = first else {
+    let CreateAgentRuntimeOutcome::Created(created) = first else {
         panic!("first create must create");
     };
 
     let replay = backend
-        .create_agent(command.clone())
+        .create_agent_runtime(command.clone())
         .await
         .expect("replay succeeds");
-    assert_eq!(replay, CreateAgentOutcome::Replay { agent_id });
+    assert_eq!(replay, CreateAgentRuntimeOutcome::Replay(created.clone()));
 
+    // A key hit is unconditional command replay: changed template and model
+    // input are not reinterpreted or compared.
     let mut other_template = command.clone();
-    other_template.source_template_name = "beta".to_owned();
-    let conflict = backend
-        .create_agent(other_template)
+    other_template.name = "beta".to_owned();
+    other_template.model_config = model_config("other-model");
+    let replay = backend
+        .create_agent_runtime(other_template)
         .await
-        .expect_err("different template conflicts");
-    assert!(matches!(
-        conflict,
-        PostgresError::IdempotencyKeyConflict { idempotency_key } if idempotency_key == key
-    ));
+        .expect("key replay ignores changed body");
+    assert_eq!(replay.runtime(), &created);
 
-    let mut other_override = command.clone();
-    other_override.creation_model_override = Some(model_config("other-model"));
-    let conflict = backend
-        .create_agent(other_override)
-        .await
-        .expect_err("different override conflicts");
-    assert!(matches!(
-        conflict,
-        PostgresError::IdempotencyKeyConflict { .. }
-    ));
-
-    // A different key from the same template creates a distinct Agent.
+    // A different key and the same exact name/tag/definition create a distinct
+    // runtime pinned to the same immutable Agent definition.
     let second = backend
-        .create_agent(create_command("alpha", Uuid::now_v7(), None))
+        .create_agent_runtime(create_command("alpha", Uuid::now_v7(), None))
         .await
         .expect("second key creates");
-    let CreateAgentOutcome::Created {
-        agent_id: second_id,
-    } = second
-    else {
+    let CreateAgentRuntimeOutcome::Created(second) = second else {
         panic!("second key must create");
     };
-    assert_ne!(agent_id, second_id);
+    assert_ne!(created.agent_runtime_id, second.agent_runtime_id);
+    assert_eq!(created.agent_id, second.agent_id);
+
+    // Reusing an exact name/tag for different immutable content is rejected.
+    let mut different_definition = create_command("alpha", Uuid::now_v7(), None);
+    different_definition.resolved_definition.prompt = "changed prompt".to_owned();
+    let conflict = backend
+        .create_agent_runtime(different_definition)
+        .await
+        .expect_err("immutable version conflict is rejected");
+    assert!(matches!(
+        conflict,
+        PostgresError::AgentVersionConflict { version } if version.as_str() == "v1"
+    ));
+
+    // A different author tag is a distinct immutable Agent definition.
+    let mut tagged = create_command("alpha", Uuid::now_v7(), None);
+    tagged.version = AgentVersionTag::new("preview-2").expect("tag is valid");
+    let tagged = backend
+        .create_agent_runtime(tagged)
+        .await
+        .expect("different tag creates");
+    assert_ne!(tagged.runtime().agent_id, created.agent_id);
 
     let state = backend
-        .read_agent_state(agent_id)
+        .read_agent_runtime_state(created.agent_runtime_id)
         .await
         .expect("state reads");
     assert_eq!(state.status, stratum_postgres::AgentStatus::Idle);
     assert_eq!(state.session_id, None);
     assert_eq!(state.current_turn_id, None);
     assert_eq!(state.last_event_seq, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn key_and_thin_state_reads_fail_closed_when_definition_pin_is_missing() {
+    let backend = reset_backend().await;
+    let key = Uuid::now_v7();
+    let created = backend
+        .create_agent_runtime(create_command("alpha", key, None))
+        .await
+        .expect("runtime creates")
+        .runtime()
+        .clone();
+    let missing_agent_id = AgentId::new();
+    let pool = raw_pool().await;
+    sqlx::query("ALTER TABLE agent_states DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await
+        .expect("foreign-key trigger disables in disposable test database");
+    sqlx::query("UPDATE agent_states SET agent_id = $2 WHERE id = $1")
+        .bind(created.agent_runtime_id.as_uuid())
+        .bind(missing_agent_id.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("definition pin corrupts");
+
+    let lookup = backend.find_agent_runtime_by_idempotency_key(key).await;
+    let replay = backend
+        .create_agent_runtime(create_command("ignored-on-replay", key, None))
+        .await;
+    let state = backend
+        .read_agent_runtime_state(created.agent_runtime_id)
+        .await;
+
+    sqlx::query("UPDATE agent_states SET agent_id = $2 WHERE id = $1")
+        .bind(created.agent_runtime_id.as_uuid())
+        .bind(created.agent_id.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("definition pin restores");
+    sqlx::query("ALTER TABLE agent_states ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await
+        .expect("foreign-key trigger restores");
+    sqlx::query(
+        "UPDATE agents SET resolved_definition = \
+             resolved_definition || '{\"future_field\":true}'::jsonb \
+         WHERE id = $1",
+    )
+    .bind(created.agent_id.as_uuid())
+    .execute(&pool)
+    .await
+    .expect("definition shape corrupts");
+    let definition_reuse = backend
+        .create_agent_runtime(create_command("alpha", Uuid::now_v7(), None))
+        .await;
+    let view = backend
+        .read_agent_runtime_view(created.agent_runtime_id)
+        .await;
+
+    assert!(matches!(
+        lookup,
+        Err(PostgresError::DurableStateCorrupt { .. })
+    ));
+    assert!(matches!(
+        replay,
+        Err(PostgresError::DurableStateCorrupt { .. })
+    ));
+    assert!(matches!(
+        state,
+        Err(PostgresError::DurableStateCorrupt { .. })
+    ));
+    assert!(matches!(
+        definition_reuse,
+        Err(PostgresError::DurableStateCorrupt { .. })
+    ));
+    assert!(matches!(
+        view,
+        Err(PostgresError::DurableStateCorrupt { .. })
+    ));
 }
 
 #[tokio::test]
@@ -337,7 +444,7 @@ async fn concurrent_create_with_one_key_converges_on_one_agent() {
         let backend = backend.clone();
         tasks.spawn(async move {
             backend
-                .create_agent(create_command("alpha", key, None))
+                .create_agent_runtime(create_command("alpha", key, None))
                 .await
                 .expect("concurrent create resolves")
         });
@@ -349,22 +456,47 @@ async fn concurrent_create_with_one_key_converges_on_one_agent() {
 
     let created = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, CreateAgentOutcome::Created { .. }))
+        .filter(|outcome| matches!(outcome, CreateAgentRuntimeOutcome::Created(_)))
         .count();
     assert_eq!(created, 1, "exactly one concurrent create wins");
-    let agent_ids: Vec<AgentId> = outcomes
+    let runtime_ids: Vec<AgentRuntimeId> = outcomes
         .iter()
-        .map(|outcome| match outcome {
-            CreateAgentOutcome::Created { agent_id } | CreateAgentOutcome::Replay { agent_id } => {
-                *agent_id
-            }
-            _ => panic!("outcome is closed"),
-        })
+        .map(|outcome| outcome.runtime().agent_runtime_id)
         .collect();
     assert!(
-        agent_ids.windows(2).all(|pair| pair[0] == pair[1]),
-        "all outcomes reference the same agent"
+        runtime_ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "all outcomes reference the same runtime"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn runtimes_sharing_one_agent_definition_keep_isolated_ledgers() {
+    let backend = reset_backend().await;
+    let first = create_agent(&backend, "alpha").await;
+    let second = create_agent(&backend, "alpha").await;
+
+    assert_eq!(first.agent_id, second.agent_id, "definition row is reused");
+    assert_ne!(first.agent_runtime_id, second.agent_runtime_id);
+
+    let (session, turn) = running_turn(&backend, first).await;
+    append_message(&backend, first, session, turn, "first runtime only").await;
+
+    let first_rows = backend
+        .read_events_range(first.agent_runtime_id, 0, 10)
+        .await
+        .expect("first ledger reads");
+    assert_eq!(first_rows.len(), 2);
+    let second_rows = backend
+        .read_events_range(second.agent_runtime_id, 0, 10)
+        .await
+        .expect("second ledger reads");
+    assert!(second_rows.is_empty());
+    let second_state = backend
+        .read_agent_runtime_state(second.agent_runtime_id)
+        .await
+        .expect("second state reads");
+    assert_eq!(second_state.last_event_seq, 0);
 }
 
 #[tokio::test]
@@ -373,13 +505,16 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
     let backend = reset_backend().await;
 
     // Unknown agent.
-    let missing = AgentId::new();
+    let missing = TestRuntime {
+        agent_runtime_id: AgentRuntimeId::new(),
+        agent_id: AgentId::new(),
+    };
     let (command, _) = begin_command(missing, None, SessionId::new());
     let error = backend
         .begin_turn(command)
         .await
         .expect_err("unknown agent");
-    assert!(matches!(error, PostgresError::AgentNotFound { .. }));
+    assert!(matches!(error, PostgresError::AgentRuntimeNotFound { .. }));
 
     let agent = create_agent(&backend, "alpha").await;
     let session = SessionId::new();
@@ -403,6 +538,30 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
         .await
         .expect("admission commits");
     assert_eq!(receipt.event_seq, 1);
+    backend
+        .revalidate_resume(agent.agent_runtime_id, agent.agent_id, session, turn_one)
+        .await
+        .expect("exact running resume revalidates");
+    let error = backend
+        .revalidate_resume(
+            agent.agent_runtime_id,
+            agent.agent_id,
+            SessionId::new(),
+            turn_one,
+        )
+        .await
+        .expect_err("foreign resume session is rejected");
+    assert!(matches!(error, PostgresError::SessionMismatch { .. }));
+    let error = backend
+        .revalidate_resume(
+            agent.agent_runtime_id,
+            agent.agent_id,
+            session,
+            TurnId::new(),
+        )
+        .await
+        .expect_err("stale resume turn is rejected");
+    assert!(matches!(error, PostgresError::StaleTurn { .. }));
 
     // A stale expectation fails as StaleTurn even while the agent is running:
     // a lost-response retry with the old expected value must never see busy.
@@ -429,7 +588,7 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
     // A running agent rejects admission when the expectation still matches.
     let (command, _) = begin_command(agent, Some(turn_one), session);
     let error = backend.begin_turn(command).await.expect_err("busy agent");
-    assert!(matches!(error, PostgresError::AgentBusy { .. }));
+    assert!(matches!(error, PostgresError::AgentRuntimeBusy { .. }));
 
     // A second agent cannot run on the same session.
     let other = create_agent(&backend, "beta").await;
@@ -441,11 +600,14 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
     ));
     // The failed admission left no durable rows behind.
     let rows = backend
-        .read_events_range(other, 0, 100)
+        .read_events_range(other.agent_runtime_id, 0, 100)
         .await
         .expect("range reads");
     assert!(rows.is_empty());
-    let state = backend.read_agent_state(other).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(other.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.status, stratum_postgres::AgentStatus::Idle);
 
     // Finish the turn; the next admission reuses the bound session.
@@ -461,6 +623,11 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
         ))
         .await
         .expect("terminal appends");
+    let error = backend
+        .revalidate_resume(agent.agent_runtime_id, agent.agent_id, session, turn_one)
+        .await
+        .expect_err("terminal turn cannot resume");
+    assert!(matches!(error, PostgresError::TurnNotRunning { .. }));
 
     let (command, _) = begin_command(agent, Some(turn_one), SessionId::new());
     let error = backend
@@ -489,9 +656,77 @@ async fn begin_turn_enforces_cas_session_binding_and_single_active() {
         .expect_err("still busy while another turn runs");
     assert!(matches!(error, PostgresError::SessionBusy { .. }));
 
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.status, stratum_postgres::AgentStatus::Running);
     assert_eq!(state.current_turn_id, Some(turn_two));
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn durable_writers_fail_closed_when_the_definition_pin_differs() {
+    let backend = reset_backend().await;
+    let agent = create_agent(&backend, "alpha").await;
+    let (session, turn) = running_turn(&backend, agent).await;
+    let foreign_agent_id = AgentId::new();
+
+    let mut append = append_command(
+        agent,
+        session,
+        turn,
+        DurableAgentEvent::MessageAppended {
+            message: ChatMessage::user("must not commit"),
+        },
+    );
+    append.agent_id = foreign_agent_id;
+    let error = backend
+        .append_event(append)
+        .await
+        .expect_err("foreign definition pin rejects append");
+    assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+
+    let error = backend
+        .revalidate_resume(agent.agent_runtime_id, foreign_agent_id, session, turn)
+        .await
+        .expect_err("foreign definition pin rejects resume install");
+    assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+
+    let approval_id = ApprovalId::new();
+    let mut request = append_command(agent, session, turn, approval_request(approval_id));
+    request.approval_hook_invocation_id = Some(HookInvocationId::new());
+    let request_seq = backend
+        .append_event(request)
+        .await
+        .expect("approval request commits")
+        .event_seq;
+    let mut resolve = resolve_command(agent, turn, approval_id, ApprovalDecision::Approve);
+    resolve.agent_id = foreign_agent_id;
+    let error = backend
+        .resolve_approval(resolve)
+        .await
+        .expect_err("foreign definition pin rejects resolution");
+    assert!(matches!(error, PostgresError::DurableStateCorrupt { .. }));
+
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
+    assert_eq!(state.last_event_seq, request_seq);
+    let rows = backend
+        .read_events_range(agent.agent_runtime_id, 0, state.last_event_seq)
+        .await
+        .expect("range reads");
+    assert_eq!(
+        rows.len(),
+        usize::try_from(request_seq).expect("test sequence fits")
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| { matches!(row.event, DurableAgentEvent::ToolApprovalResolved { .. }) })
+    );
 }
 
 #[tokio::test]
@@ -530,11 +765,14 @@ async fn concurrent_appends_linearize_with_gapless_sequence() {
         "adjacent unique sequences"
     );
 
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.last_event_seq, 9);
 
     let rows = backend
-        .read_events_range(agent, 0, 9)
+        .read_events_range(agent.agent_runtime_id, 0, 9)
         .await
         .expect("range reads");
     let persisted: Vec<u64> = rows.iter().map(|row| row.event_seq).collect();
@@ -557,7 +795,7 @@ async fn approval_resolver_and_terminal_append_linearize_without_gaps() {
         .event_seq;
 
     // Both writers cross the same barrier before contending for the exact
-    // agent_state row lock. The resolver and the kernel-style terminal append
+    // agent_states row lock. The resolver and the kernel-style terminal append
     // must therefore linearize into exactly one of the two outcomes below.
     let barrier = Arc::new(Barrier::new(3));
     let resolve_task = {
@@ -600,12 +838,15 @@ async fn approval_resolver_and_terminal_append_linearize_without_gaps() {
         .await
         .expect("terminal task joins")
         .expect("terminal append always commits");
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.status, stratum_postgres::AgentStatus::Finished);
     assert_eq!(state.last_event_seq, terminal_receipt.event_seq);
 
     let rows = backend
-        .read_events_range(agent, 0, state.last_event_seq)
+        .read_events_range(agent.agent_runtime_id, 0, state.last_event_seq)
         .await
         .expect("truth range reads");
     let persisted: Vec<u64> = rows.iter().map(|row| row.event_seq).collect();
@@ -709,12 +950,37 @@ async fn failed_append_rolls_back_without_consuming_sequence() {
         .expect_err("missing companion fails");
     assert!(matches!(error, PostgresError::InvalidCommand(_)));
 
+    let mut conflicting = append_command(
+        agent,
+        session,
+        turn,
+        DurableAgentEvent::TranscriptCompacted {
+            upto: 1,
+            summary: ChatMessage::system("event summary"),
+            compacted_iteration: 1,
+        },
+    );
+    conflicting.compaction = Some(CompactionInput {
+        compacted_iteration: 1,
+        upto: 1,
+        retained_from_event_seq: 2,
+        summary: ChatMessage::system("different companion summary"),
+    });
+    let error = backend
+        .append_event(conflicting)
+        .await
+        .expect_err("duplicated compaction facts cannot disagree");
+    assert!(matches!(error, PostgresError::InvalidCommand(_)));
+
     // The next successful append reuses the next sequence value: no gap.
     assert_eq!(
         append_message(&backend, agent, session, turn, "after failure").await,
         3
     );
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.last_event_seq, 3);
 }
 
@@ -786,7 +1052,8 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     // The durable payload is exactly the empty object; the summary lives only
     // in the companion.
     let payload: Value = sqlx::query_scalar(
-        "SELECT payload FROM durable_events WHERE agent_id = $1 AND event_seq = 4",
+        "SELECT payload FROM durable_events \
+         WHERE agent_runtime_id = $1 AND event_seq = 4",
     )
     .bind(agent.as_uuid())
     .fetch_one(&raw_pool().await)
@@ -796,7 +1063,7 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
 
     // The typed event is materialized by joining the companion.
     let rows = backend
-        .read_events_range(agent, 0, 4)
+        .read_events_range(agent.agent_runtime_id, 0, 4)
         .await
         .expect("range reads");
     assert_eq!(rows.len(), 4);
@@ -811,7 +1078,7 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
 
     // The latest companion is visible at or below its own sequence only.
     let companion = backend
-        .read_latest_companion(agent, 4)
+        .read_latest_companion(agent.agent_runtime_id, 4)
         .await
         .expect("companion reads")
         .expect("companion exists");
@@ -820,14 +1087,14 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     assert_eq!(companion.turn_id, turn);
     set_event_version(agent, receipt.event_seq, 2).await;
     let error = backend
-        .read_latest_companion(agent, receipt.event_seq)
+        .read_latest_companion(agent.agent_runtime_id, receipt.event_seq)
         .await
         .expect_err("unsupported companion discriminator version fails closed");
     assert_incompatible(error, 2);
     set_event_version(agent, receipt.event_seq, 1).await;
     assert!(
         backend
-            .read_latest_companion(agent, 3)
+            .read_latest_companion(agent.agent_runtime_id, 3)
             .await
             .expect("companion reads")
             .is_none()
@@ -836,7 +1103,7 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     // History exposes the compaction as a materialized typed marker.
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: 4,
             before_event_seq: None,
             limit: 50,
@@ -844,7 +1111,7 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
         .await
         .expect("history reads");
     let seqs: Vec<u64> = page.items.iter().map(|item| item.event_seq).collect();
-    assert_eq!(seqs, vec![2, 3, 4]);
+    assert_eq!(seqs, vec![1, 2, 3, 4]);
     assert!(matches!(
         page.items.last().map(|item| &item.event),
         Some(DurableAgentEvent::TranscriptCompacted { .. })
@@ -856,7 +1123,7 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     let pool = raw_pool().await;
     sqlx::query(
         "UPDATE transcript_compactions SET retained_from_event_seq = 1 \
-         WHERE agent_id = $1 AND event_seq = $2",
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
     )
     .bind(agent.as_uuid())
     .bind(i64::try_from(receipt.event_seq).expect("test sequence fits bigint"))
@@ -864,14 +1131,14 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     .await
     .expect("locator corruption applies");
     let corrupted = backend
-        .read_latest_companion(agent, receipt.event_seq)
+        .read_latest_companion(agent.agent_runtime_id, receipt.event_seq)
         .await
         .expect("corrupted locator still reads")
         .expect("companion exists");
     assert_eq!(corrupted.retained_from_event_seq, 1);
     let stored_pointer: i64 = sqlx::query_scalar(
         "SELECT retained_from_event_seq FROM transcript_compactions \
-         WHERE agent_id = $1 AND event_seq = $2",
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
     )
     .bind(agent.as_uuid())
     .bind(i64::try_from(receipt.event_seq).expect("test sequence fits bigint"))
@@ -879,6 +1146,128 @@ async fn transcript_compaction_commits_atomically_and_validates_pointer() {
     .await
     .expect("stored locator reads");
     assert_eq!(stored_pointer, 1, "read path never repairs the locator");
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn common_reads_fail_closed_on_missing_companion_and_snapshot_pin_mismatch() {
+    let backend = reset_backend().await;
+    let compacted = create_agent(&backend, "alpha").await;
+    let (session, turn) = running_turn(&backend, compacted).await;
+    let retained = append_message(&backend, compacted, session, turn, "retained").await;
+    let summary = ChatMessage::system("[stratum:transcript-compacted]\nsummary");
+    let mut command = append_command(
+        compacted,
+        session,
+        turn,
+        DurableAgentEvent::TranscriptCompacted {
+            upto: 1,
+            summary: summary.clone(),
+            compacted_iteration: 1,
+        },
+    );
+    command.compaction = Some(CompactionInput {
+        compacted_iteration: 1,
+        upto: 1,
+        retained_from_event_seq: retained,
+        summary,
+    });
+    let compacted_seq = backend
+        .append_event(command)
+        .await
+        .expect("compaction appends")
+        .event_seq;
+    sqlx::query(
+        "DELETE FROM transcript_compactions \
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
+    )
+    .bind(compacted.as_uuid())
+    .bind(i64::try_from(compacted_seq).expect("test sequence fits bigint"))
+    .execute(&raw_pool().await)
+    .await
+    .expect("companion deletes");
+
+    let error = backend
+        .read_latest_companion(compacted.agent_runtime_id, compacted_seq)
+        .await
+        .expect_err("latest companion read sees missing companion");
+    assert_corrupt(error);
+    let error = backend
+        .read_events_range(compacted.agent_runtime_id, 0, compacted_seq)
+        .await
+        .expect_err("general range sees missing companion");
+    assert_corrupt(error);
+
+    let mismatched = create_agent(&backend, "beta").await;
+    let (_session, turn) = running_turn(&backend, mismatched).await;
+    let mut raw_snapshot: Value = sqlx::query_scalar(
+        "SELECT runtime_snapshot FROM durable_events \
+         WHERE agent_runtime_id = $1 AND event_seq = 1",
+    )
+    .bind(mismatched.as_uuid())
+    .fetch_one(&raw_pool().await)
+    .await
+    .expect("snapshot reads");
+    raw_snapshot["agent_id"] = json!(AgentId::new());
+    sqlx::query(
+        "UPDATE durable_events SET runtime_snapshot = $2 \
+         WHERE agent_runtime_id = $1 AND event_seq = 1",
+    )
+    .bind(mismatched.as_uuid())
+    .bind(raw_snapshot)
+    .execute(&raw_pool().await)
+    .await
+    .expect("snapshot pin corrupts");
+
+    let error = backend
+        .read_events_range(mismatched.agent_runtime_id, 0, 1)
+        .await
+        .expect_err("dispatcher range validates snapshot pin");
+    assert_corrupt(error);
+    let error = backend
+        .read_history_page(HistoryQuery {
+            agent_runtime_id: mismatched.agent_runtime_id,
+            through_event_seq: 1,
+            before_event_seq: None,
+            limit: 10,
+        })
+        .await
+        .expect_err("product history validates snapshot pin");
+    assert_corrupt(error);
+    let error = backend
+        .read_loop_started(mismatched.agent_runtime_id, turn)
+        .await
+        .expect_err("specialized loop read validates snapshot pin");
+    assert_corrupt(error);
+    let error = backend
+        .read_agent_runtime_view(mismatched.agent_runtime_id)
+        .await
+        .expect_err("runtime view validates current snapshot pin");
+    assert_corrupt(error);
+
+    let extension_mismatch = create_agent(&backend, "gamma").await;
+    let (_session, turn) = running_turn(&backend, extension_mismatch).await;
+    sqlx::query(
+        "UPDATE durable_events SET payload = $2 \
+         WHERE agent_runtime_id = $1 AND event_seq = 1",
+    )
+    .bind(extension_mismatch.as_uuid())
+    .bind(json!({
+        "extension_set_version_id": ExtensionSetVersionId::new()
+    }))
+    .execute(&raw_pool().await)
+    .await
+    .expect("loop_started duplicate extension identity corrupts");
+    let error = backend
+        .read_events_range(extension_mismatch.agent_runtime_id, 0, 1)
+        .await
+        .expect_err("general range cross-checks loop_started identities");
+    assert_corrupt(error);
+    let error = backend
+        .read_loop_started(extension_mismatch.agent_runtime_id, turn)
+        .await
+        .expect_err("specialized loop read cross-checks duplicate identities");
+    assert_corrupt(error);
 }
 
 #[tokio::test]
@@ -897,12 +1286,12 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
     insert_illegal_companion(agent, message_event_seq, turn, 2).await;
 
     let error = backend
-        .read_events_range(agent, 0, message_event_seq)
+        .read_events_range(agent.agent_runtime_id, 0, message_event_seq)
         .await
         .expect_err("non-compaction companion fails closed");
     assert_corrupt(error);
 
-    // AgentView's latest-usage selector must join the same companion relation.
+    // AgentRuntimeView's latest-usage selector must join the same companion relation.
     let usage_agent = create_agent(&backend, "usage").await;
     let (usage_session, usage_turn) = running_turn(&backend, usage_agent).await;
     let usage_retained =
@@ -922,7 +1311,7 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
         .event_seq;
     insert_illegal_companion(usage_agent, usage_seq, usage_turn, usage_retained).await;
     let error = backend
-        .read_agent_view(usage_agent)
+        .read_agent_runtime_view(usage_agent.agent_runtime_id)
         .await
         .expect_err("latest usage companion fails closed");
     assert_corrupt(error);
@@ -961,13 +1350,13 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
     )
     .await;
     let error = backend
-        .read_agent_view(approval_agent)
+        .read_agent_runtime_view(approval_agent.agent_runtime_id)
         .await
         .expect_err("pending approval companion fails closed");
     assert_corrupt(error);
     let error = backend
         .read_approval(
-            approval_agent,
+            approval_agent.agent_runtime_id,
             approval_turn,
             ApprovalLookup::ByApprovalId(approval_id),
         )
@@ -1029,7 +1418,7 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
     )
     .await;
     let error = backend
-        .read_agent_view(resolved_agent)
+        .read_agent_runtime_view(resolved_agent.agent_runtime_id)
         .await
         .expect_err("resolved companion cannot silently exclude pending approval");
     assert_corrupt(error);
@@ -1070,7 +1459,7 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
     insert_illegal_companion(hook_agent, pending_seq, hook_turn, hook_retained).await;
     let error = backend
         .read_open_hook_invocation(HookInvocationLookup {
-            agent_id: hook_agent,
+            agent_runtime_id: hook_agent.agent_runtime_id,
             turn_id: hook_turn,
             point: HookPoint::DecideToolCall,
             iteration: 0,
@@ -1128,7 +1517,7 @@ async fn non_compaction_event_with_a_companion_row_fails_closed() {
     .await;
     let error = backend
         .read_open_hook_invocation(HookInvocationLookup {
-            agent_id: completed_agent,
+            agent_runtime_id: completed_agent.agent_runtime_id,
             turn_id: completed_turn,
             point: HookPoint::DecideToolCall,
             iteration: 0,
@@ -1196,7 +1585,11 @@ async fn approval_resolution_follows_the_exact_matrix() {
 
     // Handler lookups work by approval id and by hook invocation id.
     let facts = backend
-        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval_one))
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_one),
+        )
         .await
         .expect("approval reads")
         .expect("approval exists");
@@ -1204,14 +1597,21 @@ async fn approval_resolution_follows_the_exact_matrix() {
     assert_eq!(facts.hook_invocation_id, hook_one);
     assert_eq!(facts.resolution, None);
     let by_hook = backend
-        .read_approval(agent, turn, ApprovalLookup::ByHookInvocationId(hook_one))
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByHookInvocationId(hook_one),
+        )
         .await
         .expect("approval reads")
         .expect("approval exists");
     assert_eq!(by_hook.approval_id, approval_one);
 
     // The approval is pending in the view.
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.pending_approvals.len(), 1);
     assert_eq!(view.pending_approvals[0].approval_id, approval_one);
 
@@ -1242,6 +1642,25 @@ async fn approval_resolution_follows_the_exact_matrix() {
     };
     assert_eq!(receipt.event_seq, 3);
 
+    let resolved_facts = backend
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_one),
+        )
+        .await
+        .expect("resolved approval reads")
+        .expect("resolved approval exists");
+    assert_eq!(
+        resolved_facts
+            .resolution
+            .expect("resolution is derived")
+            .resolved_event_seq,
+        receipt.event_seq
+    );
+    assert_eq!(resolved_facts.consumed_event_seq, None);
+    assert_eq!(resolved_facts.invalidated_event_seq, None);
+
     // Identical retry is an idempotent success and appends nothing.
     let outcome = backend
         .resolve_approval(resolve_command(
@@ -1253,7 +1672,10 @@ async fn approval_resolution_follows_the_exact_matrix() {
         .await
         .expect("same decision succeeds");
     assert_eq!(outcome, ResolveApprovalOutcome::AlreadyResolvedSame);
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.last_event_seq, 3, "no second resolved row");
 
     // The opposite decision conflicts.
@@ -1271,6 +1693,32 @@ async fn approval_resolution_follows_the_exact_matrix() {
         PostgresError::ApprovalAlreadyResolved { .. }
     ));
 
+    // Matching kernel completion derives Consumed without a projection row.
+    let completion_seq = backend
+        .append_event(append_command(
+            agent,
+            session,
+            turn,
+            DurableAgentEvent::HookInvocationCompleted {
+                invocation_id: hook_one,
+                decision: HookDecisionRecord::DecideToolCall(DecideToolCallDecisionRecord::Execute),
+            },
+        ))
+        .await
+        .expect("matching hook completion appends")
+        .event_seq;
+    let consumed_facts = backend
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_one),
+        )
+        .await
+        .expect("consumed approval reads")
+        .expect("consumed approval exists");
+    assert_eq!(consumed_facts.consumed_event_seq, Some(completion_seq));
+    assert_eq!(consumed_facts.invalidated_event_seq, None);
+
     // A second approval stays independent, then the turn goes terminal.
     let approval_two = ApprovalId::new();
     let mut command = append_command(agent, session, turn, approval_request(approval_two));
@@ -1279,7 +1727,7 @@ async fn approval_resolution_follows_the_exact_matrix() {
         .append_event(command)
         .await
         .expect("second request appends");
-    backend
+    let terminal_seq = backend
         .append_event(append_command(
             agent,
             session,
@@ -1287,7 +1735,8 @@ async fn approval_resolution_follows_the_exact_matrix() {
             DurableAgentEvent::LoopCancelled { usage: usage(1) },
         ))
         .await
-        .expect("terminal appends");
+        .expect("terminal appends")
+        .event_seq;
 
     // Terminal invalidates the undecided approval — and takes priority over
     // the already-resolved one.
@@ -1301,6 +1750,29 @@ async fn approval_resolution_follows_the_exact_matrix() {
         .await
         .expect_err("terminal invalidates");
     assert!(matches!(error, PostgresError::ApprovalInvalidated { .. }));
+
+    let invalidated_facts = backend
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_two),
+        )
+        .await
+        .expect("invalidated approval reads")
+        .expect("invalidated approval exists");
+    assert_eq!(invalidated_facts.consumed_event_seq, None);
+    assert_eq!(invalidated_facts.invalidated_event_seq, Some(terminal_seq));
+    let consumed_facts = backend
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_one),
+        )
+        .await
+        .expect("consumed approval remains readable after terminal")
+        .expect("consumed approval exists");
+    assert_eq!(consumed_facts.consumed_event_seq, Some(completion_seq));
+    assert_eq!(consumed_facts.invalidated_event_seq, None);
     let error = backend
         .resolve_approval(resolve_command(
             agent,
@@ -1313,11 +1785,46 @@ async fn approval_resolution_follows_the_exact_matrix() {
     assert!(matches!(error, PostgresError::ApprovalInvalidated { .. }));
 
     // A terminal turn reports no pending approvals.
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert!(view.pending_approvals.is_empty());
     assert_eq!(view.status, stratum_postgres::AgentStatus::Cancelled);
 
-    // A resolution carrying the same Agent-wide approval identity but a
+    // A completion carrying the matching invocation identity cannot be moved
+    // behind a foreign Turn fence and then ignored by either derivation path.
+    sqlx::query(
+        "UPDATE durable_events SET turn_id = $3 \
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
+    )
+    .bind(agent.as_uuid())
+    .bind(i64::try_from(completion_seq).expect("test sequence fits bigint"))
+    .bind(TurnId::new().as_uuid())
+    .execute(&raw_pool().await)
+    .await
+    .expect("completion moves to a foreign turn");
+    let error = backend
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval_one),
+        )
+        .await
+        .expect_err("foreign-turn completion fails approval derivation closed");
+    assert_corrupt(error);
+    let error = backend
+        .resolve_approval(resolve_command(
+            agent,
+            turn,
+            approval_one,
+            ApprovalDecision::Approve,
+        ))
+        .await
+        .expect_err("foreign-turn completion fails resolver closed");
+    assert_corrupt(error);
+
+    // A resolution carrying the same AgentRuntime-scoped approval identity but a
     // foreign Turn must not consume the current request. The resolver detects
     // that impossible identity relation explicitly instead of falling through
     // to a unique-index error classified as store unavailability.
@@ -1347,16 +1854,19 @@ async fn approval_resolution_follows_the_exact_matrix() {
     else {
         panic!("foreign-turn fixture resolution must append");
     };
-    sqlx::query("UPDATE durable_events SET turn_id = $3 WHERE agent_id = $1 AND event_seq = $2")
-        .bind(foreign_agent.as_uuid())
-        .bind(i64::try_from(receipt.event_seq).expect("test sequence fits bigint"))
-        .bind(TurnId::new().as_uuid())
-        .execute(&raw_pool().await)
-        .await
-        .expect("resolution moves to a foreign turn");
+    sqlx::query(
+        "UPDATE durable_events SET turn_id = $3 \
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
+    )
+    .bind(foreign_agent.as_uuid())
+    .bind(i64::try_from(receipt.event_seq).expect("test sequence fits bigint"))
+    .bind(TurnId::new().as_uuid())
+    .execute(&raw_pool().await)
+    .await
+    .expect("resolution moves to a foreign turn");
 
     let view = backend
-        .read_agent_view(foreign_agent)
+        .read_agent_runtime_view(foreign_agent.agent_runtime_id)
         .await
         .expect("foreign resolution does not consume current request");
     assert_eq!(view.pending_approvals.len(), 1);
@@ -1412,17 +1922,17 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
         .await
         .expect("terminal appends");
     let barrier = backend
-        .read_agent_state(agent)
+        .read_agent_runtime_state(agent.agent_runtime_id)
         .await
         .expect("state reads")
         .last_event_seq;
     assert_eq!(barrier, 8);
 
-    // Full page: five messages plus the failed marker, ascending; finished is
-    // not a history marker and the hook row leaves a product-visible gap.
+    // Full page: LoopStarted, five messages and the failed marker, ascending;
+    // the internal hook row leaves a product-visible gap.
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: barrier,
             before_event_seq: None,
             limit: 50,
@@ -1430,9 +1940,9 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
         .await
         .expect("history reads");
     let seqs: Vec<u64> = page.items.iter().map(|item| item.event_seq).collect();
-    assert_eq!(seqs, vec![2, 3, 4, 5, 6, 8]);
+    assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 8]);
     assert!(!page.has_more);
-    assert_eq!(page.next_before_event_seq, Some(2));
+    assert_eq!(page.next_before_event_seq, Some(1));
     assert!(matches!(
         page.items.last().map(|item| &item.event),
         Some(DurableAgentEvent::LoopFailed { .. })
@@ -1441,7 +1951,7 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
     // Cursor pagination walks backwards in ascending pages.
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: barrier,
             before_event_seq: None,
             limit: 2,
@@ -1455,7 +1965,7 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
 
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: barrier,
             before_event_seq: page.next_before_event_seq,
             limit: 2,
@@ -1471,7 +1981,7 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
     while let Some(before) = cursor {
         let page = backend
             .read_history_page(HistoryQuery {
-                agent_id: agent,
+                agent_runtime_id: agent.agent_runtime_id,
                 through_event_seq: barrier,
                 before_event_seq: Some(before),
                 limit: 2,
@@ -1485,7 +1995,7 @@ async fn history_paginates_ascending_with_cursor_and_skips_internal_rows() {
             None
         };
     }
-    assert_eq!(walked, vec![2, 3], "all older rows exactly once");
+    assert_eq!(walked, vec![2, 3, 1], "all older rows exactly once");
 }
 
 #[tokio::test]
@@ -1500,14 +2010,14 @@ async fn history_soft_budget_keeps_first_oversized_item_whole() {
     append_message(&backend, agent, session, turn, &big).await;
     append_message(&backend, agent, session, turn, &big).await;
     let barrier = backend
-        .read_agent_state(agent)
+        .read_agent_runtime_state(agent.agent_runtime_id)
         .await
         .expect("state reads")
         .last_event_seq;
 
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: barrier,
             before_event_seq: None,
             limit: 10,
@@ -1523,13 +2033,13 @@ async fn history_soft_budget_keeps_first_oversized_item_whole() {
     let huge = "y".repeat(1_200_000);
     append_message(&backend, agent, session, turn, &huge).await;
     let barrier = backend
-        .read_agent_state(agent)
+        .read_agent_runtime_state(agent.agent_runtime_id)
         .await
         .expect("state reads")
         .last_event_seq;
     let page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: barrier,
             before_event_seq: None,
             limit: 1,
@@ -1562,7 +2072,10 @@ async fn started_only_turn_reconciles_with_atomic_loop_failed() {
         .expect("reconciliation appends");
     assert_eq!(receipt.event_seq, 2);
 
-    let state = backend.read_agent_state(agent).await.expect("state reads");
+    let state = backend
+        .read_agent_runtime_state(agent.agent_runtime_id)
+        .await
+        .expect("state reads");
     assert_eq!(state.status, stratum_postgres::AgentStatus::Failed);
     assert_eq!(state.session_id, Some(session));
     assert_eq!(state.current_turn_id, Some(turn), "recent turn is retained");
@@ -1589,7 +2102,7 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
     append_message(&backend, agent, session, turn, "hello").await;
 
     let started = backend
-        .read_loop_started(agent, turn)
+        .read_loop_started(agent.agent_runtime_id, turn)
         .await
         .expect("loop started reads");
     assert_eq!(started.event_seq, 1);
@@ -1603,7 +2116,7 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
 
     // Unknown turn.
     let error = backend
-        .read_loop_started(agent, TurnId::new())
+        .read_loop_started(agent.agent_runtime_id, TurnId::new())
         .await
         .expect_err("unknown turn");
     assert!(matches!(error, PostgresError::TurnNotFound { .. }));
@@ -1612,20 +2125,20 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
         .checked_add(1)
         .expect("u64 has room above bigint max");
     let error = backend
-        .read_events_range(agent, above_bigint, above_bigint)
+        .read_events_range(agent.agent_runtime_id, above_bigint, above_bigint)
         .await
         .expect_err("even an empty out-of-domain range is rejected");
     assert!(matches!(error, PostgresError::InvalidCommand(_)));
 
     // The exact slice verifies continuity and identity.
     let through = backend
-        .read_agent_state(agent)
+        .read_agent_runtime_state(agent.agent_runtime_id)
         .await
         .expect("state reads")
         .last_event_seq;
     let slice = backend
         .read_resume_slice(ResumeSliceQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             session_id: session,
             turn_id: turn,
             base_event_seq: base,
@@ -1641,7 +2154,7 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
 
     let error = backend
         .read_resume_slice(ResumeSliceQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             session_id: SessionId::new(),
             turn_id: turn,
             base_event_seq: base,
@@ -1653,7 +2166,7 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
 
     let error = backend
         .read_resume_slice(ResumeSliceQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             session_id: session,
             turn_id: turn,
             base_event_seq: base,
@@ -1665,14 +2178,14 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
 
     // Full-replay fallback reads from the ledger start.
     let replay = backend
-        .read_events_range(agent, 0, base)
+        .read_events_range(agent.agent_runtime_id, 0, base)
         .await
         .expect("replay range reads");
     assert!(replay.is_empty(), "nothing precedes the first turn");
 
     // Actual tail corruption is also rejected: the high-water still points to
     // `through`, but the final committed row is gone.
-    sqlx::query("DELETE FROM durable_events WHERE agent_id = $1 AND event_seq = $2")
+    sqlx::query("DELETE FROM durable_events WHERE agent_runtime_id = $1 AND event_seq = $2")
         .bind(agent.as_uuid())
         .bind(i64::try_from(through).expect("test sequence fits bigint"))
         .execute(&raw_pool().await)
@@ -1680,7 +2193,7 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
         .expect("tail row deletes");
     let error = backend
         .read_resume_slice(ResumeSliceQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             session_id: session,
             turn_id: turn,
             base_event_seq: base,
@@ -1693,17 +2206,20 @@ async fn resume_reads_verify_snapshot_identity_and_continuity() {
 
 #[tokio::test]
 #[ignore = "requires the compose Postgres stack"]
-async fn agent_view_derives_barrier_usage_and_default_model_updates() {
+async fn agent_view_derives_barrier_usage_and_model_config_updates() {
     let backend = reset_backend().await;
     let agent = create_agent(&backend, "alpha").await;
 
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.status, stratum_postgres::AgentStatus::Idle);
     assert_eq!(view.snapshot_event_seq, 0);
     assert_eq!(view.telemetry_floor_event_seq, 0);
     assert!(view.pending_approvals.is_empty());
     assert_eq!(view.latest_usage, None);
-    assert_eq!(view.source_template_name, "alpha");
+    assert_eq!(view.agent_name, "alpha");
 
     let (session, turn) = running_turn(&backend, agent).await;
 
@@ -1716,15 +2232,19 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
             message: ChatMessage::user("hello"),
         },
     );
-    command.default_model_update = Some(model_config("upgraded-model"));
+    command.model_config_update = Some(model_config("upgraded-model"));
     backend
         .append_event(command)
         .await
         .expect("first message commits");
-    let view = backend.read_agent_view(agent).await.expect("view reads");
-    assert_eq!(view.default_model_config, model_config("upgraded-model"));
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
+    assert_eq!(view.model_config, model_config("upgraded-model"));
 
-    // An identical replacement is a no-op.
+    // A replacement is storage-valid only on the first user message, even if
+    // a later caller repeats the already-current value.
     let mut command = append_command(
         agent,
         session,
@@ -1733,10 +2253,18 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
             message: ChatMessage::user("again"),
         },
     );
-    command.default_model_update = Some(model_config("upgraded-model"));
-    backend.append_event(command).await.expect("no-op commits");
-    let view = backend.read_agent_view(agent).await.expect("view reads");
-    assert_eq!(view.default_model_config, model_config("upgraded-model"));
+    command.model_config_update = Some(model_config("upgraded-model"));
+    let error = backend
+        .append_event(command)
+        .await
+        .expect_err("later model replacement is rejected");
+    assert!(matches!(error, PostgresError::InvalidCommand(_)));
+    append_message(&backend, agent, session, turn, "again").await;
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
+    assert_eq!(view.model_config, model_config("upgraded-model"));
 
     // Usage derives from the latest usage-carrying event within the barrier.
     backend
@@ -1751,7 +2279,10 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
         ))
         .await
         .expect("iteration commits");
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.latest_usage, Some(usage(10)));
 
     backend
@@ -1766,7 +2297,10 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
         ))
         .await
         .expect("terminal commits");
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.status, stratum_postgres::AgentStatus::Finished);
     assert_eq!(view.latest_usage, Some(usage(20)));
     assert_eq!(view.snapshot_event_seq, 5);
@@ -1775,7 +2309,10 @@ async fn agent_view_derives_barrier_usage_and_default_model_updates() {
     // A finished turn admits the next one with the exact recent-turn CAS.
     let (command, _) = begin_command(agent, Some(turn), session);
     backend.begin_turn(command).await.expect("next turn admits");
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.status, stratum_postgres::AgentStatus::Running);
     assert_eq!(view.latest_usage, None, "new turn has no usage yet");
 }
@@ -1813,13 +2350,16 @@ async fn agent_view_derives_telemetry_floor_beyond_the_latest_history_page() {
         .await;
     }
 
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.snapshot_event_seq, newest_seq);
     assert_eq!(view.telemetry_floor_event_seq, assistant_seq);
 
     let latest_page = backend
         .read_history_page(HistoryQuery {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             through_event_seq: view.snapshot_event_seq,
             before_event_seq: None,
             limit: 50,
@@ -1832,12 +2372,12 @@ async fn agent_view_derives_telemetry_floor_beyond_the_latest_history_page() {
             .items
             .iter()
             .all(|item| item.event_seq != assistant_seq),
-        "the AgentView floor must not depend on the latest page containing the final"
+        "the AgentRuntimeView floor must not depend on the latest page containing the final"
     );
 
     set_event_version(agent, newest_seq, 2).await;
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("a newer unsupported message cannot be skipped");
     assert_incompatible(error, 2);
@@ -1845,7 +2385,7 @@ async fn agent_view_derives_telemetry_floor_beyond_the_latest_history_page() {
     set_event_version(agent, newest_seq, 1).await;
     set_event_payload(agent, newest_seq, json!({ "message": { "role": "user" } })).await;
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("a newer malformed message cannot be skipped");
     assert_corrupt(error);
@@ -1854,12 +2394,13 @@ async fn agent_view_derives_telemetry_floor_beyond_the_latest_history_page() {
 /// Flips one row's `event_version` in place, simulating a row written by a
 /// newer binary; the payload keeps the v1 shape so only the version gate can
 /// reject it.
-async fn set_event_version(agent_id: AgentId, event_seq: u64, version: i32) {
+async fn set_event_version(runtime: TestRuntime, event_seq: u64, version: i32) {
     let event_seq = i64::try_from(event_seq).expect("test event sequence fits bigint");
     sqlx::query(
-        "UPDATE durable_events SET event_version = $3 WHERE agent_id = $1 AND event_seq = $2",
+        "UPDATE durable_events SET event_version = $3 \
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
     )
-    .bind(agent_id.as_uuid())
+    .bind(runtime.as_uuid())
     .bind(event_seq)
     .bind(version)
     .execute(&raw_pool().await)
@@ -1867,19 +2408,22 @@ async fn set_event_version(agent_id: AgentId, event_seq: u64, version: i32) {
     .expect("event version flips");
 }
 
-async fn set_event_payload(agent_id: AgentId, event_seq: u64, payload: Value) {
+async fn set_event_payload(runtime: TestRuntime, event_seq: u64, payload: Value) {
     let event_seq = i64::try_from(event_seq).expect("test event sequence fits bigint");
-    sqlx::query("UPDATE durable_events SET payload = $3 WHERE agent_id = $1 AND event_seq = $2")
-        .bind(agent_id.as_uuid())
-        .bind(event_seq)
-        .bind(payload)
-        .execute(&raw_pool().await)
-        .await
-        .expect("event payload changes");
+    sqlx::query(
+        "UPDATE durable_events SET payload = $3 \
+         WHERE agent_runtime_id = $1 AND event_seq = $2",
+    )
+    .bind(runtime.as_uuid())
+    .bind(event_seq)
+    .bind(payload)
+    .execute(&raw_pool().await)
+    .await
+    .expect("event payload changes");
 }
 
 async fn insert_illegal_companion(
-    agent_id: AgentId,
+    runtime: TestRuntime,
     event_seq: u64,
     turn_id: TurnId,
     retained_from_event_seq: u64,
@@ -1890,11 +2434,11 @@ async fn insert_illegal_companion(
     .expect("summary encodes");
     sqlx::query(
         "INSERT INTO transcript_compactions \
-         (agent_id, event_seq, turn_id, compacted_iteration, upto, \
+         (agent_runtime_id, event_seq, turn_id, compacted_iteration, upto, \
           retained_from_event_seq, summary) \
          VALUES ($1, $2, $3, 1, 1, $4, $5)",
     )
-    .bind(agent_id.as_uuid())
+    .bind(runtime.as_uuid())
     .bind(i64::try_from(event_seq).expect("test event sequence fits bigint"))
     .bind(turn_id.as_uuid())
     .bind(i64::try_from(retained_from_event_seq).expect("test retained sequence fits bigint"))
@@ -1946,7 +2490,7 @@ async fn latest_usage_distinguishes_unsupported_version_from_corrupt_v1() {
 
     set_event_version(agent, usage_seq, 2).await;
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("unsupported usage version fails closed");
     assert_incompatible(error, 2);
@@ -1954,7 +2498,7 @@ async fn latest_usage_distinguishes_unsupported_version_from_corrupt_v1() {
     set_event_version(agent, usage_seq, 1).await;
     set_event_payload(agent, usage_seq, json!({ "iteration": 0 })).await;
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("malformed v1 usage fails closed");
     assert_corrupt(error);
@@ -1976,19 +2520,26 @@ async fn approval_and_hook_derivation_fail_closed_on_unsupported_event_versions(
         .await
         .expect("request appends")
         .event_seq;
-    let view = backend.read_agent_view(agent).await.expect("view reads");
+    let view = backend
+        .read_agent_runtime_view(agent.agent_runtime_id)
+        .await
+        .expect("view reads");
     assert_eq!(view.pending_approvals.len(), 1);
 
     // A same-shaped request row at an unsupported version is never decoded as
     // v1: every derivation that reads its payload fails closed.
     set_event_version(agent, requested_seq, 2).await;
     let error = backend
-        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval))
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval),
+        )
         .await
         .expect_err("v2 request is incompatible");
     assert_incompatible(error, 2);
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("v2 pending derivation is incompatible");
     assert_incompatible(error, 2);
@@ -2022,7 +2573,11 @@ async fn approval_and_hook_derivation_fail_closed_on_unsupported_event_versions(
     // including the pending view's existence-based exclusion.
     set_event_version(agent, receipt.event_seq, 2).await;
     let error = backend
-        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval))
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval),
+        )
         .await
         .expect_err("v2 resolution is incompatible");
     assert_incompatible(error, 2);
@@ -2037,7 +2592,7 @@ async fn approval_and_hook_derivation_fail_closed_on_unsupported_event_versions(
         .expect_err("v2 resolution cannot be re-decoded");
     assert_incompatible(error, 2);
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("v2 resolution cannot silently hide a pending approval");
     assert_incompatible(error, 2);
@@ -2062,7 +2617,7 @@ async fn approval_and_hook_derivation_fail_closed_on_unsupported_event_versions(
         .expect("pending appends")
         .event_seq;
     let lookup = HookInvocationLookup {
-        agent_id: agent,
+        agent_runtime_id: agent.agent_runtime_id,
         turn_id: turn,
         point: HookPoint::DecideToolCall,
         iteration: 0,
@@ -2134,7 +2689,11 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
     )
     .await;
     let error = backend
-        .read_approval(agent, turn, ApprovalLookup::ByApprovalId(approval))
+        .read_approval(
+            agent.agent_runtime_id,
+            turn,
+            ApprovalLookup::ByApprovalId(approval),
+        )
         .await
         .expect_err("malformed request lookup fails closed");
     assert_corrupt(error);
@@ -2149,7 +2708,7 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
         .expect_err("malformed request cannot resolve");
     assert_corrupt(error);
     let error = backend
-        .read_agent_view(agent)
+        .read_agent_runtime_view(agent.agent_runtime_id)
         .await
         .expect_err("malformed pending request fails closed");
     assert_corrupt(error);
@@ -2185,7 +2744,7 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
     .await;
     let error = backend
         .read_open_hook_invocation(HookInvocationLookup {
-            agent_id: agent,
+            agent_runtime_id: agent.agent_runtime_id,
             turn_id: turn,
             point: HookPoint::DecideToolCall,
             iteration: 0,
@@ -2226,12 +2785,13 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
         receipt.event_seq,
         json!({
             "approval_id": resolved_approval,
-            "decision": "not-a-decision"
+            "decision": "approve",
+            "future_field": true
         }),
     )
     .await;
     let error = backend
-        .read_agent_view(resolved_agent)
+        .read_agent_runtime_view(resolved_agent.agent_runtime_id)
         .await
         .expect_err("malformed resolution cannot silently exclude a request");
     assert_corrupt(error);
@@ -2296,13 +2856,13 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
     )
     .await;
     let error = backend
-        .read_agent_view(completed_agent)
+        .read_agent_runtime_view(completed_agent.agent_runtime_id)
         .await
         .expect_err("malformed completion cannot silently consume a request");
     assert_corrupt(error);
     let error = backend
         .read_open_hook_invocation(HookInvocationLookup {
-            agent_id: completed_agent,
+            agent_runtime_id: completed_agent.agent_runtime_id,
             turn_id: completed_turn,
             point: HookPoint::DecideToolCall,
             iteration: 0,
@@ -2310,5 +2870,15 @@ async fn approval_and_open_hook_derivations_reject_malformed_v1_payloads() {
         })
         .await
         .expect_err("malformed completion cannot silently close a hook");
+    assert_corrupt(error);
+    let error = backend
+        .resolve_approval(resolve_command(
+            completed_agent,
+            completed_turn,
+            completed_approval,
+            ApprovalDecision::Approve,
+        ))
+        .await
+        .expect_err("malformed completion cannot be ignored by the resolver");
     assert_corrupt(error);
 }

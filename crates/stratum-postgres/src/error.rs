@@ -4,9 +4,10 @@
 //! Messages are lowercase without trailing periods, carry no SQL text, and
 //! never include prompt, message, or tool payload contents.
 
-use stratum_core::{AgentId, ApprovalId, HookInvocationId, SessionId, TurnId};
+use stratum_core::{
+    AgentRuntimeId, AgentVersionTag, ApprovalId, HookInvocationId, SessionId, TurnId,
+};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::types::AgentStatus;
 
@@ -43,17 +44,17 @@ pub enum PostgresError {
     /// Schema migrations could not be applied.
     #[error("failed to migrate postgres schema")]
     Migrate(#[source] sqlx::migrate::MigrateError),
-    /// The addressed Agent does not exist.
-    #[error("agent {agent_id} not found")]
-    AgentNotFound {
-        /// Missing Agent identity.
-        agent_id: AgentId,
+    /// The addressed AgentRuntime does not exist.
+    #[error("agent runtime {agent_runtime_id} not found")]
+    AgentRuntimeNotFound {
+        /// Missing runtime identity.
+        agent_runtime_id: AgentRuntimeId,
     },
-    /// The addressed Turn has no durable `LoopStarted` on this Agent.
-    #[error("turn {turn_id} not found for agent {agent_id}")]
+    /// The addressed Turn has no durable `LoopStarted` on this AgentRuntime.
+    #[error("turn {turn_id} not found for agent runtime {agent_runtime_id}")]
     TurnNotFound {
-        /// Owning Agent identity.
-        agent_id: AgentId,
+        /// Owning runtime identity.
+        agent_runtime_id: AgentRuntimeId,
         /// Missing Turn identity.
         turn_id: TurnId,
     },
@@ -63,33 +64,34 @@ pub enum PostgresError {
         /// Missing approval identity.
         approval_id: ApprovalId,
     },
-    /// An idempotency key was replayed with a different create request.
-    #[error("idempotency key {idempotency_key} is bound to a different create request")]
-    IdempotencyKeyConflict {
-        /// Conflicting client idempotency key.
-        idempotency_key: Uuid,
+    /// An author reused an exact template name/version tag for a different
+    /// immutable definition.
+    #[error("agent template version conflicts with an existing immutable definition")]
+    AgentVersionConflict {
+        /// Conflicting author-supplied tag.
+        version: AgentVersionTag,
     },
     /// The caller's expected current Turn no longer matches durable state.
-    #[error("stale turn expectation for agent {agent_id}")]
+    #[error("stale turn expectation for agent runtime {agent_runtime_id}")]
     StaleTurn {
-        /// Agent whose current Turn moved on.
-        agent_id: AgentId,
+        /// AgentRuntime whose current Turn moved on.
+        agent_runtime_id: AgentRuntimeId,
         /// Turn the caller expected (or `None` for first admission).
         expected: Option<TurnId>,
         /// Durable current Turn.
         actual: Option<TurnId>,
     },
-    /// The Agent already has a running Turn and rejects admission.
-    #[error("agent {agent_id} already has a running turn")]
-    AgentBusy {
-        /// Busy Agent identity.
-        agent_id: AgentId,
+    /// The AgentRuntime already has a running Turn and rejects admission.
+    #[error("agent runtime {agent_runtime_id} already has a running turn")]
+    AgentRuntimeBusy {
+        /// Busy runtime identity.
+        agent_runtime_id: AgentRuntimeId,
     },
-    /// The requested Session does not match the Agent's bound Session.
-    #[error("session does not match the session bound to agent {agent_id}")]
+    /// The requested Session does not match the AgentRuntime's bound Session.
+    #[error("session does not match the session bound to agent runtime {agent_runtime_id}")]
     SessionMismatch {
-        /// Agent with a different bound Session.
-        agent_id: AgentId,
+        /// AgentRuntime with a different bound Session.
+        agent_runtime_id: AgentRuntimeId,
     },
     /// Another Agent runtime row is already running on this Session.
     #[error("session {session_id} already has a running agent")]
@@ -98,10 +100,10 @@ pub enum PostgresError {
         session_id: SessionId,
     },
     /// The command requires a running Turn but the Agent is not running.
-    #[error("turn {turn_id} of agent {agent_id} is not running (status: {status})")]
+    #[error("turn {turn_id} of agent runtime {agent_runtime_id} is not running (status: {status})")]
     TurnNotRunning {
-        /// Owning Agent identity.
-        agent_id: AgentId,
+        /// Owning runtime identity.
+        agent_runtime_id: AgentRuntimeId,
         /// Turn that is not running.
         turn_id: TurnId,
         /// Durable Agent status.
@@ -132,13 +134,13 @@ pub enum PostgresError {
         approval_id: ApprovalId,
     },
     /// The compaction retained pointer does not address a real earlier
-    /// `MessageAppended` of the same Agent; the append fails closed.
+    /// `MessageAppended` of the same AgentRuntime; the append fails closed.
     #[error(
-        "retained_from_event_seq {retained_from_event_seq} does not address an earlier message of agent {agent_id}"
+        "retained_from_event_seq {retained_from_event_seq} does not address an earlier message of agent runtime {agent_runtime_id}"
     )]
     InvalidCompactionPointer {
-        /// Owning Agent identity.
-        agent_id: AgentId,
+        /// Owning runtime identity.
+        agent_runtime_id: AgentRuntimeId,
         /// Rejected retained pointer.
         retained_from_event_seq: u64,
     },
@@ -167,11 +169,11 @@ pub enum PostgresError {
         #[source]
         source: Option<serde_json::Error>,
     },
-    /// An agent-wide event sequence could not be represented as `bigint`.
-    #[error("event sequence overflow for agent {agent_id}")]
+    /// An AgentRuntime-wide event sequence could not be represented as `bigint`.
+    #[error("event sequence overflow for agent runtime {agent_runtime_id}")]
     SequenceOverflow {
-        /// Agent whose sequence space is exhausted.
-        agent_id: AgentId,
+        /// AgentRuntime whose sequence space is exhausted.
+        agent_runtime_id: AgentRuntimeId,
     },
     /// A typed event could not be serialized for persistence.
     #[error("failed to serialize durable event {event_type}")]

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use stratum_config::Config;
-use stratum_infra::NatsAgentTail;
+use stratum_infra::NatsAgentRuntimeTail;
 use stratum_llm::LlmProviderManager;
 use stratum_postgres::PostgresBackend;
 use tokio::sync::Notify;
@@ -28,7 +28,7 @@ pub(crate) type RuntimeTasks = Arc<Mutex<JoinSet<()>>>;
 /// Shared state of the assembled API host.
 pub struct AppState {
     pg: PostgresBackend,
-    tail: Option<NatsAgentTail>,
+    tail: Option<NatsAgentRuntimeTail>,
     registry: TurnRegistry,
     dispatchers: DispatcherHub,
     providers: LlmProviderManager,
@@ -39,7 +39,6 @@ pub struct AppState {
     admission: AdmissionGate,
     runtime_tasks: RuntimeTasks,
     sse_keep_alive: Duration,
-    approval_poll_interval: Duration,
 }
 
 impl AppState {
@@ -51,7 +50,7 @@ impl AppState {
     /// catalog root is missing, not a directory, or unreadable.
     pub async fn new(
         pg: PostgresBackend,
-        tail: Option<NatsAgentTail>,
+        tail: Option<NatsAgentRuntimeTail>,
         providers: LlmProviderManager,
         config: Config,
     ) -> Result<Self, HostError> {
@@ -82,7 +81,6 @@ impl AppState {
             admission: AdmissionGate::default(),
             runtime_tasks,
             sse_keep_alive: Duration::from_secs(api.sse_keep_alive_seconds),
-            approval_poll_interval: Duration::from_secs(api.approval_poll_interval_seconds),
         })
     }
 
@@ -92,7 +90,7 @@ impl AppState {
     }
 
     /// NATS tail, when realtime is connected.
-    pub(crate) fn tail(&self) -> Option<&NatsAgentTail> {
+    pub(crate) fn tail(&self) -> Option<&NatsAgentRuntimeTail> {
         self.tail.as_ref()
     }
 
@@ -101,7 +99,7 @@ impl AppState {
         &self.registry
     }
 
-    /// Per-agent realtime dispatcher hub.
+    /// Per-AgentRuntime realtime dispatcher hub.
     pub(crate) fn dispatchers(&self) -> &DispatcherHub {
         &self.dispatchers
     }
@@ -139,11 +137,6 @@ impl AppState {
     /// Configured SSE keep-alive interval.
     pub(crate) const fn sse_keep_alive(&self) -> Duration {
         self.sse_keep_alive
-    }
-
-    /// Configured durable approval fallback polling interval.
-    pub(crate) const fn approval_poll_interval(&self) -> Duration {
-        self.approval_poll_interval
     }
 
     /// Spawns one process-owned background task and opportunistically joins
@@ -239,17 +232,17 @@ impl AdmissionGate {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::ServiceUnavailable`] once shutdown has begun.
+    /// Returns [`ErrorKind::ServiceShuttingDown`] once shutdown has begun.
     pub(crate) fn enter(&self) -> Result<AdmissionGuard<'_>, ApiError> {
         if !self.open.load(Ordering::Acquire) {
-            return Err(ApiError::new(ErrorKind::ServiceUnavailable));
+            return Err(ApiError::new(ErrorKind::ServiceShuttingDown));
         }
         self.in_flight.fetch_add(1, Ordering::AcqRel);
         // Re-check after registering: a close between the first check and
         // the increment must not slip a new admission through.
         if !self.open.load(Ordering::Acquire) {
             self.leave();
-            return Err(ApiError::new(ErrorKind::ServiceUnavailable));
+            return Err(ApiError::new(ErrorKind::ServiceShuttingDown));
         }
         Ok(AdmissionGuard { gate: self })
     }
@@ -309,7 +302,7 @@ mod tests {
         let rejected = gate.enter();
         assert!(matches!(
             rejected.map(|_| ()),
-            Err(error) if error.kind() == ErrorKind::ServiceUnavailable
+            Err(error) if error.kind() == ErrorKind::ServiceShuttingDown
         ));
 
         let waiting = Arc::clone(&gate);

@@ -1,9 +1,14 @@
-const RECENT_AGENTS_KEY = "stratum-recent-agents"
-const MAX_RECENT_AGENTS = 20
+const RECENT_AGENT_RUNTIMES_KEY = "stratum-recent-agent-runtimes-v1"
+const MAX_RECENT_AGENT_RUNTIMES = 20
 
-export type RecentAgent = {
+/** Local navigation metadata only; the runtime/view remains server truth. */
+export type RecentAgentRuntime = {
+  /** Conversation identity (`agent_states.id`). */
+  agentRuntimeId: string
+  /** Pinned immutable template-version identity (`agents.id`). */
   agentId: string
   agentName: string
+  agentVersion: string
   title: string
   lastOpenedAt: string
 }
@@ -12,7 +17,6 @@ export type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">
 
 export const createMemoryStorage = (): StorageLike => {
   const values = new Map<string, string>()
-
   return {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
@@ -20,58 +24,60 @@ export const createMemoryStorage = (): StorageLike => {
   }
 }
 
-export const loadRecentAgents = (storage: StorageLike): RecentAgent[] => {
+export const loadRecentAgentRuntimes = (
+  storage: StorageLike
+): RecentAgentRuntime[] => {
   let stored: string | null
-
   try {
-    stored = storage.getItem(RECENT_AGENTS_KEY)
+    stored = storage.getItem(RECENT_AGENT_RUNTIMES_KEY)
   } catch {
     return []
   }
-
   if (stored === null) return []
 
   try {
-    const agents: unknown = JSON.parse(stored)
-    if (Array.isArray(agents) && agents.every(isRecentAgent)) {
-      const recentAgents = agents.slice(0, MAX_RECENT_AGENTS).map(toRecentAgent)
-      saveRecentAgents(storage, recentAgents)
-      return recentAgents
+    const runtimes: unknown = JSON.parse(stored)
+    if (Array.isArray(runtimes) && runtimes.every(isRecentAgentRuntime)) {
+      const recent = runtimes
+        .slice(0, MAX_RECENT_AGENT_RUNTIMES)
+        .map(copyRecentAgentRuntime)
+      saveRecentAgentRuntimes(storage, recent)
+      return recent
     }
   } catch {
-    // Remove corrupt data below.
+    // Remove corrupt navigation metadata below.
   }
 
   try {
-    storage.removeItem(RECENT_AGENTS_KEY)
+    storage.removeItem(RECENT_AGENT_RUNTIMES_KEY)
   } catch {
     // Storage can be unavailable in private browsing or when disabled.
   }
-
   return []
 }
 
-export const rememberRecentAgent = (
+export const rememberRecentAgentRuntime = (
   storage: StorageLike,
-  agent: RecentAgent
+  runtime: RecentAgentRuntime
 ): void => {
-  saveRecentAgents(storage, [
-    agent,
-    ...loadRecentAgents(storage).filter(
-      (recentAgent) => recentAgent.agentId !== agent.agentId
+  saveRecentAgentRuntimes(storage, [
+    runtime,
+    ...loadRecentAgentRuntimes(storage).filter(
+      (recent) => recent.agentRuntimeId !== runtime.agentRuntimeId
     ),
   ])
 }
 
-export const removeRecentAgent = (
+export const removeRecentAgentRuntime = (
   storage: StorageLike,
-  agentId: string
+  agentRuntimeId: string
 ): void => {
-  const agents = loadRecentAgents(storage)
-  const remainingAgents = agents.filter((agent) => agent.agentId !== agentId)
-
-  if (remainingAgents.length !== agents.length)
-    saveRecentAgents(storage, remainingAgents)
+  const runtimes = loadRecentAgentRuntimes(storage)
+  const remaining = runtimes.filter(
+    (runtime) => runtime.agentRuntimeId !== agentRuntimeId
+  )
+  if (remaining.length !== runtimes.length)
+    saveRecentAgentRuntimes(storage, remaining)
 }
 
 export const formatRelativeTime = (iso: string, locale: string): string => {
@@ -96,35 +102,42 @@ export const formatRelativeTime = (iso: string, locale: string): string => {
   }
 }
 
-const saveRecentAgents = (
+function saveRecentAgentRuntimes(
   storage: StorageLike,
-  agents: readonly RecentAgent[]
-): void => {
+  runtimes: readonly RecentAgentRuntime[]
+): void {
   try {
     storage.setItem(
-      RECENT_AGENTS_KEY,
-      JSON.stringify(agents.slice(0, MAX_RECENT_AGENTS).map(toRecentAgent))
+      RECENT_AGENT_RUNTIMES_KEY,
+      JSON.stringify(
+        runtimes.slice(0, MAX_RECENT_AGENT_RUNTIMES).map(copyRecentAgentRuntime)
+      )
     )
   } catch {
     // Storage can be unavailable in private browsing or when disabled.
   }
 }
 
-const isRecentAgent = (value: unknown): value is RecentAgent => {
+function isRecentAgentRuntime(value: unknown): value is RecentAgentRuntime {
   if (typeof value !== "object" || value === null) return false
-
-  const agent = value as Record<string, unknown>
+  const runtime = value as Record<string, unknown>
   return (
-    typeof agent.agentId === "string" &&
-    typeof agent.agentName === "string" &&
-    typeof agent.title === "string" &&
-    typeof agent.lastOpenedAt === "string"
+    typeof runtime.agentRuntimeId === "string" &&
+    typeof runtime.agentId === "string" &&
+    typeof runtime.agentName === "string" &&
+    typeof runtime.agentVersion === "string" &&
+    typeof runtime.title === "string" &&
+    typeof runtime.lastOpenedAt === "string"
   )
 }
 
-const toRecentAgent = (agent: RecentAgent): RecentAgent => ({
-  agentId: agent.agentId,
-  agentName: agent.agentName,
-  title: agent.title,
-  lastOpenedAt: agent.lastOpenedAt,
+const copyRecentAgentRuntime = (
+  runtime: RecentAgentRuntime
+): RecentAgentRuntime => ({
+  agentRuntimeId: runtime.agentRuntimeId,
+  agentId: runtime.agentId,
+  agentName: runtime.agentName,
+  agentVersion: runtime.agentVersion,
+  title: runtime.title,
+  lastOpenedAt: runtime.lastOpenedAt,
 })

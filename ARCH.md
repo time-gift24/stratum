@@ -74,7 +74,7 @@ flowchart TB
 
 `stratum-web` 和 `stratum-api` 对外提供对话、工作流编辑、运行控制、审批、历史查询和 SSE 事件流。
 
-控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。Agent 可以在没有活跃操作时修改当前模型及其 LLM 参数；新 Turn 接受后会把该 `ModelConfig` 保存为 Agent 后续默认值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
+控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。`AgentId` 标识 `agents` 中一个不可变 template 版本，`AgentRuntimeId` 标识 `agent_states` 中一个可跨多个 Turn 的长期运行聚合；多个 runtime 可以 pin 同一个 Agent。AgentRuntime 可以在没有活跃操作时修改自己的 `model_config`；新 Turn 接受后会把该完整 `ModelConfig` 保存为该 runtime 后续使用的值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
 
 Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
@@ -91,7 +91,7 @@ Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
 Agent 可以作为工作流中的一种节点，也可以直接在 Session 中运行。直接对话不是隐式工作流：Session 是长期、共享且与图结构无关的核心资产，Workflow 图及其版本可以变化，Session 身份保持不变。Agent 作为节点运行时使用 `AgentLocation::WorkflowNode` 保留 Workflow version 与 node 身份；直接运行时使用 `AgentLocation::Direct`。
 
-当前只在 Agent runtime 边界内保证同一 Session 最多有一个 running Agent；这不协调 Workflow 或其他未来的调度 owner。跨 runtime 并发、ownership 与 fencing 由后续 scheduler 模块设计，在此之前不增加 attempt 或 node-execution 身份。
+当前只在 AgentRuntime 边界内保证同一 Session 最多有一个 `agent_states.status='running'` 的运行聚合；这不协调 Workflow 或其他未来的调度 owner。跨 runtime 并发、ownership 与 fencing 由后续 scheduler 模块设计，在此之前不增加 attempt 或 node-execution 身份。
 
 ### 3. Agent ReAct Loop 与 Hook
 
@@ -144,16 +144,16 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 
 执行持久化收敛为 concrete `stratum-postgres` 拥有四张表，无 projection 表：
 
-- `agents`：immutable Agent identity 与创建时固化的 resolved definition snapshot（prompt、按序 tools、creation-time effective model）。
-- `agent_state`：薄状态——durable status、绑定的 Session/current Turn、mutable default model 与 `last_event_seq` high-water；不复制 outcome、usage、snapshot、approval 或 hosting。
-- `durable_events`：append-only ledger；agent-wide、无空洞的 `event_seq` 是唯一 durable 顺序，由 `agent_state` 行锁（`FOR UPDATE`）在集中 append 事务中分配并串行化同 Agent writer。
-- `transcript_compactions`：与 `TranscriptCompacted` discriminator 同事务写入的 companion，只保存单一 typed summary、`upto`、`compacted_iteration` 与 `retained_from_event_seq` 保留指针；原始 durable messages 永久保留。
+- `agents`：immutable Agent template 版本；`id: AgentId` 固定一条由作者 `name + version` 字符串 tag 命名的 canonical resolved definition（prompt、按序 tools、template default model），同一版本可被多个 runtime 复用。
+- `agent_states`：每个 `id: AgentRuntimeId` 一行薄状态，通过 `agent_id` 永久 pin definition，并拥有 create idempotency key、durable status、绑定的 Session/current Turn、唯一可变 `model_config` 与 `last_event_seq` high-water；不复制 outcome、usage、snapshot、approval 或 hosting。
+- `durable_events`：append-only ledger；AgentRuntime-wide、无空洞的 `event_seq` 是唯一 durable 顺序，由 exact `agent_states` 行锁（`FOR UPDATE`）在集中 append 事务中分配并串行化同 runtime writer。共享一个 AgentId 的不同 runtime 各自从 1 开始。
+- `transcript_compactions`：以同一 `(agent_runtime_id,event_seq)` 与 `TranscriptCompacted` discriminator 原子写入的 companion，只保存单一 typed summary、`upto`、`compacted_iteration` 与 `retained_from_event_seq` 保留指针；原始 durable messages 永久保留。
 
 其他不变量：
 
-- hosting 是进程内 exact `(AgentId, TurnId)` registry 的易失观察，永不持久化；进程重启后 registry 为空，恢复靠显式 resume。
-- 持久化顺序固定为 Postgres commit 先于 NATS publish；NATS 只是 Agent-scoped 的短实时 tail，发布丢失由 PG snapshot/history 收敛。
-- AgentLoop kernel（`stratum-agent`）只见 scope-free typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；Postgres、HTTP、Session、hosting、scheduler 与分页永不进入 AgentLoop。`stratum-core` 只提供共享领域身份和上下文类型，Postgres 编排全部放在装配层 `stratum-api`。
+- hosting 是进程内 exact `(AgentRuntimeId, TurnId)` registry 的易失观察，永不持久化；进程重启后 registry 为空，恢复靠显式 resume。
+- 持久化顺序固定为 Postgres commit 先于 NATS publish；NATS 只是 AgentRuntime-scoped 的短实时 tail，subject、dispatcher 与 cursor 都用 AgentRuntimeId 分区，发布丢失由 PG snapshot/history 收敛。
+- AgentLoop kernel（`stratum-agent`）只见 scope-free typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；它可以用 `AgentId` 固定 immutable definition，但 Postgres、`AgentRuntimeId`、HTTP、Session hosting、scheduler 与分页永不进入 AgentLoop。`stratum-core` 只提供共享领域身份和上下文类型，Postgres 编排全部放在装配层 `stratum-api`。
 
 ### 7. 可观测性与安全
 

@@ -38,8 +38,8 @@ import {
  * FIRST VIEWPORT: 左侧会话列表 + 右侧消息流 + 底部 PromptInput（模型选择 + 电弧激活）。
  * FORM: 整屏 Operate 界面（assistant-ui 底稿的展示层 fork），非 section 展示页。
  *
- * 数据来自 Stratum 后端（Postgres-first REST + Agent-scoped SSE）：durable
- * identity 是 (agentId, eventSeq 十进制字符串)；reasoning 与 tool calls 在
+ * 数据来自 Stratum 后端（Postgres-first REST + AgentRuntime-scoped SSE）：durable
+ * identity 是 (agentRuntimeId, eventSeq 十进制字符串)；reasoning 与 tool calls 在
  * 正文上方渐进式透明展示（默认折叠，待决审批强制展开可操作）；
  * TranscriptCompacted 渲染为可折叠"上下文已压缩" marker；failed/cancelled
  * 渲染为安全 terminal marker；向上滚动按固定 through barrier 分页更旧历史。
@@ -77,9 +77,9 @@ const settledViewCache = new WeakMap<StableMessage, SettledViewCacheEntry>()
 export default function ConversationPage() {
   const {
     state,
-    recentAgents,
+    recentAgentRuntimes,
     composerConfiguration,
-    selectAgent,
+    selectAgentRuntime,
     createConversation,
     sendMessage,
     cancel,
@@ -90,11 +90,11 @@ export default function ConversationPage() {
 
   const threads = useMemo(
     () =>
-      recentAgents.map((agent) => ({
-        id: agent.agentId,
-        title: agent.title,
+      recentAgentRuntimes.map((runtime) => ({
+        id: runtime.agentRuntimeId,
+        title: runtime.title,
       })),
-    [recentAgents]
+    [recentAgentRuntimes]
   )
 
   // 历史/新消息区分：recovery 完成（ready）时快照当时的 barrier；seq ≤ 该
@@ -102,11 +102,24 @@ export default function ConversationPage() {
   // 之后到达的为本轮新消息（默认简略预览）。
   // derive-state-during-render 模式：渲染期条件 setState，立即重渲染提交。
   const [historical, setHistorical] = useState<{
-    agentId: string | null
-    barrier: string
-  }>({ agentId: null, barrier: "0" })
-  if (state.phase === "ready" && historical.agentId !== state.agentId) {
-    setHistorical({ agentId: state.agentId, barrier: state.barrier })
+    agentRuntimeId: string | null
+    historyThrough: string | null
+    pgConfirmedEventSeq: string
+  }>({
+    agentRuntimeId: null,
+    historyThrough: null,
+    pgConfirmedEventSeq: "0",
+  })
+  if (
+    state.phase === "ready" &&
+    (historical.agentRuntimeId !== state.agentRuntimeId ||
+      historical.historyThrough !== state.historyThrough)
+  ) {
+    setHistorical({
+      agentRuntimeId: state.agentRuntimeId,
+      historyThrough: state.historyThrough,
+      pgConfirmedEventSeq: state.pgConfirmedEventSeq,
+    })
   }
 
   // 审批提交状态：submitting = 已点击等后端确认；outcomes = 本会话已决终态。
@@ -118,11 +131,16 @@ export default function ConversationPage() {
   // 旧 id 必然不在新会话的 state.approvals 里，前置 guard 已挡
   const submittingRef = useRef<Set<string>>(new Set())
   const [approvalOutcomes, setApprovalOutcomes] = useState<
-    Record<string, { approval: ApprovalRequest; decision: "approve" | "reject" }>
+    Record<
+      string,
+      { approval: ApprovalRequest; decision: "approve" | "reject" }
+    >
   >({})
-  const [approvalAgentId, setApprovalAgentId] = useState(state.agentId)
-  if (approvalAgentId !== state.agentId) {
-    setApprovalAgentId(state.agentId)
+  const [approvalAgentRuntimeId, setApprovalAgentRuntimeId] = useState(
+    state.agentRuntimeId
+  )
+  if (approvalAgentRuntimeId !== state.agentRuntimeId) {
+    setApprovalAgentRuntimeId(state.agentRuntimeId)
     setSubmittingApprovals(new Set())
     setApprovalOutcomes({})
   }
@@ -205,7 +223,7 @@ export default function ConversationPage() {
       if (entry.kind === "compaction") {
         views.push({
           kind: "compaction",
-          id: `${entry.marker.agentId}:${entry.marker.eventSeq}`,
+          id: `${entry.marker.agentRuntimeId}:${entry.marker.eventSeq}`,
           summary: entry.marker.summary,
           compactedIteration: entry.marker.compactedIteration,
         })
@@ -214,7 +232,7 @@ export default function ConversationPage() {
       if (entry.kind === "terminal") {
         views.push({
           kind: "terminal",
-          id: `${entry.marker.agentId}:${entry.marker.eventSeq}`,
+          id: `${entry.marker.agentRuntimeId}:${entry.marker.eventSeq}`,
           terminal: entry.marker.terminal,
           errorText: entry.marker.errorText,
         })
@@ -223,8 +241,9 @@ export default function ConversationPage() {
 
       const message = entry.message
       if (message.role !== "user" && message.role !== "assistant") continue
-      const id = `${message.agentId}:${message.eventSeq}`
-      const isHistorical = compareEventSeq(message.eventSeq, historical.barrier) <= 0
+      const id = `${message.agentRuntimeId}:${message.eventSeq}`
+      const isHistorical =
+        compareEventSeq(message.eventSeq, historical.pgConfirmedEventSeq) <= 0
       const inputs: readonly unknown[] = [
         isHistorical,
         ...message.toolCalls.map(
@@ -298,7 +317,9 @@ export default function ConversationPage() {
   const items = useMemo<ConversationItem[]>(() => {
     const result: ConversationItem[] = [...settled.items]
     const stableCallIds = settled.callIds
-    const attachApproval = (call: ConversationToolCall): ConversationToolCall => {
+    const attachApproval = (
+      call: ConversationToolCall
+    ): ConversationToolCall => {
       const entry = approvalEntries.get(call.callId)
       return entry ? { ...call, approval: entry.view } : call
     }
@@ -425,10 +446,12 @@ export default function ConversationPage() {
   // 受控 composer：发送成功才清空；首条消息失败等场景保留用户原文
   const [composerValue, setComposerValue] = useState("")
   const handleSubmit = (value: string) => {
-    // 发送信号：让 thread 把随后的 null → 新 agentId 识别为同一对话的首发
+    // 发送信号：让 thread 把随后的 null → 新 runtime id 识别为同一对话的首发
     setSendVersion((version) => version + 1)
     const sent =
-      state.agentId === null ? createConversation(value) : sendMessage(value)
+      state.agentRuntimeId === null
+        ? createConversation(value)
+        : sendMessage(value)
     void sent.then((ok) => {
       // 请求期间用户可能已经继续输入；只清掉本次实际发送的原值。
       if (ok) setComposerValue((current) => (current === value ? "" : current))
@@ -436,8 +459,8 @@ export default function ConversationPage() {
   }
 
   const handleNewConversation = useCallback(
-    () => selectAgent(null),
-    [selectAgent]
+    () => selectAgentRuntime(null),
+    [selectAgentRuntime]
   )
 
   const turnRunning = composerConfiguration.turnRunning
@@ -448,14 +471,14 @@ export default function ConversationPage() {
       <main className="relative min-w-0 flex-1">
         <ThreadListRail
           threads={threads}
-          activeId={state.agentId ?? undefined}
-          onSelect={selectAgent}
+          activeId={state.agentRuntimeId ?? undefined}
+          onSelect={selectAgentRuntime}
           onNew={handleNewConversation}
         />
 
         <ConversationThread
           items={items}
-          conversationId={state.agentId}
+          conversationId={state.agentRuntimeId}
           sendVersion={sendVersion}
           recovering={state.phase === "recovering"}
           hasOlder={state.historyHasMore}
@@ -483,9 +506,7 @@ export default function ConversationPage() {
                       取消请求已发送
                     </p>
                   ) : null}
-                  {state.realtimeDegraded ? (
-                    <RealtimeDegradedNotice />
-                  ) : null}
+                  {state.realtimeDegraded ? <RealtimeDegradedNotice /> : null}
                 </div>
               ) : null}
               <PromptInput
@@ -497,16 +518,54 @@ export default function ConversationPage() {
                 cancelRequested={state.cancelRequested}
                 onCancel={() => void cancel()}
                 trailing={
-                  <ModelSelector
-                    models={composerConfiguration.models}
-                    selectedModelId={selectedModelConfig?.model ?? null}
-                    onSelectModel={composerConfiguration.selectModel}
-                    thinkingLevels={levels}
-                    selectedThinkingLevel={selectedLevel}
-                    onSelectThinkingLevel={composerConfiguration.setThinkingLevel}
-                    loading={composerConfiguration.metadataLoading}
-                    error={composerConfiguration.metadataError !== null}
-                  />
+                  <div className="flex items-center gap-1.5">
+                    {!composerConfiguration.existingRuntime &&
+                    composerConfiguration.agentTemplates.length > 0 ? (
+                      <label className="flex min-w-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground">
+                        <span className="sr-only">Agent template</span>
+                        <select
+                          aria-label="Agent template"
+                          value={templateOptionValue(
+                            composerConfiguration.selectedTemplate
+                          )}
+                          onChange={(event) => {
+                            const template =
+                              composerConfiguration.agentTemplates.find(
+                                (candidate) =>
+                                  templateOptionValue(candidate) ===
+                                  event.target.value
+                              )
+                            if (template)
+                              composerConfiguration.selectTemplate(template)
+                          }}
+                          className="max-w-40 appearance-none bg-transparent py-1 text-xs font-medium text-foreground outline-none"
+                        >
+                          {composerConfiguration.agentTemplates.map(
+                            (template) => (
+                              <option
+                                key={templateOptionValue(template)}
+                                value={templateOptionValue(template)}
+                              >
+                                {template.agent_name} · {template.version}
+                              </option>
+                            )
+                          )}
+                        </select>
+                      </label>
+                    ) : null}
+                    <ModelSelector
+                      models={composerConfiguration.models}
+                      selectedModelId={selectedModelConfig?.model ?? null}
+                      onSelectModel={composerConfiguration.selectModel}
+                      thinkingLevels={levels}
+                      selectedThinkingLevel={selectedLevel}
+                      onSelectThinkingLevel={
+                        composerConfiguration.setThinkingLevel
+                      }
+                      loading={composerConfiguration.metadataLoading}
+                      error={composerConfiguration.metadataError !== null}
+                    />
+                  </div>
                 }
               />
             </div>
@@ -515,4 +574,12 @@ export default function ConversationPage() {
       </main>
     </div>
   )
+}
+
+function templateOptionValue(
+  template: { agent_name: string; version: string } | null
+): string {
+  return template === null
+    ? ""
+    : JSON.stringify([template.agent_name, template.version])
 }

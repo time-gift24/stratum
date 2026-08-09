@@ -30,7 +30,7 @@ export type ConversationThreadMeta = {
 
 /**
  * 消息列条目：普通消息 + TranscriptCompacted 可折叠 marker + 安全
- * terminal marker（failed/cancelled）。id = `${agentId}:${eventSeq}`。
+ * terminal marker（failed/cancelled）。id = `${agentRuntimeId}:${eventSeq}`。
  */
 export type ConversationItem =
   | { kind: "message"; id: string; message: ConversationMessage }

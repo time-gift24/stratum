@@ -1,83 +1,101 @@
 # stratum-api 约定
 
-- `stratum-api` 是唯一装配 crate：装配/编排层，拥有 process registry、Postgres 编排、
-  approval handler/resolver、NATS bridge/dispatcher 与 SSE。`main.rs` 必须保持薄，可复用
+- `stratum-api` 是唯一装配 crate：作为装配/编排层，拥有进程注册表、Postgres 编排、
+  审批处理器/解析器、NATS 桥接器/分发器与 SSE。`main.rs` 必须保持薄，可复用
   逻辑放 `lib.rs`。
-- 只有在 Agent/Session/Turn 的必要状态、runtime snapshot 和输入已持久化后，创建或消息接口才能返回已接受；失败不得留下可被接受为成功的半成品。
-- Postgres durable ledger 是 agent 状态、消息历史和启动恢复的唯一持久化真相源；NATS 只负责短期 Agent tail 分发，不能代替 Postgres。`sqlx` 只允许出现在 `stratum-postgres`，本 crate 只调用其 concrete command/query 接口。
-- hosting 是进程内 exact `(AgentId, TurnId)` registry 的易失观察，永不持久化；registry 的锁只保护内存映射访问，Postgres、NATS、provider 和 agent 的异步工作必须在锁外完成。
-- 持久化顺序固定为 Postgres commit 先于 NATS 发布；per-Agent dispatcher 按 `event_seq` 从已提交 PG row 发布 product event。NATS 发布/通知失败只记录一次安全错误，不回滚 PG、不改变 command 或 kernel 结果。
-- 审批完全从 durable ledger 派生：approval Handler 是普通 `decide_tool_call` Hook handler，resolver 事务复用 `agent_state` 行锁线性化；resolve 与 resume 是分离的 endpoint，unhosted resolve 不隐式 resume。
-- Postgres 决定核心 readiness；NATS 不可用时 SSE 返回稳定的 `realtime_unavailable`，Web 降级为 PG reconcile，核心 command 继续可用。
-- AgentView 对外同时编码 decimal-string `snapshot_event_seq` 与
-  `telemetry_floor_event_seq`；后者是同一 MVCC barrier 内 ledger 派生的最新 assistant
-  `MessageAppended` sequence，用于 cold recovery 拒绝首屏之外 final 之前的旧 telemetry，
-  不是第二个 high-water 或持久化 projection。
-- SSE 使用绑定 `AgentId + JetStream stream generation + stream sequence` 的不透明 NATS cursor：cursor 不得与 `event_seq`/`telemetry_seq` 比较或持久化为业务状态，跨 Agent、旧 generation 与 retention 过期必须在 headers 前显式报错；建流后的 buffer overflow 发送 `stream_reset` 并关闭连接。
-- `AppState` 持有共享 shutdown token、admission gate 与 process-owned `JoinSet`。Turn、dispatcher、SSE pump 全部进入该集合；shutdown middleware 在 token 触发时 drop 尚未返回 response 的 handler future 并返回稳定 503，再以 `[api].shutdown_drain_timeout_seconds` 的单个总 deadline 依次收敛 Axum server、admission 与 task set，超时 abort+join。未完成 Turn 在 PG 中保留 durable `running` 供显式 resume；进程 shutdown 绝不转化为业务 cancel/failed，Turn cancellation token 不因进程退出被 signal。
-- create、message 和 resume 在任何持久化或 provider I/O 前必须取得 atomic admission RAII，并在 pending Postgres/NATS 工作中观察 shutdown token。关闭后的新 durable work 返回安全稳定的 503。
-- HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 Agent/Session/Turn/cursor 等 ID，不得记录 message、prompt、tool args、secret、SQL 或 host path。
-- 错误映射合同：library errors 用 `thiserror`，HTTP 统一映射为安全 envelope
+- 只有在 Agent/Session/Turn 的必要状态、运行时快照和输入已持久化后，创建或消息接口才能返回已接受；失败不得留下可被接受为成功的半成品。
+- Postgres 持久账本是 AgentRuntime 状态、消息历史和启动恢复的唯一持久化真相源；NATS 只负责短期 AgentRuntime 尾流分发，不能代替 Postgres。`sqlx` 只允许出现在 `stratum-postgres`，本 crate 只调用其具体命令/查询接口。
+- 托管状态是进程内精确 `(AgentRuntimeId, TurnId)` 注册表的易失观察，永不持久化；注册表的锁只保护内存映射访问，Postgres、NATS、提供器和 Agent 的异步工作必须在锁外完成。
+- 持久化顺序固定为先提交 Postgres，再发布 NATS；每个 AgentRuntime 的分发器按 `event_seq` 从已提交的 PG 行发布产品事件。NATS 发布/通知失败只记录一次安全错误，不回滚 PG、不改变命令或内核结果。
+- 审批完全从持久账本派生：审批处理器是普通的 `decide_tool_call` Hook 处理器，解析器事务复用 `agent_states` 行锁实现线性化；解析与恢复是分离的端点，未托管状态下的解析不会隐式恢复。
+- Postgres 决定核心就绪性；NATS 不可用时 SSE 返回稳定的 `realtime_unavailable`，Web 降级为 PG 对账，核心命令继续可用。
+- AgentRuntimeView 对外同时编码十进制字符串 `snapshot_event_seq` 与
+  `telemetry_floor_event_seq`；后者是在同一 MVCC 屏障内从账本派生出的最新 `assistant`
+  `MessageAppended` 序号，用于冷恢复时拒绝首屏之外、最终事件之前的旧遥测，
+  不是第二个高水位或持久化投影。
+- 历史与 SSE 持久帧共享完整、严格解码的 `AgentRuntimeProductEventV1` 联合类型：
+  `LoopStarted`、消息、审批请求/解析、压缩、迭代与三类终止事件。
+  Hook 日志、`ToolExecutionStarted` 等内部事实只占用持久序号，不公开投影。
+- SSE 使用绑定 `AgentRuntimeId + JetStream 流代次 + 流序号` 的不透明 NATS 游标：游标不得与 `event_seq`/`telemetry_seq` 比较，也不得持久化为业务状态；跨 AgentRuntime、旧代次与保留期过期必须在发送响应头前显式报错；建流后的缓冲区溢出会发送 `stream_reset` 并关闭连接。
+- `AppState` 持有共享关闭令牌、准入门与进程所有的 `JoinSet`。Turn、分发器、SSE 泵全部进入该集合；关闭中间件在令牌触发时丢弃尚未返回响应的处理器异步任务并返回稳定的 503，再以 `[api].shutdown_drain_timeout_seconds` 的单个总截止时间依次收敛 Axum 服务器、准入门与任务集合，超时则中止并等待结束。未完成的 Turn 在 PG 中保留持久 `running` 状态以供显式恢复；进程关闭绝不转化为业务取消/失败，Turn 取消令牌不因进程退出而触发。
+- 创建、消息和恢复在任何持久化或提供器 I/O 前必须取得原子准入 RAII 守卫，并在等待中的 Postgres/NATS 工作中观察关闭令牌。关闭后的新持久工作返回安全稳定的 503。
+- HTTP 最终错误边界只记录一次安全的结构化操作错误；span 可记录 Agent/Session/Turn/游标等 ID，不得记录消息、提示词、Tool 参数、密钥、SQL 或宿主机路径。
+- 错误映射合同：库错误使用 `thiserror`，HTTP 统一映射为安全信封
   `{"error":{"code":"...","message":"..."}}` 与约定的 400/404/409/410/413/422/500/503；
-  响应体不暴露 SQL、NATS subject、host path、prompt、Tool arguments/result、provider 正文或 credential。
-- API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个 handler 必须有 `#[utoipa::path]`，DTO 与 wire 类型必须有 `ToSchema`；每个状态码都显式声明 body type（空成功响应使用 `body = ()`）；错误响应只声明该 handler 经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` 与 API-owned `AgentStreamFrameV1` 描述。`docs/PROTOCOL.md` 已废弃。
+  响应体不暴露 SQL、NATS 主题、宿主机路径、提示词、Tool 参数/结果、提供器正文或凭据。运行时路由的 404 固定为 `agent_runtime_not_found`；目录名称缺失为 `agent_template_not_found`；状态存在但固定的定义缺失或损坏时，必须以 `durable_state_corrupt` 故障关闭。
+- API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个处理器必须有 `#[utoipa::path]`，DTO 与传输类型必须有 `ToSchema`；每个状态码都显式声明响应体类型（空成功响应使用 `body = ()`）；错误响应只声明该处理器经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` 与 API 自有的 `AgentRuntimeStreamFrameV1` 描述。`docs/PROTOCOL.md` 已废弃。
 
 ## 模块与实现约定（重写后归档）
 
-- 模块布局：`state.rs`（AppState + admission gate）、`registry.rs`（exact
-  `(AgentId, TurnId)` claim + compare-and-remove）、`sink.rs`（per-turn
-  `DurableEventSink`/`TelemetryEventSink` adapter + admission oneshot）、`baseline.rs`
-  （历史基线物化 + 7.10 规范化，纯函数 `assemble` 可单测）、`provenance.rs`（committed-context
-  来源 seq lineage，供 compaction retained pointer 解析）、`dispatcher.rs`（per-agent
-  有序 concrete PG+NATS dispatcher）、
-  `approval.rs`（decide 相位的审批 HookHandler + 进程内 waiter）、`turn.rs`（runtime
-  重建与 managed task spawn）、`templates.rs`（只读热 catalog）、`frames.rs`
-  （`AgentStreamFrameV1`/`AgentProductEventV1`）、`dto.rs`、`error.rs`（`ErrorKind` →
-  status/code 映射表）、`host_error.rs`（启动错误）、`http/`（router + handlers + utoipa）。
-- 审批 Handler 的 `HookInvocationId` 不由 kernel 传入：kernel 保证 Pending 先提交，Handler 通过
-  `stratum-postgres` 的 `read_open_hook_invocation`（point + iteration + call_id exact 地址）
-  找到自己的 open invocation，再以它为键 reuse/创建 Requested。resume 重放 Pending 时同一地址
-  命中同一 invocation，天然复用既有 ApprovalId。
-- `TurnRuntimeSnapshot` 的六字段在 message admission 时构造：`extension_set_version_id` 必须取
-  自建 `ChainHookRuntime` 的计算值（与 kernel 写入 `LoopStarted` payload 的值一致）；
-  `skill_set_version_id` 固定为 nil UUID；hook 版本列表当前只有审批 Handler 的固定 UUID 常量
-  （行为变更必须换版本号）。resume 重建 runtime 时校验 provider/model 可用、tool fingerprint
-  与 extension set version 一致，不一致即 503 `runtime_unavailable`。
-- resume 的 replay window = 当前 `LoopStarted` + 基线消息（作为 MessageAppended）+
-  current-Turn 后缀（含 hook journal 与 approval facts），按 event_seq 序； resumed sink 的
-  lineage 必须与 kernel 重建的 context 对齐（基线 origins + 后缀消息/压缩逐个应用）。
-- dispatcher 的原子 high-water 保存已知 durable receipt；每个 `DurableWake` 固定自己的
-  `through`，每条 telemetry 在入队时固定 `durable_before`，出队时只能 flush 该命令的 barrier，
-  禁止旧 telemetry 读取未来 final 的 target。该冻结值同时以十进制字符串
-  `durable_before_event_seq` 写入 telemetry v1 frame；它只是 PG ordering watermark，不改变
-  `(llm_call_id, telemetry_seq)` identity。telemetry 满队列时允许丢失并保留 gap，但 durable
-  receipt 不得等待 NATS/queue 容量：满队列时只合并进不回退的 atomic high-water。
-  coalesced flush 必须先 snapshot target，再确认已接受队列为空，且只能 flush 这个旧 snapshot；
-  snapshot 后推进的 target 留给下一次 drain/idle 循环，idle 退休前必须最终追平。禁止先声明
-  队列为空、再读取可能已包含未来 final 的 target。
-  PG scan 必须从 frontier 连续到 target，缺洞/乱序 fail closed；product serialize/publish 失败
-  不得推进 frontier，并抑制该 barrier 后的 telemetry，重复 durable `event_seq` 由客户端去重。
-  只有显式列出的 internal durable variants 可投影为无frame并推进frontier；未来
-  `DurableAgentEvent`/`ApprovalDecision` 必须保留 typed error 并fail closed，禁止按internal、approve
-  或block默认处理。
-  map 保持 strong sender 保证同 Agent 单 dispatcher；只有配置化 idle interval 到期、无外部
-  handle 且已接收队列为空时，才在 map lock 内 remove+close 原子退休，禁止双 dispatcher race
-  或吞掉已接受命令。
-- 任何尚无 dispatcher handle 的 writer（当前为 started-only reconcile 与 approval resolver）
-  必须在 PG commit 前用已经读到的 Agent barrier 调 `ensure`，并持有返回 handle 跨过 transaction，
-  commit 后再由该 handle 提交 receipt；禁止根据 post-commit receipt 懒建 dispatcher，否则两个
-  反序 wake 可能把较早 row 错当成进程启动前历史。
-- 测试：单元测试在各模块 `#[cfg(test)]`；容器集成测试在 `tests/api.rs` +
-  `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，compose project
-  `stratum-api-test`，pg 45433 / nats 44228，与其它 crate 端口错开）。
-- OTLP 由 `telemetry.rs::init_telemetry()` 按环境激活：设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时安装 OTLP span exporter（HTTP/protobuf，reqwest-blocking，无 tonic）与 `tracing-opentelemetry` layer，未设置时与纯 fmt 行为完全一致；进程退出前必须经 `TelemetryGuard::shutdown()` flush。collector 端点仅支持 `http://`。
-- approval waiter 使用 RAII registration guard（Drop 按精确注册身份注销）；`register` 返回 guard+receiver，早命中/读错/cancel 均不泄漏。
-- DispatcherHub task 由 process `JoinSet` 所有，entry 按 generation compare-remove；shutdown
-  timeout 后由 `JoinSet::abort_all` 再 join，任何 dispatcher/SSE/Turn task 都不得 detached。
-- resume 的六字段 snapshot 校验含 `skill_set_version_id` 与有序 `hook_handler_versions`，由 `turn.rs` 的 pinned 常量单一来源同时供写入与校验。
-- message admission 的 expected-current-turn 判定先于 status 判定：expected 不匹配即 `stale_turn`（即使 running）；`agent_busy`/`resume_required` 只对 expected 匹配的 running 请求。
-- 进程关闭语义：managed Turn 一旦插入 process `JoinSet` 即拥有 claim；registry 只保存 exact
-  claim state/token，不保存 JoinHandle。shutdown 只关 admission 并 drain/abort+join，绝不 signal
-  turn token。
-- admission drain 使用先 enable 的 pinned `Notify::notified()` 再复查 in-flight 计数，最后一个
-  RAII guard 的 `notify_waiters()` 不得落在 load/注册窗口而丢失。
+- 模块布局：`state.rs`（AppState + 准入门）、`registry.rs`（精确
+  `(AgentRuntimeId, TurnId)` 占用 + 比较后移除）、`sink.rs`（每个 Turn 的
+  `DurableEventSink`/`TelemetryEventSink` 适配器 + 准入一次性通道）、`baseline.rs`
+  （历史基线物化 + 7.10 规范化，纯函数 `assemble` 可单测）、`provenance.rs`（已提交上下文的
+  来源序号血缘，供压缩保留指针解析）、`dispatcher.rs`（每个 AgentRuntime 的
+  有序具体 PG+NATS 分发器）、
+  `approval.rs`（决策阶段的审批 HookHandler + 进程内等待器）、`turn.rs`（运行时
+  重建与受管任务生成）、`templates.rs`（只读热加载目录）、`frames.rs`
+  （`AgentRuntimeStreamFrameV1`/`AgentRuntimeProductEventV1`）、`dto.rs`、`error.rs`（`ErrorKind` →
+  状态码/代码映射表）、`host_error.rs`（启动错误）、`http/`（路由器 + 处理器 + utoipa）。
+- 审批处理器的 `HookInvocationId` 不由内核传入：内核保证先提交 `Pending`，处理器通过
+  `stratum-postgres` 的 `read_open_hook_invocation`（`point` + `iteration` + `call_id` 精确地址）
+  找到自己的开放调用，再以它为键复用/创建 `Requested`。恢复时重放 `Pending`，同一地址
+  命中同一调用，天然复用既有 ApprovalId。
+- 当前组合只注册无凭据通道的 `Echo`；参数/结果是用户创作的
+  不透明对话 JSON，授权只使用类型化的 `ToolKind`/`DangerLevel`，结果仍先经过
+  `AfterToolCall`。这不是通用密钥扫描器/清理器；感知凭据的 Tool 必须先通过独立
+  `PATCH` 定义引用/提供器/故障关闭转换，完成前不得注册。
+- `TurnRuntimeSnapshot` 以 `agent_id: AgentId` 固定不可变定义，并在消息准入时构造：`extension_set_version_id` 必须取
+  自新建 `ChainHookRuntime` 的计算值（与内核写入 `LoopStarted` 载荷的值一致）；
+  `skill_set_version_id` 固定为全零 UUID；Hook 版本列表当前只有审批处理器的固定 UUID 常量
+  （行为变更必须换版本号）。恢复时重建运行时需校验提供器/模型可用、Tool 指纹
+  与扩展集版本一致，不一致即返回 503 `runtime_unavailable`。
+- 恢复的重放窗口 = 当前 `LoopStarted` + 基线消息（作为 MessageAppended）+
+  当前 Turn 后缀（包含 Hook 日志与审批事实），按 `event_seq` 排序；恢复后的接收器
+  血缘必须与内核重建的上下文对齐（基线来源 + 逐个应用后缀消息/压缩）。
+- 恢复先完成不依赖已绑定接收器的持久切片、定义/提供器/Tool 指纹、血缘
+  与类型化窗口前置检查，再确保分发器存在，并组装接收器/循环来执行纯计算的 `prepare_resume`；准备
+  失败不得写入持久真相或调用外部能力。成功后以短时状态行锁同时重验预期的 Agent 固定值、
+  Session/当前 Turn/`running`，再安装受管任务。
+- 分发器中心的 `ensure(AgentRuntimeId)` 不接收调用方前沿；它在该运行时专属的
+  门内读取已提交 PG 高水位、安装代次并取得活跃句柄。每个持久写入器
+  必须在事务前取得句柄、持有至提交完成，提交后才以同一句柄提交回执；已托管 Turn
+  把句柄交给已绑定接收器/受管任务，并持有到 Turn 退出。`ensure` 只做 PG 读取和本机注册，
+  不等待 NATS 发布。
+  分发器的原子高水位保存已知持久回执；每个 `DurableWake` 固定自己的
+  `through`，每条遥测在入队时固定 `durable_before`，出队时只能刷出该命令的屏障，
+  禁止旧遥测读取未来最终事件的目标值。该冻结值同时以十进制字符串
+  `durable_before_event_seq` 写入遥测 v1 帧；它只是 PG 排序水位，不改变
+  `(llm_call_id, telemetry_seq)` 身份。遥测队列满时允许丢失并保留缺口，但持久
+  回执不得等待 NATS/队列容量：队列满时只合并进不回退的原子高水位。
+  合并刷出必须先对目标拍摄快照，再确认已接收命令队列为空，且只能刷出这个旧快照；
+  拍摄快照后推进的目标留给下一次排空/空闲循环，空闲退休前必须最终追平。禁止先声明
+  队列为空，再读取可能已包含未来最终事件的目标。
+  PG 扫描必须从前沿连续推进到目标，出现缺洞/乱序时故障关闭；产品事件序列化/发布失败
+  不得推进前沿，并抑制该屏障后的遥测，重复的持久 `event_seq` 由客户端去重。
+  只有显式列出的内部持久变体可在不产生帧的情况下推进前沿；未来的
+  `DurableAgentEvent`/`ApprovalDecision` 必须保留类型化错误并故障关闭，禁止默认按内部事件、批准
+  或阻断处理。
+  映射表保留发送端的强引用，保证同一 AgentRuntime 只有一个分发器；只有已配置的空闲间隔到期、无外部
+  句柄且已接收队列为空时，才可在映射表锁内以“移除并关闭”原子操作退休，禁止双分发器竞态
+  或吞掉已接收命令。
+- 正常退休与 NATS 持续失败后的降级放弃必须和 `ensure` 在同一中心门内
+  线性化；存在任一活跃生产者句柄时不得退休或丢弃。句柄为零且有界重试耗尽时，只可
+  丢弃易失队列/目标，不得修改 PG 真相；下一次 `ensure` 从当时已提交的高水位建立新
+  代次，不在进程重启或代次退休后重新灌入旧历史。
+- 测试：单元测试位于各模块的 `#[cfg(test)]`；容器集成测试位于 `tests/api.rs` +
+  `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，Compose 项目
+  `stratum-api-test`，PG 45433 / NATS 44228，与其他 crate 的端口错开）。
+- OTLP 由 `telemetry.rs::init_telemetry()` 按环境激活：设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时安装 OTLP span 导出器（HTTP/protobuf、`reqwest-blocking`、不使用 `tonic`）与 `tracing-opentelemetry` 层，未设置时与纯 `fmt` 行为完全一致；进程退出前必须经 `TelemetryGuard::shutdown()` 刷出数据。采集器端点仅支持 `http://`。
+- 审批等待器使用 RAII 注册守卫（`Drop` 时按精确注册身份注销）；`register` 返回守卫+接收端，提前命中/读取错误/取消均不泄漏。
+- 审批处理器必须注册后立即读取 PG，并在通知、取消与内部固定上限节拍
+  之间进行选择；每次唤醒/节拍都重新读取持久真相。轮询节拍不得暴露为用户配置。
+- DispatcherHub 任务由进程 `JoinSet` 所有，条目按代次比较后移除；关闭
+  超时后由 `JoinSet::abort_all` 中止再等待结束，任何分发器/SSE/Turn 任务都不得游离。
+- 恢复的六字段快照校验包含 `skill_set_version_id` 与有序 `hook_handler_versions`，由 `turn.rs` 的固定常量作为单一来源，同时供写入与校验。
+- 消息准入的预期当前 Turn 判定先于状态判定：预期值不匹配即 `stale_turn`（即使状态为 `running`）；`agent_busy`/`resume_required` 只用于预期值匹配的 `running` 请求。
+- 进程关闭语义：受管 Turn 一旦插入进程 `JoinSet` 即拥有占用；注册表只保存精确
+  占用状态/令牌，不保存 JoinHandle。关闭只关停准入并排空，或中止并等待结束，绝不触发
+  Turn 令牌。
+- 准入排空使用先启用并固定的 `Notify::notified()`，再复查进行中计数；最后一个
+  RAII 守卫的 `notify_waiters()` 不得落在加载/注册窗口而丢失。

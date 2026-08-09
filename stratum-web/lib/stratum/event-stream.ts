@@ -2,17 +2,16 @@ import {
   ApiError,
   apiErrorFromResponse,
   isEventSeq,
-  type AgentProductEventV1,
-  type AgentStreamFrameV1,
-  type ChatMessage,
-  type LlmTelemetryEventV1,
-  type TokenUsage,
-  type ToolCall,
+  type AgentRuntimeStreamFrameV1,
 } from "@/lib/stratum/api"
+import {
+  parseAgentRuntimeProductEvent,
+  parseLlmTelemetryEvent,
+} from "@/lib/stratum/protocol-codec"
 
 export type SseEvent = { id: string | null; event: string; data: string }
 
-/** One NATS frame is bounded by the broker; keep parser memory bounded too. */
+/** One broker frame is bounded; the browser parser has the same hard guard. */
 const MAX_SSE_EVENT_CHARS = 2 * 1024 * 1024
 
 export async function readSseStream(
@@ -98,12 +97,10 @@ export async function readSseStream(
     buffer += decoder.decode()
     consumeLines(true)
   } catch (error) {
-    // A parser or callback failure owns this response body: cancel it now so
-    // the fetch connection cannot continue buffering after the caller exits.
     try {
       await reader.cancel()
     } catch {
-      // The stream may already have been aborted by its AbortSignal.
+      // The AbortSignal may already have cancelled the stream.
     }
     throw error
   } finally {
@@ -111,258 +108,201 @@ export async function readSseStream(
   }
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+type JsonRecord = Record<string, unknown>
+
+const isRecord = (value: unknown): value is JsonRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
-const isNullableString = (value: unknown): value is string | null =>
-  value === null || typeof value === "string"
-
-const isNonNegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-
-const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
+const hasOwn = (value: JsonRecord, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(value, key)
 
-function isTokenUsage(value: unknown): value is TokenUsage {
-  return (
-    isRecord(value) &&
-    isNonNegativeInteger(value.input_tokens) &&
-    isNonNegativeInteger(value.output_tokens) &&
-    isNonNegativeInteger(value.total_tokens)
-  )
+function hasExactKeys(
+  value: JsonRecord,
+  required: readonly string[],
+  optional: readonly string[] = []
+): boolean {
+  if (!required.every((key) => hasOwn(value, key))) return false
+  const allowed = new Set([...required, ...optional])
+  return Object.keys(value).every((key) => allowed.has(key))
 }
 
-function isToolCall(value: unknown): value is ToolCall {
-  return (
-    isRecord(value) &&
-    typeof value.call_id === "string" &&
-    typeof value.name === "string" &&
-    hasOwn(value, "arguments")
-  )
-}
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0
 
-function isChatMessage(value: unknown): value is ChatMessage {
-  if (!isRecord(value) || !isRecord(value.content)) return false
-  const validRole =
-    value.role === "user" ||
-    value.role === "assistant" ||
-    value.role === "tool" ||
-    value.role === "system"
-  const validContent =
-    (value.content.type === "text" && typeof value.content.data === "string") ||
-    (value.content.type === "json" && hasOwn(value.content, "data"))
-  return (
-    validRole &&
-    validContent &&
-    (value.tool_calls === undefined ||
-      (Array.isArray(value.tool_calls) &&
-        value.tool_calls.every(isToolCall))) &&
-    (value.reasoning_content === undefined ||
-      typeof value.reasoning_content === "string") &&
-    (value.tool_call_id === undefined || typeof value.tool_call_id === "string")
-  )
-}
-
-function isProductEvent(event: unknown): event is AgentProductEventV1 {
-  if (!isRecord(event) || typeof event.type !== "string") return false
-  if (event.type === "loop_started") return event.data === undefined
-  if (!isRecord(event.data)) return false
-  const data = event.data
-
-  switch (event.type) {
-    case "message_appended":
-      return isChatMessage(data.message)
-    case "tool_approval_requested":
-      return (
-        typeof data.approval_id === "string" &&
-        typeof data.call_id === "string" &&
-        typeof data.tool_name === "string" &&
-        hasOwn(data, "arguments") &&
-        (data.tool_kind === "read" || data.tool_kind === "write") &&
-        (data.danger_level === "low" ||
-          data.danger_level === "medium" ||
-          data.danger_level === "high")
-      )
-    case "tool_approval_resolved":
-      return (
-        typeof data.approval_id === "string" &&
-        (data.decision === "approve" || data.decision === "reject")
-      )
-    case "transcript_compacted":
-      return (
-        isChatMessage(data.summary) &&
-        isNonNegativeInteger(data.compacted_iteration)
-      )
-    case "iteration_completed":
-      return isNonNegativeInteger(data.iteration) && isTokenUsage(data.usage)
-    case "loop_finished":
-      return typeof data.finish_reason === "string" && isTokenUsage(data.usage)
-    case "loop_failed":
-      return typeof data.error_text === "string" && isTokenUsage(data.usage)
-    case "loop_cancelled":
-      return isTokenUsage(data.usage)
-    default:
-      return false
-  }
-}
-
-function isTelemetryEvent(event: unknown): event is LlmTelemetryEventV1 {
-  if (!isRecord(event) || typeof event.type !== "string") return false
-  if (event.type === "llm_started") return event.data === undefined
-  if (!isRecord(event.data)) return false
-  const data = event.data
-
-  switch (event.type) {
-    case "text_delta":
-    case "reasoning_delta":
-      return typeof data.delta === "string"
-    case "tool_call_delta":
-      return (
-        typeof data.call_id === "string" &&
-        typeof data.arguments_delta === "string" &&
-        (data.name === undefined ||
-          data.name === null ||
-          typeof data.name === "string")
-      )
-    case "llm_finished":
-      return (
-        typeof data.finish_reason === "string" &&
-        (data.usage === undefined ||
-          data.usage === null ||
-          isTokenUsage(data.usage))
-      )
-    default:
-      return false
-  }
-}
+const isPositiveSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0
 
 /**
- * 解析并校验一条 `AgentStreamFrameV1`。未知 protocol_version、未知 kind 或
- * 未知 event variant 一律拒绝（返回 undefined），不按 v1 猜测。
+ * Strictly decode one `AgentRuntimeStreamFrameV1`. Unknown versions, kinds,
+ * variants, missing dual identity, non-decimal sequence fields, and extra
+ * v1 envelope fields fail closed.
  */
-export function parseAgentStreamFrame(
+export function parseAgentRuntimeStreamFrame(
   data: string
-): AgentStreamFrameV1 | undefined {
+): AgentRuntimeStreamFrameV1 | undefined {
   let value: unknown
   try {
     value = JSON.parse(data)
   } catch {
     return undefined
   }
-  if (!isRecord(value)) return undefined
-  if (value.protocol_version !== 1) return undefined
-  if (typeof value.agent_id !== "string") return undefined
-  if (typeof value.created_at !== "string") return undefined
-  const sessionId = value.session_id === undefined ? null : value.session_id
-  const turnId = value.turn_id === undefined ? null : value.turn_id
-  if (!isNullableString(sessionId) || !isNullableString(turnId))
-    return undefined
-  if ((sessionId === null) !== (turnId === null)) return undefined
-  if (!isRecord(value.event) || typeof value.event.type !== "string")
+  if (
+    !isRecord(value) ||
+    value.protocol_version !== 1 ||
+    !isNonEmptyString(value.agent_runtime_id) ||
+    !isNonEmptyString(value.agent_id) ||
+    !isNonEmptyString(value.created_at) ||
+    !isRecord(value.event)
+  )
     return undefined
 
-  const baseIdentity = {
+  const base = {
     protocol_version: 1 as const,
+    agent_runtime_id: value.agent_runtime_id,
     agent_id: value.agent_id,
     created_at: value.created_at,
   }
-  const event = value.event
 
-  switch (value.kind) {
-    case "control": {
-      if (event.type === "stream_ready" && event.data === undefined)
-        return {
-          ...baseIdentity,
-          kind: "control",
-          session_id: sessionId,
-          turn_id: turnId,
-          event: { type: "stream_ready" },
-        }
-      if (
-        event.type === "stream_reset" &&
-        event.data === undefined &&
-        event.reason === "buffer_overflow"
-      )
-        return {
-          ...baseIdentity,
-          kind: "control",
-          session_id: sessionId,
-          turn_id: turnId,
-          event: { type: "stream_reset", reason: "buffer_overflow" },
-        }
+  if (value.kind === "control") {
+    if (
+      !hasExactKeys(
+        value,
+        [
+          "protocol_version",
+          "kind",
+          "agent_runtime_id",
+          "agent_id",
+          "created_at",
+          "event",
+        ],
+        ["session_id", "turn_id"]
+      ) ||
+      hasOwn(value, "session_id") !== hasOwn(value, "turn_id")
+    )
       return undefined
-    }
-    case "durable": {
-      if (
-        typeof sessionId !== "string" ||
-        typeof turnId !== "string" ||
-        !isEventSeq(value.event_seq) ||
-        typeof value.event_version !== "number" ||
-        !Number.isSafeInteger(value.event_version) ||
-        value.event_version <= 0 ||
-        !isProductEvent(event)
-      )
-        return undefined
+    const sessionId = value.session_id ?? null
+    const turnId = value.turn_id ?? null
+    if (
+      (sessionId !== null && !isNonEmptyString(sessionId)) ||
+      (turnId !== null && !isNonEmptyString(turnId)) ||
+      (sessionId === null) !== (turnId === null)
+    )
+      return undefined
+
+    if (
+      hasExactKeys(value.event, ["type"]) &&
+      value.event.type === "stream_ready"
+    )
       return {
-        ...baseIdentity,
-        kind: "durable",
+        ...base,
+        kind: "control",
         session_id: sessionId,
         turn_id: turnId,
-        event_seq: value.event_seq,
-        event_version: value.event_version,
-        event,
+        event: { type: "stream_ready" },
       }
-    }
-    case "telemetry": {
-      if (
-        typeof sessionId !== "string" ||
-        typeof turnId !== "string" ||
-        typeof value.llm_call_id !== "string" ||
-        !isEventSeq(value.durable_before_event_seq) ||
-        !isTelemetryEvent(event)
-      )
-        return undefined
-      // telemetry_seq 是 call-local 序号；容忍十进制字符串或 number
-      const seq =
-        typeof value.telemetry_seq === "number"
-          ? value.telemetry_seq
-          : isEventSeq(value.telemetry_seq)
-            ? Number(value.telemetry_seq)
-            : Number.NaN
-      if (!Number.isSafeInteger(seq) || seq < 0) return undefined
+    if (
+      hasExactKeys(value.event, ["type", "reason"]) &&
+      value.event.type === "stream_reset" &&
+      value.event.reason === "buffer_overflow" &&
+      sessionId === null &&
+      turnId === null
+    )
       return {
-        ...baseIdentity,
-        kind: "telemetry",
-        session_id: sessionId,
-        turn_id: turnId,
-        llm_call_id: value.llm_call_id,
-        telemetry_seq: seq,
-        durable_before_event_seq: value.durable_before_event_seq,
-        event,
+        ...base,
+        kind: "control",
+        session_id: null,
+        turn_id: null,
+        event: { type: "stream_reset", reason: "buffer_overflow" },
       }
-    }
-    default:
-      return undefined
+    return undefined
   }
+
+  if (value.kind === "durable") {
+    const event = parseAgentRuntimeProductEvent(value.event)
+    if (
+      !hasExactKeys(value, [
+        "protocol_version",
+        "kind",
+        "agent_runtime_id",
+        "agent_id",
+        "session_id",
+        "turn_id",
+        "created_at",
+        "event_seq",
+        "event_version",
+        "event",
+      ]) ||
+      !isNonEmptyString(value.session_id) ||
+      !isNonEmptyString(value.turn_id) ||
+      !isEventSeq(value.event_seq) ||
+      value.event_seq === "0" ||
+      !isPositiveSafeInteger(value.event_version) ||
+      event === undefined
+    )
+      return undefined
+    return {
+      ...base,
+      kind: "durable",
+      session_id: value.session_id,
+      turn_id: value.turn_id,
+      event_seq: value.event_seq,
+      event_version: value.event_version,
+      event,
+    }
+  }
+
+  if (value.kind === "telemetry") {
+    const event = parseLlmTelemetryEvent(value.event)
+    if (
+      !hasExactKeys(value, [
+        "protocol_version",
+        "kind",
+        "agent_runtime_id",
+        "agent_id",
+        "session_id",
+        "turn_id",
+        "created_at",
+        "durable_before_event_seq",
+        "llm_call_id",
+        "telemetry_seq",
+        "event",
+      ]) ||
+      !isNonEmptyString(value.session_id) ||
+      !isNonEmptyString(value.turn_id) ||
+      !isEventSeq(value.durable_before_event_seq) ||
+      !isNonEmptyString(value.llm_call_id) ||
+      !isEventSeq(value.telemetry_seq) ||
+      event === undefined
+    )
+      return undefined
+    return {
+      ...base,
+      kind: "telemetry",
+      session_id: value.session_id,
+      turn_id: value.turn_id,
+      durable_before_event_seq: value.durable_before_event_seq,
+      llm_call_id: value.llm_call_id,
+      telemetry_seq: value.telemetry_seq,
+      event,
+    }
+  }
+
+  return undefined
 }
 
-/**
- * 订阅 Agent SSE tail。无 cursor 时从当前新 tail 开始；页面内恢复通过
- * `after_cursor` query param（单一 cursor 来源，避免 Last-Event-ID 二义性）。
- * cursor 是不透明 NATS position，只做 transport 寻址。
- */
-export function subscribeToAgentEvents(options: {
+/** Subscribe to one exact AgentRuntime short tail. */
+export function subscribeToAgentRuntimeEvents(options: {
   baseUrl: string
-  agentId: string
+  agentRuntimeId: string
   afterCursor?: string
   signal?: AbortSignal
   fetcher?: typeof fetch
-  onFrame(frame: AgentStreamFrameV1, cursor: string | null): void
+  onFrame(frame: AgentRuntimeStreamFrameV1, cursor: string | null): void
 }): { done: Promise<void> } {
   const search = options.afterCursor
     ? new URLSearchParams({ after_cursor: options.afterCursor })
     : ""
-  const base = `${options.baseUrl.replace(/\/$/, "")}/v1/agents/${options.agentId}/events`
+  const base = `${options.baseUrl.replace(/\/$/, "")}/v1/agent-runtimes/${encodeURIComponent(options.agentRuntimeId)}/events`
   const url = search === "" ? base : `${base}?${search}`
   const fetcher = options.fetcher ?? fetch
 
@@ -372,23 +312,37 @@ export function subscribeToAgentEvents(options: {
         headers: { Accept: "text/event-stream" },
         signal: options.signal,
       })
-      if (response.status === 410) {
+      if (response.status === 410)
         throw new ApiError("cursor_expired", 410, "event cursor expired")
-      }
       if (!response.ok) throw await apiErrorFromResponse(response)
-      if (!response.body) {
+      if (!response.body)
         throw new ApiError("invalid_stream", 500, "event stream has no body")
-      }
-      await readSseStream(response.body, (event) => {
-        const frame = parseAgentStreamFrame(event.data)
-        if (frame === undefined) {
+
+      await readSseStream(response.body, (sseEvent) => {
+        const frame = parseAgentRuntimeStreamFrame(sseEvent.data)
+        if (frame === undefined)
           throw new ApiError(
             "unsupported_frame",
             400,
             "received an unsupported stream frame"
           )
-        }
-        options.onFrame(frame, event.id)
+        if (sseEvent.id === "")
+          throw new ApiError(
+            "unsupported_frame",
+            400,
+            "stream cursors must not be empty"
+          )
+        if (
+          frame.kind === "control" &&
+          frame.event.type === "stream_reset" &&
+          sseEvent.id !== null
+        )
+          throw new ApiError(
+            "unsupported_frame",
+            400,
+            "stream reset must not carry a cursor"
+          )
+        options.onFrame(frame, sseEvent.id)
       })
     })(),
   }

@@ -1,6 +1,6 @@
 //! Narrow domain types for the Postgres execution-storage API.
 //!
-//! Agent-wide event sequences are `u64` inside this crate and `bigint` in the
+//! AgentRuntime-wide event sequences are `u64` inside this crate and `bigint` in the
 //! schema; at the API boundary they are encoded as decimal strings so
 //! JavaScript number precision never changes identity ([`encode_event_seq`],
 //! [`parse_event_seq`]).
@@ -10,9 +10,9 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use stratum_core::{
-    AgentId, AgentVersionId, ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel,
-    DurableAgentEvent, HookInvocationId, HookPoint, ModelConfig, SessionId, TokenUsage, ToolKind,
-    ToolName, TurnId, TurnRuntimeSnapshot,
+    AgentId, AgentRuntimeId, AgentVersionTag, ApprovalDecision, ApprovalId, CallId, ChatMessage,
+    DangerLevel, DurableAgentEvent, HookInvocationId, HookPoint, ModelConfig, SessionId,
+    TokenUsage, ToolKind, ToolName, TurnId, TurnRuntimeSnapshot,
 };
 use uuid::Uuid;
 
@@ -38,7 +38,7 @@ pub const HISTORY_MAX_LIMIT: u32 = 256;
 /// page is still returned whole.
 pub const HISTORY_SOFT_PAGE_BUDGET_BYTES: usize = 1024 * 1024;
 
-/// Encodes an agent-wide event sequence as a decimal string for API frames.
+/// Encodes an AgentRuntime-wide event sequence as a decimal string for API frames.
 #[must_use]
 pub fn encode_event_seq(event_seq: u64) -> String {
     event_seq.to_string()
@@ -56,7 +56,7 @@ pub fn parse_event_seq(value: &str) -> Option<u64> {
     value.parse().ok()
 }
 
-/// Durable status of an Agent's current or most recent Turn.
+/// Durable status of an AgentRuntime's current or most recent Turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AgentStatus {
@@ -109,25 +109,29 @@ impl FromStr for AgentStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(PostgresError::corrupt_invariant(
-                "agent_state.status outside the closed set",
+                "agent_states.status outside the closed set",
             )),
         }
     }
 }
 
-/// Stored create request behind one idempotency key.
+/// Immutable create result behind one idempotency key.
 ///
 /// Read before any template access: an idempotent replay must answer from
 /// this record alone, without re-reading the template catalog.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CreateKeyLookup {
-    /// Existing Agent bound to the key.
+    /// Existing runtime bound to the key.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent template version pinned by the runtime.
     pub agent_id: AgentId,
-    /// Source template name recorded at creation.
-    pub source_template_name: String,
-    /// Client creation-time model override recorded at creation.
-    pub creation_model_override: Option<ModelConfig>,
+    /// Template name recorded by the immutable definition row.
+    pub agent_name: String,
+    /// Author-supplied template version tag.
+    pub agent_version: AgentVersionTag,
+    /// Runtime creation timestamp.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Exact hook invocation address used to find the one open journaled
@@ -137,8 +141,8 @@ pub struct CreateKeyLookup {
 /// identifies it uniquely.
 #[derive(Debug, Clone)]
 pub struct HookInvocationLookup {
-    /// Owning Agent.
-    pub agent_id: AgentId,
+    /// Owning AgentRuntime.
+    pub agent_runtime_id: AgentRuntimeId,
     /// Exact current Turn.
     pub turn_id: TurnId,
     /// Decision point being invoked.
@@ -149,50 +153,78 @@ pub struct HookInvocationLookup {
     pub call_id: Option<CallId>,
 }
 
-/// Create command: one immutable Agent plus its idle state.
+/// Canonical v1 immutable Agent definition stored in `agents`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedDefinitionV1 {
+    /// System prompt supplied by the template.
+    pub prompt: String,
+    /// Ordered tools exposed by the template.
+    pub tools: Vec<ToolName>,
+    /// Template default model; runtime overrides are stored only in state.
+    pub model: ModelConfig,
+}
+
+/// Create command for one long-lived AgentRuntime.
 ///
 /// The caller has already resolved and validated the template, model and tool
 /// preflight; the store persists exactly what it is given.
 #[derive(Debug, Clone)]
-pub struct CreateAgent {
-    /// Server-generated Agent identity.
-    pub agent_id: AgentId,
-    /// Immutable one-to-one Agent version identity.
-    pub agent_version_id: AgentVersionId,
+pub struct CreateAgentRuntime {
     /// Permanent client idempotency key.
     pub idempotency_key: Uuid,
-    /// Source template name used for request equivalence.
-    pub source_template_name: String,
-    /// Client creation-time model override, used for request equivalence.
-    pub creation_model_override: Option<ModelConfig>,
-    /// Immutable resolved definition snapshot (definition schema v1).
-    pub resolved_definition: Value,
-    /// Mutable default model for the next Turn, initialized from the
-    /// creation-time effective model.
-    pub default_model_config: ModelConfig,
+    /// Validated template name.
+    pub name: String,
+    /// Author-supplied template version tag.
+    pub version: AgentVersionTag,
+    /// Immutable canonical definition (definition schema v1).
+    pub resolved_definition: ResolvedDefinitionV1,
+    /// Initial effective runtime model: a complete create override or the
+    /// definition's template default.
+    pub model_config: ModelConfig,
 }
 
-/// Outcome of an idempotent create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Immutable portion of a successfully created AgentRuntime.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CreateAgentOutcome {
-    /// A new Agent and idle state were committed.
-    Created {
-        /// New Agent identity.
-        agent_id: AgentId,
-    },
-    /// The idempotency key replayed an equivalent earlier request.
-    Replay {
-        /// Original Agent identity.
-        agent_id: AgentId,
-    },
+pub struct AgentRuntimeCreated {
+    /// Long-lived runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent definition identity pinned by the runtime.
+    pub agent_id: AgentId,
+    /// Template name.
+    pub agent_name: String,
+    /// Author-supplied template version tag.
+    pub agent_version: AgentVersionTag,
+    /// Runtime creation timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Outcome of a key-only idempotent runtime create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CreateAgentRuntimeOutcome {
+    /// A new runtime state was committed.
+    Created(AgentRuntimeCreated),
+    /// The key replayed the original runtime without reinterpreting input.
+    Replay(AgentRuntimeCreated),
+}
+
+impl CreateAgentRuntimeOutcome {
+    /// Returns the immutable create response independent of replay status.
+    #[must_use]
+    pub const fn runtime(&self) -> &AgentRuntimeCreated {
+        match self {
+            Self::Created(runtime) | Self::Replay(runtime) => runtime,
+        }
+    }
 }
 
 /// Admission command: atomically install a new current Turn.
 #[derive(Debug, Clone)]
 pub struct BeginTurn {
-    /// Agent being admitted.
-    pub agent_id: AgentId,
+    /// AgentRuntime being admitted.
+    pub agent_runtime_id: AgentRuntimeId,
     /// CAS expectation: `None` for the first Turn, otherwise the exact recent
     /// Turn the caller observed.
     pub expected_current_turn_id: Option<TurnId>,
@@ -207,7 +239,9 @@ pub struct BeginTurn {
 /// Centralized append command used by every durable writer.
 #[derive(Debug, Clone)]
 pub struct AppendEvent {
-    /// Owning Agent.
+    /// Owning AgentRuntime.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent definition the hosted Turn expects this runtime to pin.
     pub agent_id: AgentId,
     /// Exact bound Session expectation.
     pub session_id: SessionId,
@@ -219,10 +253,10 @@ pub struct AppendEvent {
     /// Exact hook invocation identity; required for `ToolApprovalRequested`
     /// and forbidden otherwise.
     pub approval_hook_invocation_id: Option<HookInvocationId>,
-    /// Full replacement for the mutable default model; only meaningful on the
+    /// Full replacement for the mutable runtime model; only meaningful on the
     /// Turn's first user `MessageAppended` and applied only when the value
     /// differs. Forbidden on other events.
-    pub default_model_update: Option<ModelConfig>,
+    pub model_config_update: Option<ModelConfig>,
     /// Companion facts; required for `TranscriptCompacted` and forbidden
     /// otherwise.
     pub compaction: Option<CompactionInput>,
@@ -235,8 +269,8 @@ pub struct CompactionInput {
     pub compacted_iteration: u64,
     /// Exclusive end index of the replaced committed-context prefix.
     pub upto: u64,
-    /// Agent-wide sequence of the first retained `MessageAppended`; must
-    /// address a real earlier message of the same Agent.
+    /// AgentRuntime-wide sequence of the first retained `MessageAppended`;
+    /// must address a real earlier message of the same AgentRuntime.
     pub retained_from_event_seq: u64,
     /// Kernel-owned summary marker replacing the compacted prefix.
     pub summary: ChatMessage,
@@ -245,7 +279,9 @@ pub struct CompactionInput {
 /// Resolve command for one durable approval request.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolveApproval {
-    /// Owning Agent (path identity).
+    /// Owning AgentRuntime (path identity).
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent definition observed before the resolve transaction.
     pub agent_id: AgentId,
     /// Approval request being decided.
     pub approval_id: ApprovalId,
@@ -272,44 +308,46 @@ pub enum ResolveApprovalOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CommitReceipt {
-    /// Agent-wide sequence assigned to the committed row.
+    /// AgentRuntime-wide sequence assigned to the committed row.
     pub event_seq: u64,
 }
 
-/// Thin durable Agent state, as persisted in `agent_state`.
+/// Thin durable AgentRuntime state, as persisted in `agent_states`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct AgentStateView {
+pub struct AgentRuntimeStateView {
+    /// Long-lived runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent definition pinned for the lifetime of this runtime.
+    pub agent_id: AgentId,
     /// Durable status.
     pub status: AgentStatus,
     /// Bound Session (`None` only while idle).
     pub session_id: Option<SessionId>,
     /// Current or most recent Turn.
     pub current_turn_id: Option<TurnId>,
-    /// Mutable default model for the next Turn.
-    pub default_model_config: ModelConfig,
-    /// Agent-wide high-water sequence.
+    /// Mutable model configuration for the next Turn.
+    pub model_config: ModelConfig,
+    /// AgentRuntime-wide high-water sequence.
     pub last_event_seq: u64,
 }
 
-/// Cold read of one Agent: `agents` + `agent_state` plus ledger-derived
+/// Cold read of one AgentRuntime: `agents` + `agent_states` plus ledger-derived
 /// facts, all captured in one MVCC snapshot.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct AgentView {
-    /// Agent identity.
+pub struct AgentRuntimeView {
+    /// Long-lived runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent template-version identity.
     pub agent_id: AgentId,
-    /// Immutable Agent version identity.
-    pub agent_version_id: AgentVersionId,
-    /// Source template name recorded at creation.
-    pub source_template_name: String,
-    /// Client creation-time model override.
-    pub creation_model_override: Option<ModelConfig>,
-    /// Definition schema version of `resolved_definition`.
-    pub definition_schema_version: i32,
-    /// Immutable resolved definition snapshot.
-    pub resolved_definition: Value,
-    /// Creation timestamp.
+    /// Template name of the pinned definition.
+    pub agent_name: String,
+    /// Author-supplied template version tag.
+    pub agent_version: AgentVersionTag,
+    /// Strictly decoded immutable definition snapshot.
+    pub resolved_definition: ResolvedDefinitionV1,
+    /// Runtime creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Durable status.
     pub status: AgentStatus,
@@ -317,9 +355,9 @@ pub struct AgentView {
     pub session_id: Option<SessionId>,
     /// Current or most recent Turn.
     pub current_turn_id: Option<TurnId>,
-    /// Mutable default model for the next Turn.
-    pub default_model_config: ModelConfig,
-    /// Snapshot barrier; always equals `agent_state.last_event_seq` in the
+    /// Mutable model configuration for the next Turn.
+    pub model_config: ModelConfig,
+    /// Snapshot barrier; always equals `agent_states.last_event_seq` in the
     /// same MVCC snapshot.
     pub snapshot_event_seq: u64,
     /// Latest assistant `MessageAppended` sequence at the snapshot barrier,
@@ -359,13 +397,13 @@ pub struct PendingApproval {
 /// History page query over product-visible durable rows.
 #[derive(Debug, Clone, Copy)]
 pub struct HistoryQuery {
-    /// Owning Agent.
-    pub agent_id: AgentId,
+    /// Owning AgentRuntime.
+    pub agent_runtime_id: AgentRuntimeId,
     /// Inclusive barrier; rows above it are never returned.
     pub through_event_seq: u64,
     /// Exclusive upper cursor from a previous page.
     pub before_event_seq: Option<u64>,
-    /// Page size; clamped into `1..=HISTORY_MAX_LIMIT`.
+    /// Page size; must be in `1..=HISTORY_MAX_LIMIT`.
     pub limit: u32,
 }
 
@@ -373,7 +411,7 @@ pub struct HistoryQuery {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HistoryItem {
-    /// Agent-wide sequence of the durable row.
+    /// AgentRuntime-wide sequence of the durable row.
     pub event_seq: u64,
     /// Durable payload version of the row.
     pub event_version: i32,
@@ -424,7 +462,7 @@ pub struct LoopStartedRecord {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DurableEventRow {
-    /// Agent-wide sequence.
+    /// AgentRuntime-wide sequence.
     pub event_seq: u64,
     /// Durable payload version of the row.
     pub event_version: i32,
@@ -442,15 +480,15 @@ pub struct DurableEventRow {
 /// Exact-Turn resume slice request.
 #[derive(Debug, Clone, Copy)]
 pub struct ResumeSliceQuery {
-    /// Owning Agent.
-    pub agent_id: AgentId,
+    /// Owning AgentRuntime.
+    pub agent_runtime_id: AgentRuntimeId,
     /// Bound Session expectation.
     pub session_id: SessionId,
     /// Exact current Turn.
     pub turn_id: TurnId,
     /// Historical base: `LoopStarted.event_seq - 1`.
     pub base_event_seq: u64,
-    /// Fixed barrier captured as `agent_state.last_event_seq`.
+    /// Fixed barrier captured as `agent_states.last_event_seq`.
     pub through_event_seq: u64,
 }
 
@@ -458,8 +496,8 @@ pub struct ResumeSliceQuery {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TranscriptCompaction {
-    /// Owning Agent.
-    pub agent_id: AgentId,
+    /// Owning AgentRuntime.
+    pub agent_runtime_id: AgentRuntimeId,
     /// Sequence shared with the discriminator row.
     pub event_seq: u64,
     /// Turn that committed the compaction.
@@ -468,7 +506,7 @@ pub struct TranscriptCompaction {
     pub compacted_iteration: u64,
     /// Exclusive end index of the replaced committed-context prefix.
     pub upto: u64,
-    /// Agent-wide sequence of the first retained `MessageAppended`.
+    /// AgentRuntime-wide sequence of the first retained `MessageAppended`.
     pub retained_from_event_seq: u64,
     /// Kernel-owned summary marker.
     pub summary: ChatMessage,
@@ -508,6 +546,12 @@ pub struct ApprovalFacts {
     pub danger_level: DangerLevel,
     /// Committed decision, when the request is already resolved.
     pub resolution: Option<ApprovalResolution>,
+    /// Matching `HookInvocationCompleted` sequence, when the decision was
+    /// consumed by the kernel journal.
+    pub consumed_event_seq: Option<u64>,
+    /// Turn terminal sequence when the request was invalidated before a
+    /// matching completion. Requested and Resolved history remains durable.
+    pub invalidated_event_seq: Option<u64>,
 }
 
 /// A committed approval decision.

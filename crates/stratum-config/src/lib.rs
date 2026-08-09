@@ -7,7 +7,7 @@ use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, str::FromSt
 pub use error::ConfigError;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use stratum_core::{ModelId, ToolName};
+use stratum_core::{AgentVersionTag, ModelId, ToolName};
 
 /// Top-level Stratum configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -21,7 +21,7 @@ pub struct Config {
     /// HTTP API configuration, when the API is enabled.
     #[serde(default)]
     pub api: Option<ApiConfig>,
-    /// NATS configuration for the short Agent-scoped realtime tail.
+    /// NATS configuration for the short AgentRuntime-scoped realtime tail.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
     /// Postgres execution-storage configuration, required by the API host.
@@ -55,11 +55,8 @@ pub struct ApiConfig {
     /// SSE keep-alive interval.
     #[serde(default = "default_sse_keep_alive_seconds")]
     pub sse_keep_alive_seconds: u64,
-    /// Durable approval ledger fallback polling interval.
-    #[serde(default = "default_approval_poll_interval_seconds")]
-    pub approval_poll_interval_seconds: u64,
-    /// Idle interval after which an Agent dispatcher with no external handles
-    /// releases its map entry and task.
+    /// Idle interval after which an AgentRuntime dispatcher with no external
+    /// handles releases its map entry and task.
     #[serde(default = "default_dispatcher_idle_timeout_seconds")]
     pub dispatcher_idle_timeout_seconds: u64,
 }
@@ -71,7 +68,6 @@ impl Default for ApiConfig {
             allowed_origins: Vec::new(),
             shutdown_drain_timeout_seconds: default_shutdown_drain_timeout_seconds(),
             sse_keep_alive_seconds: default_sse_keep_alive_seconds(),
-            approval_poll_interval_seconds: default_approval_poll_interval_seconds(),
             dispatcher_idle_timeout_seconds: default_dispatcher_idle_timeout_seconds(),
         }
     }
@@ -89,10 +85,6 @@ const fn default_sse_keep_alive_seconds() -> u64 {
     15
 }
 
-const fn default_approval_poll_interval_seconds() -> u64 {
-    15
-}
-
 const fn default_dispatcher_idle_timeout_seconds() -> u64 {
     60
 }
@@ -106,7 +98,7 @@ pub struct NatsConfig {
     pub url: String,
     /// JetStream stream name.
     pub stream_name: String,
-    /// Subject prefix for agent events.
+    /// Subject prefix for AgentRuntime events.
     pub subject_prefix: String,
     /// Number of stream replicas.
     pub replicas: usize,
@@ -289,6 +281,8 @@ impl fmt::Debug for ProviderConfig {
 pub struct ResolvedAgentDefinition {
     /// Agent name.
     pub agent_name: AgentName,
+    /// Author-provided immutable template version tag.
+    pub agent_version: AgentVersionTag,
     /// Selected model.
     pub model: ModelId,
     /// Tools exposed to the agent.
@@ -300,6 +294,8 @@ pub struct ResolvedAgentDefinition {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentTemplate {
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     model: Option<ModelId>,
     #[serde(default)]
@@ -330,6 +326,11 @@ impl Config {
         input: &str,
     ) -> Result<ResolvedAgentDefinition, ConfigError> {
         let template: AgentTemplate = toml::from_str(input)?;
+        let version = template
+            .version
+            .ok_or(ConfigError::MissingAgentVersion)?
+            .parse()
+            .map_err(ConfigError::InvalidAgentVersion)?;
         let prompt = template.prompt.trim();
         if prompt.is_empty() {
             return Err(ConfigError::EmptyPrompt);
@@ -340,6 +341,7 @@ impl Config {
 
         Ok(ResolvedAgentDefinition {
             agent_name,
+            agent_version: version,
             model,
             tools: template.tools,
             prompt: prompt.to_owned(),
@@ -405,10 +407,6 @@ impl Config {
                     api.shutdown_drain_timeout_seconds,
                 ),
                 ("sse_keep_alive_seconds", api.sse_keep_alive_seconds),
-                (
-                    "approval_poll_interval_seconds",
-                    api.approval_poll_interval_seconds,
-                ),
                 (
                     "dispatcher_idle_timeout_seconds",
                     api.dispatcher_idle_timeout_seconds,
@@ -574,6 +572,7 @@ max_messages = 100000
 "#;
 
     const VALID_TEMPLATE_WITHOUT_MODEL: &str = r#"
+version = "release-1"
 tools = ["read_file", "apply_patch"]
 prompt = "  You are a coding agent.  "
 "#;
@@ -589,7 +588,6 @@ prompt = "  You are a coding agent.  "
         let api = config.require_api().expect("api exists");
         assert_eq!(api.shutdown_drain_timeout_seconds, 10);
         assert_eq!(api.sse_keep_alive_seconds, 15);
-        assert_eq!(api.approval_poll_interval_seconds, 15);
         assert_eq!(api.dispatcher_idle_timeout_seconds, 60);
         let nats = config.require_nats().expect("nats exists");
         assert_eq!(nats.connect_timeout_seconds, 5);
@@ -819,6 +817,64 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
+    fn resolves_author_version_tag_without_normalizing_it() {
+        let config = Config::parse(VALID_CONFIG).expect("config parses");
+        let definition = config
+            .resolve_template(
+                "coding-agent".parse().expect("agent name parses"),
+                VALID_TEMPLATE_WITHOUT_MODEL,
+            )
+            .expect("template resolves");
+
+        assert_eq!(definition.agent_version.as_str(), "release-1");
+        assert_eq!(definition.prompt, "You are a coding agent.");
+        assert_eq!(definition.tools.len(), 2);
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_author_version_tag() {
+        let config = Config::parse(VALID_CONFIG).expect("config parses");
+        let cases = [
+            ("tools = []\nprompt = \"hello\"", true),
+            ("version = \"\"\ntools = []\nprompt = \"hello\"", false),
+            (
+                "version = \" release-1\"\ntools = []\nprompt = \"hello\"",
+                false,
+            ),
+            (
+                "version = \"release-1 \"\ntools = []\nprompt = \"hello\"",
+                false,
+            ),
+        ];
+
+        for (template, missing) in cases {
+            let error = config
+                .resolve_template("coding-agent".parse().expect("agent name parses"), template)
+                .expect_err("invalid version is rejected");
+            assert!(
+                if missing {
+                    matches!(error, ConfigError::MissingAgentVersion)
+                } else {
+                    matches!(error, ConfigError::InvalidAgentVersion(_))
+                },
+                "unexpected error: {error}"
+            );
+        }
+
+        let oversized = format!(
+            "version = {:?}\ntools = []\nprompt = \"hello\"",
+            "x".repeat(129)
+        );
+        assert!(matches!(
+            config.resolve_template(
+                "coding-agent".parse().expect("agent name parses"),
+                &oversized,
+            ),
+            Err(ConfigError::InvalidAgentVersion(_))
+        ));
+    }
+
+    #[test]
     fn rejects_agent_name_longer_than_64_bytes() {
         let value = "a".repeat(65);
         assert!(matches!(
@@ -843,6 +899,7 @@ prompt = "  You are a coding agent.  "
         let config = Config::parse(VALID_CONFIG).expect("config parses");
         let name: AgentName = "coding-agent".parse().expect("name parses");
         let template = r#"
+version = "release-2"
 model = "deepseek:deepseek-v4-pro"
 tools = ["read_file"]
 prompt = "Use the requested model."
@@ -859,6 +916,7 @@ prompt = "Use the requested model."
         let config = Config::parse(VALID_CONFIG).expect("config parses");
         let name: AgentName = "coding-agent".parse().expect("name parses");
         let template = r#"
+version = "release-invalid-model"
 model = "deepseek:not-configured"
 tools = []
 prompt = "Use the requested model."
@@ -887,6 +945,7 @@ prompt = "Use the requested model."
         let config = Config::parse(VALID_CONFIG).expect("config parses");
         let name: AgentName = "coding-agent".parse().expect("name parses");
         let template = r#"
+version = "release-duplicate-tools"
 tools = ["read_file", "read_file"]
 prompt = "Use tools."
 "#;
@@ -901,7 +960,7 @@ prompt = "Use tools."
     fn rejects_empty_template_prompt() {
         let config = Config::parse(VALID_CONFIG).expect("config parses");
         let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = "tools = []\nprompt = \"  \"";
+        let template = "version = \"release-empty-prompt\"\ntools = []\nprompt = \"  \"";
 
         assert!(matches!(
             config.resolve_template(name, template),

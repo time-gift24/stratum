@@ -12,7 +12,7 @@ use std::error::Error as StdError;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
-use stratum_infra::AgentTailError;
+use stratum_infra::AgentRuntimeTailError;
 use stratum_postgres::PostgresError;
 use utoipa::ToSchema;
 
@@ -29,6 +29,12 @@ pub(crate) enum PersistedVariantError {
     UnsupportedApprovalDecision,
 }
 
+/// A persisted historical baseline violates the replay invariants required by
+/// the API composition layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("historical baseline is corrupt: {0}")]
+pub(crate) struct BaselineCorruptError(pub(crate) &'static str);
+
 /// Failure at one concrete dispatcher scan, projection, or publish boundary.
 /// Each variant preserves the typed source while exposing only a fixed safe
 /// message to logs.
@@ -36,7 +42,7 @@ pub(crate) enum PersistedVariantError {
 pub(crate) enum DispatchError {
     /// NATS rejected or failed a realtime publish.
     #[error("realtime publish failed")]
-    Publish(#[source] AgentTailError),
+    Publish(#[source] AgentRuntimeTailError),
     /// Postgres failed to scan a committed durable interval.
     #[error("durable event scan failed")]
     Scan(#[source] PostgresError),
@@ -71,23 +77,23 @@ pub enum ErrorKind {
     InvalidCursor,
     /// 400: history window arguments are missing, unparsable, or inverted.
     InvalidHistoryQuery,
-    /// 404: the addressed Agent does not exist.
-    AgentNotFound,
+    /// 404: the addressed AgentRuntime does not exist.
+    AgentRuntimeNotFound,
     /// 404: the addressed agent template does not exist.
-    TemplateNotFound,
+    AgentTemplateNotFound,
     /// 404: the addressed approval request does not exist.
     ApprovalNotFound,
-    /// 409: the idempotency key is bound to a different create request.
-    IdempotencyKeyConflict,
+    /// 409: an author reused one exact name/version tag for another definition.
+    AgentVersionConflict,
     /// 409: the caller's expected current Turn no longer matches.
     StaleTurn,
-    /// 409: the Agent has a running Turn hosted by this process.
-    AgentBusy,
-    /// 409: the Agent has a running Turn that is not hosted anywhere.
+    /// 409: the AgentRuntime has a running Turn hosted by this process.
+    AgentRuntimeBusy,
+    /// 409: the AgentRuntime has a running Turn that is not hosted anywhere.
     ResumeRequired,
     /// 409: the requested Session differs from the bound Session.
     SessionMismatch,
-    /// 409: another Agent is running on the requested Session.
+    /// 409: another AgentRuntime is running on the requested Session.
     SessionBusy,
     /// 409: the exact Turn is not running.
     TurnNotRunning,
@@ -107,6 +113,8 @@ pub enum ErrorKind {
     CursorExpired,
     /// 413: the JSON body exceeded the hard limit.
     RequestTooLarge,
+    /// 422: an author-provided Agent template version tag is invalid.
+    InvalidAgentVersion,
     /// 422: the template catalog or one template is unreadable or invalid.
     InvalidAgentTemplate,
     /// 422: the requested model is not configured.
@@ -124,7 +132,7 @@ pub enum ErrorKind {
     /// 503: the NATS realtime tail cannot serve the subscription.
     RealtimeUnavailable,
     /// 503: the service is shutting down.
-    ServiceUnavailable,
+    ServiceShuttingDown,
 }
 
 impl ErrorKind {
@@ -135,12 +143,12 @@ impl ErrorKind {
             Self::InvalidRequest => "invalid_request",
             Self::InvalidCursor => "invalid_cursor",
             Self::InvalidHistoryQuery => "invalid_history_query",
-            Self::AgentNotFound => "agent_not_found",
-            Self::TemplateNotFound => "template_not_found",
+            Self::AgentRuntimeNotFound => "agent_runtime_not_found",
+            Self::AgentTemplateNotFound => "agent_template_not_found",
             Self::ApprovalNotFound => "approval_not_found",
-            Self::IdempotencyKeyConflict => "idempotency_key_conflict",
+            Self::AgentVersionConflict => "agent_version_conflict",
             Self::StaleTurn => "stale_turn",
-            Self::AgentBusy => "agent_busy",
+            Self::AgentRuntimeBusy => "agent_runtime_busy",
             Self::ResumeRequired => "resume_required",
             Self::SessionMismatch => "session_mismatch",
             Self::SessionBusy => "session_busy",
@@ -153,6 +161,7 @@ impl ErrorKind {
             Self::RuntimeIncompatible => "runtime_incompatible",
             Self::CursorExpired => "cursor_expired",
             Self::RequestTooLarge => "request_too_large",
+            Self::InvalidAgentVersion => "invalid_agent_version",
             Self::InvalidAgentTemplate => "invalid_agent_template",
             Self::ModelNotConfigured => "model_not_configured",
             Self::InvalidModelParameters => "invalid_model_parameters",
@@ -161,7 +170,7 @@ impl ErrorKind {
             Self::StoreUnavailable => "store_unavailable",
             Self::RuntimeUnavailable => "runtime_unavailable",
             Self::RealtimeUnavailable => "realtime_unavailable",
-            Self::ServiceUnavailable => "service_unavailable",
+            Self::ServiceShuttingDown => "service_shutting_down",
         }
     }
 
@@ -172,12 +181,12 @@ impl ErrorKind {
             Self::InvalidRequest | Self::InvalidCursor | Self::InvalidHistoryQuery => {
                 StatusCode::BAD_REQUEST
             }
-            Self::AgentNotFound | Self::TemplateNotFound | Self::ApprovalNotFound => {
+            Self::AgentRuntimeNotFound | Self::AgentTemplateNotFound | Self::ApprovalNotFound => {
                 StatusCode::NOT_FOUND
             }
-            Self::IdempotencyKeyConflict
+            Self::AgentVersionConflict
             | Self::StaleTurn
-            | Self::AgentBusy
+            | Self::AgentRuntimeBusy
             | Self::ResumeRequired
             | Self::SessionMismatch
             | Self::SessionBusy
@@ -190,14 +199,15 @@ impl ErrorKind {
             | Self::RuntimeIncompatible => StatusCode::CONFLICT,
             Self::CursorExpired => StatusCode::GONE,
             Self::RequestTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::InvalidAgentTemplate
+            Self::InvalidAgentVersion
+            | Self::InvalidAgentTemplate
             | Self::ModelNotConfigured
             | Self::InvalidModelParameters => StatusCode::UNPROCESSABLE_ENTITY,
             Self::DurableStateCorrupt | Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::StoreUnavailable | Self::RuntimeUnavailable | Self::RealtimeUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
-            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -208,17 +218,19 @@ impl ErrorKind {
             Self::InvalidRequest => "the request is invalid",
             Self::InvalidCursor => "the event cursor is invalid",
             Self::InvalidHistoryQuery => "the history query is invalid",
-            Self::AgentNotFound => "the agent does not exist",
-            Self::TemplateNotFound => "the agent template does not exist",
+            Self::AgentRuntimeNotFound => "the agent runtime does not exist",
+            Self::AgentTemplateNotFound => "the agent template does not exist",
             Self::ApprovalNotFound => "the approval request does not exist",
-            Self::IdempotencyKeyConflict => {
-                "the idempotency key is already bound to a different create request"
+            Self::AgentVersionConflict => {
+                "the agent version tag is already bound to a different definition"
             }
-            Self::StaleTurn => "the expected current turn no longer matches the agent",
-            Self::AgentBusy => "the agent already has a running turn",
-            Self::ResumeRequired => "the agent has a running turn that must be resumed explicitly",
-            Self::SessionMismatch => "the session does not match the agent's bound session",
-            Self::SessionBusy => "the session already has a running agent",
+            Self::StaleTurn => "the expected current turn no longer matches the agent runtime",
+            Self::AgentRuntimeBusy => "the agent runtime already has a running turn",
+            Self::ResumeRequired => {
+                "the agent runtime has a running turn that must be resumed explicitly"
+            }
+            Self::SessionMismatch => "the session does not match the agent runtime's bound session",
+            Self::SessionBusy => "the session already has a running agent runtime",
             Self::TurnNotRunning => "the turn is not running",
             Self::TurnNotHosted => "the turn is not hosted by this process",
             Self::TurnStarting => "the turn is still starting",
@@ -234,6 +246,7 @@ impl ErrorKind {
             }
             Self::CursorExpired => "the event cursor is no longer retained",
             Self::RequestTooLarge => "the request body is too large",
+            Self::InvalidAgentVersion => "the agent version tag is invalid",
             Self::InvalidAgentTemplate => "the agent template is invalid",
             Self::ModelNotConfigured => "the model is not configured",
             Self::InvalidModelParameters => "the model parameters are invalid",
@@ -242,7 +255,7 @@ impl ErrorKind {
             Self::StoreUnavailable => "the execution store is unavailable",
             Self::RuntimeUnavailable => "a runtime component is unavailable",
             Self::RealtimeUnavailable => "the realtime event tail is unavailable",
-            Self::ServiceUnavailable => "the service is shutting down",
+            Self::ServiceShuttingDown => "the service is shutting down",
         }
     }
 }
@@ -298,12 +311,12 @@ impl ApiError {
 #[must_use]
 pub(crate) fn kind_of_postgres(source: &PostgresError) -> ErrorKind {
     match source {
-        PostgresError::AgentNotFound { .. } => ErrorKind::AgentNotFound,
+        PostgresError::AgentRuntimeNotFound { .. } => ErrorKind::AgentRuntimeNotFound,
         PostgresError::TurnNotFound { .. } => ErrorKind::DurableStateCorrupt,
         PostgresError::ApprovalNotFound { .. } => ErrorKind::ApprovalNotFound,
-        PostgresError::IdempotencyKeyConflict { .. } => ErrorKind::IdempotencyKeyConflict,
+        PostgresError::AgentVersionConflict { .. } => ErrorKind::AgentVersionConflict,
         PostgresError::StaleTurn { .. } => ErrorKind::StaleTurn,
-        PostgresError::AgentBusy { .. } => ErrorKind::AgentBusy,
+        PostgresError::AgentRuntimeBusy { .. } => ErrorKind::AgentRuntimeBusy,
         PostgresError::SessionMismatch { .. } => ErrorKind::SessionMismatch,
         PostgresError::SessionBusy { .. } => ErrorKind::SessionBusy,
         PostgresError::TurnNotRunning { .. } => ErrorKind::TurnNotRunning,
@@ -358,16 +371,24 @@ mod tests {
             (ErrorKind::InvalidRequest, 400, "invalid_request"),
             (ErrorKind::InvalidCursor, 400, "invalid_cursor"),
             (ErrorKind::InvalidHistoryQuery, 400, "invalid_history_query"),
-            (ErrorKind::AgentNotFound, 404, "agent_not_found"),
-            (ErrorKind::TemplateNotFound, 404, "template_not_found"),
+            (
+                ErrorKind::AgentRuntimeNotFound,
+                404,
+                "agent_runtime_not_found",
+            ),
+            (
+                ErrorKind::AgentTemplateNotFound,
+                404,
+                "agent_template_not_found",
+            ),
             (ErrorKind::ApprovalNotFound, 404, "approval_not_found"),
             (
-                ErrorKind::IdempotencyKeyConflict,
+                ErrorKind::AgentVersionConflict,
                 409,
-                "idempotency_key_conflict",
+                "agent_version_conflict",
             ),
             (ErrorKind::StaleTurn, 409, "stale_turn"),
-            (ErrorKind::AgentBusy, 409, "agent_busy"),
+            (ErrorKind::AgentRuntimeBusy, 409, "agent_runtime_busy"),
             (ErrorKind::ResumeRequired, 409, "resume_required"),
             (ErrorKind::SessionMismatch, 409, "session_mismatch"),
             (ErrorKind::SessionBusy, 409, "session_busy"),
@@ -388,6 +409,7 @@ mod tests {
             (ErrorKind::RuntimeIncompatible, 409, "runtime_incompatible"),
             (ErrorKind::CursorExpired, 410, "cursor_expired"),
             (ErrorKind::RequestTooLarge, 413, "request_too_large"),
+            (ErrorKind::InvalidAgentVersion, 422, "invalid_agent_version"),
             (
                 ErrorKind::InvalidAgentTemplate,
                 422,
@@ -404,7 +426,7 @@ mod tests {
             (ErrorKind::StoreUnavailable, 503, "store_unavailable"),
             (ErrorKind::RuntimeUnavailable, 503, "runtime_unavailable"),
             (ErrorKind::RealtimeUnavailable, 503, "realtime_unavailable"),
-            (ErrorKind::ServiceUnavailable, 503, "service_unavailable"),
+            (ErrorKind::ServiceShuttingDown, 503, "service_shutting_down"),
         ];
         for (kind, status, code) in expectations {
             assert_eq!(kind.status().as_u16(), status, "status for {code}");
@@ -423,14 +445,14 @@ mod tests {
     fn postgres_errors_map_to_their_stable_kinds() {
         let cases: Vec<(PostgresError, ErrorKind)> = vec![
             (
-                PostgresError::AgentNotFound {
-                    agent_id: stratum_core::AgentId::new(),
+                PostgresError::AgentRuntimeNotFound {
+                    agent_runtime_id: stratum_core::AgentRuntimeId::new(),
                 },
-                ErrorKind::AgentNotFound,
+                ErrorKind::AgentRuntimeNotFound,
             ),
             (
                 PostgresError::StaleTurn {
-                    agent_id: stratum_core::AgentId::new(),
+                    agent_runtime_id: stratum_core::AgentRuntimeId::new(),
                     expected: None,
                     actual: None,
                 },

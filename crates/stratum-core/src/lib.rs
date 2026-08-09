@@ -17,17 +17,17 @@ pub use agent_loop_event::{
     PrepareNextTurnDecisionRecord, TransformContextDecisionRecord, TransformToolCallDecisionRecord,
     TransformToolCallModificationRecord,
 };
-pub use error::{FingerprintParseError, HookFailure, ModelIdParseError};
+pub use error::{AgentVersionTagParseError, FingerprintParseError, HookFailure, ModelIdParseError};
 
 uuid_identity!(SessionId, "Identity of one long-lived runtime session.");
 uuid_identity!(
     TurnId,
     "Identity of one resumable turn inside a workflow run."
 );
-uuid_identity!(AgentId, "Identity of an agent.");
+uuid_identity!(AgentId, "Identity of one immutable Agent template version.");
 uuid_identity!(
-    AgentVersionId,
-    "Identity of one immutable published agent version."
+    AgentRuntimeId,
+    "Identity of one long-lived Agent runtime aggregate."
 );
 uuid_identity!(
     WorkflowVersionId,
@@ -91,6 +91,86 @@ string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
+
+/// Author-supplied identity tag for one immutable Agent template version.
+///
+/// Tags are compared byte-for-byte. They are case-sensitive and intentionally
+/// have no ordering, normalization, or semantic-version meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentVersionTag(String);
+
+impl AgentVersionTag {
+    /// Parses an author-supplied Agent template version tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentVersionTagParseError`] when `value` is empty, longer
+    /// than 128 UTF-8 bytes, contains a control character, or has leading or
+    /// trailing whitespace.
+    pub fn new(value: impl Into<String>) -> Result<Self, AgentVersionTagParseError> {
+        value.into().try_into()
+    }
+
+    /// Returns the original, unnormalized tag.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AgentVersionTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for AgentVersionTag {
+    type Err = AgentVersionTagParseError;
+
+    /// Parses an author-supplied Agent template version tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentVersionTagParseError`] when the tag is outside the
+    /// durable protocol boundary.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl TryFrom<String> for AgentVersionTag {
+    type Error = AgentVersionTagParseError;
+
+    /// Validates an owned Agent template version tag without normalizing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentVersionTagParseError`] when the tag is outside the
+    /// durable protocol boundary.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(AgentVersionTagParseError::Empty);
+        }
+        if value.len() > 128 {
+            return Err(AgentVersionTagParseError::TooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(AgentVersionTagParseError::ControlCharacter);
+        }
+        if value.trim() != value {
+            return Err(AgentVersionTagParseError::SurroundingWhitespace);
+        }
+
+        Ok(Self(value))
+    }
+}
+
+impl From<AgentVersionTag> for String {
+    fn from(value: AgentVersionTag) -> Self {
+        value.0
+    }
+}
 
 sha256_fingerprint!(
     ToolSetFingerprint,
@@ -194,6 +274,7 @@ impl From<ModelId> for String {
 /// Stable model selection and provider parameters for an agent turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     /// Canonical provider-scoped model identity.
     pub model: ModelId,
@@ -283,7 +364,7 @@ impl AgentRuntimeContext {
 #[non_exhaustive]
 pub struct TurnRuntimeSnapshot {
     /// Immutable agent definition used by the turn.
-    pub agent_version_id: AgentVersionId,
+    pub agent_id: AgentId,
     /// Fully resolved model configuration used by the turn.
     pub model: ModelConfig,
     /// Exact ordered set of tools visible to the model.
@@ -300,7 +381,7 @@ impl TurnRuntimeSnapshot {
     /// Creates an exact runtime snapshot for one resumable Turn.
     #[must_use]
     pub fn new(
-        agent_version_id: AgentVersionId,
+        agent_id: AgentId,
         model: ModelConfig,
         tool_set_fingerprint: ToolSetFingerprint,
         skill_set_version_id: SkillSetVersionId,
@@ -308,7 +389,7 @@ impl TurnRuntimeSnapshot {
         hook_handler_versions: Vec<HookHandlerVersionId>,
     ) -> Self {
         Self {
-            agent_version_id,
+            agent_id,
             model,
             tool_set_fingerprint,
             skill_set_version_id,
@@ -1031,12 +1112,45 @@ mod tests {
         }
 
         assert_identity!(SessionId);
-        assert_identity!(AgentVersionId);
+        assert_identity!(AgentId);
+        assert_identity!(AgentRuntimeId);
         assert_identity!(WorkflowVersionId);
         assert_identity!(SkillSetVersionId);
         assert_identity!(ExtensionSetVersionId);
         assert_identity!(HookHandlerVersionId);
         assert_identity!(HookInvocationId);
+    }
+
+    #[test]
+    fn agent_version_tag_preserves_author_value_and_rejects_invalid_boundaries() {
+        let tag = AgentVersionTag::new("Release-α").expect("valid tag");
+        assert_eq!(tag.as_str(), "Release-α");
+        assert_ne!(
+            tag,
+            AgentVersionTag::new("release-α").expect("valid case-distinct tag")
+        );
+
+        assert_eq!(
+            AgentVersionTag::new("").expect_err("empty tag is invalid"),
+            AgentVersionTagParseError::Empty
+        );
+        assert_eq!(
+            AgentVersionTag::new("x".repeat(129)).expect_err("oversized tag is invalid"),
+            AgentVersionTagParseError::TooLong
+        );
+        assert_eq!(
+            AgentVersionTag::new("release\n1").expect_err("control character is invalid"),
+            AgentVersionTagParseError::ControlCharacter
+        );
+        assert_eq!(
+            AgentVersionTag::new(" release-1").expect_err("leading whitespace is invalid"),
+            AgentVersionTagParseError::SurroundingWhitespace
+        );
+        assert_eq!(
+            AgentVersionTag::new("release-1 ").expect_err("trailing whitespace is invalid"),
+            AgentVersionTagParseError::SurroundingWhitespace
+        );
+        assert!(serde_json::from_str::<AgentVersionTag>(r#"" release-1""#).is_err());
     }
 
     #[test]

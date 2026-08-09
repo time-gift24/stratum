@@ -42,7 +42,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/live"]
+      test: ["CMD", "curl", "--noproxy", "*", "-fsS", "http://127.0.0.1:8080/health/live"]
       interval: 5s
       timeout: 3s
       retries: 12

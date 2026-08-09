@@ -1,23 +1,24 @@
-//! Configuration for the Agent-scoped NATS tail transport.
+//! Configuration for the AgentRuntime-scoped NATS tail transport.
 
 use std::time::Duration;
 
 use async_nats::jetstream::stream::{self, DiscardPolicy, RetentionPolicy, StorageType};
 
-use super::{AgentTailError, subject};
+use super::{AgentRuntimeTailError, subject};
 
-/// Configuration for the Agent-scoped NATS tail transport.
+/// Configuration for the AgentRuntime-scoped NATS tail transport.
 ///
 /// All three retention limits are required and finite: the tail is a short,
 /// lossy observation channel with discard-old limits retention, never a
 /// durable history.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentTailConfig {
+#[non_exhaustive]
+pub struct AgentRuntimeTailConfig {
     /// NATS server URL.
     pub url: String,
-    /// JetStream stream name backing all agent tails.
+    /// JetStream stream name backing all AgentRuntime tails.
     pub stream_name: String,
-    /// Subject prefix before `agent.<agent_id>`.
+    /// Subject prefix before `runtime.<agent_runtime_id>`.
     pub subject_prefix: String,
     /// Number of stream replicas.
     pub replicas: usize,
@@ -29,11 +30,11 @@ pub struct AgentTailConfig {
     pub max_messages: i64,
 }
 
-impl Default for AgentTailConfig {
+impl Default for AgentRuntimeTailConfig {
     fn default() -> Self {
         Self {
             url: "nats://localhost:4222".to_owned(),
-            stream_name: "AGENT_TAIL".to_owned(),
+            stream_name: "AGENT_RUNTIME_TAIL".to_owned(),
             subject_prefix: "events.agent".to_owned(),
             replicas: 1,
             max_age: Duration::from_secs(60 * 60),
@@ -43,8 +44,8 @@ impl Default for AgentTailConfig {
     }
 }
 
-impl AgentTailConfig {
-    pub(crate) fn validate(&self) -> Result<(), AgentTailError> {
+impl AgentRuntimeTailConfig {
+    pub(crate) fn validate(&self) -> Result<(), AgentRuntimeTailError> {
         let reason = if self.stream_name.is_empty() {
             Some("stream_name must not be empty")
         } else if !valid_subject_prefix(&self.subject_prefix) {
@@ -62,7 +63,7 @@ impl AgentTailConfig {
         };
 
         reason.map_or(Ok(()), |reason| {
-            Err(AgentTailError::InvalidConfig { reason })
+            Err(AgentRuntimeTailError::InvalidConfig { reason })
         })
     }
 
@@ -95,7 +96,7 @@ mod tests {
 
     #[test]
     fn default_config_has_finite_discard_old_retention_limits() {
-        let config = AgentTailConfig::default();
+        let config = AgentRuntimeTailConfig::default();
         config.validate().expect("default config is valid");
 
         let stream_config = config.stream_config();
@@ -118,23 +119,23 @@ mod tests {
     #[test]
     fn config_rejects_non_finite_retention_limits() {
         let invalid_configs = [
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 max_age: Duration::ZERO,
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 max_bytes: 0,
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 max_bytes: -1,
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 max_messages: 0,
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 max_messages: -1,
                 ..Default::default()
             },
@@ -143,7 +144,7 @@ mod tests {
         for config in invalid_configs {
             assert!(matches!(
                 config.validate(),
-                Err(AgentTailError::InvalidConfig { .. })
+                Err(AgentRuntimeTailError::InvalidConfig { .. })
             ));
         }
     }
@@ -151,27 +152,27 @@ mod tests {
     #[test]
     fn config_rejects_invalid_identity_fields() {
         let invalid_configs = [
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 stream_name: String::new(),
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 subject_prefix: String::new(),
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 subject_prefix: "events..agent".to_owned(),
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 subject_prefix: "events.agent.>".to_owned(),
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 replicas: 0,
                 ..Default::default()
             },
-            AgentTailConfig {
+            AgentRuntimeTailConfig {
                 replicas: 6,
                 ..Default::default()
             },
@@ -180,7 +181,7 @@ mod tests {
         for config in invalid_configs {
             assert!(matches!(
                 config.validate(),
-                Err(AgentTailError::InvalidConfig { .. })
+                Err(AgentRuntimeTailError::InvalidConfig { .. })
             ));
         }
     }

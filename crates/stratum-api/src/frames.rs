@@ -1,8 +1,8 @@
-//! API-owned realtime protocol: `AgentStreamFrameV1` and the safe product
-//! event union `AgentProductEventV1`.
+//! API-owned realtime protocol: `AgentRuntimeStreamFrameV1` and the safe
+//! product event union `AgentRuntimeProductEventV1`.
 //!
 //! Frames are the only public realtime wire shape. Durable frames carry the
-//! Agent-wide `event_seq` as a decimal string; telemetry frames carry the
+//! AgentRuntime-wide `event_seq` as a decimal string; telemetry frames carry the
 //! call-local `(llm_call_id, telemetry_seq)` identity plus a decimal-string PG
 //! ordering watermark. Raw durable payloads, runtime snapshots, hook journal
 //! rows, `ToolExecutionStarted`, and internal error sources are never
@@ -11,10 +11,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use stratum_core::{
-    AgentId, AgentTelemetryEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel,
-    DurableAgentEvent, LlmCallId, SessionId, TokenUsage, ToolKind, ToolName, TurnId,
+    AgentId, AgentRuntimeId, AgentTelemetryEvent, ApprovalDecision, ApprovalId, CallId,
+    ChatMessage, DangerLevel, DurableAgentEvent, LlmCallId, SessionId, TokenUsage, ToolKind,
+    ToolName, TurnId,
 };
-use stratum_postgres::{DurableEventRow, HistoryItem, encode_event_seq};
+use stratum_postgres::{DurableEventRow, HistoryItem, encode_event_seq, parse_event_seq};
 use utoipa::ToSchema;
 
 use crate::error::PersistedVariantError;
@@ -26,7 +27,7 @@ pub const PROTOCOL_VERSION_V1: u8 = 1;
 /// this local projection of one scanned durable row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScannedRow {
-    /// Agent-wide sequence.
+    /// AgentRuntime-wide sequence.
     pub event_seq: u64,
     /// Durable payload version of the row.
     pub event_version: i32,
@@ -53,16 +54,19 @@ impl From<DurableEventRow> for ScannedRow {
     }
 }
 
-/// One frame of the Agent-scoped realtime stream (SSE `data` payload).
+/// One frame of the AgentRuntime-scoped realtime stream (SSE `data` payload).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
-pub enum AgentStreamFrameV1 {
+pub enum AgentRuntimeStreamFrameV1 {
     /// Locally produced control signal; never carries an SSE id.
     Control {
         /// Protocol version; always 1.
+        #[serde(deserialize_with = "deserialize_protocol_version_v1")]
         protocol_version: u8,
-        /// Owning Agent.
+        /// Owning AgentRuntime aggregate.
+        agent_runtime_id: AgentRuntimeId,
+        /// Immutable Agent template version pinned by the runtime.
         agent_id: AgentId,
         /// Bound Session, when one exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,8 +82,11 @@ pub enum AgentStreamFrameV1 {
     /// One committed product event of the durable ledger.
     Durable {
         /// Protocol version; always 1.
+        #[serde(deserialize_with = "deserialize_protocol_version_v1")]
         protocol_version: u8,
-        /// Owning Agent.
+        /// Owning AgentRuntime aggregate.
+        agent_runtime_id: AgentRuntimeId,
+        /// Immutable Agent template version pinned by the runtime.
         agent_id: AgentId,
         /// Session owning the durable row.
         session_id: SessionId,
@@ -87,18 +94,22 @@ pub enum AgentStreamFrameV1 {
         turn_id: TurnId,
         /// Frame creation time.
         created_at: DateTime<Utc>,
-        /// Agent-wide event sequence as a decimal string.
+        /// AgentRuntime-wide event sequence as a decimal string.
+        #[serde(deserialize_with = "deserialize_decimal_sequence")]
         event_seq: String,
         /// Durable event payload version from the row.
         event_version: i32,
         /// Safe typed product event.
-        event: AgentProductEventV1,
+        event: AgentRuntimeProductEventV1,
     },
     /// One volatile LLM telemetry event.
     Telemetry {
         /// Protocol version; always 1.
+        #[serde(deserialize_with = "deserialize_protocol_version_v1")]
         protocol_version: u8,
-        /// Owning Agent.
+        /// Owning AgentRuntime aggregate.
+        agent_runtime_id: AgentRuntimeId,
+        /// Immutable Agent template version pinned by the runtime.
         agent_id: AgentId,
         /// Session owning the active Turn.
         session_id: SessionId,
@@ -109,27 +120,54 @@ pub enum AgentStreamFrameV1 {
         /// Highest durable PG event sequence known before this telemetry was
         /// enqueued, encoded as a decimal string. This is an ordering
         /// watermark, not part of the telemetry identity.
+        #[serde(deserialize_with = "deserialize_decimal_sequence")]
         durable_before_event_seq: String,
         /// LLM call identity.
         llm_call_id: LlmCallId,
-        /// Call-local telemetry sequence, assigned from 0 per call.
-        telemetry_seq: u64,
+        /// Call-local telemetry sequence as an unsigned decimal string,
+        /// assigned from 0 per call.
+        #[serde(deserialize_with = "deserialize_decimal_sequence")]
+        telemetry_seq: String,
         /// Typed LLM telemetry payload.
         event: LlmTelemetryEventV1,
     },
 }
 
-impl AgentStreamFrameV1 {
+fn deserialize_protocol_version_v1<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u8::deserialize(deserializer)?;
+    if version == PROTOCOL_VERSION_V1 {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom("unsupported protocol version"))
+    }
+}
+
+fn deserialize_decimal_sequence<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let sequence = String::deserialize(deserializer)?;
+    parse_event_seq(&sequence)
+        .map(|_| sequence)
+        .ok_or_else(|| serde::de::Error::custom("sequence must be an unsigned decimal string"))
+}
+
+impl AgentRuntimeStreamFrameV1 {
     /// Builds the `stream_ready` control frame; Session/Turn may be absent for
-    /// an idle Agent.
+    /// an idle AgentRuntime.
     #[must_use]
     pub fn stream_ready(
+        agent_runtime_id: AgentRuntimeId,
         agent_id: AgentId,
         session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
     ) -> Self {
         Self::Control {
             protocol_version: PROTOCOL_VERSION_V1,
+            agent_runtime_id,
             agent_id,
             session_id,
             turn_id,
@@ -141,9 +179,10 @@ impl AgentStreamFrameV1 {
     /// Builds the connection-local `stream_reset` control frame. It is never
     /// written to Postgres or published to NATS and never carries an SSE id.
     #[must_use]
-    pub fn stream_reset(agent_id: AgentId) -> Self {
+    pub fn stream_reset(agent_runtime_id: AgentRuntimeId, agent_id: AgentId) -> Self {
         Self::Control {
             protocol_version: PROTOCOL_VERSION_V1,
+            agent_runtime_id,
             agent_id,
             session_id: None,
             turn_id: None,
@@ -155,17 +194,19 @@ impl AgentStreamFrameV1 {
     }
 
     /// Builds one durable frame from a committed ledger row and its mapped
-    /// product event. The Agent identity comes from the scoped context; the
+    /// product event. Both identities come from the scoped context; the
     /// row itself does not carry it.
     #[must_use]
     pub fn durable(
+        agent_runtime_id: AgentRuntimeId,
         agent_id: AgentId,
         row: &ScannedRow,
-        event: AgentProductEventV1,
+        event: AgentRuntimeProductEventV1,
         event_version: i32,
     ) -> Self {
         Self::Durable {
             protocol_version: PROTOCOL_VERSION_V1,
+            agent_runtime_id,
             agent_id,
             session_id: row.session_id,
             turn_id: row.turn_id,
@@ -181,24 +222,26 @@ impl AgentStreamFrameV1 {
     /// it is never disguised as a known v1 event.
     #[must_use]
     pub fn telemetry(
+        agent_runtime_id: AgentRuntimeId,
         agent_id: AgentId,
         session_id: SessionId,
         turn_id: TurnId,
         durable_before_event_seq: u64,
-        llm_call_id: LlmCallId,
         telemetry_seq: u64,
         event: &AgentTelemetryEvent,
     ) -> Option<Self> {
+        let (llm_call_id, event) = project_telemetry_event(event)?;
         Some(Self::Telemetry {
             protocol_version: PROTOCOL_VERSION_V1,
+            agent_runtime_id,
             agent_id,
             session_id,
             turn_id,
             created_at: Utc::now(),
             durable_before_event_seq: encode_event_seq(durable_before_event_seq),
             llm_call_id,
-            telemetry_seq,
-            event: project_telemetry_event(event)?,
+            telemetry_seq: telemetry_seq.to_string(),
+            event,
         })
     }
 
@@ -215,7 +258,7 @@ impl AgentStreamFrameV1 {
 
 /// Control payload of a connection-level frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum ControlEventV1 {
     /// The subscription is established and buffering; the client may read the
@@ -242,7 +285,12 @@ pub enum StreamResetReason {
 /// Typed LLM telemetry payload of a telemetry frame; the call identity lives
 /// on the frame, not inside the event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
 pub enum LlmTelemetryEventV1 {
     /// An LLM call started.
@@ -277,35 +325,49 @@ pub enum LlmTelemetryEventV1 {
     },
 }
 
-fn project_telemetry_event(event: &AgentTelemetryEvent) -> Option<LlmTelemetryEventV1> {
+fn project_telemetry_event(
+    event: &AgentTelemetryEvent,
+) -> Option<(LlmCallId, LlmTelemetryEventV1)> {
     match event {
-        AgentTelemetryEvent::LlmStarted { .. } => Some(LlmTelemetryEventV1::LlmStarted),
-        AgentTelemetryEvent::TextDelta { delta, .. } => Some(LlmTelemetryEventV1::TextDelta {
-            delta: delta.clone(),
-        }),
-        AgentTelemetryEvent::ReasoningDelta { delta, .. } => {
-            Some(LlmTelemetryEventV1::ReasoningDelta {
-                delta: delta.clone(),
-            })
+        AgentTelemetryEvent::LlmStarted { llm_call_id } => {
+            Some((llm_call_id.clone(), LlmTelemetryEventV1::LlmStarted))
         }
+        AgentTelemetryEvent::TextDelta { llm_call_id, delta } => Some((
+            llm_call_id.clone(),
+            LlmTelemetryEventV1::TextDelta {
+                delta: delta.clone(),
+            },
+        )),
+        AgentTelemetryEvent::ReasoningDelta { llm_call_id, delta } => Some((
+            llm_call_id.clone(),
+            LlmTelemetryEventV1::ReasoningDelta {
+                delta: delta.clone(),
+            },
+        )),
         AgentTelemetryEvent::ToolCallDelta {
+            llm_call_id,
             call_id,
             name,
             arguments_delta,
-            ..
-        } => Some(LlmTelemetryEventV1::ToolCallDelta {
-            call_id: call_id.clone(),
-            name: name.clone(),
-            arguments_delta: arguments_delta.clone(),
-        }),
+        } => Some((
+            llm_call_id.clone(),
+            LlmTelemetryEventV1::ToolCallDelta {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                arguments_delta: arguments_delta.clone(),
+            },
+        )),
         AgentTelemetryEvent::LlmFinished {
+            llm_call_id,
             finish_reason,
             usage,
-            ..
-        } => Some(LlmTelemetryEventV1::LlmFinished {
-            finish_reason: finish_reason.clone(),
-            usage: *usage,
-        }),
+        } => Some((
+            llm_call_id.clone(),
+            LlmTelemetryEventV1::LlmFinished {
+                finish_reason: finish_reason.clone(),
+                usage: *usage,
+            },
+        )),
         // `AgentTelemetryEvent` is non-exhaustive across crates. Protocol v1
         // fails closed: a future variant has no public representation until
         // an explicit projection is added.
@@ -318,9 +380,14 @@ fn project_telemetry_event(event: &AgentTelemetryEvent) -> Option<LlmTelemetryEv
 /// History and SSE durable frames share this union. Internal events
 /// (`ToolExecutionStarted`, hook journal rows) have no projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
-pub enum AgentProductEventV1 {
+pub enum AgentRuntimeProductEventV1 {
     /// A Turn started.
     LoopStarted,
     /// A complete message was committed (user, assistant, or tool result).
@@ -398,11 +465,11 @@ pub enum AgentProductEventV1 {
 /// treating it as an internal event.
 pub(crate) fn product_event(
     event: &DurableAgentEvent,
-) -> Result<Option<AgentProductEventV1>, PersistedVariantError> {
+) -> Result<Option<AgentRuntimeProductEventV1>, PersistedVariantError> {
     match event {
-        DurableAgentEvent::LoopStarted { .. } => Ok(Some(AgentProductEventV1::LoopStarted)),
+        DurableAgentEvent::LoopStarted { .. } => Ok(Some(AgentRuntimeProductEventV1::LoopStarted)),
         DurableAgentEvent::MessageAppended { message } => {
-            Ok(Some(AgentProductEventV1::MessageAppended {
+            Ok(Some(AgentRuntimeProductEventV1::MessageAppended {
                 message: message.clone(),
             }))
         }
@@ -413,7 +480,7 @@ pub(crate) fn product_event(
             arguments,
             tool_kind,
             danger_level,
-        } => Ok(Some(AgentProductEventV1::ToolApprovalRequested {
+        } => Ok(Some(AgentRuntimeProductEventV1::ToolApprovalRequested {
             approval_id: *approval_id,
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -430,7 +497,7 @@ pub(crate) fn product_event(
                 ApprovalDecision::Reject => ApprovalDecision::Reject,
                 _ => return Err(PersistedVariantError::UnsupportedApprovalDecision),
             };
-            Ok(Some(AgentProductEventV1::ToolApprovalResolved {
+            Ok(Some(AgentRuntimeProductEventV1::ToolApprovalResolved {
                 approval_id: *approval_id,
                 decision,
             }))
@@ -439,12 +506,12 @@ pub(crate) fn product_event(
             summary,
             compacted_iteration,
             ..
-        } => Ok(Some(AgentProductEventV1::TranscriptCompacted {
+        } => Ok(Some(AgentRuntimeProductEventV1::TranscriptCompacted {
             summary: summary.clone(),
             compacted_iteration: *compacted_iteration,
         })),
         DurableAgentEvent::IterationCompleted { iteration, usage } => {
-            Ok(Some(AgentProductEventV1::IterationCompleted {
+            Ok(Some(AgentRuntimeProductEventV1::IterationCompleted {
                 iteration: *iteration,
                 usage: *usage,
             }))
@@ -453,18 +520,20 @@ pub(crate) fn product_event(
             finish_reason,
             usage,
             ..
-        } => Ok(Some(AgentProductEventV1::LoopFinished {
+        } => Ok(Some(AgentRuntimeProductEventV1::LoopFinished {
             finish_reason: finish_reason.clone(),
             usage: *usage,
         })),
         DurableAgentEvent::LoopFailed {
             error_text, usage, ..
-        } => Ok(Some(AgentProductEventV1::LoopFailed {
+        } => Ok(Some(AgentRuntimeProductEventV1::LoopFailed {
             error_text: error_text.clone(),
             usage: *usage,
         })),
         DurableAgentEvent::LoopCancelled { usage } => {
-            Ok(Some(AgentProductEventV1::LoopCancelled { usage: *usage }))
+            Ok(Some(AgentRuntimeProductEventV1::LoopCancelled {
+                usage: *usage,
+            }))
         }
         // Internal facts never become product events.
         DurableAgentEvent::ToolExecutionStarted { .. }
@@ -486,7 +555,7 @@ pub(crate) fn product_event(
 /// invariant violation. Future persisted variants retain their typed error.
 pub(crate) fn history_item_event(
     item: &HistoryItem,
-) -> Result<Option<AgentProductEventV1>, PersistedVariantError> {
+) -> Result<Option<AgentRuntimeProductEventV1>, PersistedVariantError> {
     product_event(&item.event)
 }
 
@@ -497,27 +566,33 @@ mod tests {
 
     use super::*;
 
-    fn frame_json(frame: &AgentStreamFrameV1) -> Value {
+    fn frame_json(frame: &AgentRuntimeStreamFrameV1) -> Value {
         serde_json::to_value(frame).expect("frame serializes")
     }
 
     #[test]
     fn durable_frame_encodes_event_seq_as_decimal_string() {
-        let frame = AgentStreamFrameV1::Durable {
+        let frame = AgentRuntimeStreamFrameV1::Durable {
             protocol_version: PROTOCOL_VERSION_V1,
+            agent_runtime_id: AgentRuntimeId::new(),
             agent_id: AgentId::new(),
             session_id: SessionId::new(),
             turn_id: TurnId::new(),
             created_at: Utc::now(),
             event_seq: encode_event_seq(u64::MAX),
             event_version: 1,
-            event: AgentProductEventV1::LoopStarted,
+            event: AgentRuntimeProductEventV1::LoopStarted,
         };
         let json = frame_json(&frame);
         assert_eq!(json["kind"], "durable");
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["event_seq"], json!(u64::MAX.to_string()));
         assert_eq!(json["event"], json!({ "type": "loop_started" }));
+
+        let mut unknown_version = json;
+        unknown_version["protocol_version"] = json!(2);
+        serde_json::from_value::<AgentRuntimeStreamFrameV1>(unknown_version)
+            .expect_err("an unknown protocol version fails closed");
     }
 
     #[test]
@@ -527,12 +602,12 @@ mod tests {
             llm_call_id: llm_call_id.clone(),
             delta: "hello".to_owned(),
         };
-        let frame = AgentStreamFrameV1::telemetry(
+        let frame = AgentRuntimeStreamFrameV1::telemetry(
+            AgentRuntimeId::new(),
             AgentId::new(),
             SessionId::new(),
             TurnId::new(),
             u64::MAX,
-            llm_call_id.clone(),
             7,
             &event,
         )
@@ -545,26 +620,30 @@ mod tests {
             json!(u64::MAX.to_string())
         );
         assert_eq!(json["llm_call_id"], json!(llm_call_id));
-        assert_eq!(json["telemetry_seq"], 7);
+        assert_eq!(json["telemetry_seq"], "7");
         assert_eq!(json["event"]["type"], "text_delta");
         assert_eq!(
-            serde_json::from_value::<AgentStreamFrameV1>(json.clone())
+            serde_json::from_value::<AgentRuntimeStreamFrameV1>(json.clone())
                 .expect("complete telemetry frame decodes"),
             frame
         );
 
         let mut missing_watermark = json;
+        missing_watermark["telemetry_seq"] = json!("not-decimal");
+        serde_json::from_value::<AgentRuntimeStreamFrameV1>(missing_watermark.clone())
+            .expect_err("v1 telemetry requires a decimal telemetry sequence");
+        missing_watermark["telemetry_seq"] = json!("7");
         missing_watermark
             .as_object_mut()
             .expect("frame is an object")
             .remove("durable_before_event_seq");
-        serde_json::from_value::<AgentStreamFrameV1>(missing_watermark)
+        serde_json::from_value::<AgentRuntimeStreamFrameV1>(missing_watermark)
             .expect_err("v1 telemetry requires its durable watermark");
     }
 
     #[test]
     fn stream_reset_carries_no_session_or_turn_identity() {
-        let frame = AgentStreamFrameV1::stream_reset(AgentId::new());
+        let frame = AgentRuntimeStreamFrameV1::stream_reset(AgentRuntimeId::new(), AgentId::new());
         let json = frame_json(&frame);
         assert_eq!(json["kind"], "control");
         assert_eq!(
@@ -672,7 +751,7 @@ mod tests {
                 .expect("approval resolution is a product event");
             assert!(matches!(
                 product,
-                AgentProductEventV1::ToolApprovalResolved {
+                AgentRuntimeProductEventV1::ToolApprovalResolved {
                     decision: projected,
                     ..
                 } if projected == decision

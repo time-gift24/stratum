@@ -14,8 +14,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use stratum_core::AgentId;
-use stratum_infra::NatsAgentTail;
+use stratum_core::AgentRuntimeId;
+use stratum_infra::NatsAgentRuntimeTail;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -24,7 +24,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::dto::{
-    AgentTemplatesResponse, AgentViewResponse, CreateAgentRequest, CreateAgentResponse,
+    AgentRuntimeCreated, AgentRuntimeView, AgentTemplatesResponse, CreateAgentRuntimeRequest,
     HistoryResponse, LivenessResponse, ModelsResponse, ReadinessResponse, TurnAccepted,
 };
 use crate::error::{ApiError, ErrorKind, ErrorResponse};
@@ -38,10 +38,10 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
 #[openapi(
     info(title = "Stratum API", description = "Stratum agent runtime HTTP API"),
     paths(
-        agents::create_agent,
+        agents::create_agent_runtime,
         agents::list_agent_templates,
         agents::list_models,
-        agents::get_agent,
+        agents::get_agent_runtime,
         agents::get_history,
         turns::post_message,
         turns::post_resume,
@@ -52,14 +52,14 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         readiness,
     ),
     components(schemas(
-        CreateAgentRequest,
-        CreateAgentResponse,
+        CreateAgentRuntimeRequest,
+        AgentRuntimeCreated,
         AgentTemplatesResponse,
         crate::dto::AgentTemplateDto,
         ModelsResponse,
         stratum_llm::ModelDescriptor,
-        AgentViewResponse,
-        crate::dto::AgentStatusDto,
+        AgentRuntimeView,
+        crate::dto::AgentRuntimeStatusDto,
         crate::dto::PendingApprovalDto,
         HistoryResponse,
         crate::dto::HistoryItemDto,
@@ -68,10 +68,10 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         crate::dto::CancelRequest,
         crate::dto::ApprovalResolveRequest,
         TurnAccepted,
-        crate::frames::AgentStreamFrameV1,
+        crate::frames::AgentRuntimeStreamFrameV1,
         crate::frames::ControlEventV1,
         crate::frames::StreamResetReason,
-        crate::frames::AgentProductEventV1,
+        crate::frames::AgentRuntimeProductEventV1,
         crate::frames::LlmTelemetryEventV1,
         LivenessResponse,
         ReadinessResponse,
@@ -106,19 +106,37 @@ pub fn router(state: Arc<AppState>) -> Router {
         .collect::<Vec<_>>();
     let router = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .route("/v1/agents", post(agents::create_agent))
+        .route("/v1/agent-runtimes", post(agents::create_agent_runtime))
         .route("/v1/agent-templates", get(agents::list_agent_templates))
         .route("/v1/models", get(agents::list_models))
-        .route("/v1/agents/{agent_id}", get(agents::get_agent))
-        .route("/v1/agents/{agent_id}/history", get(agents::get_history))
-        .route("/v1/agents/{agent_id}/messages", post(turns::post_message))
-        .route("/v1/agents/{agent_id}/resume", post(turns::post_resume))
-        .route("/v1/agents/{agent_id}/cancel", post(turns::post_cancel))
         .route(
-            "/v1/agents/{agent_id}/approvals/{approval_id}",
+            "/v1/agent-runtimes/{agent_runtime_id}",
+            get(agents::get_agent_runtime),
+        )
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/history",
+            get(agents::get_history),
+        )
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/messages",
+            post(turns::post_message),
+        )
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/resume",
+            post(turns::post_resume),
+        )
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/cancel",
+            post(turns::post_cancel),
+        )
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/approvals/{approval_id}",
             post(turns::post_approval),
         )
-        .route("/v1/agents/{agent_id}/events", get(events::get_events))
+        .route(
+            "/v1/agent-runtimes/{agent_runtime_id}/events",
+            get(events::get_events),
+        )
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .with_state(state)
@@ -138,6 +156,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                         "http.request",
                         route,
                         method = %request.method(),
+                        agent_runtime_id = field::Empty,
                         agent_id = field::Empty,
                         session_id = field::Empty,
                         turn_id = field::Empty,
@@ -182,7 +201,7 @@ async fn reject_during_shutdown(
     tokio::select! {
         biased;
         () = shutdown.cancelled() => {
-            ApiError::new(ErrorKind::ServiceUnavailable).into_response()
+            ApiError::new(ErrorKind::ServiceShuttingDown).into_response()
         }
         response = next.run(request) => response,
     }
@@ -199,10 +218,10 @@ pub(crate) fn json_request<T>(request: Result<Json<T>, JsonRejection>) -> Result
     })
 }
 
-/// Parses the agent path identity.
-pub(crate) fn parse_agent_id(raw: &str) -> Result<AgentId, ApiError> {
+/// Parses the AgentRuntime path identity.
+pub(crate) fn parse_agent_runtime_id(raw: &str) -> Result<AgentRuntimeId, ApiError> {
     let uuid = uuid::Uuid::parse_str(raw).map_err(|_| ApiError::new(ErrorKind::InvalidRequest))?;
-    Ok(AgentId::from(uuid))
+    Ok(AgentRuntimeId::from(uuid))
 }
 
 /// Liveness: the process answers.
@@ -227,7 +246,7 @@ async fn liveness() -> Json<LivenessResponse> {
     )
 )]
 async fn readiness(State(state): State<Arc<AppState>>) -> Response {
-    let realtime = if state.tail().is_some_and(NatsAgentTail::is_available) {
+    let realtime = if state.tail().is_some_and(NatsAgentRuntimeTail::is_available) {
         "ok"
     } else {
         "degraded"
@@ -257,6 +276,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::future::pending;
     use std::sync::Arc;
 
@@ -268,7 +288,79 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
-    use super::reject_during_shutdown;
+    use utoipa::OpenApi;
+
+    use super::{ApiDoc, reject_during_shutdown};
+
+    #[test]
+    fn openapi_contains_exactly_the_twelve_public_endpoints_and_decimal_sequences() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
+        let actual = document["paths"]
+            .as_object()
+            .expect("paths are an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "/health/live",
+            "/health/ready",
+            "/v1/agent-runtimes",
+            "/v1/agent-runtimes/{agent_runtime_id}",
+            "/v1/agent-runtimes/{agent_runtime_id}/approvals/{approval_id}",
+            "/v1/agent-runtimes/{agent_runtime_id}/cancel",
+            "/v1/agent-runtimes/{agent_runtime_id}/events",
+            "/v1/agent-runtimes/{agent_runtime_id}/history",
+            "/v1/agent-runtimes/{agent_runtime_id}/messages",
+            "/v1/agent-runtimes/{agent_runtime_id}/resume",
+            "/v1/agent-templates",
+            "/v1/models",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+
+        let schemas = document["components"]["schemas"]
+            .as_object()
+            .expect("schemas are an object");
+        assert!(schemas.contains_key("AgentRuntimeCreated"));
+        assert!(schemas.contains_key("AgentRuntimeView"));
+        assert!(schemas.contains_key("AgentRuntimeStreamFrameV1"));
+
+        let frame = &schemas["AgentRuntimeStreamFrameV1"];
+        for field in ["event_seq", "durable_before_event_seq", "telemetry_seq"] {
+            let mut matches = Vec::new();
+            collect_property_schemas(frame, field, &mut matches);
+            assert_eq!(matches.len(), 1, "one frame variant owns {field}");
+            assert_eq!(matches[0]["type"], "string", "{field} is a string");
+        }
+    }
+
+    fn collect_property_schemas<'a>(
+        value: &'a serde_json::Value,
+        property: &str,
+        found: &mut Vec<&'a serde_json::Value>,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(schema) = object
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|properties| properties.get(property))
+                {
+                    found.push(schema);
+                }
+                for child in object.values() {
+                    collect_property_schemas(child, property, found);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    collect_property_schemas(child, property, found);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[tokio::test]
     async fn shutdown_drops_a_hanging_handler_and_returns_the_stable_envelope() {
@@ -314,7 +406,7 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&body).expect("body is json"),
             json!({
                 "error": {
-                    "code": "service_unavailable",
+                "code": "service_shutting_down",
                     "message": "the service is shutting down"
                 }
             })

@@ -3,8 +3,9 @@
 //! The catalog is read through a sandboxed [`LocalFilesystem`] used strictly
 //! read-only: every request reads the current files, any unreadable or
 //! invalid template fails the whole catalog (no partial results), and only
-//! safe fields (name plus the provider default model configuration) leave
-//! the API. The service never creates template directories.
+//! safe fields (name, author version tag, and provider default model
+//! configuration) leave the API. The service never creates template
+//! directories.
 
 use std::path::Path;
 
@@ -46,7 +47,7 @@ impl TemplateCatalog {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::TemplateNotFound`] when no `*.toml` file exists
+    /// Returns [`ErrorKind::AgentTemplateNotFound`] when no `*.toml` file exists
     /// for the name, [`ErrorKind::InvalidAgentTemplate`] when the file cannot
     /// be read, parsed, or validated, and [`ErrorKind::ModelNotConfigured`]
     /// when its model is not configured.
@@ -60,7 +61,7 @@ impl TemplateCatalog {
             .read_file(&path)
             .await
             .map_err(|error| match error {
-                FilesystemError::NotFound { .. } => ApiError::new(ErrorKind::TemplateNotFound),
+                FilesystemError::NotFound { .. } => ApiError::new(ErrorKind::AgentTemplateNotFound),
                 other => ApiError::with_source(ErrorKind::InvalidAgentTemplate, other),
             })?;
         let text = String::from_utf8(bytes)
@@ -102,6 +103,7 @@ impl TemplateCatalog {
                 .map_err(|_| ApiError::new(ErrorKind::ModelNotConfigured))?;
             templates.push(AgentTemplateDto {
                 agent_name: agent_name.as_str().to_owned(),
+                version: definition.agent_version,
                 model_config,
             });
         }
@@ -114,6 +116,9 @@ impl TemplateCatalog {
 /// stable code.
 fn map_config_error(source: ConfigError) -> ApiError {
     match source {
+        ConfigError::MissingAgentVersion | ConfigError::InvalidAgentVersion(_) => {
+            ApiError::with_source(ErrorKind::InvalidAgentVersion, source)
+        }
         ConfigError::ModelNotConfigured { .. } => {
             ApiError::with_source(ErrorKind::ModelNotConfigured, source)
         }

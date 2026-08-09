@@ -25,10 +25,10 @@ import {
 } from "@/features/agent-conversation/message-intent"
 import type { ConversationState } from "@/features/agent-conversation/types"
 import {
-  loadRecentAgents,
-  rememberRecentAgent as rememberStoredRecentAgent,
-  removeRecentAgent as removeStoredRecentAgent,
-  type RecentAgent,
+  loadRecentAgentRuntimes,
+  rememberRecentAgentRuntime as rememberStoredRecentAgentRuntime,
+  removeRecentAgentRuntime as removeStoredRecentAgentRuntime,
+  type RecentAgentRuntime,
   type StorageLike,
 } from "@/lib/stratum/recent-agents"
 import {
@@ -46,7 +46,7 @@ import {
   ApiError,
   STRATUM_API_BASE_URL,
 } from "@/lib/stratum/api"
-import { subscribeToAgentEvents } from "@/lib/stratum/event-stream"
+import { subscribeToAgentRuntimeEvents } from "@/lib/stratum/event-stream"
 
 /** running / 待决审批 / 取消确认中 / realtime 降级时的低频 reconcile 间隔 */
 const RECONCILE_POLL_INTERVAL_MS = 15_000
@@ -61,7 +61,7 @@ export type ComposerConfiguration = {
   persistedModelConfig: ModelConfig | null
   currentModelConfig: ModelConfig | null
   selectedModelConfig: ModelConfig | null
-  existingAgent: boolean
+  existingRuntime: boolean
   turnRunning: boolean
   selectTemplate(template: AgentTemplateView): void
   selectModel(descriptor: ModelDescriptor): void
@@ -70,9 +70,9 @@ export type ComposerConfiguration = {
 
 export type AgentConversation = {
   state: ConversationState
-  recentAgents: readonly RecentAgent[]
+  recentAgentRuntimes: readonly RecentAgentRuntime[]
   composerConfiguration: ComposerConfiguration
-  selectAgent(agentId: string | null): void
+  selectAgentRuntime(agentRuntimeId: string | null): void
   createConversation(text: string): Promise<boolean>
   sendMessage(text: string): Promise<boolean>
   resume(): Promise<void>
@@ -83,7 +83,7 @@ export type AgentConversation = {
   ): Promise<boolean>
   reconnect(): void
   loadOlderHistory(): void
-  removeRecentAgent(agentId: string): void
+  removeRecentAgentRuntime(agentRuntimeId: string): void
 }
 
 type PendingCreate = {
@@ -103,8 +103,12 @@ export function useAgentConversation(): AgentConversation {
   const [models, setModels] = useState<readonly ModelDescriptor[]>([])
   const [metadataLoading, setMetadataLoading] = useState(true)
   const [metadataError, setMetadataError] = useState<ApiError | null>(null)
-  const [recentAgents, setRecentAgents] = useState<readonly RecentAgent[]>([])
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+  const [recentAgentRuntimes, setRecentAgentRuntimes] = useState<
+    readonly RecentAgentRuntime[]
+  >([])
+  const [selectedAgentRuntimeId, setSelectedAgentRuntimeId] = useState<
+    string | null
+  >(null)
   const [reconnectVersion, setReconnectVersion] = useState(0)
   const [selectedTemplate, setSelectedTemplate] =
     useState<AgentTemplateView | null>(null)
@@ -116,7 +120,7 @@ export function useAgentConversation(): AgentConversation {
   const [preferredThinkingLevel, setPreferredThinkingLevel] = useState<
     string | null
   >(null)
-  const selectedAgentRef = useRef<string | null>(null)
+  const selectedAgentRuntimeRef = useRef<string | null>(null)
   const selectionGeneration = useRef(0)
   // SSE cursor 只存当前页面内存（协议禁止跨刷新持久化）
   const cursorsRef = useRef(new Map<string, string>())
@@ -160,7 +164,7 @@ export function useAgentConversation(): AgentConversation {
     if (storage) {
       // 异步调度：避免在 effect 体内同步 setState 触发级联渲染
       void Promise.resolve().then(() => {
-        if (!cancelled) setRecentAgents(loadRecentAgents(storage))
+        if (!cancelled) setRecentAgentRuntimes(loadRecentAgentRuntimes(storage))
       })
     }
 
@@ -169,46 +173,54 @@ export function useAgentConversation(): AgentConversation {
     }
   }, [])
 
-  const rememberRecentAgent = useCallback((agent: RecentAgent) => {
-    const storage = browserStorage()
-    if (storage) {
-      rememberStoredRecentAgent(storage, agent)
-      setRecentAgents(loadRecentAgents(storage))
-      return
-    }
-    setRecentAgents((agents) => [
-      agent,
-      ...agents.filter((recentAgent) => recentAgent.agentId !== agent.agentId),
-    ])
-  }, [])
+  const rememberRecentAgentRuntime = useCallback(
+    (runtime: RecentAgentRuntime) => {
+      const storage = browserStorage()
+      if (storage) {
+        rememberStoredRecentAgentRuntime(storage, runtime)
+        setRecentAgentRuntimes(loadRecentAgentRuntimes(storage))
+        return
+      }
+      setRecentAgentRuntimes((runtimes) => [
+        runtime,
+        ...runtimes.filter(
+          (recent) => recent.agentRuntimeId !== runtime.agentRuntimeId
+        ),
+      ])
+    },
+    []
+  )
 
-  const removeRecentAgent = useCallback((agentId: string) => {
+  const removeRecentAgentRuntime = useCallback((agentRuntimeId: string) => {
     const storage = browserStorage()
     if (storage) {
-      removeStoredRecentAgent(storage, agentId)
-      setRecentAgents(loadRecentAgents(storage))
+      removeStoredRecentAgentRuntime(storage, agentRuntimeId)
+      setRecentAgentRuntimes(loadRecentAgentRuntimes(storage))
     } else {
-      setRecentAgents((agents) =>
-        agents.filter((agent) => agent.agentId !== agentId)
+      setRecentAgentRuntimes((runtimes) =>
+        runtimes.filter((runtime) => runtime.agentRuntimeId !== agentRuntimeId)
       )
     }
   }, [])
 
-  const selectAgent = useCallback((agentId: string | null) => {
+  const selectAgentRuntime = useCallback((agentRuntimeId: string | null) => {
     reconcileRerunRef.current = false
     reconcileAbortRef.current?.abort()
     reconcileAbortRef.current = null
     historyAbortRef.current?.abort()
     historyAbortRef.current = null
     selectionGeneration.current += 1
-    selectedAgentRef.current = agentId
+    selectedAgentRuntimeRef.current = agentRuntimeId
     // 切换会话 = state 全量重置：page cursor 一并作废，重新 cold bootstrap
     cursorsRef.current.clear()
-    if (pendingMessageRef.current?.agentId !== agentId)
+    // 显式切换/新建表示放弃旧 create command intent；只有同一次结果
+    // 未确定的原地重试才复用 pending Idempotency-Key。
+    pendingCreateRef.current = null
+    if (pendingMessageRef.current?.agentRuntimeId !== agentRuntimeId)
       pendingMessageRef.current = null
-    if (agentId === null) setSelectedTemplate(null)
-    setSelectedAgentId(agentId)
-    dispatch({ type: "agent_selected", agentId })
+    if (agentRuntimeId === null) setSelectedTemplate(null)
+    setSelectedAgentRuntimeId(agentRuntimeId)
+    dispatch({ type: "runtime_selected", agentRuntimeId })
   }, [])
 
   useEffect(
@@ -223,21 +235,23 @@ export function useAgentConversation(): AgentConversation {
 
   // 默认 template 派生而非 effect：未选中 agent 且未显式选择时取第一个
   const effectiveTemplate =
-    state.agentId === null
+    state.agentRuntimeId === null
       ? (selectedTemplate ?? agentTemplates[0] ?? null)
       : null
 
   // agent 切换时在渲染期重置 pending 的模型配置（derive-state-during-render 模式）
-  const [prevConfigAgentId, setPrevConfigAgentId] = useState(state.agentId)
-  if (prevConfigAgentId !== state.agentId) {
-    setPrevConfigAgentId(state.agentId)
+  const [prevConfigAgentRuntimeId, setPrevConfigAgentRuntimeId] = useState(
+    state.agentRuntimeId
+  )
+  if (prevConfigAgentRuntimeId !== state.agentRuntimeId) {
+    setPrevConfigAgentRuntimeId(state.agentRuntimeId)
     setRequestedModelConfig(null)
     setAcceptedModelConfig(null)
     setPreferredThinkingLevel(null)
   }
 
   useEffect(() => {
-    if (selectedAgentId === null) return
+    if (selectedAgentRuntimeId === null) return
 
     const controller = new AbortController()
     const generation = selectionGeneration.current
@@ -245,33 +259,44 @@ export function useAgentConversation(): AgentConversation {
     const cursors = cursorsRef.current
     const dispatchIfCurrent = (action: Parameters<typeof dispatch>[0]) => {
       if (
-        !controller.signal.aborted &&
-        generation === selectionGeneration.current
+        controller.signal.aborted ||
+        generation !== selectionGeneration.current
       )
-        dispatch(action)
+        return
+      // Cursor expiry / overflow / identity recovery starts a replacement PG
+      // snapshot generation. It is a hard reset, so older reconcile/history
+      // reads must not commit even when their numeric barrier happens to match.
+      if (action.type === "recovery_started") {
+        reconcileRerunRef.current = false
+        reconcileAbortRef.current?.abort()
+        reconcileAbortRef.current = null
+        historyAbortRef.current?.abort()
+        historyAbortRef.current = null
+      }
+      dispatch(action)
     }
 
     void runConversationSession(
       {
         api,
         subscribe: (options) =>
-          subscribeToAgentEvents({
+          subscribeToAgentRuntimeEvents({
             ...options,
             baseUrl: STRATUM_API_BASE_URL,
           }),
-        loadCursor: (agentId) => cursors.get(agentId),
-        saveCursor: (agentId, cursor) => {
+        loadCursor: (agentRuntimeId) => cursors.get(agentRuntimeId),
+        saveCursor: (agentRuntimeId, cursor) => {
           if (generation === selectionGeneration.current)
-            cursors.set(agentId, cursor)
+            cursors.set(agentRuntimeId, cursor)
         },
-        clearCursor: (agentId) => cursors.delete(agentId),
+        clearCursor: (agentRuntimeId) => cursors.delete(agentRuntimeId),
         dispatch: dispatchIfCurrent,
       },
-      { agentId: selectedAgentId, signal: controller.signal }
+      { agentRuntimeId: selectedAgentRuntimeId, signal: controller.signal }
     )
 
     return () => controller.abort()
-  }, [reconnectVersion, selectedAgentId])
+  }, [reconnectVersion, selectedAgentRuntimeId])
 
   const reportError = useCallback((error: unknown) => {
     const apiError = toApiError(error)
@@ -283,22 +308,22 @@ export function useAgentConversation(): AgentConversation {
   }, [])
 
   const reconnect = useCallback(() => {
-    if (selectedAgentRef.current === null) return
+    if (selectedAgentRuntimeRef.current === null) return
     reconcileRerunRef.current = false
     reconcileAbortRef.current?.abort()
     reconcileAbortRef.current = null
     historyAbortRef.current?.abort()
     historyAbortRef.current = null
     // 手动重连 = hard reset：清 page cursor，从无 cursor cold bootstrap 重来
-    cursorsRef.current.delete(selectedAgentRef.current)
+    cursorsRef.current.delete(selectedAgentRuntimeRef.current)
     selectionGeneration.current += 1
     setReconnectVersion((version) => version + 1)
   }, [])
 
   /** 命令返回后 / 窗口聚焦 / 低频轮询共用的增量 reconcile */
   const reconcileNow = useCallback(() => {
-    const agentId = selectedAgentRef.current
-    if (agentId === null) return
+    const agentRuntimeId = selectedAgentRuntimeRef.current
+    if (agentRuntimeId === null) return
 
     // 活跃请求不可被 timer / focus / command 取消；多个触发只需
     // 在它完成后补跑一次，以最新 reducer barrier 收敛。
@@ -311,7 +336,7 @@ export function useAgentConversation(): AgentConversation {
 
     const run = () => {
       if (
-        selectedAgentRef.current !== agentId ||
+        selectedAgentRuntimeRef.current !== agentRuntimeId ||
         generation !== selectionGeneration.current
       )
         return
@@ -322,16 +347,23 @@ export function useAgentConversation(): AgentConversation {
       const isCurrent = () =>
         !controller.signal.aborted &&
         reconcileAbortRef.current === controller &&
-        selectedAgentRef.current === agentId &&
+        selectedAgentRuntimeRef.current === agentRuntimeId &&
         generation === selectionGeneration.current
 
       void reconcileConversation(
         {
           api,
-          getBarrier: () => {
+          getPgConfirmedEventSeq: () => {
             const current = stateRef.current
-            return current.agentId === agentId && current.phase === "ready"
-              ? current.barrier
+            return current.agentRuntimeId === agentRuntimeId &&
+              current.phase === "ready"
+              ? current.pgConfirmedEventSeq
+              : null
+          },
+          getPinnedAgentId: () => {
+            const current = stateRef.current
+            return current.agentRuntimeId === agentRuntimeId
+              ? current.agentId
               : null
           },
           isCurrent,
@@ -339,7 +371,7 @@ export function useAgentConversation(): AgentConversation {
             if (isCurrent()) dispatch(action)
           },
         },
-        { agentId, signal: controller.signal }
+        { agentRuntimeId, signal: controller.signal }
       ).finally(() => {
         // Agent switch / hard reset / unmount 会先换掉这个 handle；旧请求
         // 不得清理新 Agent 的状态，也不得触发补跑。
@@ -363,7 +395,7 @@ export function useAgentConversation(): AgentConversation {
 
   const polling =
     state.phase === "ready" &&
-    state.agentId !== null &&
+    state.agentRuntimeId !== null &&
     (state.view?.status === "running" ||
       state.acceptedTurnId !== null ||
       state.cancelRequested ||
@@ -381,8 +413,8 @@ export function useAgentConversation(): AgentConversation {
   }, [polling, reconcileNow])
 
   const loadOlderHistory = useCallback(() => {
-    const agentId = selectedAgentRef.current
-    if (agentId === null) return
+    const agentRuntimeId = selectedAgentRuntimeRef.current
+    if (agentRuntimeId === null) return
     // The reducer flag is updated on the next render; this ref also closes the
     // same-tick double-click window and owns cancellation on Agent switches.
     if (historyAbortRef.current !== null) return
@@ -395,7 +427,10 @@ export function useAgentConversation(): AgentConversation {
         api,
         getWindow: () => {
           const current = stateRef.current
-          if (current.agentId !== agentId || current.historyThrough === null)
+          if (
+            current.agentRuntimeId !== agentRuntimeId ||
+            current.historyThrough === null
+          )
             return null
           return {
             through: current.historyThrough,
@@ -408,7 +443,7 @@ export function useAgentConversation(): AgentConversation {
           if (generation === selectionGeneration.current) dispatch(action)
         },
       },
-      { agentId, signal: controller.signal }
+      { agentRuntimeId, signal: controller.signal }
     ).finally(() => {
       if (historyAbortRef.current === controller) historyAbortRef.current = null
     })
@@ -436,10 +471,10 @@ export function useAgentConversation(): AgentConversation {
       const generation = selectionGeneration.current
       const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
       const modelConfig = requestedModelConfig ?? undefined
-      // selectAgent 会推进 generation；记录推进后的值，既不把自身切换误判为
+      // selectAgentRuntime 会推进 generation；记录推进后的值，既不把自身切换误判为
       // stale，也不允许随后用户切换 Agent 时由旧请求污染新会话。
       let selectedGeneration: number | null = null
-      let createdAgentId: string | null = null
+      let createdAgentRuntimeId: string | null = null
       try {
         // 同一 pending intent 复用 Idempotency-Key；只有新 intent 才生成新 key
         let pending = pendingCreateRef.current
@@ -455,7 +490,7 @@ export function useAgentConversation(): AgentConversation {
           }
           pendingCreateRef.current = pending
         }
-        const created = await api.createAgent({
+        const created = await api.createAgentRuntime({
           agentName: pending.agentName,
           modelConfig: pending.modelConfig,
           idempotencyKey: pending.key,
@@ -464,18 +499,20 @@ export function useAgentConversation(): AgentConversation {
           pendingCreateRef.current = null
         if (generation !== selectionGeneration.current) return false
 
-        rememberRecentAgent({
+        rememberRecentAgentRuntime({
+          agentRuntimeId: created.agent_runtime_id,
           agentId: created.agent_id,
           agentName: created.agent_name,
+          agentVersion: created.agent_version,
           title: text.trim(),
           lastOpenedAt: new Date().toISOString(),
         })
-        selectAgent(created.agent_id)
-        createdAgentId = created.agent_id
+        selectAgentRuntime(created.agent_runtime_id)
+        createdAgentRuntimeId = created.agent_runtime_id
         selectedGeneration = selectionGeneration.current
 
         const messageIntent: PendingMessageIntent = {
-          agentId: created.agent_id,
+          agentRuntimeId: created.agent_runtime_id,
           text,
           expectedCurrentTurnId: null,
           modelConfig,
@@ -484,18 +521,23 @@ export function useAgentConversation(): AgentConversation {
 
         // 首个 Turn：idle Agent 的 CAS 是 expected_current_turn_id = null；
         // 只对同一 Agent 发送首条消息，不再 create
-        const accepted = await api.sendMessage(created.agent_id, {
+        const accepted = await api.sendMessage(created.agent_runtime_id, {
           text: messageIntent.text,
           expectedCurrentTurnId: messageIntent.expectedCurrentTurnId,
           modelConfig: messageIntent.modelConfig,
         })
         if (
           selectedGeneration !== selectionGeneration.current ||
-          selectedAgentRef.current !== created.agent_id
+          selectedAgentRuntimeRef.current !== created.agent_runtime_id
         )
           return false
+        if (accepted.agent_id !== created.agent_id) {
+          reportError(protocolIdentityError())
+          return false
+        }
         dispatch({
           type: "turn_accepted",
+          agentRuntimeId: created.agent_runtime_id,
           agentId: created.agent_id,
           turnId: accepted.turn_id,
         })
@@ -503,7 +545,7 @@ export function useAgentConversation(): AgentConversation {
           pendingMessageRef.current = null
         if (
           messageIntent.modelConfig !== undefined &&
-          selectedAgentRef.current === created.agent_id
+          selectedAgentRuntimeRef.current === created.agent_runtime_id
         ) {
           setAcceptedModelConfig(messageIntent.modelConfig)
           setRequestedModelConfig((pendingConfig) =>
@@ -515,48 +557,50 @@ export function useAgentConversation(): AgentConversation {
               : pendingConfig
           )
         }
-        reconcileNow()
         return true
       } catch (error) {
-        if (selectedGeneration === null || createdAgentId === null) {
+        if (selectedGeneration === null || createdAgentRuntimeId === null) {
           if (generation !== selectionGeneration.current) return false
-          // key 命中但请求不同 = 新 intent：清掉 pending key，下次生成新 key
-          if (isApiErrorCode(error, "idempotency_key_conflict"))
-            pendingCreateRef.current = null
+          // Key-only replay: an uncertain outcome keeps the same key. A new
+          // name/model intent replaces it in the next invocation.
           reportError(error)
           return false
         }
         if (
           selectedGeneration !== selectionGeneration.current ||
-          selectedAgentRef.current !== createdAgentId
+          selectedAgentRuntimeRef.current !== createdAgentRuntimeId
         )
           return false
-        // 首条消息失败（selectAgent 已推进 generation）：必须显式 surface，
+        // 首条消息失败（selectAgentRuntime 已推进 generation）：必须显式 surface，
         // 不能静默返回。新 agent 的 recovery session 会 cold bootstrap 收敛
         // view；stale_turn 表示消息可能已提交但响应丢失——只 reconcile，
         // 绝不重发创建第二个 Turn
-        if (isApiErrorCode(error, "stale_turn")) {
-          reconcileNow()
-          return false
-        }
+        if (isApiErrorCode(error, "stale_turn")) return false
         reportError(error)
-        reconcileNow()
         return false
+      } finally {
+        if (
+          selectedGeneration !== null &&
+          createdAgentRuntimeId !== null &&
+          selectedGeneration === selectionGeneration.current &&
+          selectedAgentRuntimeRef.current === createdAgentRuntimeId
+        )
+          reconcileNow()
       }
     },
     [
       effectiveTemplate,
       reconcileNow,
-      rememberRecentAgent,
+      rememberRecentAgentRuntime,
       reportError,
       requestedModelConfig,
-      selectAgent,
+      selectAgentRuntime,
     ]
   )
 
   const selectedClient = useCallback(() => {
-    const agentId = selectedAgentRef.current
-    if (agentId === null) {
+    const agentRuntimeId = selectedAgentRuntimeRef.current
+    if (agentRuntimeId === null) {
       reportError(
         new ApiError("agent_not_selected", 400, "select an agent first")
       )
@@ -565,7 +609,7 @@ export function useAgentConversation(): AgentConversation {
 
     return {
       api: createStratumApi({ baseUrl: STRATUM_API_BASE_URL }),
-      agentId,
+      agentRuntimeId,
       generation: selectionGeneration.current,
     }
   }, [reportError])
@@ -590,13 +634,13 @@ export function useAgentConversation(): AgentConversation {
       // 新 intent。同 Agent + 同原文且没有新的显式 override 时继续沿用 pending
       // intent 的完整模型配置与 CAS。
       const submittedModelConfig =
-        existingIntent?.agentId === client.agentId &&
+        existingIntent?.agentRuntimeId === client.agentRuntimeId &&
         existingIntent.text === text &&
         selectedConfig === null
           ? existingIntent.modelConfig
           : (selectedConfig ?? undefined)
       const messageIntent = resolveMessageIntent(existingIntent, {
-        agentId: client.agentId,
+        agentRuntimeId: client.agentRuntimeId,
         text,
         expectedCurrentTurnId: view.current_turn_id,
         modelConfig: submittedModelConfig,
@@ -605,7 +649,7 @@ export function useAgentConversation(): AgentConversation {
       if (view.status === "running" && !retryingPendingIntent) return false
       pendingMessageRef.current = messageIntent
       try {
-        const accepted = await client.api.sendMessage(client.agentId, {
+        const accepted = await client.api.sendMessage(client.agentRuntimeId, {
           text: messageIntent.text,
           // exact current-Turn CAS：terminal 后携带最近 TurnId 才能开新 Turn
           expectedCurrentTurnId: messageIntent.expectedCurrentTurnId,
@@ -613,12 +657,23 @@ export function useAgentConversation(): AgentConversation {
         })
         if (
           client.generation !== selectionGeneration.current ||
-          selectedAgentRef.current !== client.agentId
+          selectedAgentRuntimeRef.current !== client.agentRuntimeId
         )
           return false
+        const pinnedAgentId = stateRef.current.agentId
+        const pinnedSessionId = stateRef.current.view?.session_id ?? null
+        if (
+          pinnedAgentId === null ||
+          accepted.agent_id !== pinnedAgentId ||
+          (pinnedSessionId !== null && accepted.session_id !== pinnedSessionId)
+        ) {
+          reportError(protocolIdentityError())
+          return false
+        }
         dispatch({
           type: "turn_accepted",
-          agentId: client.agentId,
+          agentRuntimeId: client.agentRuntimeId,
+          agentId: pinnedAgentId,
           turnId: accepted.turn_id,
         })
         if (pendingMessageRef.current === messageIntent)
@@ -637,23 +692,24 @@ export function useAgentConversation(): AgentConversation {
               : pendingConfig
           )
         }
-        reconcileNow()
         return true
       } catch (error) {
         if (client.generation !== selectionGeneration.current) return false
         // stale_turn：view 过期，刷新后由用户重试，不静默创建第二个 Turn
         if (isApiErrorCode(error, "stale_turn")) {
-          reconcileNow()
           reportError(error)
           return false
         }
         // resume_required：unhosted running Turn，reconcile 后显示 Resume
-        if (isApiErrorCode(error, "resume_required")) {
-          reconcileNow()
-          return false
-        }
-        if (!isApiErrorCode(error, "agent_busy")) reportError(error)
+        if (isApiErrorCode(error, "resume_required")) return false
+        if (!isApiErrorCode(error, "agent_runtime_busy")) reportError(error)
         return false
+      } finally {
+        if (
+          client.generation === selectionGeneration.current &&
+          selectedAgentRuntimeRef.current === client.agentRuntimeId
+        )
+          reconcileNow()
       }
     },
     [
@@ -673,19 +729,32 @@ export function useAgentConversation(): AgentConversation {
 
     try {
       // 202 = 已托管；204 = already hosted/starting，幂等成功
-      await client.api.resume(client.agentId, turnId)
-      reconcileNow()
+      const accepted = await client.api.resume(client.agentRuntimeId, turnId)
+      if (accepted !== null) {
+        const current = stateRef.current
+        if (
+          accepted.agent_id !== current.agentId ||
+          accepted.session_id !== current.view?.session_id
+        ) {
+          reportError(protocolIdentityError())
+          return
+        }
+      }
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
       // stale_turn / turn_not_running：view 已过期，reconcile 收敛
       if (
         isApiErrorCode(error, "stale_turn") ||
         isApiErrorCode(error, "turn_not_running")
-      ) {
-        reconcileNow()
+      )
         return
-      }
       reportError(error)
+    } finally {
+      if (
+        client.generation === selectionGeneration.current &&
+        selectedAgentRuntimeRef.current === client.agentRuntimeId
+      )
+        reconcileNow()
     }
   }, [reconcileNow, reportError, selectedClient])
 
@@ -696,9 +765,8 @@ export function useAgentConversation(): AgentConversation {
 
     try {
       // 202 = 信号已接受（只显示"取消请求已发送"）；204 = 已 cancelled
-      await client.api.cancel(client.agentId, turnId)
+      await client.api.cancel(client.agentRuntimeId, turnId)
       dispatch({ type: "cancel_requested" })
-      reconcileNow()
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
       // turn_not_hosted / stale_turn：reconcile 后按真实 view 显示 Resume 等
@@ -706,11 +774,15 @@ export function useAgentConversation(): AgentConversation {
         isApiErrorCode(error, "turn_not_hosted") ||
         isApiErrorCode(error, "stale_turn") ||
         isApiErrorCode(error, "turn_starting")
-      ) {
-        reconcileNow()
+      )
         return
-      }
       reportError(error)
+    } finally {
+      if (
+        client.generation === selectionGeneration.current &&
+        selectedAgentRuntimeRef.current === client.agentRuntimeId
+      )
+        reconcileNow()
     }
   }, [reconcileNow, reportError, selectedClient])
 
@@ -722,13 +794,12 @@ export function useAgentConversation(): AgentConversation {
 
       try {
         // 204：持久化决定；unhosted Turn 由后续显式 Resume 接管（不自动 resume）
-        await client.api.resolveApproval(client.agentId, approvalId, {
+        await client.api.resolveApproval(client.agentRuntimeId, approvalId, {
           turnId,
           decision,
         })
         if (client.generation !== selectionGeneration.current) return false
         dispatch({ type: "approval_resolved", approvalId })
-        reconcileNow()
         return true
       } catch (error) {
         if (client.generation !== selectionGeneration.current) return false
@@ -737,12 +808,16 @@ export function useAgentConversation(): AgentConversation {
           isApiErrorCode(error, "approval_invalidated") ||
           isApiErrorCode(error, "approval_already_resolved") ||
           isApiErrorCode(error, "stale_turn")
-        ) {
-          reconcileNow()
+        )
           return false
-        }
         reportError(error)
         return false
+      } finally {
+        if (
+          client.generation === selectionGeneration.current &&
+          selectedAgentRuntimeRef.current === client.agentRuntimeId
+        )
+          reconcileNow()
       }
     },
     [reconcileNow, reportError, selectedClient]
@@ -750,26 +825,26 @@ export function useAgentConversation(): AgentConversation {
 
   const selectTemplate = useCallback(
     (template: AgentTemplateView) => {
-      if (selectedAgentRef.current !== null) selectAgent(null)
+      if (selectedAgentRuntimeRef.current !== null) selectAgentRuntime(null)
       setRequestedModelConfig(null)
       setAcceptedModelConfig(null)
       setPreferredThinkingLevel(null)
       setSelectedTemplate(template)
     },
-    [selectAgent]
+    [selectAgentRuntime]
   )
 
   // memo 派生：未选 agent 时 configForTemplate 每次渲染 structuredClone 会产生
   // 新引用，级联打穿下游 useCallback/memo（selectModel、ModelSelector props）
   const currentModelConfig = useMemo(
     () =>
-      state.agentId === null
+      state.agentRuntimeId === null
         ? effectiveTemplate === null
           ? null
           : configForTemplate(effectiveTemplate)
         : (acceptedModelConfig ?? state.view?.model_config ?? null),
     [
-      state.agentId,
+      state.agentRuntimeId,
       effectiveTemplate,
       acceptedModelConfig,
       state.view?.model_config,
@@ -822,13 +897,13 @@ export function useAgentConversation(): AgentConversation {
     metadataError,
     selectedTemplate: effectiveTemplate,
     agentName:
-      state.agentId === null
+      state.agentRuntimeId === null
         ? (effectiveTemplate?.agent_name ?? null)
         : (state.view?.agent_name ?? null),
     persistedModelConfig,
     currentModelConfig,
     selectedModelConfig,
-    existingAgent: state.agentId !== null,
+    existingRuntime: state.agentRuntimeId !== null,
     turnRunning: state.view?.status === "running",
     selectTemplate,
     selectModel,
@@ -837,9 +912,9 @@ export function useAgentConversation(): AgentConversation {
 
   return {
     state,
-    recentAgents,
+    recentAgentRuntimes,
     composerConfiguration,
-    selectAgent,
+    selectAgentRuntime,
     createConversation,
     sendMessage,
     resume,
@@ -847,7 +922,7 @@ export function useAgentConversation(): AgentConversation {
     resolveApproval,
     reconnect,
     loadOlderHistory,
-    removeRecentAgent,
+    removeRecentAgentRuntime,
   }
 }
 
@@ -863,6 +938,14 @@ function browserStorage(): StorageLike | undefined {
 
 function isApiErrorCode(error: unknown, code: string): boolean {
   return error instanceof ApiError && error.code === code
+}
+
+function protocolIdentityError(): ApiError {
+  return new ApiError(
+    "protocol_identity_error",
+    0,
+    "server returned a different runtime, definition, or turn identity"
+  )
 }
 
 function toApiError(error: unknown): ApiError {

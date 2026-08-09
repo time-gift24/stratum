@@ -2,17 +2,17 @@
 //! execution.
 //!
 //! Four tables carry every execution fact: `agents` (immutable identity and
-//! resolved definition), `agent_state` (thin current/recent-Turn state and
-//! the agent-wide high-water), `durable_events` (the append-only agent-wide
+//! resolved definition), `agent_states` (thin current/recent-Turn state and
+//! the AgentRuntime-wide high-water), `durable_events` (the append-only runtime
 //! ledger), and `transcript_compactions` (durable compaction companions).
-//! Every view — Agent view, product history, pending approvals, latest usage,
+//! Every view — AgentRuntime view, product history, pending approvals, latest usage,
 //! resume slices — is derived from the ledger at a fixed barrier; there are
 //! no projections, no outbox, and no rebuild metadata.
 //!
 //! All durable writers share one transaction template: the exact
-//! `agent_state` row is locked `FOR UPDATE` (it is both the `event_seq`
+//! `agent_states` row is locked `FOR UPDATE` (it is both the `event_seq`
 //! allocator and the serialization point for concurrent writers of one
-//! Agent), exact Agent/Session/Turn/status expectations are validated, the
+//! runtime), exact runtime/Session/Turn/status expectations are validated, the
 //! versioned row is inserted, only the state side effect owned by that event
 //! is applied, and the high-water advances in the same commit. A
 //! [`CommitReceipt`] is returned only after commit.
@@ -28,16 +28,17 @@ mod commands;
 mod queries;
 
 use sqlx::PgPool;
-use stratum_core::{AgentId, HookInvocationId, TurnId};
+use stratum_core::{AgentId, AgentRuntimeId, HookInvocationId, SessionId, TurnId};
 use uuid::Uuid;
 
 pub use error::{PostgresError, VersionedKind};
 pub use types::{
-    AgentStateView, AgentStatus, AgentView, AppendEvent, ApprovalFacts, ApprovalLookup,
-    ApprovalResolution, BeginTurn, CommitReceipt, CompactionInput, CreateAgent, CreateAgentOutcome,
-    CreateKeyLookup, DurableEventRow, EVENT_SEQ_MAX, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT,
-    HISTORY_SOFT_PAGE_BUDGET_BYTES, HistoryItem, HistoryPage, HistoryQuery, HookInvocationLookup,
-    LoopStartedRecord, PendingApproval, ResolveApproval, ResolveApprovalOutcome, ResumeSliceQuery,
+    AgentRuntimeCreated, AgentRuntimeStateView, AgentRuntimeView, AgentStatus, AppendEvent,
+    ApprovalFacts, ApprovalLookup, ApprovalResolution, BeginTurn, CommitReceipt, CompactionInput,
+    CreateAgentRuntime, CreateAgentRuntimeOutcome, CreateKeyLookup, DurableEventRow, EVENT_SEQ_MAX,
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, HISTORY_SOFT_PAGE_BUDGET_BYTES, HistoryItem,
+    HistoryPage, HistoryQuery, HookInvocationLookup, LoopStartedRecord, PendingApproval,
+    ResolveApproval, ResolveApprovalOutcome, ResolvedDefinitionV1, ResumeSliceQuery,
     TranscriptCompaction, encode_event_seq, parse_event_seq,
 };
 
@@ -81,19 +82,19 @@ impl PostgresBackend {
         Ok(())
     }
 
-    /// Reads the stored create request behind one idempotency key, before any
-    /// template access.
+    /// Reads the immutable create result behind one idempotency key, before
+    /// any template access.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::DurableStateCorrupt`] when the stored override
-    /// fails v1 decode and [`PostgresError::StoreUnavailable`] on storage
-    /// failure.
-    pub async fn find_agent_by_idempotency_key(
+    /// Returns [`PostgresError::DurableStateCorrupt`] when the stored tag
+    /// violates its boundary and [`PostgresError::StoreUnavailable`] on
+    /// storage failure.
+    pub async fn find_agent_runtime_by_idempotency_key(
         &self,
         idempotency_key: Uuid,
     ) -> Result<Option<CreateKeyLookup>, PostgresError> {
-        queries::find_agent_by_idempotency_key(&self.pool, idempotency_key).await
+        queries::find_agent_runtime_by_idempotency_key(&self.pool, idempotency_key).await
     }
 
     /// Finds the one open journaled hook invocation at an exact address (the
@@ -113,19 +114,19 @@ impl PostgresBackend {
         queries::read_open_hook_invocation(&self.pool, lookup).await
     }
 
-    /// Creates an immutable Agent and its idle state, or replays an
-    /// equivalent earlier create under the same idempotency key.
+    /// Creates one AgentRuntime and materializes or reuses its immutable Agent
+    /// definition row, or replays the original key-owned runtime.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::IdempotencyKeyConflict`] when the key is bound
-    /// to a different request and [`PostgresError::StoreUnavailable`] on
-    /// storage failure.
-    pub async fn create_agent(
+    /// Returns [`PostgresError::AgentVersionConflict`] when an exact
+    /// name/version tag already identifies a different definition and
+    /// [`PostgresError::StoreUnavailable`] on storage failure.
+    pub async fn create_agent_runtime(
         &self,
-        command: CreateAgent,
-    ) -> Result<CreateAgentOutcome, PostgresError> {
-        commands::create_agent(&self.pool, command).await
+        command: CreateAgentRuntime,
+    ) -> Result<CreateAgentRuntimeOutcome, PostgresError> {
+        commands::create_agent_runtime(&self.pool, command).await
     }
 
     /// Admits a new Turn: CAS on the expected current Turn, Session binding,
@@ -134,7 +135,8 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::AgentNotFound`], [`PostgresError::AgentBusy`],
+    /// Returns [`PostgresError::AgentRuntimeNotFound`],
+    /// [`PostgresError::AgentRuntimeBusy`],
     /// [`PostgresError::StaleTurn`], [`PostgresError::SessionMismatch`], or
     /// [`PostgresError::SessionBusy`] on expectation failures and
     /// [`PostgresError::StoreUnavailable`] on storage failure.
@@ -142,12 +144,34 @@ impl PostgresBackend {
         commands::begin_turn(&self.pool, command).await
     }
 
+    /// Revalidates an exact running Session/Turn under the AgentRuntime state
+    /// row lock immediately before a prepared resume task is installed.
+    ///
+    /// This operation does not mutate durable state or append an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PostgresError::AgentRuntimeNotFound`],
+    /// [`PostgresError::SessionMismatch`], [`PostgresError::StaleTurn`], or
+    /// [`PostgresError::TurnNotRunning`] when the prepared resume is stale,
+    /// and [`PostgresError::StoreUnavailable`] on storage failure.
+    pub async fn revalidate_resume(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        agent_id: AgentId,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Result<(), PostgresError> {
+        commands::revalidate_resume(&self.pool, agent_runtime_id, agent_id, session_id, turn_id)
+            .await
+    }
+
     /// Appends one durable event through the centralized transaction shared
     /// by every writer, applying only the side effect the event owns.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::AgentNotFound`],
+    /// Returns [`PostgresError::AgentRuntimeNotFound`],
     /// [`PostgresError::SessionMismatch`], [`PostgresError::StaleTurn`],
     /// [`PostgresError::TurnNotRunning`],
     /// [`PostgresError::ApprovalAlreadyRequested`],
@@ -160,11 +184,11 @@ impl PostgresBackend {
     }
 
     /// Resolves one durable approval request, linearized with every other
-    /// writer of the Agent.
+    /// writer of the AgentRuntime.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::AgentNotFound`],
+    /// Returns [`PostgresError::AgentRuntimeNotFound`],
     /// [`PostgresError::ApprovalNotFound`], [`PostgresError::StaleTurn`],
     /// [`PostgresError::ApprovalInvalidated`],
     /// [`PostgresError::ApprovalAlreadyResolved`], or
@@ -179,33 +203,36 @@ impl PostgresBackend {
         commands::resolve_approval(&self.pool, command).await
     }
 
-    /// Reads the thin durable Agent state.
+    /// Reads the thin durable AgentRuntime state.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::AgentNotFound`] when the Agent does not exist,
+    /// Returns [`PostgresError::AgentRuntimeNotFound`] when the runtime does not exist,
     /// [`PostgresError::DurableStateCorrupt`] when persisted shapes fail v1
     /// decode, and [`PostgresError::StoreUnavailable`] on storage failure.
-    pub async fn read_agent_state(
+    pub async fn read_agent_runtime_state(
         &self,
-        agent_id: AgentId,
-    ) -> Result<AgentStateView, PostgresError> {
-        queries::read_agent_state(&self.pool, agent_id).await
+        agent_runtime_id: AgentRuntimeId,
+    ) -> Result<AgentRuntimeStateView, PostgresError> {
+        queries::read_agent_runtime_state(&self.pool, agent_runtime_id).await
     }
 
-    /// Reads the Agent view in one MVCC snapshot: identity, thin state,
+    /// Reads the AgentRuntime view in one MVCC snapshot: identities, thin state,
     /// barrier (`snapshot_event_seq` equals `last_event_seq`), derived pending
     /// approvals and latest usage.
     ///
     /// # Errors
     ///
-    /// Returns [`PostgresError::AgentNotFound`] when the Agent does not exist,
+    /// Returns [`PostgresError::AgentRuntimeNotFound`] when the runtime does not exist,
     /// [`PostgresError::RuntimeIncompatible`] when a derived approval row
     /// declares an unsupported event version,
     /// [`PostgresError::DurableStateCorrupt`] when persisted shapes fail v1
     /// decode, and [`PostgresError::StoreUnavailable`] on storage failure.
-    pub async fn read_agent_view(&self, agent_id: AgentId) -> Result<AgentView, PostgresError> {
-        queries::read_agent_view(&self.pool, agent_id).await
+    pub async fn read_agent_runtime_view(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+    ) -> Result<AgentRuntimeView, PostgresError> {
+        queries::read_agent_runtime_view(&self.pool, agent_runtime_id).await
     }
 
     /// Reads one ascending product-history page from the filtered durable
@@ -234,10 +261,10 @@ impl PostgresBackend {
     /// storage failure.
     pub async fn read_loop_started(
         &self,
-        agent_id: AgentId,
+        agent_runtime_id: AgentRuntimeId,
         turn_id: TurnId,
     ) -> Result<LoopStartedRecord, PostgresError> {
-        queries::read_loop_started(&self.pool, agent_id, turn_id).await
+        queries::read_loop_started(&self.pool, agent_runtime_id, turn_id).await
     }
 
     /// Reads and verifies the complete gapless `(base, through]` current-Turn
@@ -256,7 +283,7 @@ impl PostgresBackend {
     }
 
     /// Reads decoded durable rows in `(from_event_seq, to_event_seq]` for one
-    /// Agent, in order (dispatcher scans and full-replay recovery).
+    /// AgentRuntime, in order (dispatcher scans and full-replay recovery).
     ///
     /// # Errors
     ///
@@ -264,11 +291,11 @@ impl PostgresBackend {
     /// decode and [`PostgresError::StoreUnavailable`] on storage failure.
     pub async fn read_events_range(
         &self,
-        agent_id: AgentId,
+        agent_runtime_id: AgentRuntimeId,
         from_event_seq: u64,
         to_event_seq: u64,
     ) -> Result<Vec<DurableEventRow>, PostgresError> {
-        queries::read_events_range(&self.pool, agent_id, from_event_seq, to_event_seq).await
+        queries::read_events_range(&self.pool, agent_runtime_id, from_event_seq, to_event_seq).await
     }
 
     /// Reads the latest valid compaction companion at or below
@@ -281,10 +308,10 @@ impl PostgresBackend {
     /// [`PostgresError::StoreUnavailable`] on storage failure.
     pub async fn read_latest_companion(
         &self,
-        agent_id: AgentId,
+        agent_runtime_id: AgentRuntimeId,
         base_event_seq: u64,
     ) -> Result<Option<TranscriptCompaction>, PostgresError> {
-        queries::read_latest_companion(&self.pool, agent_id, base_event_seq).await
+        queries::read_latest_companion(&self.pool, agent_runtime_id, base_event_seq).await
     }
 
     /// Reads ledger facts about one approval request for the decide Handler.
@@ -298,10 +325,10 @@ impl PostgresBackend {
     /// failure.
     pub async fn read_approval(
         &self,
-        agent_id: AgentId,
+        agent_runtime_id: AgentRuntimeId,
         turn_id: TurnId,
         lookup: ApprovalLookup,
     ) -> Result<Option<ApprovalFacts>, PostgresError> {
-        queries::read_approval(&self.pool, agent_id, turn_id, lookup).await
+        queries::read_approval(&self.pool, agent_runtime_id, turn_id, lookup).await
     }
 }

@@ -7,18 +7,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use stratum_core::{
-    AgentId, ApprovalDecision, ApprovalId, CallId, DangerLevel, ModelConfig, SessionId, TokenUsage,
-    ToolKind, ToolName, TurnId,
+    AgentId, AgentRuntimeId, AgentVersionTag, ApprovalDecision, ApprovalId, CallId, DangerLevel,
+    ModelConfig, SessionId, TokenUsage, ToolKind, ToolName, TurnId,
 };
 use stratum_llm::ModelDescriptor;
 use utoipa::ToSchema;
 
-use crate::frames::AgentProductEventV1;
+use crate::frames::AgentRuntimeProductEventV1;
 
-/// Create-agent request body.
+/// Create-AgentRuntime request body.
 #[derive(Debug, Clone, PartialEq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CreateAgentRequest {
+pub struct CreateAgentRuntimeRequest {
     /// Template name of the Agent to create.
     pub agent_name: String,
     /// Full replacement model configuration; the template default is used
@@ -27,15 +27,17 @@ pub struct CreateAgentRequest {
     pub model_config: Option<ModelConfig>,
 }
 
-/// Create-agent response body (identical on idempotent replay).
+/// Immutable AgentRuntime creation result (identical on key-only replay).
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct CreateAgentResponse {
-    /// Created (or replayed) Agent identity.
+pub struct AgentRuntimeCreated {
+    /// Created (or replayed) runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent template-version identity pinned by the runtime.
     pub agent_id: AgentId,
-    /// Source template name recorded at creation.
+    /// Template name recorded in the immutable definition row.
     pub agent_name: String,
-    /// Current default model configuration.
-    pub model_config: ModelConfig,
+    /// Author-provided version tag recorded in the immutable definition row.
+    pub agent_version: AgentVersionTag,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
 }
@@ -98,7 +100,9 @@ pub struct ApprovalResolveRequest {
 /// Accepted Turn identities returned by message and resume commands.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct TurnAccepted {
-    /// Agent identity.
+    /// Runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent template-version identity.
     pub agent_id: AgentId,
     /// Bound Session identity.
     pub session_id: SessionId,
@@ -110,7 +114,7 @@ pub struct TurnAccepted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum AgentStatusDto {
+pub enum AgentRuntimeStatusDto {
     /// Created but never started a Turn.
     Idle,
     /// Current Turn is durably running.
@@ -142,22 +146,27 @@ pub struct PendingApprovalDto {
     pub danger_level: DangerLevel,
 }
 
-/// Cold Agent view at a fixed Postgres barrier.
+/// Cold AgentRuntime view at a fixed Postgres barrier.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct AgentViewResponse {
-    /// Agent identity.
+#[non_exhaustive]
+pub struct AgentRuntimeView {
+    /// Runtime aggregate identity.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent template-version identity pinned by the runtime.
     pub agent_id: AgentId,
-    /// Agent name recorded at creation.
+    /// Template name joined from the immutable definition row.
     pub agent_name: String,
+    /// Author-provided template version tag.
+    pub agent_version: AgentVersionTag,
     /// Durable status of the current or most recent Turn.
-    pub status: AgentStatusDto,
-    /// Current default model configuration.
+    pub status: AgentRuntimeStatusDto,
+    /// Current runtime model configuration.
     pub model_config: ModelConfig,
     /// Bound Session, when one exists.
     pub session_id: Option<SessionId>,
     /// Current or most recent Turn, when one exists.
     pub current_turn_id: Option<TurnId>,
-    /// Snapshot barrier (`agent_state.last_event_seq`) as a decimal string.
+    /// Snapshot barrier (`agent_states.last_event_seq`) as a decimal string.
     pub snapshot_event_seq: String,
     /// Latest durable assistant-message sequence at the same barrier, as a
     /// decimal string; `"0"` when no assistant message exists.
@@ -175,6 +184,8 @@ pub struct AgentViewResponse {
 pub struct AgentTemplateDto {
     /// Template name.
     pub agent_name: String,
+    /// Author-provided immutable template version tag.
+    pub version: AgentVersionTag,
     /// Provider default model configuration of the template's model.
     pub model_config: ModelConfig,
 }
@@ -196,7 +207,7 @@ pub struct ModelsResponse {
 /// One product-visible history item.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct HistoryItemDto {
-    /// Agent-wide event sequence as a decimal string.
+    /// AgentRuntime-wide event sequence as a decimal string.
     pub event_seq: String,
     /// Durable payload version from the row.
     pub event_version: i32,
@@ -207,11 +218,12 @@ pub struct HistoryItemDto {
     /// Commit timestamp.
     pub created_at: DateTime<Utc>,
     /// Safe typed product event.
-    pub event: AgentProductEventV1,
+    pub event: AgentRuntimeProductEventV1,
 }
 
 /// One ascending history page.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+#[non_exhaustive]
 pub struct HistoryResponse {
     /// Items in ascending event order.
     pub items: Vec<HistoryItemDto>,
@@ -261,7 +273,15 @@ mod tests {
         );
         assert!(with_credential.is_err(), "credential fields are rejected");
 
-        let create: Result<CreateAgentRequest, _> = serde_json::from_str(
+        let nested_credential: Result<MessageRequest, _> = serde_json::from_str(
+            r#"{"text":"hi","expected_current_turn_id":null,"model_config":{"model":"test:model","parameters":{},"api_key":"sk-secret"}}"#,
+        );
+        assert!(
+            nested_credential.is_err(),
+            "credential-shaped model fields are rejected instead of ignored"
+        );
+
+        let create: Result<CreateAgentRuntimeRequest, _> = serde_json::from_str(
             r#"{"agent_name": "a", "session_id": "00000000-0000-0000-0000-000000000000"}"#,
         );
         assert!(

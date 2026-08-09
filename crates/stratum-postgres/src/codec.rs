@@ -12,11 +12,12 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use stratum_core::{
-    ApprovalDecision, ApprovalId, CallId, DangerLevel, DurableAgentEvent, HookInvocationId,
-    ToolKind, ToolName, TurnRuntimeSnapshot,
+    AgentId, ApprovalDecision, ApprovalId, CallId, DangerLevel, DurableAgentEvent,
+    HookInvocationId, ToolKind, ToolName, TurnRuntimeSnapshot,
 };
 
 use crate::error::{PostgresError, VersionedKind};
+use crate::types::ResolvedDefinitionV1;
 
 /// Only supported durable event payload version.
 pub(crate) const EVENT_VERSION_V1: i32 = 1;
@@ -46,14 +47,19 @@ pub(crate) const TYPE_TRANSCRIPT_COMPACTED: &str = "transcript_compacted";
 const TYPE_TOOL_APPROVAL_REQUESTED: &str = "tool_approval_requested";
 
 /// Product-visible event types covered by the filtered history index.
-pub(crate) const HISTORY_EVENT_TYPES: [&str; 4] = [
+pub(crate) const HISTORY_EVENT_TYPES: [&str; 9] = [
+    "loop_started",
     "message_appended",
+    "tool_approval_requested",
+    "tool_approval_resolved",
     "transcript_compacted",
+    "iteration_completed",
+    "loop_finished",
     "loop_failed",
     "loop_cancelled",
 ];
 
-/// Usage-carrying event types scanned for `AgentView.latest_usage`.
+/// Usage-carrying event types scanned for `AgentRuntimeView.latest_usage`.
 pub(crate) const USAGE_EVENT_TYPES: [&str; 4] = [
     "iteration_completed",
     "loop_finished",
@@ -117,12 +123,27 @@ pub(crate) fn encode_event(
             };
             data.insert("hook_invocation_id".to_owned(), json!(hook_invocation_id));
         }
-        _ => {
+        DurableAgentEvent::LoopStarted { .. }
+        | DurableAgentEvent::MessageAppended { .. }
+        | DurableAgentEvent::ToolApprovalResolved { .. }
+        | DurableAgentEvent::ToolExecutionStarted { .. }
+        | DurableAgentEvent::HookInvocationPending { .. }
+        | DurableAgentEvent::HookInvocationCompleted { .. }
+        | DurableAgentEvent::HookInvocationFailed { .. }
+        | DurableAgentEvent::IterationCompleted { .. }
+        | DurableAgentEvent::LoopFinished { .. }
+        | DurableAgentEvent::LoopFailed { .. }
+        | DurableAgentEvent::LoopCancelled { .. } => {
             if approval_hook_invocation_id.is_some() {
                 return Err(PostgresError::InvalidCommand(
                     "approval_hook_invocation_id is only valid for tool_approval_requested",
                 ));
             }
+        }
+        _ => {
+            return Err(PostgresError::InvalidCommand(
+                "unsupported durable event variant",
+            ));
         }
     }
 
@@ -270,6 +291,48 @@ pub(crate) fn decode_runtime_snapshot(
     )
 }
 
+/// Decodes and validates the immutable Agent identity pinned in a runtime
+/// snapshot.
+pub(crate) fn ensure_runtime_snapshot_agent(
+    snapshot: &TurnRuntimeSnapshot,
+    expected_agent_id: AgentId,
+) -> Result<(), PostgresError> {
+    if snapshot.agent_id != expected_agent_id {
+        return Err(PostgresError::corrupt_invariant(
+            "runtime snapshot agent_id does not match agent_states pin",
+        ));
+    }
+    Ok(())
+}
+
+/// Encodes a canonical v1 immutable definition.
+pub(crate) fn encode_resolved_definition(
+    definition: &ResolvedDefinitionV1,
+) -> Result<Value, PostgresError> {
+    serde_json::to_value(definition).map_err(|source| PostgresError::EventEncode {
+        event_type: "resolved_definition",
+        source,
+    })
+}
+
+/// Strictly decodes an immutable Agent definition.
+pub(crate) fn decode_resolved_definition(
+    version: i32,
+    definition: Value,
+) -> Result<ResolvedDefinitionV1, PostgresError> {
+    if version != DEFINITION_SCHEMA_VERSION_V1 {
+        return Err(PostgresError::RuntimeIncompatible {
+            kind: VersionedKind::ResolvedDefinition,
+            version,
+        });
+    }
+    strict_v1_from_value(
+        definition,
+        "resolved definition failed v1 decode",
+        "resolved definition does not match canonical v1 shape",
+    )
+}
+
 /// Postgres SQLSTATE of a unique-constraint violation.
 const UNIQUE_VIOLATION_SQLSTATE: &str = "23505";
 
@@ -303,16 +366,6 @@ pub(crate) fn decode_model_config(
         context,
         "persisted model config does not match canonical v1 shape",
     )
-}
-
-/// Decodes an optional `ModelConfig` jsonb column.
-pub(crate) fn decode_optional_model_config(
-    value: Option<Value>,
-    context: &'static str,
-) -> Result<Option<stratum_core::ModelConfig>, PostgresError> {
-    value
-        .map(|value| decode_model_config(value, context))
-        .transpose()
 }
 
 /// Wire shape of a `tool_approval_requested` payload (core fields plus the
@@ -367,8 +420,8 @@ impl ResolvedApprovalPayload {
 mod tests {
     use serde_json::{Map, json};
     use stratum_core::{
-        AgentVersionId, ChatMessage, ExtensionSetVersionId, HookHandlerVersionId, ModelConfig,
-        ModelId, SkillSetVersionId, TokenUsage,
+        AgentId, ChatMessage, ExtensionSetVersionId, HookHandlerVersionId, ModelConfig, ModelId,
+        SkillSetVersionId, TokenUsage,
     };
 
     use super::*;
@@ -748,7 +801,7 @@ mod tests {
     #[test]
     fn runtime_snapshot_strict_decode_distinguishes_incompatible_and_corrupt() {
         let snapshot = TurnRuntimeSnapshot::new(
-            AgentVersionId::new(),
+            AgentId::new(),
             ModelConfig::new(
                 ModelId::new("openai", "test-model").expect("model id is valid"),
                 Map::new(),
@@ -788,6 +841,38 @@ mod tests {
         let unknown = decode_model_config(noncanonical_model, "model failed v1 decode")
             .expect_err("unknown persisted model fields are corrupt");
         assert!(matches!(unknown, PostgresError::DurableStateCorrupt { .. }));
+    }
+
+    #[test]
+    fn resolved_definition_strict_decode_distinguishes_incompatible_and_corrupt() {
+        let definition = ResolvedDefinitionV1 {
+            prompt: "system prompt".to_owned(),
+            tools: vec![ToolName::from("echo")],
+            model: ModelConfig::new(
+                ModelId::new("openai", "test-model").expect("model id is valid"),
+                Map::new(),
+            ),
+        };
+        let encoded = encode_resolved_definition(&definition).expect("definition encodes");
+        let decoded = decode_resolved_definition(DEFINITION_SCHEMA_VERSION_V1, encoded.clone())
+            .expect("definition decodes");
+        assert_eq!(decoded, definition);
+
+        let incompatible =
+            decode_resolved_definition(2, encoded.clone()).expect_err("v2 is unsupported");
+        assert!(matches!(
+            incompatible,
+            PostgresError::RuntimeIncompatible {
+                kind: VersionedKind::ResolvedDefinition,
+                version: 2
+            }
+        ));
+
+        let mut noncanonical = encoded;
+        noncanonical["future_field"] = json!(true);
+        let corrupt = decode_resolved_definition(DEFINITION_SCHEMA_VERSION_V1, noncanonical)
+            .expect_err("unknown v1 definition fields are corrupt");
+        assert!(matches!(corrupt, PostgresError::DurableStateCorrupt { .. }));
     }
 
     fn error_kind(error: &PostgresError) -> &'static str {

@@ -8,142 +8,136 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::rejection::JsonRejection};
 use stratum_config::AgentName;
-use stratum_core::{AgentId, ModelConfig};
+use stratum_core::ModelConfig;
 use stratum_llm::LlmError;
 use stratum_postgres::{
-    AgentView, CreateAgent, CreateAgentOutcome, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT,
-    HistoryQuery, encode_event_seq, parse_event_seq,
+    AgentRuntimeView as StoredAgentRuntimeView, CreateAgentRuntime, HISTORY_DEFAULT_LIMIT,
+    HISTORY_MAX_LIMIT, HistoryQuery, ResolvedDefinitionV1, encode_event_seq, parse_event_seq,
 };
 use tracing::{Span, field};
 use utoipa::IntoParams;
 
-use super::{json_request, parse_agent_id};
+use super::{json_request, parse_agent_runtime_id};
 use crate::dto::{
-    AgentStatusDto, AgentTemplateDto, AgentTemplatesResponse, AgentViewResponse,
-    CreateAgentRequest, CreateAgentResponse, HistoryItemDto, HistoryResponse, ModelsResponse,
-    PendingApprovalDto,
+    AgentRuntimeCreated, AgentRuntimeStatusDto, AgentRuntimeView, AgentTemplateDto,
+    AgentTemplatesResponse, CreateAgentRuntimeRequest, HistoryItemDto, HistoryResponse,
+    ModelsResponse, PendingApprovalDto,
 };
 use crate::error::{ApiError, ErrorKind, ErrorResponse};
 use crate::frames::history_item_event;
 use crate::state::AppState;
-use crate::turn::{ResolvedDefinitionV1, build_tool_registry};
+use crate::turn::build_tool_registry;
 
-/// Creates an immutable Agent, idempotently keyed by the client.
+/// Creates an AgentRuntime, idempotently keyed by the client.
 #[utoipa::path(
     post,
-    path = "/v1/agents",
-    request_body = CreateAgentRequest,
+    path = "/v1/agent-runtimes",
+    request_body = CreateAgentRuntimeRequest,
     params(("Idempotency-Key" = String, Header, description = "client-generated UUID idempotency key")),
     responses(
-        (status = 201, description = "agent created (or identically replayed)", body = CreateAgentResponse,
-            headers(("Location" = String, description = "canonical URI of the created agent"))),
+        (status = 201, description = "agent runtime created (or key-only replayed)", body = AgentRuntimeCreated,
+            headers(("Location" = String, description = "canonical URI of the created agent runtime"))),
         (status = 400, description = "missing/invalid idempotency key or request body", body = ErrorResponse),
         (status = 404, description = "agent template not found", body = ErrorResponse),
-        (status = 409, description = "idempotency key is bound to a different create request", body = ErrorResponse),
+        (status = 409, description = "the exact template name/version tag conflicts with another immutable definition", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
         (status = 422, description = "template or model validation failed", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt or an internal error occurred", body = ErrorResponse),
         (status = 503, description = "store unavailable or service shutting down", body = ErrorResponse),
     )
 )]
-pub(crate) async fn create_agent(
+pub(crate) async fn create_agent_runtime(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    request: Result<Json<CreateAgentRequest>, JsonRejection>,
+    request: Result<Json<CreateAgentRuntimeRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let _admission = state.admission().enter()?;
     let idempotency_key = parse_idempotency_key(&headers)?;
     let body = json_request(request)?;
+    // Key-first: an idempotent replay answers from the stored record alone,
+    // without reading the template catalog.
+    if let Some(existing) = state
+        .pg()
+        .find_agent_runtime_by_idempotency_key(idempotency_key)
+        .await
+        .map_err(ApiError::from_postgres)?
+    {
+        return Ok(created_response(
+            existing.agent_runtime_id,
+            existing.agent_id,
+            existing.agent_name,
+            existing.agent_version,
+            existing.created_at,
+        ));
+    }
+
+    // Miss: hot-read and validate the current template, then preflight the
+    // model and tools before any durable mutation.
     let agent_name: AgentName = body
         .agent_name
         .parse()
         .map_err(|_| ApiError::new(ErrorKind::InvalidRequest))?;
     Span::current().record("agent_name", agent_name.as_str());
-
-    // Key-first: an idempotent replay answers from the stored record alone,
-    // without reading the template catalog.
-    if let Some(existing) = state
-        .pg()
-        .find_agent_by_idempotency_key(idempotency_key)
-        .await
-        .map_err(ApiError::from_postgres)?
-    {
-        if existing.source_template_name == agent_name.as_str()
-            && existing.creation_model_override == body.model_config
-        {
-            let view = state
-                .pg()
-                .read_agent_view(existing.agent_id)
-                .await
-                .map_err(ApiError::from_postgres)?;
-            return Ok(created_response(&view));
-        }
-        return Err(ApiError::new(ErrorKind::IdempotencyKeyConflict));
-    }
-
-    // Miss: hot-read and validate the current template, then preflight the
-    // model and tools before any durable mutation.
     let definition = state.templates().resolve(&agent_name).await?;
+    let template_model = state
+        .providers()
+        .default_model_config(&definition.model)
+        .map_err(|_| ApiError::new(ErrorKind::ModelNotConfigured))?;
     let effective_model = match &body.model_config {
         Some(overridden) => {
             validate_model_override(&state, overridden)?;
             overridden.clone()
         }
-        None => state
-            .providers()
-            .default_model_config(&definition.model)
-            .map_err(|_| ApiError::new(ErrorKind::ModelNotConfigured))?,
+        None => template_model.clone(),
     };
     build_tool_registry(&definition.tools)
         .map_err(|_| ApiError::new(ErrorKind::InvalidAgentTemplate))?;
 
     let resolved = ResolvedDefinitionV1 {
-        agent_name: agent_name.as_str().to_owned(),
-        model: effective_model.clone(),
+        model: template_model,
         tools: definition.tools.clone(),
         prompt: definition.prompt.clone(),
     };
-    let resolved_definition = serde_json::to_value(&resolved)
-        .map_err(|source| ApiError::with_source(ErrorKind::Internal, source))?;
 
     let outcome = state
         .pg()
-        .create_agent(CreateAgent {
-            agent_id: AgentId::new(),
-            agent_version_id: stratum_core::AgentVersionId::new(),
+        .create_agent_runtime(CreateAgentRuntime {
             idempotency_key,
-            source_template_name: agent_name.as_str().to_owned(),
-            creation_model_override: body.model_config,
-            resolved_definition,
-            default_model_config: effective_model,
+            name: agent_name.as_str().to_owned(),
+            version: definition.agent_version,
+            resolved_definition: resolved,
+            model_config: effective_model,
         })
         .await
         .map_err(ApiError::from_postgres)?;
-    let agent_id = match outcome {
-        CreateAgentOutcome::Created { agent_id } | CreateAgentOutcome::Replay { agent_id } => {
-            agent_id
-        }
-        _ => return Err(ApiError::new(ErrorKind::Internal)),
-    };
-    let view = state
-        .pg()
-        .read_agent_view(agent_id)
-        .await
-        .map_err(ApiError::from_postgres)?;
-    Ok(created_response(&view))
+    let runtime = outcome.runtime();
+    Ok(created_response(
+        runtime.agent_runtime_id,
+        runtime.agent_id,
+        runtime.agent_name.clone(),
+        runtime.agent_version.clone(),
+        runtime.created_at,
+    ))
 }
 
 /// 201 + Location + the stored representation, identical on replay.
-fn created_response(view: &AgentView) -> Response {
-    let body = CreateAgentResponse {
-        agent_id: view.agent_id,
-        agent_name: view.source_template_name.clone(),
-        model_config: view.default_model_config.clone(),
-        created_at: view.created_at,
+fn created_response(
+    agent_runtime_id: stratum_core::AgentRuntimeId,
+    agent_id: stratum_core::AgentId,
+    agent_name: String,
+    agent_version: stratum_core::AgentVersionTag,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Response {
+    let body = AgentRuntimeCreated {
+        agent_runtime_id,
+        agent_id,
+        agent_name,
+        agent_version,
+        created_at,
     };
     (
         StatusCode::CREATED,
-        [("Location", format!("/v1/agents/{}", view.agent_id))],
+        [("Location", format!("/v1/agent-runtimes/{agent_runtime_id}"))],
         Json(body),
     )
         .into_response()
@@ -206,28 +200,28 @@ pub(crate) async fn list_models(State(state): State<Arc<AppState>>) -> Json<Mode
     })
 }
 
-/// Cold Agent view at a fixed Postgres barrier.
+/// Cold AgentRuntime view at a fixed Postgres barrier.
 #[utoipa::path(
     get,
-    path = "/v1/agents/{agent_id}",
-    params(("agent_id" = String, Path, description = "agent identity")),
+    path = "/v1/agent-runtimes/{agent_runtime_id}",
+    params(("agent_runtime_id" = String, Path, description = "agent runtime identity")),
     responses(
-        (status = 200, description = "agent view at the current barrier", body = AgentViewResponse),
-        (status = 400, description = "malformed agent identity", body = ErrorResponse),
-        (status = 404, description = "agent not found", body = ErrorResponse),
+        (status = 200, description = "agent runtime view at the current barrier", body = AgentRuntimeView),
+        (status = 400, description = "malformed agent runtime identity", body = ErrorResponse),
+        (status = 404, description = "agent runtime not found", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt", body = ErrorResponse),
         (status = 503, description = "store unavailable", body = ErrorResponse),
     )
 )]
-pub(crate) async fn get_agent(
+pub(crate) async fn get_agent_runtime(
     State(state): State<Arc<AppState>>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AgentViewResponse>, ApiError> {
-    let agent_id = parse_agent_id(&agent_id)?;
-    Span::current().record("agent_id", field::display(agent_id));
+    Path(agent_runtime_id): Path<String>,
+) -> Result<Json<AgentRuntimeView>, ApiError> {
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let view = state
         .pg()
-        .read_agent_view(agent_id)
+        .read_agent_runtime_view(agent_runtime_id)
         .await
         .map_err(ApiError::from_postgres)?;
     Ok(Json(agent_view_response(&state, &view)?))
@@ -236,30 +230,32 @@ pub(crate) async fn get_agent(
 /// Maps the store view to the API DTO, adding the process-local advisory.
 pub(crate) fn agent_view_response(
     state: &AppState,
-    view: &AgentView,
-) -> Result<AgentViewResponse, ApiError> {
+    view: &StoredAgentRuntimeView,
+) -> Result<AgentRuntimeView, ApiError> {
     let status = map_status(view.status)?;
     let resume_required = match (status, view.current_turn_id) {
-        (AgentStatusDto::Running, Some(turn_id)) => state
+        (AgentRuntimeStatusDto::Running, Some(turn_id)) => state
             .registry()
-            .claim_state(view.agent_id, turn_id)
+            .claim_state(view.agent_runtime_id, turn_id)
             .is_none(),
-        (AgentStatusDto::Running, None) => {
+        (AgentRuntimeStatusDto::Running, None) => {
             return Err(ApiError::new(ErrorKind::DurableStateCorrupt));
         }
         (
-            AgentStatusDto::Idle
-            | AgentStatusDto::Finished
-            | AgentStatusDto::Failed
-            | AgentStatusDto::Cancelled,
+            AgentRuntimeStatusDto::Idle
+            | AgentRuntimeStatusDto::Finished
+            | AgentRuntimeStatusDto::Failed
+            | AgentRuntimeStatusDto::Cancelled,
             _,
         ) => false,
     };
-    Ok(AgentViewResponse {
+    Ok(AgentRuntimeView {
+        agent_runtime_id: view.agent_runtime_id,
         agent_id: view.agent_id,
-        agent_name: view.source_template_name.clone(),
+        agent_name: view.agent_name.clone(),
+        agent_version: view.agent_version.clone(),
         status,
-        model_config: view.default_model_config.clone(),
+        model_config: view.model_config.clone(),
         session_id: view.session_id,
         current_turn_id: view.current_turn_id,
         snapshot_event_seq: encode_event_seq(view.snapshot_event_seq),
@@ -284,13 +280,13 @@ pub(crate) fn agent_view_response(
 
 /// The store already fails closed on unknown status text; a variant outside
 /// the closed set here is an internal invariant violation.
-fn map_status(status: stratum_postgres::AgentStatus) -> Result<AgentStatusDto, ApiError> {
+fn map_status(status: stratum_postgres::AgentStatus) -> Result<AgentRuntimeStatusDto, ApiError> {
     match status {
-        stratum_postgres::AgentStatus::Idle => Ok(AgentStatusDto::Idle),
-        stratum_postgres::AgentStatus::Running => Ok(AgentStatusDto::Running),
-        stratum_postgres::AgentStatus::Finished => Ok(AgentStatusDto::Finished),
-        stratum_postgres::AgentStatus::Failed => Ok(AgentStatusDto::Failed),
-        stratum_postgres::AgentStatus::Cancelled => Ok(AgentStatusDto::Cancelled),
+        stratum_postgres::AgentStatus::Idle => Ok(AgentRuntimeStatusDto::Idle),
+        stratum_postgres::AgentStatus::Running => Ok(AgentRuntimeStatusDto::Running),
+        stratum_postgres::AgentStatus::Finished => Ok(AgentRuntimeStatusDto::Finished),
+        stratum_postgres::AgentStatus::Failed => Ok(AgentRuntimeStatusDto::Failed),
+        stratum_postgres::AgentStatus::Cancelled => Ok(AgentRuntimeStatusDto::Cancelled),
         _ => Err(ApiError::new(ErrorKind::Internal)),
     }
 }
@@ -311,27 +307,27 @@ pub(crate) struct HistoryParams {
 /// Reads one ascending product-history page from the durable ledger.
 #[utoipa::path(
     get,
-    path = "/v1/agents/{agent_id}/history",
+    path = "/v1/agent-runtimes/{agent_runtime_id}/history",
     params(
-        ("agent_id" = String, Path, description = "agent identity"),
+        ("agent_runtime_id" = String, Path, description = "agent runtime identity"),
         HistoryParams,
     ),
     responses(
         (status = 200, description = "ascending history page", body = HistoryResponse),
-        (status = 400, description = "invalid history query or agent identity", body = ErrorResponse),
-        (status = 404, description = "agent not found", body = ErrorResponse),
+        (status = 400, description = "invalid history query or runtime identity", body = ErrorResponse),
+        (status = 404, description = "agent runtime not found", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt", body = ErrorResponse),
         (status = 503, description = "store unavailable", body = ErrorResponse),
     )
 )]
 pub(crate) async fn get_history(
     State(state): State<Arc<AppState>>,
-    Path(agent_id): Path<String>,
+    Path(agent_runtime_id): Path<String>,
     params: Result<Query<HistoryParams>, QueryRejection>,
 ) -> Result<Json<HistoryResponse>, ApiError> {
     let params = history_query(params)?;
-    let agent_id = parse_agent_id(&agent_id)?;
-    Span::current().record("agent_id", field::display(agent_id));
+    let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
+    Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
 
     let invalid = || ApiError::new(ErrorKind::InvalidHistoryQuery);
     let through = params
@@ -353,19 +349,19 @@ pub(crate) async fn get_history(
         return Err(invalid());
     }
 
-    let agent_state = state
+    let runtime_state = state
         .pg()
-        .read_agent_state(agent_id)
+        .read_agent_runtime_state(agent_runtime_id)
         .await
         .map_err(ApiError::from_postgres)?;
-    if through > agent_state.last_event_seq {
+    if through > runtime_state.last_event_seq {
         return Err(invalid());
     }
 
     let page = state
         .pg()
         .read_history_page(HistoryQuery {
-            agent_id,
+            agent_runtime_id,
             through_event_seq: through,
             before_event_seq: before,
             limit,
@@ -410,7 +406,7 @@ mod tests {
 
     #[test]
     fn history_query_rejects_unknown_fields_with_the_stable_kind() {
-        let uri: http::Uri = "/v1/agents/id/history?through_event_seq=4&replay=all"
+        let uri: http::Uri = "/v1/agent-runtimes/id/history?through_event_seq=4&replay=all"
             .parse()
             .expect("test URI parses");
 

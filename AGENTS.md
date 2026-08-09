@@ -38,6 +38,9 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 ## API 设计
 
 - 领域 ID 使用 newtype，例如 `SessionId`、`AgentId`、`TurnId`、`CallId`、`ModelId`。
+- 当前 Agent 领域必须严格区分：`AgentId` 标识一个不可变 template 版本，`AgentRuntimeId`
+  标识可跨多个 Turn 的长期运行聚合。共享同一 AgentId 的 runtime 不共享状态、event
+  sequence、history、approval 或 realtime transport；不得让同一个 UUID newtype 同时表达两者。
 - 避免 stringly typed API；能用 enum 或已校验 newtype 表达的，不要只用裸字符串。
 - 公共类型在合适时实现常用 trait：`Debug`、`Clone`、`PartialEq`、`Eq`、`Hash`、`Serialize`、`Deserialize`。
 - 实现转换时优先实现 `From<T>`，不要手写 `Into<T>`。

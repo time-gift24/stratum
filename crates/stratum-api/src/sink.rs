@@ -3,7 +3,7 @@
 //! [`TurnDurableSink`] implements the kernel's `DurableEventSink` for one
 //! exact Turn: `LoopStarted` routes to the admission transaction
 //! (`begin_turn`), the first user `MessageAppended` carries the effective
-//! model as the conditional default-model update, `TranscriptCompacted`
+//! model as the conditional runtime `model_config` replacement, `TranscriptCompacted`
 //! resolves its retained pointer from the provenance lineage, and every other
 //! event goes through the centralized append. The sink acknowledges only
 //! after commit and feeds each commit receipt to the realtime dispatcher.
@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use stratum_core::{
-    AgentId, AgentTelemetryEvent, ChatRole, DurableAgentEvent, LlmCallId, ModelConfig, SessionId,
-    TurnId, TurnRuntimeSnapshot,
+    AgentId, AgentRuntimeId, AgentTelemetryEvent, ChatRole, DurableAgentEvent, LlmCallId,
+    ModelConfig, SessionId, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_infra::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use stratum_postgres::{AppendEvent, BeginTurn, CompactionInput, PostgresBackend};
@@ -31,7 +31,13 @@ use crate::provenance::ContextLineage;
 /// message of a fresh Turn to commit before answering 202. The sink completes
 /// it on success; the sink or the task wrapper completes it with the mapped
 /// error on any earlier failure.
-type AdmissionSender = Arc<Mutex<Option<oneshot::Sender<Result<(), ApiError>>>>>;
+type AdmissionSender = Arc<Mutex<AdmissionSignalState>>;
+
+#[derive(Debug)]
+struct AdmissionSignalState {
+    sender: Option<oneshot::Sender<Result<(), ApiError>>>,
+    failure_delivered: bool,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionSignal {
@@ -45,7 +51,10 @@ impl AdmissionSignal {
         let (sender, receiver) = oneshot::channel();
         (
             Self {
-                sender: Arc::new(Mutex::new(Some(sender))),
+                sender: Arc::new(Mutex::new(AdmissionSignalState {
+                    sender: Some(sender),
+                    failure_delivered: false,
+                })),
             },
             receiver,
         )
@@ -53,32 +62,44 @@ impl AdmissionSignal {
 
     /// Completes the signal successfully (first user message committed).
     pub(crate) fn complete(&self) {
-        self.send(Ok(()));
+        let _ = self.send(Ok(()), false);
     }
 
-    /// Completes the signal with an error; a completed signal stays completed.
-    pub(crate) fn fail(&self, error: ApiError) {
-        self.send(Err(error));
+    /// Completes the signal with an error and reports whether that failure was
+    /// delivered to the waiting HTTP boundary. A delivered failure remains
+    /// observable to later callers so the managed task does not log it twice.
+    pub(crate) fn fail(&self, error: ApiError) -> bool {
+        self.send(Err(error), true)
     }
 
-    fn send(&self, outcome: Result<(), ApiError>) {
-        let sender = self
+    fn send(&self, outcome: Result<(), ApiError>, failure: bool) -> bool {
+        let mut state = self
             .sender
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(sender) = sender {
-            // A dropped receiver means the HTTP handler already left (for
-            // example on shutdown); the durable outcome is unaffected.
-            let _ = sender.send(outcome);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failure && state.failure_delivered {
+            return true;
         }
+        let Some(sender) = state.sender.take() else {
+            return false;
+        };
+        // A dropped receiver means the HTTP handler already left (for example
+        // on shutdown); the durable outcome is unaffected and the managed
+        // task remains responsible for recording the underlying failure.
+        let delivered = sender.send(outcome).is_ok();
+        if failure && delivered {
+            state.failure_delivered = true;
+        }
+        delivered
     }
 }
 
 /// Exact Turn identity shared by the per-turn adapters.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnIds {
-    /// Owning Agent.
+    /// Owning AgentRuntime.
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Immutable Agent definition pinned by the runtime.
     pub(crate) agent_id: AgentId,
     /// Bound Session.
     pub(crate) session_id: SessionId,
@@ -104,8 +125,9 @@ pub(crate) struct FreshTurnAdmission {
     pub(crate) expected_current_turn_id: Option<TurnId>,
     /// Runtime snapshot pinned to the `LoopStarted` row.
     pub(crate) snapshot: TurnRuntimeSnapshot,
-    /// Effective model of the Turn.
-    pub(crate) effective_model: ModelConfig,
+    /// Full model replacement committed with the first user message only when
+    /// it differs from the runtime's current value.
+    pub(crate) model_config_update: Option<ModelConfig>,
     /// First-user-message admission signal.
     pub(crate) signal: AdmissionSignal,
 }
@@ -114,7 +136,7 @@ pub(crate) struct FreshTurnAdmission {
 struct FreshAdmission {
     expected_current_turn_id: Option<TurnId>,
     snapshot: TurnRuntimeSnapshot,
-    effective_model: ModelConfig,
+    model_config_update: Option<ModelConfig>,
     signal: AdmissionSignal,
     first_user_pending: AtomicBool,
 }
@@ -136,7 +158,7 @@ impl TurnDurableSink {
             admission: Some(FreshAdmission {
                 expected_current_turn_id: admission.expected_current_turn_id,
                 snapshot: admission.snapshot,
-                effective_model: admission.effective_model,
+                model_config_update: admission.model_config_update,
                 signal: admission.signal,
                 first_user_pending: AtomicBool::new(true),
             }),
@@ -146,8 +168,8 @@ impl TurnDurableSink {
     }
 
     /// Creates the sink for a resumed Turn: no admission CAS, no admission
-    /// signal, and no default-model update (a resumed loop never appends
-    /// `LoopStarted` and never prompts).
+    /// signal, and no runtime `model_config` replacement (a resumed loop
+    /// never appends `LoopStarted` and never prompts).
     #[must_use]
     pub(crate) fn resumed(
         pg: PostgresBackend,
@@ -174,15 +196,16 @@ impl TurnDurableSink {
         &self,
         event: DurableAgentEvent,
         compaction: Option<CompactionInput>,
-        default_model_update: Option<ModelConfig>,
+        model_config_update: Option<ModelConfig>,
     ) -> AppendEvent {
         AppendEvent {
+            agent_runtime_id: self.ids.agent_runtime_id,
             agent_id: self.ids.agent_id,
             session_id: self.ids.session_id,
             turn_id: self.ids.turn_id,
             event,
             approval_hook_invocation_id: None,
-            default_model_update,
+            model_config_update,
             compaction,
         }
     }
@@ -202,7 +225,7 @@ impl DurableEventSink for TurnDurableSink {
                 let result = self
                     .pg
                     .begin_turn(BeginTurn {
-                        agent_id: self.ids.agent_id,
+                        agent_runtime_id: self.ids.agent_runtime_id,
                         expected_current_turn_id: admission.expected_current_turn_id,
                         turn_id: self.ids.turn_id,
                         session_id: self.ids.session_id,
@@ -222,13 +245,13 @@ impl DurableEventSink for TurnDurableSink {
                     admission.first_user_pending.load(Ordering::Acquire)
                         && message.role == ChatRole::User
                 });
-                let default_model_update = match (&self.admission, first_user) {
-                    (Some(admission), true) => Some(admission.effective_model.clone()),
+                let model_config_update = match (&self.admission, first_user) {
+                    (Some(admission), true) => admission.model_config_update.clone(),
                     _ => None,
                 };
                 let result = self
                     .pg
-                    .append_event(self.append_command(event, None, default_model_update))
+                    .append_event(self.append_command(event, None, model_config_update))
                     .await;
                 let receipt = match result {
                     Ok(receipt) => receipt,
@@ -364,13 +387,8 @@ impl TelemetryEventSink for TurnTelemetrySink {
             *next = following;
             assigned
         };
-        self.dispatcher.telemetry(
-            self.ids.session_id,
-            self.ids.turn_id,
-            llm_call_id,
-            telemetry_seq,
-            event,
-        );
+        self.dispatcher
+            .telemetry(self.ids.session_id, self.ids.turn_id, telemetry_seq, event);
     }
 }
 
@@ -379,14 +397,18 @@ mod tests {
     use stratum_infra::TelemetryEventSink;
 
     use super::*;
-    use crate::dispatcher::{DispatcherCommand, DispatcherHandle};
+    use crate::dispatcher::DispatcherCommand;
 
     #[test]
     fn telemetry_seq_starts_at_zero_per_llm_call() {
-        let (dispatcher, mut rx) = DispatcherHandle::stub(AgentId::new());
+        let agent_runtime_id = AgentRuntimeId::new();
+        let agent_id = AgentId::new();
+        let (dispatcher, mut rx) =
+            crate::dispatcher::test_support::stub_handle(agent_runtime_id, agent_id);
         let sink = TurnTelemetrySink::new(
             TurnIds {
-                agent_id: AgentId::new(),
+                agent_runtime_id,
+                agent_id,
                 session_id: SessionId::new(),
                 turn_id: TurnId::new(),
             },
@@ -422,7 +444,7 @@ mod tests {
     fn admission_signal_completes_exactly_once() {
         let (signal, receiver) = AdmissionSignal::new();
         signal.complete();
-        signal.fail(ApiError::new(ErrorKind::Internal));
+        assert!(!signal.fail(ApiError::new(ErrorKind::Internal)));
         assert!(
             receiver
                 .blocking_recv()
@@ -430,7 +452,11 @@ mod tests {
         );
 
         let (signal, receiver) = AdmissionSignal::new();
-        signal.fail(ApiError::new(ErrorKind::StoreUnavailable));
+        assert!(signal.fail(ApiError::new(ErrorKind::StoreUnavailable)));
+        assert!(
+            signal.fail(ApiError::new(ErrorKind::Internal)),
+            "the already-delivered failure remains owned by the HTTP boundary"
+        );
         let outcome = receiver.blocking_recv().expect("signal delivered");
         assert_eq!(
             outcome.expect_err("failure delivered").kind(),

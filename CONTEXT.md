@@ -10,6 +10,18 @@ Stratum agent 内核的领域语言：一个确定性 kernel 驱动模型/工具
 
 ## Language
 
+**Agent template 版本 (AgentId)**:
+一份不可变的 Agent 行为定义。template 作者用大小写敏感、无排序语义的 `(name, version string tag)` 命名版本；同一名称与 tag 不得指向两个不同定义。AgentId 不表示一次对话、Session 或进程中的运行对象。
+_Avoid_: Agent 实例、会话 Agent、自动递增版本
+
+**AgentRuntime (AgentRuntimeId)**:
+长期运行的 Agent 对话聚合。它永久 pin 一个 AgentId，可以跨多个 Turn，并拥有自己的当前模型配置、Session/current Turn、历史、审批与运行状态。同一 AgentId 可以被多个相互隔离的 AgentRuntime 复用。
+_Avoid_: AgentVersionId、用 AgentId 充当运行实例、RunId
+
+**AgentRuntime-wide event sequence**:
+每个 AgentRuntime 从 1 开始、跨 Turn 连续无空洞的 durable 事实顺序。稳定 identity 是 `(AgentRuntimeId,event_seq)`；公开 product 过滤掉内部事实后允许数值跳号。共享同一 AgentId 的不同 runtime 不共享顺序或历史。
+_Avoid_: agent-wide（未区分 definition/runtime）、per-Turn sequence、message_seq
+
 **Committed context**:
 从事件流重建的持久对话基线（system prompt + 全部已提交消息）。只能被 kernel 提交的 durable 事件（`MessageAppended`、`TranscriptCompacted`）改写，handler 永远不能直接写。
 _Avoid_: history、transcript（作"基线"义时）

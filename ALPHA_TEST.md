@@ -6,11 +6,10 @@
 
 关联但不会因本文档存在而自动完成的 OpenSpec gate：
 
-- `9.10`：真实 NATS/API/Web 集成；
-- `11.3`：每个 transaction、crash window、race、version boundary 与 typed error；
-- `11.5`：真实 Postgres + NATS 的完整端到端路径；
-- `11.6`：preamble、commit uncertainty、NATS loss、cursor、overflow、cleanup 与 compaction fallback；
-- `12.6`：完成全部验证后才能同步和归档 change。
+- `10.2`：重建 NATS 并执行真实 dispatcher/NATS/API 集成；
+- `10.3`：真实 Postgres + NATS + API + Web 的完整端到端路径；
+- `10.4`：preamble、commit uncertainty、race、NATS loss/cursor/overflow、Tool、approval、cancel 与 compaction fallback 故障注入；
+- `10.12`：完成实现、验证与独立审查后才能准备同步和归档 change。
 
 已经能由普通单元测试或 crate-local ignored integration test 稳定覆盖的情况不应只保留在这里。人工场景一旦可以确定性自动化，应迁入对应 crate/Web 测试，并把本文件保留为发布验收入口。
 
@@ -24,7 +23,7 @@
 6. 破坏性步骤前记录 database、stream、API/Web commit 和容器身份；结束后清理测试资源，不复用已被手工篡改的数据库。集成测试会 TRUNCATE 核心表或删除目标 stream，其连接地址必须再次人工确认不是共享/真实环境。
 7. 不向生产代码增加公开 failpoint、debug endpoint、绕过鉴权的管理入口或第二套状态。精确窗口优先使用 debugger、测试 binary、TCP proxy、容器 pause/stop 或一次性测试配置。
 8. 证据不得包含 API key、token、credential value、原始 provider body、prompt、Tool arguments/result、SQL connection string 或用户对话正文。数据库证据只记录安全 identity、event type、version、sequence 和状态。
-9. `kill -9`、网络切断和直接 SQL mutation 都必须作用于已确认的精确 PID、容器、database 与 AgentId；禁止使用宽泛进程匹配或未解析变量。
+9. `kill -9`、网络切断和直接 SQL mutation 都必须作用于已确认的精确 PID、容器、database 与 AgentRuntimeId；禁止使用宽泛进程匹配或未解析变量。
 10. Alpha 验证不得扩大当前版本保证：不测试或承诺 scheduler lease/fencing、多实例自动接管、rolling deploy、自动 resume、durable cancel、并发 Tool、通用 Tool 幂等、template management、Workflow 协调或 NATS durable backlog。
 11. crash 后的 running Turn 需要显式 resume；cancel `202` 只是进程内 signal，shutdown 也不等于业务 cancel。Tool 在 `ToolExecutionStarted` 后崩溃会以同一 CallId 至少一次重做，副作用去重由 Tool/service 负责；approval resolve 与 resume 保持分离。
 12. Tool 与 agent 生成的命令只能在容器或等价沙箱中运行，禁止直接在宿主机执行。副作用目标必须是 mock/隔离资源，并使用非生产凭据。
@@ -46,8 +45,8 @@
 
 - 带时间戳的操作顺序和故障注入点；
 - HTTP status 与稳定 `error.code`，不保存敏感正文；
-- AgentId、SessionId、TurnId、ApprovalId/CallId（适用时）；
-- 故障前后 `agent_state.status/current_turn_id/last_event_seq`；
+- AgentRuntimeId、pinned AgentId、SessionId、TurnId、ApprovalId/CallId（适用时）；
+- 故障前后 `agent_states.status/current_turn_id/last_event_seq`；
 - 按 event_seq 排序的安全 event type 清单及是否连续；
 - SSE control/durable/telemetry 的 identity、sequence 与 cursor 行为；
 - 浏览器最终可见状态、是否需要 refresh/resume，以及是否出现重复消息、ghost draft 或伪造 terminal；
@@ -56,65 +55,68 @@
 可使用以下只读查询记录安全证据；不要在证据中选择 payload、summary 或 definition：
 
 ```sql
-SELECT status, session_id, current_turn_id, last_event_seq
-FROM agent_state
-WHERE agent_id = '<agent_uuid>';
+SELECT s.id AS agent_runtime_id, s.agent_id, a.name, a.version,
+       s.status, s.session_id, s.current_turn_id, s.last_event_seq
+FROM agent_states AS s
+JOIN agents AS a ON a.id = s.agent_id
+WHERE s.id = '<agent_runtime_uuid>';
 
 SELECT event_seq, turn_id, event_type, event_version
 FROM durable_events
-WHERE agent_id = '<agent_uuid>'
+WHERE agent_runtime_id = '<agent_runtime_uuid>'
 ORDER BY event_seq;
 
 SELECT event_seq, turn_id, compacted_iteration, upto, retained_from_event_seq
 FROM transcript_compactions
-WHERE agent_id = '<agent_uuid>'
+WHERE agent_runtime_id = '<agent_runtime_uuid>'
 ORDER BY event_seq;
 
 SELECT expected.event_seq AS missing_event_seq
 FROM generate_series(
   1,
-  (SELECT last_event_seq FROM agent_state WHERE agent_id = '<agent_uuid>')
+  (SELECT last_event_seq FROM agent_states WHERE id = '<agent_runtime_uuid>')
 ) AS expected(event_seq)
 LEFT JOIN durable_events AS actual
-  ON actual.agent_id = '<agent_uuid>'
+  ON actual.agent_runtime_id = '<agent_runtime_uuid>'
  AND actual.event_seq = expected.event_seq
 WHERE actual.event_seq IS NULL;
 ```
 
-通用通过条件：Postgres 是唯一 durable truth；已提交事实不因 NATS 或 HTTP 响应丢失而回滚；未提交事务不消耗 event_seq；不确定结果不靠猜测；恢复不创建替代 Agent/Session/Turn；错误保持 typed、fail-closed 且不泄露敏感信息。
+通用通过条件：Postgres 是唯一 durable truth；已提交事实不因 NATS 或 HTTP 响应丢失而回滚；未提交事务不消耗 event_seq；不确定结果不靠猜测；恢复不创建替代 AgentRuntime/Session/Turn，也不改变 pinned AgentId；错误保持 typed、fail-closed 且不泄露敏感信息。
 
 ## 场景索引
 
 | ID | 场景 | 主要 OpenSpec gate | 结果 |
 |---|---|---|---|
-| A01 | 完整真实端到端路径 | 9.10, 11.5 | [ ] |
-| A02 | 两个 message preamble 边界 | 11.3, 11.6 | [ ] |
-| A03 | Started-only terminal COMMIT 结果不确定 | 11.3, 11.6 | [ ] |
-| A04 | 运行中进程崩溃、exact resume 与 stale cleanup | 11.3, 11.5, 11.6 | [ ] |
-| A05 | Tool 至少一次的两个崩溃窗口 | 11.3, 11.5 | [ ] |
-| A06 | Approval refresh、崩溃恢复与 terminal race | 9.10, 11.3, 11.5 | [ ] |
-| A07 | Cancel 的内存级语义与崩溃限制 | 11.3, 11.5 | [ ] |
-| A08 | NATS down、post-commit publish loss 与恢复 | 9.10, 11.5, 11.6 | [ ] |
-| A09 | Cursor retention expiry 与 stream generation 变化 | 9.10, 11.6 | [ ] |
-| A10 | SSE bounded-buffer overflow 后冷恢复 | 9.10, 11.6 | [ ] |
-| A11 | Subscribe-before-snapshot、reconcile 与迟到 telemetry | 9.10, 11.5 | [ ] |
-| A12 | Postgres outage、readiness 与破坏性 baseline | 11.3, 11.5 | [ ] |
-| A13 | Compaction pointer fallback 与核心事实损坏 | 11.3, 11.6 | [ ] |
-| A14 | 严格持久版本、shape 与 identity fail-closed | 11.3 | [ ] |
-| A15 | Graceful shutdown 的统一 deadline | 11.3, 11.5 | [ ] |
+| A01 | 完整真实端到端路径 | 10.3 | [ ] |
+| A02 | 两个 message preamble 边界 | 10.4 | [ ] |
+| A03 | Started-only terminal COMMIT 结果不确定 | 10.4 | [ ] |
+| A04 | 运行中进程崩溃、exact resume 与 stale cleanup | 10.3, 10.4 | [ ] |
+| A05 | Tool 至少一次的两个崩溃窗口 | 10.3, 10.4 | [ ] |
+| A06 | Approval refresh、崩溃恢复与 terminal race | 10.3, 10.4 | [ ] |
+| A07 | Cancel 的内存级语义与崩溃限制 | 10.3, 10.4 | [ ] |
+| A08 | NATS down、post-commit publish loss 与恢复 | 10.2, 10.4 | [ ] |
+| A09 | Cursor retention expiry 与 stream generation 变化 | 10.2, 10.4 | [ ] |
+| A10 | SSE bounded-buffer overflow 后冷恢复 | 10.2, 10.4 | [ ] |
+| A11 | Subscribe-before-snapshot、reconcile 与迟到 telemetry | 10.3, 10.4 | [ ] |
+| A12 | Postgres outage、readiness 与破坏性 baseline | 10.3, 10.4 | [ ] |
+| A13 | Compaction pointer fallback 与核心事实损坏 | 10.4 | [ ] |
+| A14 | 严格持久版本、shape 与 identity fail-closed | 10.4 | [ ] |
+| A15 | Graceful shutdown 的统一 deadline | 10.3, 10.4 | [ ] |
+| A16 | Template tag、版本复用与多 runtime 隔离 | 10.3, 10.4 | [ ] |
 
 ## A01 — 完整真实端到端路径
 
 ### 前置条件
 
-- 全新的 Alpha database 与 Agent-scoped NATS stream；
+- 全新的 Alpha database 与 AgentRuntime-scoped NATS stream；
 - 真实 API、Web 和一个可控的 mock LLM/Tool composition；
 - Tool 能产生需要人工 approve/reject 的调用，并能记录不含参数的调用次数与 CallId；
 - 预置足够多的安全消息，以便最终出现两页以上 history。
 
 ### 操作
 
-1. 从 Web 读取 template/model catalog，创建 Agent，确认创建本身仍为 idle 且没有 Turn event。
+1. 从 Web 读取 template/model catalog，创建 AgentRuntime，确认创建本身仍为 idle 且没有 Turn event。
 2. 发送首条消息，观察 `stream_ready`、`LoopStarted`、user message、LLM telemetry、完整 assistant message与 terminal。
 3. 开始下一 Turn，触发 Tool approval；分别完成一次 approve 路径和一次 reject 后继续运行路径。
 4. 在一个 running Turn 中停止 API 进程，使用同一 Postgres/NATS 启动新 API 进程，刷新页面并显式 resume exact Turn。
@@ -124,9 +126,9 @@ WHERE actual.event_seq IS NULL;
 ### 预期
 
 - create → message → stream → approval/tool → cancel/resume → restart → refresh → pagination 全链路不依赖 filesystem execution 或 projection table；
-- 所有 durable item 以 `(AgentId,event_seq)` 去重，event truth 连续；公开过滤视图允许跳号；
+- 所有 durable item 以 `(AgentRuntimeId,event_seq)` 去重，event truth 连续；公开过滤视图允许跳号；
 - 刷新后 pending approval、status、usage、telemetry floor 与 history 从同一 PG barrier 收敛；
-- resume 沿用原 AgentId、SessionId 和 TurnId，不追加第二个 `LoopStarted`；
+- resume 沿用原 AgentRuntimeId、pinned AgentId、SessionId 和 TurnId，不追加第二个 `LoopStarted`；
 - Tool result 只由 `MessageAppended(role=tool, tool_call_id=CallId)` 表示；
 - 旧消息只在向上滚动时加载，固定 through barrier 不混入更新数据。
 
@@ -136,15 +138,15 @@ WHERE actual.event_seq IS NULL;
 
 1. 在 exact starting claim 已安装、`LoopStarted` transaction COMMIT 前暂停 API。
 2. 终止 API 进程并启动一个连接同一 PG 的新进程。
-3. 读取 AgentView 与 durable ledger。
+3. 读取 AgentRuntimeView 与 durable ledger。
 
-预期：事务完全回滚；原 status/current Turn/default model/high-water 不变；不存在新 `LoopStarted`；旧进程 claim 不会成为 durable hosting truth；合法 CAS 仍可重新发送消息。
+预期：事务完全回滚；原 status/current Turn/`model_config`/high-water 不变；不存在新 `LoopStarted`；旧进程 claim 不会成为 durable hosting truth；合法 CAS 仍可重新发送消息。
 
 ### A02.2：`LoopStarted` 已提交、首条 user message 未提交
 
 1. 暂停在 `LoopStarted` COMMIT 成功之后、首条 `MessageAppended(role=user)` COMMIT 之前。
 2. 终止 API 并以空 registry 重启。
-3. 验证 Agent 为 `running + unhosted`、`resume_required=true`，该 Turn 只有一个 `LoopStarted`，default model仍是此前值。
+3. 验证 AgentRuntime 为 `running + unhosted`、`resume_required=true`，该 Turn 只有一个 `LoopStarted`，`model_config`仍是此前值。
 4. 调用 exact resume。
 
 预期：原 message 请求没有返回 202；resume 不调用 LLM/Tool/Hook，原子追加唯一安全 `LoopFailed`并把 state 置 failed，返回 `409 turn_preamble_incomplete`；Session/current Turn 保留，event_seq 无洞。
@@ -155,7 +157,7 @@ WHERE actual.event_seq IS NULL;
 
 1. 先按 A02.2 构造 started-only Turn。
 2. 在 resume 写入安全 `LoopFailed` 时，通过数据库 TCP proxy 让 COMMIT 请求可能到达 PG，但在 client 收到最终确认前切断连接。不要用“handler 返回后丢 HTTP response”替代这个数据库 commit-ack 窗口。
-3. 让 API 的 exact-Turn reread 分支运行；若读取也暂时失败，恢复 PG 后再次读取 AgentView/ledger。
+3. 让 API 的 exact-Turn reread 分支运行；若读取也暂时失败，恢复 PG 后再次读取 AgentRuntimeView/ledger。
 
 ### 预期
 
@@ -171,7 +173,7 @@ WHERE actual.event_seq IS NULL;
 ### 操作
 
 1. 让一个正常 Turn 已提交首条 user message，并让 mock provider保持运行中。
-2. 记录 Agent/Session/Turn identity 后 `kill -9` API。
+2. 记录 AgentRuntime/pinned Agent/Session/Turn identity 后 `kill -9` API。
 3. 使用同一 PG/NATS 启动新 API；刷新 Web，确认 view仍是 durable running 但 registry为空。
 4. 并发发送两个 exact resume 请求。
 5. 在新 claim 安装后，允许旧 task cleanup（或等价的延迟 cleanup harness）继续执行。
@@ -180,7 +182,7 @@ WHERE actual.event_seq IS NULL;
 
 - 新进程报告 `resume_required=true`；不会自动接管，也不会产生 terminal；
 - 两个 resume 至多一个返回 202 并启动 task，另一个返回 204；
-- resume 保持原 AgentId/SessionId/TurnId且不追加第二个 `LoopStarted`；
+- resume 保持原 AgentRuntimeId/pinned AgentId/SessionId/TurnId且不追加第二个 `LoopStarted`；
 - 旧 cleanup 只能 compare-remove 自己的 claim，不能删除新 handle；
 - publisher 从启动时 PG high-water开始，不向新 subscription重灌旧 NATS history。
 
@@ -207,7 +209,7 @@ WHERE actual.event_seq IS NULL;
 
 ### 操作
 
-1. 触发 approval Requested，但在 Web 接收 realtime frame 前断开页面；刷新并确认同一 ApprovalId 从 AgentView重新出现。
+1. 触发 approval Requested，但在 Web 接收 realtime frame 前断开页面；刷新并确认同一 ApprovalId 从 AgentRuntimeView重新出现。
 2. 在 Requested 后、Resolved 前终止 API；重启后对 unhosted Turn resolve。确认 resolve 只持久化决定，不自动 resume。
 3. 显式 resume，暂停在 Resolved COMMIT 后、matching `HookInvocationCompleted` 前，再次终止并恢复。
 4. 使用两个独立 client同时提交 approval resolve 与 exact Turn terminal/cancel completion，重复运行直到观察到两种合法线性化顺序。
@@ -252,7 +254,7 @@ WHERE actual.event_seq IS NULL;
 
 - PG-backed command仍按durable合同成功，readiness中realtime显示degraded；SSE建立失败为`503 realtime_unavailable`而不是store failure；
 - publish失败不回滚PG、不让sink重试append、不改变HTTP/kernel结果；
-- Web通过AgentView/history补齐缺失durable frame并清理terminal UI；
+- Web通过AgentRuntimeView/history补齐缺失durable frame并清理terminal UI；
 - 已接受telemetry可以丢失并形成incomplete draft，但完整assistant message最终收敛；
 - 慢NATS和满队列不得阻塞PG acknowledgement；durable wake必须合并并最终追平，telemetry drop只能造成可检测gap；
 - NATS恢复后只提供新tail，不补发全部PG历史。
@@ -280,8 +282,8 @@ WHERE actual.event_seq IS NULL;
 
 ### 操作
 
-1. 建立Agent SSE并收到`stream_ready`，随后通过代理/debugger阻塞AgentView或history，使cold bootstrap不消费实时buffer。
-2. 对同一Agent快速产生超过服务端bounded buffer容量的安全frames；不得通过修改生产常量来伪造结果。
+1. 建立AgentRuntime SSE并收到`stream_ready`，随后通过代理/debugger阻塞AgentRuntimeView或history，使cold bootstrap不消费实时buffer。
+2. 对同一AgentRuntime快速产生超过服务端bounded buffer容量的安全frames；不得通过修改生产常量来伪造结果。
 3. 观察最后一个control frame、SSE id和连接关闭；继续观察浏览器下一次subscription。
 
 ### 预期
@@ -295,7 +297,7 @@ WHERE actual.event_seq IS NULL;
 
 ### 操作
 
-1. 让SSE先ready，再延迟AgentView/history响应；延迟期间提交一个durable product event。
+1. 让SSE先ready，再延迟AgentRuntimeView/history响应；延迟期间提交一个durable product event。
 2. 在cold buffer中只注入某个LLM call的中段telemetry，不提供完整prefix。
 3. 进入live后使NATS丢失LoopStarted或terminal frame，保留PG事实。
 4. 制造超过一页的 `(B,T]` durable gap，并把每页读取延迟到超过一次poll interval；同时触发focus和command reconcile。
@@ -309,8 +311,8 @@ WHERE actual.event_seq IS NULL;
 
 - snapshot期间event要么在barrier内去重，要么以`> barrier`应用一次，不丢不重；
 - cold-buffer telemetry全部丢弃，不以残缺prefix构造draft；
-- accepted Turn维持PG polling，直到AgentView或同Turn durable frame证明；terminal丢失仍由PG清理draft/Tool UI；
-- reconcile保持single-flight，周期/focus/command只coalesce一次补跑；每个fetch deadline能释放永久挂起请求；
+- accepted Turn维持PG polling，直到AgentRuntimeView或同Turn durable frame证明；terminal丢失仍由PG清理draft/Tool UI；
+- reconcile保持single-flight，周期/focus/command不得取消当前慢分页，只coalesce至多一次补跑；
 - final前旧tail和跨Turn旧telemetry均被拒绝，final后的新call不被误杀；
 - ready后连接死亡会作废本轮snapshot和cursor，而不是提交有恢复空洞的view。
 - offline恢复后PG final替换残缺draft，terminal/usage/Tool UI最终一致；不会永久停在running；
@@ -323,7 +325,7 @@ WHERE actual.event_seq IS NULL;
 
 1. 用含已删除beta migration history的可丢弃database启动新API。
 2. 记录拒绝启动后，按运维文档重建空database与migration history，再启动API。
-3. API健康后停止或隔离Postgres，分别请求health、AgentView、history与一个command；保持NATS可用。
+3. API健康后停止或隔离Postgres，分别请求health、AgentRuntimeView、history与一个command；保持NATS可用。
 4. 恢复Postgres并等待连接池恢复，再次请求health和只读/command endpoint。
 5. 在另一个一次性database上安装一次性trigger，让普通append在durable row insert后、state update时失败；移除trigger后再次append。
 
@@ -365,7 +367,7 @@ WHERE actual.event_seq IS NULL;
 ### A13.4：必需companion/summary损坏
 
 1. 从新fixture删除必需companion，或写入可通过DB CHECK但无法按v1严格解码的summary。
-2. 调用AgentView/history/resume中会读取该事实的路径。
+2. 调用AgentRuntimeView/history/resume中会读取该事实的路径。
 
 预期：返回`durable_state_corrupt`并且任何LLM/Tool/Hook动作都未开始；不得把核心事实缺失降级为pointer miss、filesystem fallback或在线repair。
 
@@ -375,7 +377,8 @@ WHERE actual.event_seq IS NULL;
 
 - 高于当前支持范围的definition、event或runtime snapshot version；
 - v1 event/snapshot/approval payload的未知字段、非canonical默认值或非法嵌套variant；
-- `agent_state.last_event_seq`与truth rows不一致、current-Turn slice缺行或row属于错误Session/Turn；
+- `agent_states.last_event_seq`与truth rows不一致、current-Turn slice缺行或row属于错误AgentRuntime/Session/Turn；
+- runtime snapshot 的 `agent_id` 与 `agent_states.agent_id` pin不一致，或Hook journal row属于错误AgentRuntime/Session/Turn；
 - 非`TranscriptCompacted` event挂companion、companion与discriminator identity不一致；
 - approval/hook派生查询中的foreign-Turn或非法version matching fact；
 - Tool result未知、重复、稀疏、乱序或脱离assistant group。
@@ -398,6 +401,26 @@ WHERE actual.event_seq IS NULL;
 - deadline到期后进程退出，不遗失已启动但从registry移除后变成detached的Turn task；
 - SSE pump、dispatcher和telemetry provider被有界结束，错误退出仍flush telemetry provider的安全日志链。
 
+## A16 — Template tag、版本复用与多 runtime 隔离
+
+### 操作
+
+1. 准备一个作者 tag 为 `alpha-a` 的合法 template，用两个不同 `Idempotency-Key` 分别创建两个 AgentRuntime。
+2. 确认两个 runtime pin 同一 AgentId；并发在两者启动 Turn，使两边都产生 `event_seq=1` 及后续事件，并同时订阅 SSE。
+3. 保持 tag 与 canonical definition 不变再次创建；随后只修改 create 的完整 `model_config` 再用新 key 创建。
+4. 把 template tag 改为 `alpha-b`、definition不变后创建；确认得到新的 AgentId。再恢复 tag `alpha-a` 但修改 prompt/tool/model定义，尝试创建。
+5. 对一个已经成功的 create key，在template文件已经变更后用不同request body重试。
+6. 在一次性数据库中让 `agents` insert之后、`agent_states` insert之前的同一transaction失败，再重试创建。
+
+### 预期
+
+- 同一 exact `(name, version)` 与相同 canonical definition 始终复用同一 AgentId，但每个新 key 都产生独立 AgentRuntimeId；create-time `model_config` 不参与template版本身份；
+- 共享 AgentId 的两个 runtime各自拥有从1开始的sequence、独立history/approval/dispatcher/NATS subject/cursor，任一frame双identity不匹配都不得应用；
+- 不同tag即使definition相同也产生不同AgentId；旧tag被作者改写definition时固定返回`409 agent_version_conflict`，不得覆盖原row；
+- key命中先于template读取和body比较，无条件返回首次创建的同一immutable `AgentRuntimeCreated` identity与Location；
+- version row与runtime state原子提交，失败transaction不留下orphan AgentId或已消费key；
+- 已有runtime在template文件改变后仍以pinned AgentId恢复；snapshot必须与pin一致，kernel-minimal Hook journal只通过外层exact AgentRuntime/Session/Turn ledger恢复。
+
 ## 结果汇总
 
 完成一轮后更新本表；失败必须关联issue，不得用“符合预期”覆盖恢复空洞、重复外部动作或已知限制之外的行为。
@@ -419,6 +442,7 @@ WHERE actual.event_seq IS NULL;
 | A13 |  |  |  |  |
 | A14 |  |  |  |  |
 | A15 |  |  |  |  |
+| A16 |  |  |  |  |
 
 ## Alpha 结束条件
 
@@ -429,6 +453,7 @@ WHERE actual.event_seq IS NULL;
 3. A05、A06、A07证明Tool、approval、cancel的恢复边界与明确限制；
 4. A08—A11证明真实NATS/SSE/Web在丢失、过期、overflow和慢reconcile下最终由PG收敛；
 5. A12—A15证明核心依赖、compaction、严格解码与shutdown fail-closed；
-6. 所有FAIL都有已修复并重新验证的issue；
-7. 自动化门禁仍全绿，独立constitution review没有red flag或violation；
-8. 受影响crate `AGENTS.md` 已由用户确认，OpenSpec evidence与checkbox逐项对应。
+6. A16证明template tag、immutable版本复用与多runtime隔离；
+7. 所有FAIL都有已修复并重新验证的issue；
+8. 自动化门禁仍全绿，独立constitution review没有red flag或violation；
+9. 受影响crate `AGENTS.md` 已由用户确认，OpenSpec evidence与checkbox逐项对应。

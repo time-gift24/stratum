@@ -2,7 +2,7 @@
 //!
 //! `stratum-api` is the only assembly crate: it owns the process registry,
 //! the Postgres-backed sink adapters injected into the kernel, the approval
-//! handler and resolver, the per-Agent realtime dispatcher, and the HTTP/SSE
+//! handler and resolver, the per-AgentRuntime realtime dispatcher, and the HTTP/SSE
 //! surface. Postgres is the only durable truth and the core readiness
 //! dependency; NATS is a short, lossy observation channel whose failure only
 //! degrades realtime. The kernel (`stratum-agent`) stays storage-agnostic and
@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use stratum_config::{Config, ProviderConfig};
 use stratum_core::ModelId;
-use stratum_infra::{AgentTailConfig, NatsAgentTail};
+use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 use stratum_llm::{
     ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager, LlmTimeouts,
     OpenAICompatibleProvider,
@@ -41,12 +41,12 @@ use stratum_llm::{
 use stratum_postgres::PostgresBackend;
 
 pub use dto::{
-    AgentStatusDto, AgentTemplateDto, AgentTemplatesResponse, AgentViewResponse,
-    CreateAgentRequest, CreateAgentResponse, HistoryItemDto, HistoryResponse, LivenessResponse,
-    ModelsResponse, PendingApprovalDto, ReadinessResponse, TurnAccepted,
+    AgentRuntimeCreated, AgentRuntimeStatusDto, AgentRuntimeView, AgentTemplateDto,
+    AgentTemplatesResponse, CreateAgentRuntimeRequest, HistoryItemDto, HistoryResponse,
+    LivenessResponse, ModelsResponse, PendingApprovalDto, ReadinessResponse, TurnAccepted,
 };
 pub use error::{ApiError, ErrorKind, ErrorResponse};
-pub use frames::{AgentProductEventV1, AgentStreamFrameV1};
+pub use frames::{AgentRuntimeProductEventV1, AgentRuntimeStreamFrameV1};
 pub use host_error::HostError;
 pub use http::router;
 pub use state::AppState;
@@ -179,19 +179,18 @@ async fn shutdown_signal() -> std::io::Result<()> {
 
 /// Connects the NATS tail; any failure degrades realtime (the core Postgres
 /// commands keep working).
-async fn connect_tail(config: &Config) -> Option<NatsAgentTail> {
+async fn connect_tail(config: &Config) -> Option<NatsAgentRuntimeTail> {
     let nats = config.nats.as_ref()?;
-    let tail_config = AgentTailConfig {
-        url: nats.url.clone(),
-        stream_name: nats.stream_name.clone(),
-        subject_prefix: nats.subject_prefix.clone(),
-        replicas: nats.replicas,
-        max_age: Duration::from_secs(nats.max_age_seconds),
-        max_bytes: nats.max_bytes,
-        max_messages: nats.max_messages,
-    };
+    let mut tail_config = AgentRuntimeTailConfig::default();
+    tail_config.url.clone_from(&nats.url);
+    tail_config.stream_name.clone_from(&nats.stream_name);
+    tail_config.subject_prefix.clone_from(&nats.subject_prefix);
+    tail_config.replicas = nats.replicas;
+    tail_config.max_age = Duration::from_secs(nats.max_age_seconds);
+    tail_config.max_bytes = nats.max_bytes;
+    tail_config.max_messages = nats.max_messages;
     let connect_timeout = Duration::from_secs(nats.connect_timeout_seconds);
-    match tokio::time::timeout(connect_timeout, NatsAgentTail::connect(tail_config)).await {
+    match tokio::time::timeout(connect_timeout, NatsAgentRuntimeTail::connect(tail_config)).await {
         Ok(Ok(tail)) => Some(tail),
         Ok(Err(error)) => {
             tracing::error!(error = %error, "nats tail connect failed; realtime is degraded");

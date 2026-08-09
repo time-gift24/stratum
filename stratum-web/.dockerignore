@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+tsconfig.tsbuildinfo
+.DS_Store
+.env*
+!.env.example
+.npmrc
+*.key
+*.pem
+*.p12
+*.pfx
+coverage

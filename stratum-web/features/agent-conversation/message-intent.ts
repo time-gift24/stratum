@@ -8,14 +8,14 @@ import type { ModelConfig } from "@/lib/stratum/model-config"
  * 再开第二个 Turn。
  */
 export type PendingMessageIntent = {
-  agentId: string
+  agentRuntimeId: string
   text: string
   expectedCurrentTurnId: string | null
   modelConfig?: ModelConfig
 }
 
 /**
- * 相同 Agent / 原文 / 完整模型配置表示同一 pending intent，保留旧 CAS；
+ * 相同 AgentRuntime / 原文 / 完整模型配置表示同一 pending intent，保留旧 CAS；
  * 任一输入变化表示调用方明确形成了新 intent，采用新的 expected CAS。
  */
 export function resolveMessageIntent(
@@ -24,7 +24,7 @@ export function resolveMessageIntent(
 ): PendingMessageIntent {
   if (
     pending !== null &&
-    pending.agentId === next.agentId &&
+    pending.agentRuntimeId === next.agentRuntimeId &&
     pending.text === next.text &&
     sameModelConfig(pending.modelConfig, next.modelConfig)
   )

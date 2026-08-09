@@ -1,6 +1,6 @@
-//! Per-agent realtime dispatcher.
+//! Per-AgentRuntime realtime dispatcher.
 //!
-//! One ordered dispatcher task per locally active Agent. Durable commit
+//! One ordered dispatcher task per locally active AgentRuntime. Durable commit
 //! receipts (from the sink adapter, the approval handler, the resolver, and
 //! admission) carry only the committed high-water; the dispatcher scans the
 //! committed rows from Postgres in `event_seq` order, skips internal rows,
@@ -22,26 +22,33 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use stratum_core::{AgentId, AgentTelemetryEvent, LlmCallId, SessionId, TurnId};
-use stratum_infra::NatsAgentTail;
-use stratum_postgres::PostgresBackend;
-use tokio::sync::mpsc;
+use stratum_core::{AgentId, AgentRuntimeId, AgentTelemetryEvent, SessionId, TurnId};
+use stratum_infra::NatsAgentRuntimeTail;
+use stratum_postgres::{PostgresBackend, PostgresError};
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{DispatchError, PersistedVariantError};
-use crate::frames::{AgentProductEventV1, AgentStreamFrameV1, ScannedRow, product_event};
+use crate::frames::{
+    AgentRuntimeProductEventV1, AgentRuntimeStreamFrameV1, ScannedRow, product_event,
+};
 use crate::state::{RuntimeTasks, spawn_runtime_task};
 
 /// Bounded per-dispatcher command queue.
 const DISPATCHER_CHANNEL_CAPACITY: usize = 1024;
 
-/// Command accepted by one Agent's dispatcher.
+/// Idle publish attempts tolerated after every producer handle has gone away.
+/// The durable ledger remains authoritative; abandoning this volatile
+/// generation lets a later writer start from a fresh committed PG barrier.
+const MAX_IDLE_PUBLISH_FAILURES: usize = 3;
+
+/// Command accepted by one AgentRuntime's dispatcher.
 #[derive(Debug)]
 pub(crate) enum DispatcherCommand {
     /// Publishes committed durable rows through this receipt's fixed target.
     DurableWake {
-        /// Committed Agent-wide high-water observed by this receipt.
+        /// Committed AgentRuntime-wide high-water observed by this receipt.
         through: u64,
     },
     /// One volatile LLM telemetry event of the active Turn.
@@ -52,8 +59,6 @@ pub(crate) enum DispatcherCommand {
         session_id: SessionId,
         /// Exact Turn.
         turn_id: TurnId,
-        /// LLM call identity.
-        llm_call_id: LlmCallId,
         /// Call-local telemetry sequence.
         telemetry_seq: u64,
         /// Typed telemetry payload.
@@ -61,29 +66,16 @@ pub(crate) enum DispatcherCommand {
     },
 }
 
-/// Sending half of one Agent's dispatcher.
+/// Sending half of one AgentRuntime's dispatcher.
 #[derive(Debug, Clone)]
 pub(crate) struct DispatcherHandle {
+    agent_runtime_id: AgentRuntimeId,
     agent_id: AgentId,
     tx: mpsc::Sender<DispatcherCommand>,
     durable_target: Arc<AtomicU64>,
 }
 
 impl DispatcherHandle {
-    /// Test-only stub over a raw channel.
-    #[cfg(test)]
-    pub(crate) fn stub(agent_id: AgentId) -> (Self, mpsc::Receiver<DispatcherCommand>) {
-        let (tx, rx) = mpsc::channel(16);
-        (
-            Self {
-                agent_id,
-                tx,
-                durable_target: Arc::new(AtomicU64::new(0)),
-            },
-            rx,
-        )
-    }
-
     /// Reports one committed durable high-water without making the Postgres
     /// acknowledgement wait for realtime transport capacity. A full queue may
     /// coalesce this wake into `durable_target`; the dispatcher reloads that
@@ -95,7 +87,11 @@ impl DispatcherHandle {
         }) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!(agent_id = %self.agent_id, "dispatcher is closed");
+                tracing::warn!(
+                    agent_runtime_id = %self.agent_runtime_id,
+                    agent_id = %self.agent_id,
+                    "dispatcher is closed"
+                );
             }
         }
     }
@@ -105,47 +101,61 @@ impl DispatcherHandle {
         &self,
         session_id: SessionId,
         turn_id: TurnId,
-        llm_call_id: LlmCallId,
         telemetry_seq: u64,
         event: AgentTelemetryEvent,
     ) {
         let durable_before = self.durable_target.load(Ordering::Acquire);
-        if self
-            .tx
-            .try_send(DispatcherCommand::Telemetry {
-                durable_before,
-                session_id,
-                turn_id,
-                llm_call_id,
-                telemetry_seq,
-                event,
-            })
-            .is_err()
-        {
-            tracing::warn!(
+        match self.tx.try_send(DispatcherCommand::Telemetry {
+            durable_before,
+            session_id,
+            turn_id,
+            telemetry_seq,
+            event,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => tracing::warn!(
+                agent_runtime_id = %self.agent_runtime_id,
                 agent_id = %self.agent_id,
                 "dispatcher queue is full; dropping a telemetry event"
-            );
+            ),
+            Err(mpsc::error::TrySendError::Closed(_)) => tracing::warn!(
+                agent_runtime_id = %self.agent_runtime_id,
+                agent_id = %self.agent_id,
+                "dispatcher is closed; dropping a telemetry event"
+            ),
         }
     }
 }
 
-/// One live dispatcher registration. The map's strong sender serializes all
-/// receipts for the Agent; the task retires it after a configured idle period
-/// only when no external handle exists.
+/// One live dispatcher registration. The slot's strong sender serializes all
+/// receipts for the AgentRuntime; the task retires it after a configured idle
+/// period only when no external handle exists.
 struct DispatcherEntry {
     generation: Uuid,
+    agent_id: AgentId,
     tx: mpsc::Sender<DispatcherCommand>,
     durable_target: Arc<AtomicU64>,
 }
 
-/// Lazily creates the per-Agent dispatchers of this process. Tasks are owned
+/// Stable per-runtime gate. `ensure` holds this gate while it reads the
+/// committed PG barrier and installs a generation, so two concurrent callers
+/// cannot start overlapping dispatchers.
+struct RuntimeSlot {
+    /// Async initialization/retirement gate. A permit may span the committed
+    /// PG read; the entry mutex below never spans an await.
+    gate: Semaphore,
+    entry: Mutex<Option<DispatcherEntry>>,
+}
+
+type RuntimeSlots = Arc<Mutex<HashMap<AgentRuntimeId, Arc<RuntimeSlot>>>>;
+
+/// Lazily creates the per-AgentRuntime dispatchers of this process. Tasks are owned
 /// by the process `JoinSet`; an idle retirement handshake breaks the map
 /// sender / task receiver lifecycle without allowing two live dispatchers.
 pub(crate) struct DispatcherHub {
-    entries: Arc<Mutex<HashMap<AgentId, DispatcherEntry>>>,
+    slots: RuntimeSlots,
     pg: PostgresBackend,
-    tail: Option<NatsAgentTail>,
+    tail: Option<NatsAgentRuntimeTail>,
     shutdown: CancellationToken,
     tasks: RuntimeTasks,
     idle_timeout: Duration,
@@ -156,13 +166,13 @@ impl DispatcherHub {
     #[must_use]
     pub(crate) fn new(
         pg: PostgresBackend,
-        tail: Option<NatsAgentTail>,
+        tail: Option<NatsAgentRuntimeTail>,
         shutdown: CancellationToken,
         tasks: RuntimeTasks,
         idle_timeout: Duration,
     ) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            slots: Arc::new(Mutex::new(HashMap::new())),
             pg,
             tail,
             shutdown,
@@ -171,51 +181,94 @@ impl DispatcherHub {
         }
     }
 
-    /// Returns the dispatcher of a locally active Agent, creating it at the
-    /// supplied frontier when absent. A writer that does not already hold a
-    /// handle must call this with a Postgres barrier observed *before* its
-    /// commit and retain the handle through [`DispatcherHandle::receipt`];
-    /// lazy creation from a post-commit receipt can skip an earlier concurrent
-    /// writer whose task wake arrives later.
-    pub(crate) fn ensure(&self, agent_id: AgentId, frontier: u64) -> DispatcherHandle {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = entries.get(&agent_id) {
-            return DispatcherHandle {
-                agent_id,
-                tx: entry.tx.clone(),
-                durable_target: Arc::clone(&entry.durable_target),
-            };
+    /// Returns the dispatcher of a locally active AgentRuntime. When absent,
+    /// the per-runtime gate linearizes a committed PG state read with
+    /// generation installation. Callers therefore never supply a frontier.
+    ///
+    /// This method performs only the PG read and local registration; it never
+    /// waits for NATS publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed Postgres error when the runtime state cannot be read.
+    pub(crate) async fn ensure(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+    ) -> Result<DispatcherHandle, PostgresError> {
+        let slot = {
+            let mut slots = self
+                .slots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(slots.entry(agent_runtime_id).or_insert_with(|| {
+                Arc::new(RuntimeSlot {
+                    gate: Semaphore::new(1),
+                    entry: Mutex::new(None),
+                })
+            }))
+        };
+        // INVARIANT: RuntimeSlot::gate is private to this module and is never
+        // closed, so acquisition failure is a programmer error.
+        let _permit = slot
+            .gate
+            .acquire()
+            .await
+            .expect("runtime dispatcher gate is never closed");
+        {
+            let entry = slot
+                .entry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = entry.as_ref() {
+                return Ok(DispatcherHandle {
+                    agent_runtime_id,
+                    agent_id: entry.agent_id,
+                    tx: entry.tx.clone(),
+                    durable_target: Arc::clone(&entry.durable_target),
+                });
+            }
         }
 
-        let (entry, handle) = self.spawn(agent_id, frontier);
-        entries.insert(agent_id, entry);
-        handle
+        let state = self.pg.read_agent_runtime_state(agent_runtime_id).await?;
+        let (registration, handle) = self.spawn(
+            agent_runtime_id,
+            state.agent_id,
+            state.last_event_seq,
+            Arc::clone(&slot),
+        );
+        *slot
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(registration);
+        Ok(handle)
     }
 
     /// Clears the strong registrations after the process-owned task set drains.
     pub(crate) fn clear(&self) {
-        self.entries
+        self.slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
     }
 
-    fn spawn(&self, agent_id: AgentId, frontier: u64) -> (DispatcherEntry, DispatcherHandle) {
+    fn spawn(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        agent_id: AgentId,
+        frontier: u64,
+        slot: Arc<RuntimeSlot>,
+    ) -> (DispatcherEntry, DispatcherHandle) {
         let (tx, rx) = mpsc::channel(DISPATCHER_CHANNEL_CAPACITY);
         let durable_target = Arc::new(AtomicU64::new(frontier));
         let io = PgNatsIo {
-            agent_id,
+            agent_runtime_id,
             pg: self.pg.clone(),
             tail: self.tail.clone(),
         };
         let shutdown = self.shutdown.clone();
-        let entries = Arc::clone(&self.entries);
+        let slots = Arc::clone(&self.slots);
         let generation = Uuid::now_v7();
         let idle_timeout = self.idle_timeout;
-        let task_entries = Arc::clone(&entries);
         let task_durable_target = Arc::clone(&durable_target);
         spawn_runtime_task(&self.tasks, async move {
             run_dispatcher(
@@ -224,34 +277,27 @@ impl DispatcherHub {
                 io,
                 shutdown,
                 DispatcherTaskContext {
+                    agent_runtime_id,
                     agent_id,
-                    entries: task_entries,
+                    slots,
+                    slot,
                     generation,
                     idle_timeout,
                     durable_target: task_durable_target,
                 },
             )
             .await;
-            // Remove only this generation. A new dispatcher may already have
-            // replaced an idle generation while this task was exiting.
-            let mut entries = entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if entries
-                .get(&agent_id)
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                entries.remove(&agent_id);
-            }
         });
         let entry = DispatcherEntry {
             generation,
+            agent_id,
             tx: tx.clone(),
             durable_target: Arc::clone(&durable_target),
         };
         (
             entry,
             DispatcherHandle {
+                agent_runtime_id,
                 agent_id,
                 tx,
                 durable_target,
@@ -263,16 +309,16 @@ impl DispatcherHub {
 /// Production IO: Postgres scans plus the NATS tail, degrading to a no-op
 /// publisher while NATS is down.
 struct PgNatsIo {
-    agent_id: AgentId,
+    agent_runtime_id: AgentRuntimeId,
     pg: PostgresBackend,
-    tail: Option<NatsAgentTail>,
+    tail: Option<NatsAgentRuntimeTail>,
 }
 
 impl PgNatsIo {
     async fn publish(&self, frame: Bytes) -> Result<(), DispatchError> {
         match &self.tail {
             Some(tail) => tail
-                .publish(&self.agent_id, frame)
+                .publish(&self.agent_runtime_id, frame)
                 .await
                 .map(|_| ())
                 .map_err(DispatchError::Publish),
@@ -289,7 +335,7 @@ impl PgNatsIo {
     ) -> Result<Vec<ScannedRow>, DispatchError> {
         let rows = self
             .pg
-            .read_events_range(self.agent_id, from_event_seq, to_event_seq)
+            .read_events_range(self.agent_runtime_id, from_event_seq, to_event_seq)
             .await
             .map_err(DispatchError::Scan)?;
         Ok(rows.into_iter().map(ScannedRow::from).collect())
@@ -298,8 +344,10 @@ impl PgNatsIo {
 
 /// Lifecycle and ordering context owned by one dispatcher task.
 struct DispatcherTaskContext {
+    agent_runtime_id: AgentRuntimeId,
     agent_id: AgentId,
-    entries: Arc<Mutex<HashMap<AgentId, DispatcherEntry>>>,
+    slots: RuntimeSlots,
+    slot: Arc<RuntimeSlot>,
     generation: Uuid,
     idle_timeout: Duration,
     durable_target: Arc<AtomicU64>,
@@ -314,6 +362,7 @@ async fn run_dispatcher(
     context: DispatcherTaskContext,
 ) {
     let mut frontier = DurableFrontier(initial_frontier);
+    let mut idle_publish_failures = 0_usize;
     loop {
         let command = tokio::select! {
             () = shutdown.cancelled() => break,
@@ -321,13 +370,29 @@ async fn run_dispatcher(
             () = tokio::time::sleep(context.idle_timeout) => {
                 flush_coalesced_target(&context, &rx, &io, &mut frontier).await;
                 let target = context.durable_target.load(Ordering::Acquire);
-                if frontier.is_caught_up(target) && retire_idle_dispatcher(
-                    &context.entries,
-                    context.agent_id,
-                    context.generation,
-                    &mut rx,
-                ) {
-                    break;
+                if frontier.is_caught_up(target) {
+                    idle_publish_failures = 0;
+                    if retire_idle_dispatcher(&context, &mut rx).await {
+                        prune_empty_slot(&context).await;
+                        return;
+                    }
+                } else if rx.is_empty()
+                    && generation_has_no_external_handles(&context).await
+                {
+                    if record_idle_publish_failure(&mut idle_publish_failures)
+                        && retire_idle_dispatcher(&context, &mut rx).await
+                    {
+                        tracing::warn!(
+                            agent_runtime_id = %context.agent_runtime_id,
+                            agent_id = %context.agent_id,
+                            unpublished_through_event_seq = target,
+                            "abandoning an idle realtime generation after bounded publish failures; postgres remains authoritative"
+                        );
+                        prune_empty_slot(&context).await;
+                        return;
+                    }
+                } else {
+                    idle_publish_failures = 0;
                 }
                 continue;
             }
@@ -335,30 +400,43 @@ async fn run_dispatcher(
         match command {
             None => break,
             Some(DispatcherCommand::DurableWake { through }) => {
-                flush_durable(context.agent_id, &io, through, &mut frontier).await;
+                flush_durable(
+                    context.agent_runtime_id,
+                    context.agent_id,
+                    &io,
+                    through,
+                    &mut frontier,
+                )
+                .await;
             }
             Some(DispatcherCommand::Telemetry {
                 durable_before,
                 session_id,
                 turn_id,
-                llm_call_id,
                 telemetry_seq,
                 event,
             }) => {
-                let durable_ready =
-                    flush_durable(context.agent_id, &io, durable_before, &mut frontier).await;
+                let durable_ready = flush_durable(
+                    context.agent_runtime_id,
+                    context.agent_id,
+                    &io,
+                    durable_before,
+                    &mut frontier,
+                )
+                .await;
                 if !durable_ready {
                     tracing::warn!(
+                        agent_runtime_id = %context.agent_runtime_id,
                         agent_id = %context.agent_id,
                         "telemetry was suppressed behind an unpublished durable event"
                     );
                 } else {
-                    let frame = AgentStreamFrameV1::telemetry(
+                    let frame = AgentRuntimeStreamFrameV1::telemetry(
+                        context.agent_runtime_id,
                         context.agent_id,
                         session_id,
                         turn_id,
                         durable_before,
-                        llm_call_id,
                         telemetry_seq,
                         &event,
                     );
@@ -367,6 +445,7 @@ async fn run_dispatcher(
                             Ok(bytes) => {
                                 if let Err(error) = io.publish(bytes).await {
                                     tracing::warn!(
+                                        agent_runtime_id = %context.agent_runtime_id,
                                         agent_id = %context.agent_id,
                                         error = %error,
                                         "realtime telemetry publish failed; clients recover via postgres"
@@ -374,11 +453,17 @@ async fn run_dispatcher(
                                 }
                             }
                             Err(error) => {
-                                tracing::error!(agent_id = %context.agent_id, error = %error, "telemetry frame failed to serialize");
+                                tracing::error!(
+                                    agent_runtime_id = %context.agent_runtime_id,
+                                    agent_id = %context.agent_id,
+                                    error = %error,
+                                    "telemetry frame failed to serialize"
+                                );
                             }
                         }
                     } else {
                         tracing::warn!(
+                            agent_runtime_id = %context.agent_runtime_id,
                             agent_id = %context.agent_id,
                             "unsupported telemetry event was omitted from the v1 stream"
                         );
@@ -388,6 +473,15 @@ async fn run_dispatcher(
         }
         flush_coalesced_target(&context, &rx, &io, &mut frontier).await;
     }
+    unregister_generation(&context, &mut rx).await;
+    prune_empty_slot(&context).await;
+}
+
+/// Records one idle retry that still could not reach the durable target and
+/// reports when the bounded abandonment threshold has been reached.
+fn record_idle_publish_failure(failures: &mut usize) -> bool {
+    *failures = failures.saturating_add(1);
+    *failures >= MAX_IDLE_PUBLISH_FAILURES
 }
 
 /// Flushes a receipt that was coalesced into the atomic target while the
@@ -400,7 +494,14 @@ async fn flush_coalesced_target(
     frontier: &mut DurableFrontier,
 ) {
     if let Some(target) = coalesced_target_after_drain(rx, &context.durable_target, *frontier) {
-        flush_durable(context.agent_id, io, target, frontier).await;
+        flush_durable(
+            context.agent_runtime_id,
+            context.agent_id,
+            io,
+            target,
+            frontier,
+        )
+        .await;
     }
 }
 
@@ -435,6 +536,7 @@ fn drained_target(
 /// acknowledgement is safe because durable `event_seq` is the client dedupe
 /// identity.
 async fn flush_durable(
+    agent_runtime_id: AgentRuntimeId,
     agent_id: AgentId,
     io: &PgNatsIo,
     target: u64,
@@ -447,6 +549,7 @@ async fn flush_durable(
         Ok(rows) => rows,
         Err(error) => {
             tracing::error!(
+                agent_runtime_id = %agent_runtime_id,
                 agent_id = %agent_id,
                 error = %error,
                 "durable scan failed; realtime delivery is delayed until the next wake"
@@ -454,10 +557,19 @@ async fn flush_durable(
             return false;
         }
     };
-    publish_scanned_rows(agent_id, rows, target, frontier, |bytes| io.publish(bytes)).await
+    publish_scanned_rows(
+        agent_runtime_id,
+        agent_id,
+        rows,
+        target,
+        frontier,
+        |bytes| io.publish(bytes),
+    )
+    .await
 }
 
 async fn publish_scanned_rows<F, Fut>(
+    agent_runtime_id: AgentRuntimeId,
     agent_id: AgentId,
     rows: Vec<ScannedRow>,
     target: u64,
@@ -471,6 +583,7 @@ where
     for row in rows {
         let Some(expected_event_seq) = frontier.sequence().checked_add(1) else {
             tracing::error!(
+                agent_runtime_id = %agent_runtime_id,
                 agent_id = %agent_id,
                 "durable frontier overflowed; realtime delivery is halted"
             );
@@ -478,6 +591,7 @@ where
         };
         if row.event_seq != expected_event_seq || row.event_seq > target {
             tracing::error!(
+                agent_runtime_id = %agent_runtime_id,
                 agent_id = %agent_id,
                 expected_event_seq,
                 actual_event_seq = row.event_seq,
@@ -491,6 +605,7 @@ where
                 Ok(product) => product,
                 Err(error) => {
                     tracing::error!(
+                        agent_runtime_id = %agent_runtime_id,
                         agent_id = %agent_id,
                         event_seq = row.event_seq,
                         error = %error,
@@ -500,11 +615,18 @@ where
                 }
             };
         if let Some(product) = product {
-            let frame = AgentStreamFrameV1::durable(agent_id, &row, product, row.event_version);
+            let frame = AgentRuntimeStreamFrameV1::durable(
+                agent_runtime_id,
+                agent_id,
+                &row,
+                product,
+                row.event_version,
+            );
             let bytes = match frame.to_bytes() {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::error!(
+                        agent_runtime_id = %agent_runtime_id,
                         agent_id = %agent_id,
                         event_seq = row.event_seq,
                         error = %error,
@@ -515,6 +637,7 @@ where
             };
             if let Err(error) = frontier.complete_product(row.event_seq, publish(bytes).await) {
                 tracing::warn!(
+                    agent_runtime_id = %agent_runtime_id,
                     agent_id = %agent_id,
                     event_seq = row.event_seq,
                     error = %error,
@@ -533,9 +656,9 @@ where
 /// telemetry.
 fn apply_product_projection(
     event_seq: u64,
-    projection: Result<Option<AgentProductEventV1>, PersistedVariantError>,
+    projection: Result<Option<AgentRuntimeProductEventV1>, PersistedVariantError>,
     frontier: &mut DurableFrontier,
-) -> Result<Option<AgentProductEventV1>, DispatchError> {
+) -> Result<Option<AgentRuntimeProductEventV1>, DispatchError> {
     match projection.map_err(DispatchError::Projection)? {
         Some(product) => Ok(Some(product)),
         None => {
@@ -571,95 +694,264 @@ impl DurableFrontier {
     }
 }
 
-/// Atomically removes an idle generation and closes its receiver while the
-/// map lock excludes a concurrent `ensure`. Retirement requires both that no
-/// caller holds a handle and that every already-accepted command was consumed;
-/// otherwise an idle-timer branch could win `select!` over a ready receiver and
-/// strand the queued command.
-fn retire_idle_dispatcher(
-    entries: &Mutex<HashMap<AgentId, DispatcherEntry>>,
-    agent_id: AgentId,
-    generation: Uuid,
-    rx: &mut mpsc::Receiver<DispatcherCommand>,
-) -> bool {
-    let mut entries = entries
+/// Reports whether this generation has no producer handle outside its slot.
+async fn generation_has_no_external_handles(context: &DispatcherTaskContext) -> bool {
+    let Ok(_permit) = context.slot.gate.acquire().await else {
+        return false;
+    };
+    let entry = context
+        .slot
+        .entry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let can_retire = entries.get(&agent_id).is_some_and(|entry| {
-        entry.generation == generation && entry.tx.strong_count() == 1 && rx.is_empty()
+    entry
+        .as_ref()
+        .is_some_and(|entry| entry.generation == context.generation && entry.tx.strong_count() == 1)
+}
+
+/// Atomically unregisters an idle generation. The per-runtime gate excludes a
+/// concurrent `ensure` while the generation and live-handle count are checked.
+/// Already accepted commands must have drained, otherwise an idle timer could
+/// win `select!` over a ready receiver and strand the command.
+async fn retire_idle_dispatcher(
+    context: &DispatcherTaskContext,
+    rx: &mut mpsc::Receiver<DispatcherCommand>,
+) -> bool {
+    let Ok(_permit) = context.slot.gate.acquire().await else {
+        return false;
+    };
+    let mut entry = context
+        .slot
+        .entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let can_retire = entry.as_ref().is_some_and(|entry| {
+        entry.generation == context.generation && entry.tx.strong_count() == 1 && rx.is_empty()
     });
     if can_retire {
-        entries.remove(&agent_id);
+        *entry = None;
         rx.close();
     }
     can_retire
 }
 
+/// Removes this generation during shutdown or receiver closure, without
+/// touching a replacement that may already have been installed.
+async fn unregister_generation(
+    context: &DispatcherTaskContext,
+    rx: &mut mpsc::Receiver<DispatcherCommand>,
+) {
+    let Ok(_permit) = context.slot.gate.acquire().await else {
+        return;
+    };
+    let mut entry = context
+        .slot
+        .entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entry
+        .as_ref()
+        .is_some_and(|entry| entry.generation == context.generation)
+    {
+        *entry = None;
+        rx.close();
+    }
+}
+
+/// Prunes an empty gate only when nobody can be waiting to install through
+/// that exact `Arc`. Holding both the gate and outer map lock makes removal
+/// linear with a concurrent slot lookup.
+async fn prune_empty_slot(context: &DispatcherTaskContext) {
+    let Ok(_permit) = context.slot.gate.acquire().await else {
+        return;
+    };
+    let entry = context
+        .slot
+        .entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entry.is_some() {
+        return;
+    }
+    let mut slots = context
+        .slots
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let owns_map_entry = slots
+        .get(&context.agent_runtime_id)
+        .is_some_and(|slot| Arc::ptr_eq(slot, &context.slot));
+    // One strong reference is held by the map and one by this task context.
+    // Any additional reference belongs to an `ensure` caller that must retain
+    // the same gate until it has checked or installed a generation.
+    if owns_map_entry && Arc::strong_count(&context.slot) == 2 {
+        slots.remove(&context.agent_runtime_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn stub_handle(
+        agent_runtime_id: AgentRuntimeId,
+        agent_id: AgentId,
+    ) -> (DispatcherHandle, mpsc::Receiver<DispatcherCommand>) {
+        let (tx, rx) = mpsc::channel(16);
+        (
+            DispatcherHandle {
+                agent_runtime_id,
+                agent_id,
+                tx,
+                durable_target: Arc::new(AtomicU64::new(0)),
+            },
+            rx,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use stratum_core::{ChatMessage, DurableAgentEvent};
-    use stratum_infra::AgentTailError;
+    use stratum_core::{ChatMessage, DurableAgentEvent, LlmCallId};
+    use stratum_infra::AgentRuntimeTailError;
 
     use super::*;
 
     #[tokio::test]
     async fn idle_retirement_waits_for_external_handles_and_closes_atomically() {
         let (tx, mut rx) = mpsc::channel::<DispatcherCommand>(1);
+        let agent_runtime_id = AgentRuntimeId::new();
         let agent_id = AgentId::new();
         let generation = Uuid::now_v7();
-        let entries = Mutex::new(HashMap::from([(
-            agent_id,
-            DispatcherEntry {
+        let slot = Arc::new(RuntimeSlot {
+            gate: Semaphore::new(1),
+            entry: Mutex::new(Some(DispatcherEntry {
                 generation,
+                agent_id,
                 tx: tx.clone(),
                 durable_target: Arc::new(AtomicU64::new(0)),
-            },
-        )]));
+            })),
+        });
+        let context = test_context(agent_runtime_id, agent_id, generation, Arc::clone(&slot));
 
-        assert!(!retire_idle_dispatcher(
-            &entries, agent_id, generation, &mut rx
-        ));
+        assert!(!retire_idle_dispatcher(&context, &mut rx).await);
         drop(tx);
-        assert!(retire_idle_dispatcher(
-            &entries, agent_id, generation, &mut rx
-        ));
+        assert!(retire_idle_dispatcher(&context, &mut rx).await);
         assert!(rx.recv().await.is_none());
         assert!(
-            entries
+            slot.entry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
+                .is_none()
         );
     }
 
     #[tokio::test]
     async fn idle_retirement_consumes_an_accepted_command_before_retiring() {
         let (tx, mut rx) = mpsc::channel::<DispatcherCommand>(1);
+        let agent_runtime_id = AgentRuntimeId::new();
         let agent_id = AgentId::new();
         let generation = Uuid::now_v7();
-        let entries = Mutex::new(HashMap::from([(
-            agent_id,
-            DispatcherEntry {
+        let slot = Arc::new(RuntimeSlot {
+            gate: Semaphore::new(1),
+            entry: Mutex::new(Some(DispatcherEntry {
                 generation,
+                agent_id,
                 tx: tx.clone(),
                 durable_target: Arc::new(AtomicU64::new(0)),
-            },
-        )]));
+            })),
+        });
+        let context = test_context(agent_runtime_id, agent_id, generation, slot);
         tx.try_send(DispatcherCommand::DurableWake { through: 1 })
             .expect("queue has one slot");
         drop(tx);
 
-        assert!(!retire_idle_dispatcher(
-            &entries, agent_id, generation, &mut rx
-        ));
+        assert!(!retire_idle_dispatcher(&context, &mut rx).await);
         assert!(matches!(
             rx.recv().await,
             Some(DispatcherCommand::DurableWake { through: 1 })
         ));
-        assert!(retire_idle_dispatcher(
-            &entries, agent_id, generation, &mut rx
-        ));
+        assert!(retire_idle_dispatcher(&context, &mut rx).await);
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn retirement_gate_serializes_replacement_and_old_cleanup_cannot_remove_it() {
+        let (tx, mut rx) = mpsc::channel::<DispatcherCommand>(1);
+        let agent_runtime_id = AgentRuntimeId::new();
+        let agent_id = AgentId::new();
+        let old_generation = Uuid::now_v7();
+        let slot = Arc::new(RuntimeSlot {
+            gate: Semaphore::new(1),
+            entry: Mutex::new(Some(DispatcherEntry {
+                generation: old_generation,
+                agent_id,
+                tx: tx.clone(),
+                durable_target: Arc::new(AtomicU64::new(0)),
+            })),
+        });
+        let context = Arc::new(test_context(
+            agent_runtime_id,
+            agent_id,
+            old_generation,
+            Arc::clone(&slot),
+        ));
+        drop(tx);
+
+        let permit = slot.gate.acquire().await.expect("test gate stays open");
+        let task_context = Arc::clone(&context);
+        let retirement = tokio::spawn(async move {
+            let retired = retire_idle_dispatcher(&task_context, &mut rx).await;
+            (retired, rx)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !retirement.is_finished(),
+            "retirement waits for the same per-runtime gate"
+        );
+        drop(permit);
+        let (retired, mut old_rx) = retirement.await.expect("retirement task joins");
+        assert!(retired);
+        assert!(old_rx.recv().await.is_none());
+
+        let new_generation = Uuid::now_v7();
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let replacement_permit = slot.gate.acquire().await.expect("test gate stays open");
+        *slot
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DispatcherEntry {
+            generation: new_generation,
+            agent_id,
+            tx: new_tx,
+            durable_target: Arc::new(AtomicU64::new(0)),
+        });
+        drop(replacement_permit);
+
+        unregister_generation(&context, &mut old_rx).await;
+        let entry = slot
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            entry.as_ref().map(|entry| entry.generation),
+            Some(new_generation),
+            "old generation cleanup cannot remove its replacement"
+        );
+    }
+
+    #[test]
+    fn idle_publish_failure_retries_are_bounded_before_abandonment() {
+        let mut failures = 0;
+
+        for _ in 1..MAX_IDLE_PUBLISH_FAILURES {
+            assert!(!record_idle_publish_failure(&mut failures));
+        }
+        assert!(record_idle_publish_failure(&mut failures));
+        assert_eq!(failures, MAX_IDLE_PUBLISH_FAILURES);
+        assert!(
+            record_idle_publish_failure(&mut failures),
+            "the saturated threshold remains eligible for abandonment"
+        );
     }
 
     #[test]
@@ -694,6 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_flush_failure_blocks_telemetry_until_the_durable_row_retries() {
+        let agent_runtime_id = AgentRuntimeId::new();
         let agent_id = AgentId::new();
         let row = ScannedRow {
             event_seq: 5,
@@ -707,31 +1000,43 @@ mod tests {
         };
         let mut frontier = DurableFrontier(4);
 
-        let ready =
-            publish_scanned_rows(agent_id, vec![row.clone()], 5, &mut frontier, |_| async {
-                Err(DispatchError::Publish(AgentTailError::Nats {
+        let ready = publish_scanned_rows(
+            agent_runtime_id,
+            agent_id,
+            vec![row.clone()],
+            5,
+            &mut frontier,
+            |_| async {
+                Err(DispatchError::Publish(AgentRuntimeTailError::Nats {
                     source: Box::new(std::io::Error::other("nats unavailable")),
                 }))
-            })
-            .await;
+            },
+        )
+        .await;
 
         assert!(!ready, "run_dispatcher must suppress the next telemetry");
         assert_eq!(frontier.sequence(), 4);
 
-        let ready =
-            publish_scanned_rows(agent_id, vec![row], 5, &mut frontier, |_| async { Ok(()) }).await;
+        let ready = publish_scanned_rows(
+            agent_runtime_id,
+            agent_id,
+            vec![row],
+            5,
+            &mut frontier,
+            |_| async { Ok(()) },
+        )
+        .await;
         assert!(ready);
         assert_eq!(frontier.sequence(), 5);
     }
 
     #[tokio::test]
     async fn telemetry_keeps_the_durable_barrier_from_its_enqueue_position() {
-        let (handle, mut rx) = DispatcherHandle::stub(AgentId::new());
+        let (handle, mut rx) = test_support::stub_handle(AgentRuntimeId::new(), AgentId::new());
         handle.durable_target.store(4, Ordering::Release);
         handle.telemetry(
             SessionId::new(),
             TurnId::new(),
-            LlmCallId::from("call-1"),
             0,
             AgentTelemetryEvent::LlmStarted {
                 llm_call_id: LlmCallId::from("call-1"),
@@ -754,10 +1059,12 @@ mod tests {
 
     #[tokio::test]
     async fn durable_scan_gap_does_not_advance_the_frontier() {
+        let agent_runtime_id = AgentRuntimeId::new();
         let agent_id = AgentId::new();
         let mut frontier = DurableFrontier(4);
 
         let ready = publish_scanned_rows(
+            agent_runtime_id,
             agent_id,
             vec![internal_row(6)],
             6,
@@ -772,10 +1079,12 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_order_durable_scan_stops_before_the_first_hole() {
+        let agent_runtime_id = AgentRuntimeId::new();
         let agent_id = AgentId::new();
         let mut frontier = DurableFrontier(4);
 
         let ready = publish_scanned_rows(
+            agent_runtime_id,
             agent_id,
             vec![internal_row(5), internal_row(7)],
             7,
@@ -794,6 +1103,7 @@ mod tests {
         tx.try_send(DispatcherCommand::DurableWake { through: 3 })
             .expect("queue has one slot");
         let handle = DispatcherHandle {
+            agent_runtime_id: AgentRuntimeId::new(),
             agent_id: AgentId::new(),
             tx,
             durable_target: Arc::new(AtomicU64::new(3)),
@@ -828,7 +1138,6 @@ mod tests {
             durable_before: 4,
             session_id: SessionId::new(),
             turn_id: TurnId::new(),
-            llm_call_id: LlmCallId::from("call-1"),
             telemetry_seq: 0,
             event: AgentTelemetryEvent::LlmStarted {
                 llm_call_id: LlmCallId::from("call-1"),
@@ -906,6 +1215,26 @@ mod tests {
                 call_id: stratum_core::CallId::from("call-1"),
                 tool_name: stratum_core::ToolName::from("echo"),
             },
+        }
+    }
+
+    fn test_context(
+        agent_runtime_id: AgentRuntimeId,
+        agent_id: AgentId,
+        generation: Uuid,
+        slot: Arc<RuntimeSlot>,
+    ) -> DispatcherTaskContext {
+        DispatcherTaskContext {
+            agent_runtime_id,
+            agent_id,
+            slots: Arc::new(Mutex::new(HashMap::from([(
+                agent_runtime_id,
+                Arc::clone(&slot),
+            )]))),
+            slot,
+            generation,
+            idle_timeout: Duration::from_secs(1),
+            durable_target: Arc::new(AtomicU64::new(0)),
         }
     }
 }

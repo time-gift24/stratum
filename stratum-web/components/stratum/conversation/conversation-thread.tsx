@@ -78,7 +78,7 @@ function renderItem(
  * 结构：可滚动 viewport（消息列居中，max-w 44rem）+ composer。数据驱动：
  * items 由调用方持有；滚动到底部仅在用户本就近底时自动跟随，上翻后不打扰。
  *
- * items 混合三类条目（升序渲染，id = agentId:eventSeq 十进制字符串）：
+ * items 混合三类条目（升序渲染，id = agentRuntimeId:eventSeq 十进制字符串）：
  * 普通消息、TranscriptCompacted 可折叠 marker、安全 terminal marker。
  * 向上分页：滚动接近顶部且 hasOlder 时调 onLoadOlder；旧页 prepend 后
  * 用预先记录的 scrollHeight 差值恢复滚动位置（不跳动）。
@@ -95,7 +95,7 @@ function renderItem(
  * 播放规则：只在同一会话内的空 ⇄ 非空翻转时播——
  * - 空 → 稳态（当前对话发出第一条消息）：composer 从中心滑到底部
  *   （y: 差值 → 0，expo.out 0.55s），同一 timeline 欢迎语 fixed 在旧位置
- *   淡出上移、消息区淡入。sendVersion 信号使首发后的 null → 新 agentId
+ *   淡出上移、消息区淡入。sendVersion 信号使首发后的 null → 新 runtime id
  *   被视为同一对话的确立而非切换。
  * - 稳态 → 空（点新对话，目的地 conversationId 为 null）：同参数镜像滑回。
  * - 会话切换（conversationId 变化，含恢复填充引起的翻转）：一律不播位置
@@ -123,9 +123,9 @@ export function ConversationThread({
   composer?: React.ReactNode
   /** 空状态内容（items 为空时居中展示） */
   welcome?: React.ReactNode
-  /** 当前会话 id（state.agentId）；变化 = 切换会话，一律不播位置动画 */
+  /** 当前会话 id（AgentRuntimeId）；变化 = 切换会话，一律不播位置动画 */
   conversationId?: string | null
-  /** 用户发送递增信号；首发后的 null → 新 agentId 视为同一对话的确立 */
+  /** 用户发送递增信号；首发后的 null → 新 runtime id 视为同一对话的确立 */
   sendVersion?: number
   /** 会话恢复中（phase === "recovering"）：切换过场的进场等恢复结束再播 */
   recovering?: boolean
@@ -148,10 +148,12 @@ export function ConversationThread({
   const messagesRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLDivElement>(null)
   const prevIsEmptyRef = useRef<boolean | null>(null)
-  const prevConversationIdRef = useRef<string | null | undefined>(conversationId)
+  const prevConversationIdRef = useRef<string | null | undefined>(
+    conversationId
+  )
   const prevSendVersionRef = useRef(sendVersion)
   // 首发信号：用户在当前（新）对话发出第一条消息；其后一次 null → 新
-  // agentId 是同一对话的确立而非切换，首次 isEmpty 翻转播正向过场
+  // runtime id 是同一对话的确立而非切换，首次 isEmpty 翻转播正向过场
   const pendingSendRef = useRef(false)
   // 会话切换后的恢复填充不算"同一会话内空 → 有消息"，抑制下一次翻转动画
   const suppressNextFlipRef = useRef(false)
@@ -159,7 +161,10 @@ export function ConversationThread({
   const prevComposerRectRef = useRef<DOMRect | null>(null)
   const prevWelcomeRectRef = useRef<DOMRect | null>(null)
   // 向上分页的滚动锚点：触发加载时记录，prepend 完成后按高度差恢复位置
-  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const prependAnchorRef = useRef<{
+    scrollHeight: number
+    scrollTop: number
+  } | null>(null)
   const [nearBottom, setNearBottom] = useState(true)
 
   // 会话切换过场：track.departing = 旧内容的最后已知快照（退场期间不再重渲染
@@ -180,7 +185,7 @@ export function ConversationThread({
   const departingStartedRef = useRef<DepartingContent | null>(null)
 
   // derive-state-during-render：会话切换时快照旧内容为 departing（首发创建的
-  // null → 新 agentId 不算切换，与 FLIP 的 pendingSend 规则一致）
+  // null → 新 runtime id 不算切换，与 FLIP 的 pendingSend 规则一致）
   if (track.conversationId !== conversationId) {
     const createFlow =
       track.conversationId === null && sendVersion !== track.sendVersion
@@ -331,7 +336,7 @@ export function ConversationThread({
         pendingSendRef.current &&
         previousConversationId === null
       ) {
-        // 首发创建：send 后的 null → 新 agentId 是同一对话的确立（消费一次）
+        // 首发创建：send 后的 null → 新 runtime id 是同一对话的确立（消费一次）
         pendingSendRef.current = false
       } else if (conversationChanged) {
         // 会话切换：composer 一律不做位置动画；内容淡入淡出由 departing/enter
@@ -449,7 +454,16 @@ export function ConversationThread({
         )
       }
     },
-    { scope: rootRef, dependencies: [departing, recovering, isEmpty, clearDeparting, finishDeparting] }
+    {
+      scope: rootRef,
+      dependencies: [
+        departing,
+        recovering,
+        isEmpty,
+        clearDeparting,
+        finishDeparting,
+      ],
+    }
   )
 
   const handleScroll = () => {
@@ -496,9 +510,7 @@ export function ConversationThread({
           <div
             ref={welcomeRef}
             className={cn(
-              isEmpty
-                ? "absolute inset-x-0 bottom-[calc(50%+2rem)]"
-                : "hidden"
+              isEmpty ? "absolute inset-x-0 bottom-[calc(50%+2rem)]" : "hidden"
             )}
           >
             {welcome}

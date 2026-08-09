@@ -11,6 +11,24 @@ pub enum ModelIdParseError {
     InvalidFormat,
 }
 
+/// Error returned when an Agent template version tag is invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AgentVersionTagParseError {
+    /// The tag is empty.
+    #[error("agent version tag must not be empty")]
+    Empty,
+    /// The UTF-8 representation exceeds the durable protocol limit.
+    #[error("agent version tag must be at most 128 bytes")]
+    TooLong,
+    /// The tag contains a Unicode control character.
+    #[error("agent version tag must not contain control characters")]
+    ControlCharacter,
+    /// The tag starts or ends with whitespace.
+    #[error("agent version tag must not have leading or trailing whitespace")]
+    SurroundingWhitespace,
+}
+
 /// Error returned when a SHA-256 fingerprint is not canonical lowercase hexadecimal.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FingerprintParseError {

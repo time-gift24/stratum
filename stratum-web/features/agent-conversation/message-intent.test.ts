@@ -9,7 +9,7 @@ function intent(
   overrides: Partial<PendingMessageIntent> = {}
 ): PendingMessageIntent {
   return {
-    agentId: "agent-1",
+    agentRuntimeId: "runtime-1",
     text: "original text",
     expectedCurrentTurnId: "turn-before",
     modelConfig: {
@@ -56,10 +56,10 @@ describe("message intent CAS retention", () => {
     expect(resolveMessageIntent(pending, next)).toBe(next)
   })
 
-  it("never carries a pending CAS across Agents", () => {
+  it("never carries a pending CAS across AgentRuntimes", () => {
     const pending = intent()
     const next = intent({
-      agentId: "agent-2",
+      agentRuntimeId: "runtime-2",
       expectedCurrentTurnId: "agent-2-current-turn",
     })
 

@@ -235,11 +235,6 @@ impl AgentLoop {
             self.hook_runtime.extension_set_version(),
         ) && recorded != current
         {
-            tracing::warn!(
-                recorded = %recorded,
-                current = %current,
-                "refusing resume: hook extension set version mismatch"
-            );
             return Err(ResumeError::ExtensionSetVersionMismatch { recorded, current });
         }
         Ok(RunStart {
@@ -364,10 +359,6 @@ impl AgentLoop {
         let invocation_id = match journal.lookup(&address) {
             Some(entry) => {
                 if entry.input_digest != input_digest {
-                    tracing::warn!(
-                        invocation_id = %entry.invocation_id,
-                        "refusing resume: journaled hook input digest does not match the rebuilt input"
-                    );
                     return Err(ResumeError::HookDigestMismatch { point }.into());
                 }
                 match &entry.state {

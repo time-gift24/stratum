@@ -167,8 +167,8 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 执行后端或 backend selector：Postgres 是唯一执行真相，最终为四表模型（见
 `docs/runtime.md`）。
 
-- [ ] ~~新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。~~（已由 `complete-postgres-agent-runtime` 取代：concrete `PostgresBackend` + 内嵌 sqlx baseline，四表 `agents`/`agent_state`/`durable_events`/`transcript_compactions`，无 `agent_messages` 投影表。）
-- [ ] ~~`append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。~~（已取代：无消息投影；集中 append 事务以 `agent_state` 行锁分配无空洞 agent-wide `event_seq`。）
+- [ ] ~~新建 `stratum-postgres`：`PostgresDurableEventSink` 与 `PostgresAgentStore`，`sqlx migrate` 管理 schema（`durable_events` / `agent_state` / `agent_messages`）。~~（已由 `complete-postgres-agent-runtime` 取代：concrete `PostgresBackend` + 内嵌 sqlx baseline，四表 `agents`/`agent_states`/`durable_events`/`transcript_compactions`，无 `agent_messages` 投影表；`agents` 是可复用template版本，`agent_states` 是长期运行聚合。）
+- [ ] ~~`append_message` 单事务双写：journal 事件 + 序号分配 + 消息投影行一次提交。~~（已取代：无消息投影；集中 append 事务以 exact `agent_states` 行锁分配无空洞 AgentRuntime-wide `event_seq`。）
 - [ ] ~~`stratum-store` 纯合同化；filesystem 后端迁 `stratum-infra`（独立 commit）。~~（已取代：`stratum-store` crate 与 filesystem 执行后端均已整体删除。）
 - [ ] ~~组合根显式 `backend = "postgres" | "filesystem"`，无静默回退；生产默认 postgres。~~（已取代：不存在 backend selector，Postgres 是唯一执行存储。）
 - [ ] ~~双后端行为对齐：同一事件序列两种后端 replay，resume 结果逐事件一致。~~（已取代：双后端与 dual-backend replay 测试已删除。）
@@ -343,7 +343,7 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 
 - [ ] 在接入层加入认证与租户/项目身份。
 - [ ] 定义作者、发布者、执行者、审批者、查看者和管理员权限。
-- [ ] 定义 Secret 引用与执行时解析。
+- [ ] 以独立 PATCH 定义 credential-aware Tool 的 opaque Secret 引用、审批消费后的安全 provider 注入与 fail-closed result transform；完成前不得把此类 Tool 注册到 runtime。
 - [ ] 定义制品摘要、签名和来源记录。
 - [ ] 定义 Extension 能力声明与执行策略。
 - [ ] 审计网络、文件、Tool、模型和 Secret 访问。
@@ -357,7 +357,6 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 - [ ] 记录队列深度、就绪等待、节点耗时、恢复和 Retry 指标。
 - [ ] 记录模型用量与 Tool 结果分类，不记录敏感载荷。
 - [ ] 为发布、注册、审批和高权限执行提供审计记录。
-- [ ] 在应用组合根接入 OpenTelemetry Exporter。
 
 ### P4：可靠性与运维
 
@@ -397,7 +396,7 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 以下能力已确认需要，但**明确延期**，不属于 Postgres 执行真相切换的范围，届时以独立 change 提出：
 
 - **调度与多实例（scheduler PATCH）**：durable scheduling、ownership lease/fencing、多实例 ownership/hosting、rolling deployment、自动 takeover/resume、durable cancel、Agent/Workflow Session 协调。未来的 scheduler change 必须用 ownership/placement 替换 `resume_required` 的 process-local 判定来源，同时保留该 API 字段。
-- **Agent template 管理（独立 change）**：正式 template 版本、catalog 管理与 Agent 列表（`GET /v1/agents`）。当前只保留只读 `templates_root` 热读 catalog，不提前实现这些抽象。
+- **Agent template 管理（独立 change）**：catalog CRUD、显式版本浏览、发布/提升/回滚、`GET /v1/agents` / `GET /v1/agents/{agent_id}` 与既有 AgentRuntime upgrade。当前 change 已负责在 create 时按作者 `(name, version string tag)` 自动物化/复用 immutable `agents` row；未来管理模块不得重新定义该版本身份。
 
 ### 其他延后事项
 

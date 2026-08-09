@@ -2,24 +2,25 @@ import { describe, expect, it, vi } from "vitest"
 
 import { ApiError } from "@/lib/stratum/api"
 import {
-  parseAgentStreamFrame,
+  parseAgentRuntimeStreamFrame,
   readSseStream,
+  subscribeToAgentRuntimeEvents,
 } from "@/lib/stratum/event-stream"
 
-/**
- * 协议形状 fixture 对齐 crates/stratum-api/src/frames.rs：
- * - frame 以 `kind` tag（control / durable / telemetry），内层 event 以
- *   `type` + 可选 `data` tag（serde adjacently tagged）。
- * - unit variants（loop_started / llm_started）序列化时不携带 `data` key。
- * - durable frame 的 event_seq 是十进制字符串，另携带 event_version。
- */
-
-const IDENTITY = {
+const TURN_IDENTITY = {
   protocol_version: 1,
-  agent_id: "agent-1",
+  agent_runtime_id: "runtime-1",
+  agent_id: "agent-definition-1",
   session_id: "session-1",
   turn_id: "turn-1",
-  created_at: "2026-01-01T00:00:00.000Z",
+  created_at: "2026-08-09T00:00:00Z",
+}
+
+const CONNECTION_IDENTITY = {
+  protocol_version: 1,
+  agent_runtime_id: "runtime-1",
+  agent_id: "agent-definition-1",
+  created_at: "2026-08-09T00:00:00Z",
 }
 
 const USAGE = { input_tokens: 1, output_tokens: 2, total_tokens: 3 }
@@ -28,9 +29,55 @@ const SUMMARY = {
   content: { type: "text", data: "summary" },
 }
 
-function durableFrame(event: Record<string, unknown>): string {
+const PRODUCT_EVENTS = [
+  { type: "loop_started" },
+  {
+    type: "message_appended",
+    data: {
+      message: {
+        role: "assistant",
+        content: { type: "text", data: "hello" },
+        tool_calls: [
+          { call_id: "call-1", name: "lookup", arguments: { q: "x" } },
+        ],
+        reasoning_content: "reasoning",
+      },
+    },
+  },
+  {
+    type: "tool_approval_requested",
+    data: {
+      approval_id: "approval-1",
+      call_id: "call-1",
+      tool_name: "write_file",
+      arguments: { path: "safe.txt" },
+      tool_kind: "write",
+      danger_level: "high",
+    },
+  },
+  {
+    type: "tool_approval_resolved",
+    data: { approval_id: "approval-1", decision: "approve" },
+  },
+  {
+    type: "transcript_compacted",
+    data: { summary: SUMMARY, compacted_iteration: 3 },
+  },
+  { type: "iteration_completed", data: { iteration: 4, usage: USAGE } },
+  {
+    type: "loop_finished",
+    data: { finish_reason: "stop", usage: USAGE },
+  },
+  {
+    type: "loop_failed",
+    data: { error_text: "safe failure", usage: USAGE },
+  },
+  { type: "loop_cancelled", data: { usage: USAGE } },
+] as const
+
+function durableFrame(event: unknown): string {
   return JSON.stringify({
-    ...IDENTITY,
+    ...TURN_IDENTITY,
     kind: "durable",
     event_seq: "42",
     event_version: 1,
@@ -38,80 +85,51 @@ function durableFrame(event: Record<string, unknown>): string {
   })
 }
 
-function telemetryFrame(
-  event: Record<string, unknown>,
-  telemetrySeq: number | string = 0
-): string {
+function telemetryFrame(event: unknown, telemetrySeq = "0"): string {
   return JSON.stringify({
-    ...IDENTITY,
+    ...TURN_IDENTITY,
     kind: "telemetry",
-    llm_call_id: "call-1",
+    llm_call_id: "llm-call-1",
     telemetry_seq: telemetrySeq,
     durable_before_event_seq: "41",
     event,
   })
 }
 
-describe("parseAgentStreamFrame durable frames", () => {
-  it("accepts the loop_started unit variant without any data key", () => {
-    const frame = parseAgentStreamFrame(durableFrame({ type: "loop_started" }))
-
-    expect(frame).toMatchObject({
-      kind: "durable",
-      event_seq: "42",
-      event_version: 1,
-      event: { type: "loop_started" },
-    })
+function sseStream(lines: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(lines))
+      controller.close()
+    },
   })
+}
 
-  it("rejects a loop_started frame that wrongly carries data", () => {
-    expect(
-      parseAgentStreamFrame(durableFrame({ type: "loop_started", data: {} }))
-    ).toBeUndefined()
-  })
-
-  it("accepts data variants with an object data payload", () => {
-    const message = {
-      role: "assistant",
-      content: { type: "text", data: "hello" },
+describe("parseAgentRuntimeStreamFrame", () => {
+  it("accepts every complete public durable product variant", () => {
+    for (const event of PRODUCT_EVENTS) {
+      expect(parseAgentRuntimeStreamFrame(durableFrame(event))).toMatchObject({
+        protocol_version: 1,
+        kind: "durable",
+        agent_runtime_id: "runtime-1",
+        agent_id: "agent-definition-1",
+        event_seq: "42",
+        event_version: 1,
+        event,
+      })
     }
-    const frame = parseAgentStreamFrame(
-      durableFrame({ type: "message_appended", data: { message } })
-    )
-
-    expect(frame).toMatchObject({
-      kind: "durable",
-      event: { type: "message_appended", data: { message } },
-    })
   })
 
-  it("accepts loop_finished with finish_reason and usage", () => {
-    const data = {
-      finish_reason: "stop",
-      usage: USAGE,
-    }
-    const frame = parseAgentStreamFrame(
-      durableFrame({ type: "loop_finished", data })
-    )
-
-    expect(frame).toMatchObject({
-      kind: "durable",
-      event: { type: "loop_finished", data },
-    })
-  })
-
-  it("validates every typed durable data variant", () => {
-    const events = [
+  it("rejects unknown, extra, and malformed product variants", () => {
+    const invalid = [
+      { type: "tool_execution_started", data: {} },
+      { type: "loop_started", data: {} },
       {
         type: "message_appended",
         data: {
           message: {
             role: "assistant",
-            content: { type: "text", data: "hello" },
-            tool_calls: [
-              { call_id: "call-1", name: "lookup", arguments: { q: "x" } },
-            ],
-            reasoning_content: "reasoning",
+            content: { type: "text", data: 7 },
           },
         },
       },
@@ -120,177 +138,42 @@ describe("parseAgentStreamFrame durable frames", () => {
         data: {
           approval_id: "approval-1",
           call_id: "call-1",
-          tool_name: "write_file",
-          arguments: { path: "safe.txt" },
-          tool_kind: "write",
-          danger_level: "high",
-        },
-      },
-      {
-        type: "tool_approval_resolved",
-        data: { approval_id: "approval-1", decision: "approve" },
-      },
-      {
-        type: "transcript_compacted",
-        data: { summary: SUMMARY, compacted_iteration: 3 },
-      },
-      { type: "iteration_completed", data: { iteration: 4, usage: USAGE } },
-      {
-        type: "loop_finished",
-        data: { finish_reason: "stop", usage: USAGE },
-      },
-      {
-        type: "loop_failed",
-        data: { error_text: "safe failure", usage: USAGE },
-      },
-      { type: "loop_cancelled", data: { usage: USAGE } },
-    ]
-
-    for (const event of events)
-      expect(parseAgentStreamFrame(durableFrame(event))).toBeDefined()
-  })
-
-  it("rejects malformed fields in every durable data variant", () => {
-    const malformedEvents = [
-      {
-        type: "message_appended",
-        data: {
-          message: {
-            role: "assistant",
-            content: { type: "text", data: 42 },
-          },
-        },
-      },
-      {
-        type: "tool_approval_requested",
-        data: {
-          approval_id: "approval-1",
-          tool_name: "write_file",
+          tool_name: "writer",
           arguments: {},
-          tool_kind: "write",
+          tool_kind: "mutating",
           danger_level: "high",
         },
-      },
-      {
-        type: "tool_approval_resolved",
-        data: { approval_id: "approval-1", decision: "later" },
       },
       {
         type: "transcript_compacted",
         data: { summary: SUMMARY, compacted_iteration: -1 },
       },
       {
-        type: "iteration_completed",
+        type: "transcript_compacted",
         data: {
-          iteration: 4,
-          usage: { input_tokens: 1, output_tokens: 2 },
+          summary: { ...SUMMARY, role: "user" },
+          compacted_iteration: 1,
         },
       },
       {
         type: "loop_finished",
-        data: { finish_reason: 1, usage: USAGE },
-      },
-      { type: "loop_failed", data: { usage: USAGE } },
-      {
-        type: "loop_cancelled",
-        data: {
-          usage: { input_tokens: 1, output_tokens: -1, total_tokens: 0 },
-        },
+        data: { finish_reason: "stop", usage: USAGE, raw: "provider" },
       },
     ]
 
-    for (const event of malformedEvents)
-      expect(parseAgentStreamFrame(durableFrame(event))).toBeUndefined()
+    for (const event of invalid)
+      expect(parseAgentRuntimeStreamFrame(durableFrame(event))).toBeUndefined()
   })
 
-  it("rejects data variants without a data object", () => {
-    expect(
-      parseAgentStreamFrame(durableFrame({ type: "message_appended" }))
-    ).toBeUndefined()
-    expect(
-      parseAgentStreamFrame(
-        durableFrame({ type: "loop_finished", data: "stop" })
-      )
-    ).toBeUndefined()
-  })
-
-  it("rejects unknown durable event variants", () => {
-    expect(
-      parseAgentStreamFrame(
-        durableFrame({ type: "tool_execution_started", data: {} })
-      )
-    ).toBeUndefined()
-  })
-
-  it("rejects non-decimal-string event_seq", () => {
-    const raw = JSON.parse(durableFrame({ type: "loop_started" }))
-    raw.event_seq = 42
-    expect(parseAgentStreamFrame(JSON.stringify(raw))).toBeUndefined()
-  })
-
-  it("rejects a non-positive or non-integer event_version", () => {
-    for (const eventVersion of [0, -1, 1.5]) {
-      const raw = JSON.parse(durableFrame({ type: "loop_started" }))
-      raw.event_version = eventVersion
-      expect(parseAgentStreamFrame(JSON.stringify(raw))).toBeUndefined()
-    }
-  })
-
-  it("rejects a durable frame without complete Turn identity", () => {
-    const missingSession = JSON.parse(durableFrame({ type: "loop_started" }))
-    delete missingSession.session_id
-    const missingTurn = JSON.parse(durableFrame({ type: "loop_started" }))
-    missingTurn.turn_id = null
-
-    expect(
-      parseAgentStreamFrame(JSON.stringify(missingSession))
-    ).toBeUndefined()
-    expect(parseAgentStreamFrame(JSON.stringify(missingTurn))).toBeUndefined()
-  })
-})
-
-describe("parseAgentStreamFrame telemetry frames", () => {
-  it("accepts the llm_started unit variant without any data key", () => {
-    const frame = parseAgentStreamFrame(telemetryFrame({ type: "llm_started" }))
-
-    expect(frame).toMatchObject({
-      kind: "telemetry",
-      llm_call_id: "call-1",
-      telemetry_seq: 0,
-      durable_before_event_seq: "41",
-      event: { type: "llm_started" },
-    })
-  })
-
-  it("rejects an llm_started frame that wrongly carries data", () => {
-    expect(
-      parseAgentStreamFrame(telemetryFrame({ type: "llm_started", data: {} }))
-    ).toBeUndefined()
-  })
-
-  it("accepts text_delta with data and rejects it without data", () => {
-    expect(
-      parseAgentStreamFrame(
-        telemetryFrame({ type: "text_delta", data: { delta: "he" } }, 1)
-      )
-    ).toMatchObject({
-      kind: "telemetry",
-      telemetry_seq: 1,
-      event: { type: "text_delta", data: { delta: "he" } },
-    })
-    expect(
-      parseAgentStreamFrame(telemetryFrame({ type: "text_delta" }, 1))
-    ).toBeUndefined()
-  })
-
-  it("validates every typed telemetry data variant", () => {
+  it("accepts every telemetry variant with decimal-string call sequence", () => {
     const events = [
+      { type: "llm_started" },
       { type: "text_delta", data: { delta: "text" } },
       { type: "reasoning_delta", data: { delta: "reasoning" } },
       {
         type: "tool_call_delta",
         data: {
-          call_id: "call-1",
+          call_id: "tool-call-1",
           name: "lookup",
           arguments_delta: "{",
         },
@@ -301,132 +184,184 @@ describe("parseAgentStreamFrame telemetry frames", () => {
       },
     ]
 
-    for (const event of events)
-      expect(parseAgentStreamFrame(telemetryFrame(event))).toBeDefined()
+    events.forEach((event, index) => {
+      const sequence = String(index)
+      expect(
+        parseAgentRuntimeStreamFrame(telemetryFrame(event, sequence))
+      ).toMatchObject({
+        kind: "telemetry",
+        telemetry_seq: sequence,
+        durable_before_event_seq: "41",
+        event,
+      })
+    })
   })
 
-  it("rejects malformed fields in every telemetry data variant", () => {
-    const malformedEvents = [
-      { type: "text_delta", data: { delta: 1 } },
-      { type: "reasoning_delta", data: {} },
-      {
-        type: "tool_call_delta",
-        data: { call_id: "call-1", name: 3, arguments_delta: "{" },
-      },
-      {
-        type: "llm_finished",
-        data: {
-          finish_reason: "stop",
-          usage: { input_tokens: 1, output_tokens: 2 },
-        },
-      },
-    ]
+  it("rejects numeric/malformed sequences and unsafe versions", () => {
+    const numericEventSeq = JSON.parse(durableFrame({ type: "loop_started" }))
+    numericEventSeq.event_seq = 42
+    const leadingZero = JSON.parse(durableFrame({ type: "loop_started" }))
+    leadingZero.event_seq = "042"
+    const unsafeVersion = JSON.parse(durableFrame({ type: "loop_started" }))
+    unsafeVersion.event_version = Number.MAX_SAFE_INTEGER + 1
+    const numericTelemetry = JSON.parse(telemetryFrame({ type: "llm_started" }))
+    numericTelemetry.telemetry_seq = 0
 
-    for (const event of malformedEvents)
-      expect(parseAgentStreamFrame(telemetryFrame(event))).toBeUndefined()
+    for (const value of [
+      numericEventSeq,
+      leadingZero,
+      unsafeVersion,
+      numericTelemetry,
+    ])
+      expect(
+        parseAgentRuntimeStreamFrame(JSON.stringify(value))
+      ).toBeUndefined()
   })
 
-  it("tolerates telemetry_seq as a decimal string", () => {
-    const frame = parseAgentStreamFrame(
-      telemetryFrame({ type: "llm_started" }, "7")
-    )
-    expect(frame).toMatchObject({ kind: "telemetry", telemetry_seq: 7 })
-  })
-
-  it("requires a decimal durable-before watermark", () => {
-    const missing = JSON.parse(telemetryFrame({ type: "llm_started" }))
-    delete missing.durable_before_event_seq
-    const malformed = JSON.parse(telemetryFrame({ type: "llm_started" }))
-    malformed.durable_before_event_seq = -1
-
-    expect(parseAgentStreamFrame(JSON.stringify(missing))).toBeUndefined()
-    expect(parseAgentStreamFrame(JSON.stringify(malformed))).toBeUndefined()
-  })
-
-  it("rejects unknown telemetry event variants", () => {
-    expect(
-      parseAgentStreamFrame(telemetryFrame({ type: "llm_exploded", data: {} }))
-    ).toBeUndefined()
-  })
-
-  it("rejects telemetry without complete Turn identity", () => {
-    const missingTurn = JSON.parse(telemetryFrame({ type: "llm_started" }))
+  it("requires both runtime and pinned definition identities", () => {
+    const missingRuntime = JSON.parse(durableFrame({ type: "loop_started" }))
+    delete missingRuntime.agent_runtime_id
+    const missingDefinition = JSON.parse(durableFrame({ type: "loop_started" }))
+    delete missingDefinition.agent_id
+    const missingTurn = JSON.parse(durableFrame({ type: "loop_started" }))
     delete missingTurn.turn_id
 
-    expect(parseAgentStreamFrame(JSON.stringify(missingTurn))).toBeUndefined()
-  })
-})
-
-describe("parseAgentStreamFrame envelope validation", () => {
-  it("rejects unknown protocol_version", () => {
-    const raw = JSON.parse(durableFrame({ type: "loop_started" }))
-    raw.protocol_version = 2
-    expect(parseAgentStreamFrame(JSON.stringify(raw))).toBeUndefined()
+    for (const value of [missingRuntime, missingDefinition, missingTurn])
+      expect(
+        parseAgentRuntimeStreamFrame(JSON.stringify(value))
+      ).toBeUndefined()
   })
 
-  it("rejects unknown frame kinds", () => {
-    const raw = JSON.parse(durableFrame({ type: "loop_started" }))
-    raw.kind = "snapshot"
-    expect(parseAgentStreamFrame(JSON.stringify(raw))).toBeUndefined()
+  it("rejects unknown protocol versions, frame kinds, and envelope fields", () => {
+    const version = JSON.parse(durableFrame({ type: "loop_started" }))
+    version.protocol_version = 2
+    const kind = JSON.parse(durableFrame({ type: "loop_started" }))
+    kind.kind = "snapshot"
+    const extra = JSON.parse(durableFrame({ type: "loop_started" }))
+    extra.metadata = { secret: true }
+
+    for (const value of [version, kind, extra])
+      expect(
+        parseAgentRuntimeStreamFrame(JSON.stringify(value))
+      ).toBeUndefined()
   })
 
-  it("rejects non-JSON payloads", () => {
-    expect(parseAgentStreamFrame("not json")).toBeUndefined()
-  })
-
-  it("accepts stream_ready and stream_reset control frames", () => {
+  it("accepts ready with both-or-neither Turn identity and reset with neither", () => {
     expect(
-      parseAgentStreamFrame(
+      parseAgentRuntimeStreamFrame(
         JSON.stringify({
-          ...IDENTITY,
+          ...CONNECTION_IDENTITY,
           kind: "control",
           event: { type: "stream_ready" },
         })
       )
-    ).toMatchObject({ kind: "control", event: { type: "stream_ready" } })
+    ).toMatchObject({ session_id: null, turn_id: null })
     expect(
-      parseAgentStreamFrame(
+      parseAgentRuntimeStreamFrame(
         JSON.stringify({
-          ...IDENTITY,
+          ...TURN_IDENTITY,
+          kind: "control",
+          event: { type: "stream_ready" },
+        })
+      )
+    ).toBeDefined()
+    expect(
+      parseAgentRuntimeStreamFrame(
+        JSON.stringify({
+          ...CONNECTION_IDENTITY,
           kind: "control",
           event: { type: "stream_reset", reason: "buffer_overflow" },
         })
       )
-    ).toMatchObject({
-      kind: "control",
-      event: { type: "stream_reset", reason: "buffer_overflow" },
-    })
-  })
-
-  it("accepts both-or-neither control identity and rejects invalid identity", () => {
-    const idleReady = {
-      protocol_version: 1,
-      agent_id: "agent-1",
-      created_at: IDENTITY.created_at,
-      kind: "control",
-      event: { type: "stream_ready" },
-    }
-    expect(parseAgentStreamFrame(JSON.stringify(idleReady))).toMatchObject({
-      kind: "control",
-      session_id: null,
-      turn_id: null,
-    })
-
+    ).toMatchObject({ session_id: null, turn_id: null })
     expect(
-      parseAgentStreamFrame(
-        JSON.stringify({ ...idleReady, session_id: "session-1" })
-      )
-    ).toBeUndefined()
-    expect(
-      parseAgentStreamFrame(
-        JSON.stringify({ ...idleReady, session_id: 7, turn_id: {} })
+      parseAgentRuntimeStreamFrame(
+        JSON.stringify({
+          ...CONNECTION_IDENTITY,
+          session_id: "session-1",
+          kind: "control",
+          event: { type: "stream_ready" },
+        })
       )
     ).toBeUndefined()
   })
 })
 
+describe("subscribeToAgentRuntimeEvents", () => {
+  it("uses the runtime route and opaque after_cursor", async () => {
+    const ready = JSON.stringify({
+      ...CONNECTION_IDENTITY,
+      kind: "control",
+      event: { type: "stream_ready" },
+    })
+    const fetcher = vi.fn((input: RequestInfo | URL) => {
+      expect(String(input)).toBe(
+        "http://stratum.test/v1/agent-runtimes/runtime-1/events?after_cursor=opaque%2Fcursor"
+      )
+      return Promise.resolve(
+        new Response(sseStream(`data: ${ready}\n\n`), { status: 200 })
+      )
+    }) as typeof fetch
+    const onFrame = vi.fn()
+
+    await subscribeToAgentRuntimeEvents({
+      baseUrl: "http://stratum.test",
+      agentRuntimeId: "runtime-1",
+      afterCursor: "opaque/cursor",
+      fetcher,
+      onFrame,
+    }).done
+
+    expect(onFrame).toHaveBeenCalledOnce()
+  })
+
+  it("rejects a stream_reset carrying an SSE id", async () => {
+    const reset = JSON.stringify({
+      ...CONNECTION_IDENTITY,
+      kind: "control",
+      event: { type: "stream_reset", reason: "buffer_overflow" },
+    })
+    const fetcher = (() =>
+      Promise.resolve(
+        new Response(sseStream(`id: forbidden\ndata: ${reset}\n\n`), {
+          status: 200,
+        })
+      )) as typeof fetch
+
+    await expect(
+      subscribeToAgentRuntimeEvents({
+        baseUrl: "http://stratum.test",
+        agentRuntimeId: "runtime-1",
+        fetcher,
+        onFrame: () => {},
+      }).done
+    ).rejects.toMatchObject({ code: "unsupported_frame" })
+  })
+
+  it("rejects an empty SSE cursor instead of confusing it with cold mode", async () => {
+    const ready = JSON.stringify({
+      ...CONNECTION_IDENTITY,
+      kind: "control",
+      event: { type: "stream_ready" },
+    })
+    const fetcher = (() =>
+      Promise.resolve(
+        new Response(sseStream(`id:\ndata: ${ready}\n\n`), { status: 200 })
+      )) as typeof fetch
+
+    await expect(
+      subscribeToAgentRuntimeEvents({
+        baseUrl: "http://stratum.test",
+        agentRuntimeId: "runtime-1",
+        fetcher,
+        onFrame: () => {},
+      }).done
+    ).rejects.toMatchObject({ code: "unsupported_frame" })
+  })
+})
+
 describe("readSseStream resource bounds", () => {
-  it("rejects an unterminated frame instead of buffering it without bound", async () => {
+  it("rejects an unterminated frame instead of buffering without bound", async () => {
     const oversized = new TextEncoder().encode("x".repeat(2 * 1024 * 1024 + 1))
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {

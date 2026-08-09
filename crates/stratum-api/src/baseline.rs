@@ -18,10 +18,10 @@
 //! `durable_state_corrupt`. The current running Turn is never part of the
 //! baseline and therefore never normalized.
 
-use stratum_core::{AgentId, ChatMessage, ChatRole, DurableAgentEvent};
+use stratum_core::{AgentRuntimeId, ChatMessage, ChatRole, DurableAgentEvent};
 use stratum_postgres::PostgresBackend;
 
-use crate::error::{ApiError, ErrorKind};
+use crate::error::{ApiError, BaselineCorruptError, ErrorKind};
 use crate::provenance::ContextLineage;
 
 /// Materialized committed context at one historical barrier.
@@ -37,7 +37,7 @@ pub(crate) struct Baseline {
 /// assembly logic is unit-testable without constructing store rows.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LedgerEvent {
-    /// Agent-wide event sequence.
+    /// AgentRuntime-wide event sequence.
     event_seq: u64,
     /// Typed durable event (compactions are already companion-materialized).
     event: DurableAgentEvent,
@@ -50,11 +50,6 @@ impl LedgerEvent {
         Self { event_seq, event }
     }
 }
-
-/// Why baseline assembly failed closed; mapped to `durable_state_corrupt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("historical baseline is corrupt: {0}")]
-pub(crate) struct BaselineCorrupt(&'static str);
 
 /// Replay mode of one assembly pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +72,7 @@ pub(crate) enum ReplayMode {
 /// failure, and [`ErrorKind::RuntimeIncompatible`] for unsupported versions.
 pub(crate) async fn materialize_baseline(
     pg: &PostgresBackend,
-    agent_id: AgentId,
+    agent_runtime_id: AgentRuntimeId,
     base_event_seq: u64,
 ) -> Result<Baseline, ApiError> {
     if base_event_seq == 0 {
@@ -88,7 +83,7 @@ pub(crate) async fn materialize_baseline(
     }
 
     let companion = pg
-        .read_latest_companion(agent_id, base_event_seq)
+        .read_latest_companion(agent_runtime_id, base_event_seq)
         .await
         .map_err(ApiError::from_postgres)?;
     if let Some(companion) = companion {
@@ -97,7 +92,8 @@ pub(crate) async fn materialize_baseline(
             let window_from = pointer
                 .checked_sub(1)
                 .ok_or_else(|| ApiError::new(ErrorKind::DurableStateCorrupt))?;
-            let rows = read_checked_range(pg, agent_id, window_from, base_event_seq).await?;
+            let rows =
+                read_checked_range(pg, agent_runtime_id, window_from, base_event_seq).await?;
             if retained_window_is_usable(pointer, base_event_seq, &rows) {
                 return assemble(rows, Some(companion.summary), ReplayMode::Accelerated)
                     .map_err(corrupt);
@@ -107,7 +103,7 @@ pub(crate) async fn materialize_baseline(
             // available through the permanent event rows).
         }
     }
-    full_replay(pg, agent_id, base_event_seq).await
+    full_replay(pg, agent_runtime_id, base_event_seq).await
 }
 
 /// Whether a companion's retained pointer can start an accelerated replay
@@ -130,10 +126,10 @@ fn retained_window_is_usable(
 /// In-memory full replay from the ledger start.
 async fn full_replay(
     pg: &PostgresBackend,
-    agent_id: AgentId,
+    agent_runtime_id: AgentRuntimeId,
     base_event_seq: u64,
 ) -> Result<Baseline, ApiError> {
-    let rows = read_checked_range(pg, agent_id, 0, base_event_seq).await?;
+    let rows = read_checked_range(pg, agent_runtime_id, 0, base_event_seq).await?;
     assemble(rows, None, ReplayMode::Full).map_err(corrupt)
 }
 
@@ -143,12 +139,12 @@ async fn full_replay(
 /// truth gap.
 async fn read_checked_range(
     pg: &PostgresBackend,
-    agent_id: AgentId,
+    agent_runtime_id: AgentRuntimeId,
     from_event_seq: u64,
     to_event_seq: u64,
 ) -> Result<Vec<LedgerEvent>, ApiError> {
     let rows = pg
-        .read_events_range(agent_id, from_event_seq, to_event_seq)
+        .read_events_range(agent_runtime_id, from_event_seq, to_event_seq)
         .await
         .map_err(ApiError::from_postgres)?;
     let events: Vec<LedgerEvent> = rows
@@ -165,23 +161,27 @@ fn check_gapless(
     from_event_seq: u64,
     to_event_seq: u64,
     events: &[LedgerEvent],
-) -> Result<(), BaselineCorrupt> {
+) -> Result<(), BaselineCorruptError> {
     let mut expected = from_event_seq;
     for row in events {
-        expected = expected.checked_add(1).ok_or(BaselineCorrupt(
+        expected = expected.checked_add(1).ok_or(BaselineCorruptError(
             "historical truth range sequence overflowed",
         ))?;
         if row.event_seq != expected {
-            return Err(BaselineCorrupt("historical truth range has missing rows"));
+            return Err(BaselineCorruptError(
+                "historical truth range has missing rows",
+            ));
         }
     }
     if expected != to_event_seq {
-        return Err(BaselineCorrupt("historical truth range has missing rows"));
+        return Err(BaselineCorruptError(
+            "historical truth range has missing rows",
+        ));
     }
     Ok(())
 }
 
-fn corrupt(error: BaselineCorrupt) -> ApiError {
+fn corrupt(error: BaselineCorruptError) -> ApiError {
     ApiError::with_source(ErrorKind::DurableStateCorrupt, error)
 }
 
@@ -202,7 +202,7 @@ pub(crate) fn assemble(
     rows: Vec<LedgerEvent>,
     seed: Option<ChatMessage>,
     mode: ReplayMode,
-) -> Result<Baseline, BaselineCorrupt> {
+) -> Result<Baseline, BaselineCorruptError> {
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut origins: Vec<Option<u64>> = Vec::new();
     if let Some(summary) = seed {
@@ -216,7 +216,7 @@ pub(crate) fn assemble(
         match &row.event {
             DurableAgentEvent::LoopStarted { .. } => {
                 if open {
-                    return Err(BaselineCorrupt(
+                    return Err(BaselineCorruptError(
                         "a new turn started before the previous turn's terminal boundary",
                     ));
                 }
@@ -225,7 +225,7 @@ pub(crate) fn assemble(
             }
             DurableAgentEvent::MessageAppended { message } => {
                 if !open {
-                    return Err(BaselineCorrupt("message outside any turn boundary"));
+                    return Err(BaselineCorruptError("message outside any turn boundary"));
                 }
                 messages.push(message.clone());
                 origins.push(Some(row.event_seq));
@@ -237,11 +237,11 @@ pub(crate) fn assemble(
                     continue;
                 }
                 if !open {
-                    return Err(BaselineCorrupt("compaction outside any turn boundary"));
+                    return Err(BaselineCorruptError("compaction outside any turn boundary"));
                 }
                 let upto = usize::try_from(*upto).unwrap_or(usize::MAX);
                 if upto == 0 {
-                    return Err(BaselineCorrupt("compaction cut is zero"));
+                    return Err(BaselineCorruptError("compaction cut is zero"));
                 }
                 if upto <= messages.len() {
                     // Full-stream cut, mirroring kernel replay.
@@ -251,7 +251,7 @@ pub(crate) fn assemble(
                         segment_start
                             .checked_sub(upto)
                             .and_then(|start| start.checked_add(1))
-                            .ok_or(BaselineCorrupt("historical baseline index overflowed"))?
+                            .ok_or(BaselineCorruptError("historical baseline index overflowed"))?
                     } else {
                         1
                     };
@@ -300,12 +300,12 @@ pub(crate) fn assemble(
             | DurableAgentEvent::ToolApprovalRequested { .. }
             | DurableAgentEvent::ToolApprovalResolved { .. } => {}
             _ => {
-                return Err(BaselineCorrupt("unsupported durable event in history"));
+                return Err(BaselineCorruptError("unsupported durable event in history"));
             }
         }
     }
     if open && !rows.is_empty() {
-        return Err(BaselineCorrupt(
+        return Err(BaselineCorruptError(
             "last historical turn has no terminal boundary",
         ));
     }
@@ -321,12 +321,12 @@ fn close_segment(
     origins: &mut Vec<Option<u64>>,
     segment_start: usize,
     terminal: TerminalKind,
-) -> Result<(), BaselineCorrupt> {
+) -> Result<(), BaselineCorruptError> {
     let mut index = segment_start;
     while index < messages.len() {
         let message = &messages[index];
         if message.role == ChatRole::Tool {
-            return Err(BaselineCorrupt(
+            return Err(BaselineCorruptError(
                 "tool result outside its assistant tool-call group",
             ));
         }
@@ -337,7 +337,7 @@ fn close_segment(
                 let result_index = index
                     .checked_add(1)
                     .and_then(|next| next.checked_add(committed))
-                    .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
+                    .ok_or(BaselineCorruptError("historical baseline index overflowed"))?;
                 let Some(result) = messages.get(result_index) else {
                     break;
                 };
@@ -345,18 +345,18 @@ fn close_segment(
                     break;
                 }
                 if result.tool_call_id.as_ref() != Some(&tool_calls[committed].call_id) {
-                    return Err(BaselineCorrupt(
+                    return Err(BaselineCorruptError(
                         "tool result does not match the expected call order",
                     ));
                 }
                 committed = committed
                     .checked_add(1)
-                    .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
+                    .ok_or(BaselineCorruptError("historical baseline index overflowed"))?;
             }
             let group_end = index
                 .checked_add(1)
                 .and_then(|next| next.checked_add(committed))
-                .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
+                .ok_or(BaselineCorruptError("historical baseline index overflowed"))?;
             if committed == tool_calls.len() {
                 index = group_end;
                 continue;
@@ -364,7 +364,7 @@ fn close_segment(
             let trailing = group_end == messages.len();
             let recoverable = matches!(terminal, TerminalKind::Failed | TerminalKind::Cancelled);
             if !trailing || !recoverable {
-                return Err(BaselineCorrupt(
+                return Err(BaselineCorruptError(
                     "unclosed assistant tool-call group in committed history",
                 ));
             }
@@ -380,7 +380,7 @@ fn close_segment(
         }
         index = index
             .checked_add(1)
-            .ok_or(BaselineCorrupt("historical baseline index overflowed"))?;
+            .ok_or(BaselineCorruptError("historical baseline index overflowed"))?;
     }
     Ok(())
 }
@@ -647,7 +647,7 @@ mod tests {
         .expect_err("finished turn must close its tool groups");
         assert_eq!(
             error,
-            BaselineCorrupt("unclosed assistant tool-call group in committed history")
+            BaselineCorruptError("unclosed assistant tool-call group in committed history")
         );
     }
 
@@ -667,7 +667,7 @@ mod tests {
         .expect_err("non-trailing gaps are corruption");
         assert_eq!(
             error,
-            BaselineCorrupt("unclosed assistant tool-call group in committed history")
+            BaselineCorruptError("unclosed assistant tool-call group in committed history")
         );
 
         let out_of_order = assemble(
@@ -683,7 +683,7 @@ mod tests {
         .expect_err("out-of-order results are corruption");
         assert_eq!(
             out_of_order,
-            BaselineCorrupt("tool result does not match the expected call order")
+            BaselineCorruptError("tool result does not match the expected call order")
         );
     }
 

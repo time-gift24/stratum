@@ -10,11 +10,15 @@
 //! ledger is the only truth. Cancellation stops the wait without a decision
 //! (the kernel's own cancellation race treats the invocation as aborted).
 //!
-//! No typed secret value can occur in a final tool call today: tool arguments
-//! are plain JSON validated against the tool schema and the effective
-//! authorization metadata is `(ToolKind, DangerLevel)` only, so the persisted
-//! `ToolApprovalRequested` payload is durable-safe by construction. A future
-//! typed-secret channel must fail this append closed.
+//! No typed secret value can occur in the current closed composition: the
+//! only registered tool is `echo`, its arguments are schema-validated opaque
+//! user-authored JSON, authorization metadata is `(ToolKind, DangerLevel)`,
+//! and there is no runtime credential provider or injection channel. Echo's
+//! result is the same non-runtime-managed JSON and still crosses the kernel's
+//! `AfterToolCall` boundary; the resulting `Keep` is durable-safe for this
+//! composition, not a generic secret-scanning claim. A future credential-aware
+//! tool must add a typed secret/reference boundary and fail a secret-bearing
+//! Requested/result append closed before it can be registered here.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,8 +27,8 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use stratum_agent::{DecideToolCallDecision, DecideToolCallInput, HookControl, HookHandler};
 use stratum_core::{
-    AgentId, ApprovalDecision, ApprovalId, DurableAgentEvent, HookFailure, HookHandlerVersionId,
-    HookInvocationId, HookPoint, SessionId, ToolName, TurnId,
+    AgentId, AgentRuntimeId, ApprovalDecision, ApprovalId, DurableAgentEvent, HookFailure,
+    HookHandlerVersionId, HookInvocationId, HookPoint, SessionId, ToolName, TurnId,
 };
 use stratum_postgres::{AppendEvent, ApprovalLookup, HookInvocationLookup, PostgresBackend};
 use tokio::sync::oneshot;
@@ -36,10 +40,10 @@ use crate::error::PersistedVariantError;
 /// One registered waiter: its unique registration identity and notify half.
 type WaiterEntry = (Uuid, oneshot::Sender<()>);
 
-/// Process-local approval waiters keyed by `ApprovalId`.
+/// Process-local approval waiters keyed by exact AgentRuntime + approval.
 #[derive(Debug, Default)]
 pub(crate) struct ApprovalWaiters {
-    inner: Mutex<HashMap<ApprovalId, Vec<WaiterEntry>>>,
+    inner: Mutex<HashMap<(AgentRuntimeId, ApprovalId), Vec<WaiterEntry>>>,
 }
 
 impl ApprovalWaiters {
@@ -48,6 +52,7 @@ impl ApprovalWaiters {
     /// error, or a cancelled wait never leaks the sender.
     pub(crate) fn register(
         &self,
+        agent_runtime_id: AgentRuntimeId,
         approval_id: ApprovalId,
     ) -> (WaiterRegistration<'_>, oneshot::Receiver<()>) {
         let (sender, receiver) = oneshot::channel();
@@ -55,12 +60,13 @@ impl ApprovalWaiters {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(approval_id)
+            .entry((agent_runtime_id, approval_id))
             .or_default()
             .push((registration_id, sender));
         (
             WaiterRegistration {
                 waiters: self,
+                agent_runtime_id,
                 approval_id,
                 registration_id,
             },
@@ -71,12 +77,12 @@ impl ApprovalWaiters {
     /// Best-effort notification after a decision commits; loss is harmless
     /// because waiters re-read the ledger on every wake and on the poll
     /// interval.
-    pub(crate) fn notify(&self, approval_id: ApprovalId) {
+    pub(crate) fn notify(&self, agent_runtime_id: AgentRuntimeId, approval_id: ApprovalId) {
         let senders = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&approval_id);
+            .remove(&(agent_runtime_id, approval_id));
         if let Some(senders) = senders {
             for (_, sender) in senders {
                 let _ = sender.send(());
@@ -86,15 +92,20 @@ impl ApprovalWaiters {
 
     /// Removes one exact registration; a notification that already removed
     /// the entry makes this a no-op.
-    fn unregister(&self, approval_id: ApprovalId, registration_id: Uuid) {
+    fn unregister(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        approval_id: ApprovalId,
+        registration_id: Uuid,
+    ) {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(senders) = inner.get_mut(&approval_id) {
+        if let Some(senders) = inner.get_mut(&(agent_runtime_id, approval_id)) {
             senders.retain(|(id, _)| *id != registration_id);
             if senders.is_empty() {
-                inner.remove(&approval_id);
+                inner.remove(&(agent_runtime_id, approval_id));
             }
         }
     }
@@ -105,14 +116,18 @@ impl ApprovalWaiters {
 #[derive(Debug)]
 pub(crate) struct WaiterRegistration<'a> {
     waiters: &'a ApprovalWaiters,
+    agent_runtime_id: AgentRuntimeId,
     approval_id: ApprovalId,
     registration_id: Uuid,
 }
 
 impl Drop for WaiterRegistration<'_> {
     fn drop(&mut self) {
-        self.waiters
-            .unregister(self.approval_id, self.registration_id);
+        self.waiters.unregister(
+            self.agent_runtime_id,
+            self.approval_id,
+            self.registration_id,
+        );
     }
 }
 
@@ -121,15 +136,20 @@ impl Drop for WaiterRegistration<'_> {
 pub(crate) const APPROVAL_HANDLER_VERSION: Uuid =
     Uuid::from_u128(0x5f1a7c2e_8b3d_4e6f_9a01_c4d5e6f70819);
 
+/// Fixed upper bound between durable approval re-reads. Notifications are a
+/// latency optimization only, so a lost notification converges within this
+/// internal interval without exposing a protocol knob.
+const APPROVAL_RECHECK_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Approval decide hook bound to one exact Turn.
 pub(crate) struct ApprovalHandler {
     pg: PostgresBackend,
+    agent_runtime_id: AgentRuntimeId,
     agent_id: AgentId,
     session_id: SessionId,
     turn_id: TurnId,
     waiters: Arc<ApprovalWaiters>,
     dispatcher: DispatcherHandle,
-    poll_interval: Duration,
 }
 
 impl ApprovalHandler {
@@ -137,21 +157,21 @@ impl ApprovalHandler {
     #[must_use]
     pub(crate) fn new(
         pg: PostgresBackend,
+        agent_runtime_id: AgentRuntimeId,
         agent_id: AgentId,
         session_id: SessionId,
         turn_id: TurnId,
         waiters: Arc<ApprovalWaiters>,
         dispatcher: DispatcherHandle,
-        poll_interval: Duration,
     ) -> Self {
         Self {
             pg,
+            agent_runtime_id,
             agent_id,
             session_id,
             turn_id,
             waiters,
             dispatcher,
-            poll_interval,
         }
     }
 
@@ -161,10 +181,11 @@ impl ApprovalHandler {
         lookup: ApprovalLookup,
     ) -> Result<Option<stratum_postgres::ApprovalFacts>, HookFailure> {
         self.pg
-            .read_approval(self.agent_id, self.turn_id, lookup)
+            .read_approval(self.agent_runtime_id, self.turn_id, lookup)
             .await
             .map_err(|error| {
                 tracing::warn!(
+                    agent_runtime_id = %self.agent_runtime_id,
                     agent_id = %self.agent_id,
                     turn_id = %self.turn_id,
                     error = %error,
@@ -196,6 +217,7 @@ impl ApprovalHandler {
     ) -> Result<DecideToolCallDecision, HookFailure> {
         Self::map_decision(decision).map_err(|error| {
             tracing::error!(
+                agent_runtime_id = %self.agent_runtime_id,
                 agent_id = %self.agent_id,
                 turn_id = %self.turn_id,
                 error = %error,
@@ -231,7 +253,7 @@ impl HookHandler for ApprovalHandler {
         let invocation_id = self
             .pg
             .read_open_hook_invocation(HookInvocationLookup {
-                agent_id: self.agent_id,
+                agent_runtime_id: self.agent_runtime_id,
                 turn_id: self.turn_id,
                 point: HookPoint::DecideToolCall,
                 iteration: input.snapshot.iteration,
@@ -240,6 +262,7 @@ impl HookHandler for ApprovalHandler {
             .await
             .map_err(|error| {
                 tracing::warn!(
+                    agent_runtime_id = %self.agent_runtime_id,
                     agent_id = %self.agent_id,
                     turn_id = %self.turn_id,
                     error = %error,
@@ -249,6 +272,7 @@ impl HookHandler for ApprovalHandler {
             })?
             .ok_or_else(|| {
                 tracing::error!(
+                    agent_runtime_id = %self.agent_runtime_id,
                     agent_id = %self.agent_id,
                     turn_id = %self.turn_id,
                     "decide hook ran without a journaled pending invocation"
@@ -263,6 +287,7 @@ impl HookHandler for ApprovalHandler {
             .await?
         {
             Some(facts) => {
+                let facts = require_active_approval_facts(facts)?;
                 if let Some(resolution) = facts.resolution {
                     return self.resolved_decision(resolution.decision);
                 }
@@ -277,13 +302,13 @@ impl HookHandler for ApprovalHandler {
         // Register-then-read: a decision committed before registration is
         // observed by the immediate re-read. The registration guard lives to
         // the end of this call, so every exit path unregisters the waiter.
-        let (_registration, waiter) = self.waiters.register(approval_id);
+        let (_registration, waiter) = self.waiters.register(self.agent_runtime_id, approval_id);
         let mut waiter = waiter.fuse();
-        if let Some(facts) = self
-            .read_facts(ApprovalLookup::ByApprovalId(approval_id))
-            .await?
-            && let Some(resolution) = facts.resolution
-        {
+        let facts = require_active_approval_facts(require_approval_facts(
+            self.read_facts(ApprovalLookup::ByApprovalId(approval_id))
+                .await?,
+        )?)?;
+        if let Some(resolution) = facts.resolution {
             return self.resolved_decision(resolution.decision);
         }
 
@@ -299,30 +324,50 @@ impl HookHandler for ApprovalHandler {
                     unreachable!("a cancelled approval wait never resumes");
                 }
                 _ = &mut waiter => {}
-                () = tokio::time::sleep(self.poll_interval) => {}
+                () = tokio::time::sleep(APPROVAL_RECHECK_INTERVAL) => {}
             }
             match self
                 .read_facts(ApprovalLookup::ByApprovalId(approval_id))
                 .await
             {
-                Ok(Some(facts)) => {
+                Ok(facts) => {
+                    let facts = require_active_approval_facts(require_approval_facts(facts)?)?;
                     if let Some(resolution) = facts.resolution {
                         return self.resolved_decision(resolution.decision);
                     }
-                }
-                Ok(None) => {
-                    // The request row cannot vanish; treat as a transient
-                    // read anomaly and keep waiting.
-                    tracing::warn!(
-                        agent_id = %self.agent_id,
-                        turn_id = %self.turn_id,
-                        "approval request vanished from the ledger; still waiting"
-                    );
                 }
                 Err(failure) => return Err(failure),
             }
         }
     }
+}
+
+/// Once an approval id has been acquired, its Requested row is permanent.
+/// Absence is durable corruption and must terminate the hook wait.
+fn require_approval_facts(
+    facts: Option<stratum_postgres::ApprovalFacts>,
+) -> Result<stratum_postgres::ApprovalFacts, HookFailure> {
+    facts.ok_or(HookFailure::HandlerFailed)
+}
+
+/// A consumed or invalidated request cannot authorize another execution.
+/// Seeing either fact while the handler is active means replay/lifecycle
+/// state is inconsistent, so the hook fails closed.
+fn require_active_approval_facts(
+    facts: stratum_postgres::ApprovalFacts,
+) -> Result<stratum_postgres::ApprovalFacts, HookFailure> {
+    if approval_facts_are_active(facts.consumed_event_seq, facts.invalidated_event_seq) {
+        Ok(facts)
+    } else {
+        Err(HookFailure::HandlerFailed)
+    }
+}
+
+const fn approval_facts_are_active(
+    consumed_event_seq: Option<u64>,
+    invalidated_event_seq: Option<u64>,
+) -> bool {
+    consumed_event_seq.is_none() && invalidated_event_seq.is_none()
 }
 
 impl ApprovalHandler {
@@ -348,12 +393,13 @@ impl ApprovalHandler {
         let result = self
             .pg
             .append_event(AppendEvent {
+                agent_runtime_id: self.agent_runtime_id,
                 agent_id: self.agent_id,
                 session_id: self.session_id,
                 turn_id: self.turn_id,
                 event,
                 approval_hook_invocation_id: Some(invocation_id),
-                default_model_update: None,
+                model_config_update: None,
                 compaction: None,
             })
             .await;
@@ -365,13 +411,15 @@ impl ApprovalHandler {
             Err(stratum_postgres::PostgresError::ApprovalAlreadyRequested { .. }) => {
                 // A concurrent or recovered writer committed the request for
                 // this invocation first; reuse it.
-                self.read_facts(ApprovalLookup::ByHookInvocationId(invocation_id))
-                    .await?
-                    .map(|facts| facts.approval_id)
-                    .ok_or(HookFailure::HandlerFailed)
+                let facts = require_active_approval_facts(require_approval_facts(
+                    self.read_facts(ApprovalLookup::ByHookInvocationId(invocation_id))
+                        .await?,
+                )?)?;
+                Ok(facts.approval_id)
             }
             Err(error) => {
                 tracing::warn!(
+                    agent_runtime_id = %self.agent_runtime_id,
                     agent_id = %self.agent_id,
                     turn_id = %self.turn_id,
                     error = %error,
@@ -390,30 +438,32 @@ mod tests {
     #[tokio::test]
     async fn notify_wakes_every_registered_waiter() {
         let waiters = ApprovalWaiters::default();
+        let agent_runtime_id = AgentRuntimeId::new();
         let approval_id = ApprovalId::new();
-        let (_first_guard, first) = waiters.register(approval_id);
-        let (_second_guard, second) = waiters.register(approval_id);
+        let (_first_guard, first) = waiters.register(agent_runtime_id, approval_id);
+        let (_second_guard, second) = waiters.register(agent_runtime_id, approval_id);
 
-        waiters.notify(approval_id);
+        waiters.notify(agent_runtime_id, approval_id);
 
         assert!(first.await.is_ok());
         assert!(second.await.is_ok());
         // A decision for an unknown approval notifies nobody and never fails.
-        waiters.notify(ApprovalId::new());
+        waiters.notify(agent_runtime_id, ApprovalId::new());
     }
 
     #[tokio::test]
     async fn dropped_registration_unregisters_the_waiter() {
         let waiters = ApprovalWaiters::default();
+        let agent_runtime_id = AgentRuntimeId::new();
         let approval_id = ApprovalId::new();
-        let (_kept_guard, kept) = waiters.register(approval_id);
-        let (dropped_guard, dropped) = waiters.register(approval_id);
+        let (_kept_guard, kept) = waiters.register(agent_runtime_id, approval_id);
+        let (dropped_guard, dropped) = waiters.register(agent_runtime_id, approval_id);
         drop(dropped_guard);
 
         // The dropped sender is gone: the waiter observes a closed channel
         // and a notify only reaches the live registration.
         assert!(dropped.await.is_err());
-        waiters.notify(approval_id);
+        waiters.notify(agent_runtime_id, approval_id);
         assert!(kept.await.is_ok());
         // The entry was consumed by the notify; nothing accumulates.
         assert!(
@@ -423,6 +473,44 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn same_approval_uuid_is_isolated_by_agent_runtime() {
+        let waiters = ApprovalWaiters::default();
+        let runtime_a = AgentRuntimeId::new();
+        let runtime_b = AgentRuntimeId::new();
+        let approval_id = ApprovalId::new();
+        let (_guard_a, waiter_a) = waiters.register(runtime_a, approval_id);
+        let (_guard_b, mut waiter_b) = waiters.register(runtime_b, approval_id);
+
+        waiters.notify(runtime_a, approval_id);
+
+        assert!(waiter_a.await.is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiter_b)
+                .await
+                .is_err(),
+            "a resolver wakes only the exact runtime waiter"
+        );
+        waiters.notify(runtime_b, approval_id);
+        assert!(waiter_b.await.is_ok());
+    }
+
+    #[test]
+    fn acquired_approval_id_without_requested_facts_fails_closed() {
+        assert!(matches!(
+            require_approval_facts(None),
+            Err(HookFailure::HandlerFailed)
+        ));
+    }
+
+    #[test]
+    fn consumed_or_invalidated_approval_facts_fail_closed() {
+        assert!(approval_facts_are_active(None, None));
+        assert!(!approval_facts_are_active(Some(7), None));
+        assert!(!approval_facts_are_active(None, Some(8)));
+        assert!(!approval_facts_are_active(Some(7), Some(8)));
     }
 
     #[test]
