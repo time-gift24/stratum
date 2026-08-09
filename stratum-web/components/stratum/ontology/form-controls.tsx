@@ -47,6 +47,7 @@ export function CommitInput({
   placeholder,
   mono,
   ariaLabel,
+  autoFocus,
 }: {
   value: string
   onCommit(next: string): void
@@ -54,6 +55,8 @@ export function CommitInput({
   placeholder?: string
   mono?: boolean
   ariaLabel?: string
+  /** 挂载即聚焦（如画布节点行内改名、新建后立即编辑） */
+  autoFocus?: boolean
 }) {
   const [draft, setDraft] = useState(value)
   const [error, setError] = useState<string | null>(null)
@@ -87,6 +90,7 @@ export function CommitInput({
         aria-invalid={error !== null}
         value={draft}
         placeholder={placeholder}
+        autoFocus={autoFocus}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => {

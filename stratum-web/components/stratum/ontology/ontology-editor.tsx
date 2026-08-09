@@ -23,6 +23,7 @@ import {
   LinkTypeDialog,
   LinkTypePanel,
 } from "@/components/stratum/ontology/link-type-dialog"
+import type { ObjectTypePropertyActions } from "@/components/stratum/ontology/ontology-node"
 import {
   useOntologyEditor,
   type OntologyEditor,
@@ -183,6 +184,17 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
   const violations = useMemo(
     () => groupViolations(candidate, state.violations),
     [candidate, state.violations]
+  )
+
+  // 节点属性行内增删改：hook 方法本身引用稳定，聚合对象借此保持稳定，
+  // 避免画布 toNodes 的 useMemo 每轮重建
+  const propertyActions = useMemo<ObjectTypePropertyActions>(
+    () => ({
+      onAddProperty: editor.addProperty,
+      onUpdateProperty: editor.updateProperty,
+      onRemoveProperty: editor.removeProperty,
+    }),
+    [editor.addProperty, editor.updateProperty, editor.removeProperty]
   )
 
   const selectedObjectType =
@@ -437,6 +449,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
               focus={activeFocus !== null ? focusNeighborhood : null}
               objectViolations={violations.objectViolations}
               linkViolations={violations.linkViolations}
+              propertyActions={propertyActions}
               onSelectionChange={setSelection}
               onConnectNodes={handleConnect}
               onNodeDragStop={editor.setPosition}

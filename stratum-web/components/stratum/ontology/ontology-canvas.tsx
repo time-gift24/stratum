@@ -34,6 +34,7 @@ import {
 import {
   OntologyObjectTypeNode,
   type ObjectTypeNode,
+  type ObjectTypePropertyActions,
 } from "@/components/stratum/ontology/ontology-node"
 import styles from "@/components/stratum/ontology/ontology-theme.module.css"
 
@@ -59,7 +60,8 @@ type CanvasMessages = ReadonlyMap<string, readonly string[]>
 function toNodes(
   document: OntologyDocument,
   focus: LocalNeighborhood | null,
-  objectViolations: CanvasMessages
+  objectViolations: CanvasMessages,
+  propertyActions: ObjectTypePropertyActions
 ): ObjectTypeNode[] {
   const positions = resolveNodePositions(document)
   return document.object_types.map((objectType) => ({
@@ -70,6 +72,7 @@ function toNodes(
       objectType,
       violations: objectViolations.get(objectType.id) ?? [],
       dimmed: focus !== null && !focus.objectTypeIds.has(objectType.id),
+      propertyActions,
     },
   }))
 }
@@ -101,6 +104,7 @@ export function OntologyCanvas({
   focus,
   objectViolations,
   linkViolations,
+  propertyActions,
   onSelectionChange,
   onConnectNodes,
   onNodeDragStop,
@@ -109,13 +113,15 @@ export function OntologyCanvas({
   focus: LocalNeighborhood | null
   objectViolations: CanvasMessages
   linkViolations: CanvasMessages
+  /** 属性行内增删改（来自 use-ontology-editor，需引用稳定） */
+  propertyActions: ObjectTypePropertyActions
   onSelectionChange(selection: CanvasSelection): void
   onConnectNodes(sourceId: string, targetId: string): void
   onNodeDragStop(objectTypeId: string, x: number, y: number): void
 }) {
   const baseNodes = useMemo(
-    () => toNodes(document, focus, objectViolations),
-    [document, focus, objectViolations]
+    () => toNodes(document, focus, objectViolations, propertyActions),
+    [document, focus, objectViolations, propertyActions]
   )
   const baseEdges = useMemo(
     () => toEdges(document.link_types, focus, linkViolations),
