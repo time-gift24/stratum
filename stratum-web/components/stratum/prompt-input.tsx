@@ -34,6 +34,7 @@ const useIsomorphicLayoutEffect =
  */
 export function PromptInput({
   placeholder = "问问 Stratum",
+  leading,
   trailing,
   value,
   onChange,
@@ -44,6 +45,8 @@ export function PromptInput({
   className,
 }: {
   placeholder?: string
+  /** 输入框左侧控制位（如 Agent 选择器）；不传渲染默认 + 按钮，传 null 则不渲染 */
+  leading?: React.ReactNode
   /** 输入框右侧、发送按钮之前的插槽（如模型选择器）；不传则不渲染 */
   trailing?: React.ReactNode
   /** 受控值；不传则内部自管（提交后自动清空） */
@@ -194,16 +197,21 @@ export function PromptInput({
       >
         {/* 单一 DOM 顺序 + flex-wrap：单行 = 横向药丸（+ / textarea / trailing+send）；
             多行 = textarea order-first basis-full 独占首行，控制行 justify-between
-            （左 + 按钮、右 trailing + 发送）。textarea 节点不 remount、不丢焦点 */}
-        <div className="flex flex-wrap items-end justify-between gap-1.5 rounded-[28px] p-1.5 shadow-[0_8px_30px] shadow-black/10">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="mb-1 rounded-full"
-            aria-label="添加附件"
-          >
-            <Plus aria-hidden />
-          </Button>
+            （左 + 按钮、右 trailing + 发送）。textarea 节点不 remount、不丢焦点。
+            items-center：按钮（28px）与单行文行（44px）垂直居中 */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-[28px] p-1.5 shadow-[0_8px_30px] shadow-black/10">
+          {leading !== undefined ? (
+            leading
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="rounded-full"
+              aria-label="添加附件"
+            >
+              <Plus aria-hidden />
+            </Button>
+          )}
           <textarea
             ref={textareaRef}
             rows={1}
@@ -227,7 +235,7 @@ export function PromptInput({
               multiline && "order-first basis-full"
             )}
           />
-          <div className="mb-1 flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5">
             {trailing}
             {running && onCancel ? (
               <Button

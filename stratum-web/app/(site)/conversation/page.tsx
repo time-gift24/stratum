@@ -16,6 +16,7 @@ import type {
   ToolCallApproval,
 } from "@/components/stratum/conversation/types"
 import { ModelSelector } from "@/components/stratum/model-selector"
+import { AgentSelector } from "@/components/stratum/agent-selector"
 import { PromptInput } from "@/components/stratum/prompt-input"
 import type {
   ApprovalRequest,
@@ -517,42 +518,20 @@ export default function ConversationPage() {
                 running={turnRunning && !resumeRequired}
                 cancelRequested={state.cancelRequested}
                 onCancel={() => void cancel()}
+                leading={
+                  !composerConfiguration.existingRuntime &&
+                  composerConfiguration.agentTemplates.length > 0 ? (
+                    <AgentSelector
+                      templates={composerConfiguration.agentTemplates}
+                      selectedTemplate={
+                        composerConfiguration.selectedTemplate
+                      }
+                      onSelectTemplate={composerConfiguration.selectTemplate}
+                    />
+                  ) : null
+                }
                 trailing={
                   <div className="flex items-center gap-1.5">
-                    {!composerConfiguration.existingRuntime &&
-                    composerConfiguration.agentTemplates.length > 0 ? (
-                      <label className="flex min-w-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground">
-                        <span className="sr-only">Agent template</span>
-                        <select
-                          aria-label="Agent template"
-                          value={templateOptionValue(
-                            composerConfiguration.selectedTemplate
-                          )}
-                          onChange={(event) => {
-                            const template =
-                              composerConfiguration.agentTemplates.find(
-                                (candidate) =>
-                                  templateOptionValue(candidate) ===
-                                  event.target.value
-                              )
-                            if (template)
-                              composerConfiguration.selectTemplate(template)
-                          }}
-                          className="max-w-40 appearance-none bg-transparent py-1 text-xs font-medium text-foreground outline-none"
-                        >
-                          {composerConfiguration.agentTemplates.map(
-                            (template) => (
-                              <option
-                                key={templateOptionValue(template)}
-                                value={templateOptionValue(template)}
-                              >
-                                {template.agent_name} · {template.version}
-                              </option>
-                            )
-                          )}
-                        </select>
-                      </label>
-                    ) : null}
                     <ModelSelector
                       models={composerConfiguration.models}
                       selectedModelId={selectedModelConfig?.model ?? null}
@@ -574,12 +553,4 @@ export default function ConversationPage() {
       </main>
     </div>
   )
-}
-
-function templateOptionValue(
-  template: { agent_name: string; version: string } | null
-): string {
-  return template === null
-    ? ""
-    : JSON.stringify([template.agent_name, template.version])
 }

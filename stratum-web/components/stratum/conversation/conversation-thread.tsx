@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ArrowDown, Loader2 } from "lucide-react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
@@ -20,18 +20,8 @@ import { cn } from "@/lib/utils"
 
 gsap.registerPlugin(useGSAP)
 
-/** 会话切换过场编排：旧内容淡出下沉 → 空场呼吸 → 新内容淡入上浮归位
- * （严格串行：进场只在退场 onComplete 且快照移除后开始） */
-const SWITCH_CHOREO = {
-  exitDuration: 0.28,
-  exitEase: "power1.in",
-  exitY: 6,
-  enterDuration: 0.45,
-  enterEase: "expo.out",
-  enterY: 8,
-  /** 退场与进场之间的呼吸间隔（s） */
-  enterDelay: 0.06,
-} as const
+/** 会话切换进场的纯淡入时长（s）；无位移——位置动画是"从上往下飘"的来源 */
+const SWITCH_FADE_DURATION = 0.3
 
 /** 滚动到距顶部该阈值内且有更旧分页时自动加载 */
 const OLDER_LOAD_THRESHOLD = 64
@@ -99,9 +89,14 @@ function renderItem(
  *   被视为同一对话的确立而非切换。
  * - 稳态 → 空（点新对话，目的地 conversationId 为 null）：同参数镜像滑回。
  * - 会话切换（conversationId 变化，含恢复填充引起的翻转）：一律不播位置
- *   动画，直接落目标布局，内容仅轻微淡入。
+ *   动画，直接落目标布局。
  * 完成后 clearProps 交还 CSS。打断：killTweensOf + 反向时从当前视觉位置
  * 续播；prefers-reduced-motion 全程瞬时。
+ *
+ * 会话切换过场（isSwitching）：切换期间新内容保持透明（渲染期内联 opacity 0
+ * + layout phase gsap.set 兜底，挡住 recovering 中间帧），旧内容随 React 替换
+ * 即时消失（无快照覆盖层——快照层无法复现旧滚动位置，且会透出底层新内容）。
+ * 恢复结束后滚动落底、内容纯淡入（无位移，避免"从上往下飘"的二次定位感）。
  */
 export function ConversationThread({
   items,
@@ -166,62 +161,49 @@ export function ConversationThread({
     scrollTop: number
   } | null>(null)
   const [nearBottom, setNearBottom] = useState(true)
+  // 正向 FLIP（空 → 有消息）期间，React 不要提前 hidden 欢迎语，
+  // 让 GSAP 在原位置淡出，避免"消失 → 复现 → 再消失"的闪烁
+  const [leavingEmpty, setLeavingEmpty] = useState(false)
+  // 会话切换（非首发创建）期间：新内容保持透明，等恢复结束、滚动落底后
+  // 再纯淡入。旧内容直接随 React 替换消失，不做快照覆盖层——快照层会透出
+  // 底层新内容且无法复现旧滚动位置，是"中间一闪而过"的来源
+  const [isSwitching, setIsSwitching] = useState(false)
 
-  // 会话切换过场：track.departing = 旧内容的最后已知快照（退场期间不再重渲染
-  // 旧内容，借鉴 approval-dock 的 known/leaving）；enterPendingRef = 退场完成且
-  // recovery 结束后待播的进场。快照内容随 items.length / isEmpty /
-  // sendVersion 更新（不按 token 更新，保住流式热路径）
-  type DepartingContent = { items: ConversationItem[]; isEmpty: boolean }
+  // derive-state-during-render：检测会话切换与空 ⇄ 非空翻转。
+  // pendingSend = 当前 null 会话内已发出首条消息；随后的 null → 新 runtime id
+  // 是同一对话的确立（createFlow）而非切换，交给 FLIP 过场。
+  // 信号必须存 state 而非 ref：渲染期判定，且 sendVersion 变化先于
+  // conversationId 提交（track.sendVersion 在中间帧已同步，不能用作判定）
   const [track, setTrack] = useState<{
     conversationId: string | null | undefined
     sendVersion: number | undefined
-    items: ConversationItem[]
     isEmpty: boolean
-    departing: DepartingContent | null
-  }>({ conversationId, sendVersion, items, isEmpty, departing: null })
-  const enterPendingRef = useRef(false)
-  const departingRef = useRef<HTMLDivElement>(null)
-  // 已开始退场的快照（防止 recovering 翻转重跑 effect 时退场 tween 重头再播）
-  const departingStartedRef = useRef<DepartingContent | null>(null)
-
-  // derive-state-during-render：会话切换时快照旧内容为 departing（首发创建的
-  // null → 新 runtime id 不算切换，与 FLIP 的 pendingSend 规则一致）
+    pendingSend: boolean
+  }>({ conversationId, sendVersion, isEmpty, pendingSend: false })
   if (track.conversationId !== conversationId) {
-    const createFlow =
-      track.conversationId === null && sendVersion !== track.sendVersion
+    const createFlow = track.conversationId === null && track.pendingSend
+    setTrack({ conversationId, sendVersion, isEmpty, pendingSend: false })
+    if (!createFlow) setIsSwitching(true)
+  } else if (track.isEmpty !== isEmpty || track.sendVersion !== sendVersion) {
     setTrack({
-      conversationId,
-      sendVersion,
-      items,
+      ...track,
       isEmpty,
-      departing: createFlow
-        ? null
-        : { items: track.items, isEmpty: track.isEmpty },
+      sendVersion,
+      pendingSend:
+        track.pendingSend ||
+        (conversationId === null && sendVersion !== track.sendVersion),
     })
-  } else if (
-    track.items.length !== items.length ||
-    track.isEmpty !== isEmpty ||
-    track.sendVersion !== sendVersion
-  ) {
-    setTrack({ ...track, items, isEmpty, sendVersion })
   }
-  const departing = track.departing
-  const clearDeparting = useCallback(
-    () =>
-      setTrack((prev) =>
-        prev.departing ? { ...prev, departing: null } : prev
-      ),
-    []
-  )
-  // 退场完成信号（按快照 identity 清除）：过期 tween 的 onComplete 不会
-  // 误清更新快照的退场——进场只可能在当前退场真正结束后开始
-  const finishDeparting = useCallback(
-    (snapshot: DepartingContent) =>
-      setTrack((prev) =>
-        prev.departing === snapshot ? { ...prev, departing: null } : prev
-      ),
-    []
-  )
+  // 同一会话内空 → 有消息（首发或同一会话首条）的正向 FLIP 即将播放：
+  // 保持欢迎语本帧可见，让 GSAP 在原位置淡出，避免 React hidden 造成的闪烁
+  const isForwardFlip =
+    !isEmpty &&
+    track.isEmpty &&
+    track.conversationId === conversationId &&
+    !isSwitching
+  if (isForwardFlip && !leavingEmpty) {
+    setLeavingEmpty(true)
+  }
 
   // 近底时新内容（含流式增长）瞬时贴底——流式期间每 30ms 一帧，
   // smooth 会反复重启动画造成滞后抖动；平滑只留给用户主动点的「回到底部」
@@ -295,7 +277,10 @@ export function ConversationThread({
 
       const timeline = gsap.timeline({
         defaults: { ease: CHOREO.ease },
-        onComplete: () => gsap.set(targets, { clearProps: "all" }),
+        onComplete: () => {
+          gsap.set(targets, { clearProps: "all" })
+          setLeavingEmpty(false)
+        },
       })
       if (deltaY !== 0)
         timeline.fromTo(
@@ -308,6 +293,7 @@ export function ConversationThread({
       const settle = () => {
         timeline.kill()
         gsap.set(targets, { clearProps: "all" })
+        setLeavingEmpty(false)
       }
 
       if (sendHappened) pendingSendRef.current = true
@@ -339,8 +325,8 @@ export function ConversationThread({
         // 首发创建：send 后的 null → 新 runtime id 是同一对话的确立（消费一次）
         pendingSendRef.current = false
       } else if (conversationChanged) {
-        // 会话切换：composer 一律不做位置动画；内容淡入淡出由 departing/enter
-        // 过场接管；恢复填充引起的下一次翻转也抑制
+        // 会话切换：composer 一律不做位置动画；内容淡入由切换过场接管；
+        // 恢复填充引起的下一次翻转也抑制
         suppressNextFlipRef.current = true
         pendingSendRef.current = false
         settle()
@@ -395,75 +381,41 @@ export function ConversationThread({
     { scope: rootRef, dependencies: [isEmpty, conversationId, sendVersion] }
   )
 
-  // 会话切换过场：旧内容（departing 快照）先淡出下沉 → 新内容（recovery
-  // 结束后）淡入上浮归位；快速连切时新快照替换旧快照、overwrite 接管
+  // 会话切换过场：新内容在渲染期保持透明（style opacity 0），等恢复结束、
+  // 滚动落底后纯淡入（无位移——位置动画是"从上往下飘"的来源）。
+  // 旧内容随 React 替换即时消失，不做快照覆盖层。
   useGSAP(
     () => {
+      if (!isSwitching) return
+      const targets = [welcomeRef.current, messagesRef.current].filter(
+        (element): element is HTMLDivElement => element !== null
+      )
+      if (targets.length === 0) return
+      // 整个切换期（含 recovering 的多次重渲染）保持隐藏：FLIP 的 settle
+      // clearProps 会清掉渲染期内联的 opacity 0，这里在 layout phase 兜底
+      gsap.set(targets, { autoAlpha: 0 })
+      if (recovering) return
       const reduce = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
-      const incomingTargets = [welcomeRef.current, messagesRef.current].filter(
-        (element): element is HTMLDivElement => element !== null
-      )
-
-      if (departing) {
-        // 退场期间新内容保持不可见（干净的空场，不闪 skeleton）
-        gsap.set(incomingTargets, { autoAlpha: 0 })
-        enterPendingRef.current = true
-        if (departingStartedRef.current === departing) return
-        departingStartedRef.current = departing
-        const departingElement = departingRef.current
-        if (!departingElement) {
-          // ref 未挂上（不应发生）：异步清理，避免 effect 内同步 setState
-          void Promise.resolve().then(clearDeparting)
-          return
+      // 历史会话进场落在底部（最新消息）；切换后总是回到近底态
+      const viewport = viewportRef.current
+      if (viewport && !isEmpty)
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
+      setNearBottom(true)
+      gsap.fromTo(
+        targets,
+        { autoAlpha: 0 },
+        {
+          autoAlpha: 1,
+          duration: reduce ? 0 : SWITCH_FADE_DURATION,
+          ease: "power1.out",
+          overwrite: "auto",
+          onComplete: () => setIsSwitching(false),
         }
-        gsap.fromTo(
-          departingElement,
-          { autoAlpha: 1, y: 0 },
-          {
-            autoAlpha: 0,
-            y: SWITCH_CHOREO.exitY,
-            duration: reduce ? 0 : SWITCH_CHOREO.exitDuration,
-            ease: SWITCH_CHOREO.exitEase,
-            overwrite: "auto",
-            onComplete: () => finishDeparting(departing),
-          }
-        )
-        return
-      }
-
-      if (enterPendingRef.current && !recovering) {
-        enterPendingRef.current = false
-        departingStartedRef.current = null
-        // 历史会话进场落在底部（最新消息）；scroll 事件会同步 nearBottom
-        const viewport = viewportRef.current
-        if (viewport && !isEmpty)
-          viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
-        gsap.fromTo(
-          incomingTargets,
-          { autoAlpha: 0, y: SWITCH_CHOREO.enterY },
-          {
-            autoAlpha: 1,
-            y: 0,
-            duration: reduce ? 0 : SWITCH_CHOREO.enterDuration,
-            ease: SWITCH_CHOREO.enterEase,
-            delay: reduce ? 0 : SWITCH_CHOREO.enterDelay,
-            overwrite: "auto",
-          }
-        )
-      }
+      )
     },
-    {
-      scope: rootRef,
-      dependencies: [
-        departing,
-        recovering,
-        isEmpty,
-        clearDeparting,
-        finishDeparting,
-      ],
-    }
+    { scope: rootRef, dependencies: [isSwitching, recovering, isEmpty] }
   )
 
   const handleScroll = () => {
@@ -509,8 +461,11 @@ export function ConversationThread({
         <div className="relative mx-auto flex w-full max-w-[44rem] flex-1 flex-col px-4 pt-6">
           <div
             ref={welcomeRef}
+            style={{ opacity: isSwitching ? 0 : undefined }}
             className={cn(
-              isEmpty ? "absolute inset-x-0 bottom-[calc(50%+2rem)]" : "hidden"
+              isEmpty || leavingEmpty
+                ? "absolute inset-x-0 bottom-[calc(50%+2rem)]"
+                : "hidden"
             )}
           >
             {welcome}
@@ -518,6 +473,7 @@ export function ConversationThread({
 
           <div
             ref={messagesRef}
+            style={{ opacity: isSwitching ? 0 : undefined }}
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
             {olderLoading ? (
@@ -540,28 +496,6 @@ export function ConversationThread({
               })
             )}
           </div>
-
-          {/* 会话切换退场层：旧内容的最后已知快照，淡出期间覆盖在新内容之上
-              （新内容此时 autoAlpha 0），动画完成后从 DOM 移除 */}
-          {departing ? (
-            <div
-              ref={departingRef}
-              aria-hidden
-              className="pointer-events-none absolute inset-0 px-4 pt-6"
-            >
-              {departing.isEmpty ? (
-                <div className="absolute inset-x-0 bottom-[calc(50%+2rem)]">
-                  {welcome}
-                </div>
-              ) : (
-                <div className="flex flex-col gap-y-6">
-                  {departing.items.map((item, index) =>
-                    renderItem(item, index === departing.items.length - 1)
-                  )}
-                </div>
-              )}
-            </div>
-          ) : null}
 
           {composer ? (
             <div
