@@ -73,12 +73,15 @@ function renderItem(
  * 向上分页：滚动接近顶部且 hasOlder 时调 onLoadOlder；旧页 prepend 后
  * 用预先记录的 scrollHeight 差值恢复滚动位置（不跳动）。
  *
- * 两种布局模式（单一 DOM 树，节点跨模式保留，composer 不 remount）：
- * - 空态（无条目）：composer 包装器脱离文档流（absolute inset-0 +
+ * 两种布局模式（单一 DOM 树，节点跨模式保留，composer 不 remount）。
+ * 模式由 centeredEmpty = 无条目且 conversationId 为 null 决定——居中
+ * 只属于"新对话空态"；会话切换/恢复途中的暂态空不翻转布局，composer
+ * 全程钉在底部（杜绝历史会话间切换的中心 ⇄ 底部跳动）：
+ * - 空态（新对话无条目）：composer 包装器脱离文档流（absolute inset-0 +
  *   items-center justify-center + pointer-events-none，内部恢复 auto），
  *   恒定容器正中心；欢迎语独立锚定在中线上方（bottom: 50% + 2rem），
  *   其高度/有无及未来新增内容都不改变 composer 位置。宽度与稳态一致。
- * - 稳态（有条目）：消息流 + composer sticky 底部。
+ * - 稳态（有条目，或任何已有会话）：消息流 + composer sticky 底部。
  *
  * 双向过场（GSAP FLIP）：passive effect 在每次提交后（绘制之后、布局干净，
  * 不产生 forced reflow）记录 composer rect；welcome 只在可见时记录。
@@ -137,6 +140,10 @@ export function ConversationThread({
   className?: string
 }) {
   const isEmpty = items.length === 0
+  // 居中布局只属于"新对话空态"（无会话且无条目）。会话切换/恢复途中的
+  // 暂态空不触发居中：composer 全程钉在底部，杜绝历史会话间切换时
+  // 中心 ⇄ 底部的布局跳动；welcome 也只在 genuinely 新对话时出现
+  const centeredEmpty = isEmpty && conversationId == null
   const rootRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const welcomeRef = useRef<HTMLDivElement>(null)
@@ -463,7 +470,7 @@ export function ConversationThread({
             ref={welcomeRef}
             style={{ opacity: isSwitching ? 0 : undefined }}
             className={cn(
-              isEmpty || leavingEmpty
+              centeredEmpty || leavingEmpty
                 ? "absolute inset-x-0 bottom-[calc(50%+2rem)]"
                 : "hidden"
             )}
@@ -501,13 +508,13 @@ export function ConversationThread({
             <div
               className={cn(
                 "flex flex-col gap-2",
-                isEmpty
+                centeredEmpty
                   ? // 空态浮层透明（不能带 bg-background，否则盖住 welcome）
                     "pointer-events-none absolute inset-0 items-center justify-center"
                   : "sticky bottom-0 mt-auto bg-background pb-4 md:pb-6"
               )}
             >
-              {!isEmpty && !nearBottom ? (
+              {!centeredEmpty && !nearBottom ? (
                 <Button
                   variant="outline"
                   size="icon"
@@ -520,7 +527,7 @@ export function ConversationThread({
               ) : null}
               <div
                 ref={composerRef}
-                className={cn(isEmpty && "pointer-events-auto w-full")}
+                className={cn(centeredEmpty && "pointer-events-auto w-full")}
               >
                 {composer}
               </div>
