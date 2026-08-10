@@ -101,8 +101,8 @@
 
 - [x] 10.1 运行全部 Rust 单元与 all-target tests，并运行 crate-local ignored real-Postgres suites验证schema/create/append/view/history/resume/approval/compaction/race
 - [x] 10.2 重建 disposable NATS资源并运行 real-NATS/dispatcher/API integration suites，验证runtime隔离、cursor、overflow、publish loss与realtime degraded恢复
-- [ ] 10.3 在真实 Postgres+NATS+API+Web 上验证 create → message → durable stream → Tool/approval → cancel或resume → process restart → refresh → upward pagination 端到端路径
-- [ ] 10.4 自动化或按 `ALPHA_TEST.md` 人工记录两个preamble窗口、commit不确定、resolver/kernel竞态、NATS loss/slow/full/expiry/overflow、compaction pointer、approval crash、Tool at-least-once与cancel race的故障注入证据
+- [ ] 10.3 按 `ALPHA_TEST.md` 在 stock Compose（仓库默认Podman，Docker等价）的真实 Postgres+NATS+API+Web 上分别验证八个互不依赖的基础 journey：栈健康与catalog、普通LLM Turn、硬刷新PG恢复、Echo approval approve/reject、approval pending时API重启后resolve与explicit resume、pending cancel、跨页history、同一AgentId下多AgentRuntime隔离；每例使用fresh AgentRuntime，不把多个故障串成单一长场景
+- [ ] 10.4 按 `ALPHA_FAULT_INJECTION.md` 分别记录三个当前可执行的外部故障：NATS stop/recover、Postgres stop/recover、API SIGTERM/restart；每例只注入一个故障并使用独立fixture。精确COMMIT uncertainty、Tool crash、slow/full/expiry/overflow与SQL corruption迁入 `TODO.md` 的P4a；production compaction策略/Hook与其产品故障验收迁入H5b/H5c；这些后续能力不属于本change的merge/archive gate
 - [x] 10.5 运行 `cargo fmt --all -- --check`、`cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets`，不得通过压制lint规避失败
 - [x] 10.6 运行 Web full test、typecheck、lint、format与production build，并检查无未处理Promise/stream/reconcile竞态
 - [x] 10.7 运行 `openspec validate complete-postgres-agent-runtime --type change --strict --no-interactive` 与 `openspec validate --all --strict`，确认 superseded change不会污染main specs
@@ -110,4 +110,4 @@
 - [x] 10.9 派发独立 `constitution-review` 子代理逐条检查完整diff，修复全部 red flag、violation 与高风险 constitution gap
 - [x] 10.10 修复审查finding后重新运行 OpenSpec、Rust、real PG/NATS、Web、deletion proof 与 kernel-restraint 全部门禁
 - [x] 10.11 逐项核对checkbox与具体evidence，以最终implementation convention更新受影响 `AGENTS.md`，并在merge前提醒用户确认归档文档
-- [ ] 10.12 只有implementation、真实验证、独立审查与文档全部完成后，才准备sync/archive `complete-postgres-agent-runtime`；本次apply不提前归档
+- [ ] 10.12 只有implementation、10.3的八个基础journey、10.4的三个stock-Compose外部故障、独立审查与文档全部完成后，才准备sync/archive `complete-postgres-agent-runtime`；后续P4a fault harness与H5b/H5c production compaction不阻塞本change，本次apply不提前归档

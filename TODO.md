@@ -189,26 +189,48 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
   显式列出 composition-owned 审批事实变体、`index as u64` 改 `try_from`。
   当时涉及的 `filesystem.rs`/JoinError 实现已随执行后端删除。
 
-### H5：上下文压缩
+### H5a：上下文压缩机制（已完成）
 
 **依赖：** H2.5、H3。
 
 - [x] 结果级压缩：确认由 `after_tool_call::ReplaceResult` 覆盖（唯一带写回语义的 decision，压缩结果直接耐久提交）；明确原始结果从 transcript 消失的审计权衡，原始留存依赖 H3 journal 或 handler 私有通道。
-- [x] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达"该压了"并携带摘要，写回由 kernel 代执行。
+- [x] `prepare_next_turn` 新增 `Compact` 意图 decision：hook 只表达“该压了”并携带摘要，写回由 kernel 代执行。
 - [x] kernel 在迭代边界执行压缩：强制 tool_call/tool_result 配对完整、system prompt 保留、摘要使用 kernel 归属的归因标记（`COMPACTION_MARKER_PREFIX`），不得伪装成用户或助手消息。
 - [x] 压缩后的 transcript 成为新的 durable 基线（`TranscriptCompacted` 耐久事件），resume
   从压缩基线恢复。历史 `compact.jsonl` 检查点快速路径已随
   `complete-postgres-agent-runtime` 删除；当前快速路径只由 Postgres
   `transcript_compactions` companion 的 `retained_from_event_seq` 指针承担，指针无效时
   回退内存 full replay。
-- [x] 摘要算力归属：handler 自带（决策记录含摘要，journal 固化非确定性；kernel 不引入 summarizer 组件）。
-- [x] 压缩触发依据来自 `HookSnapshot.usage`，阈值策略由组合侧配置。
+- [x] 固定摘要计算的责任边界：handler 产生摘要，journal 耐久记录已完成的 decision 以闭合崩溃窗口，kernel 不引入 summarizer 组件。
+- [x] `HookSnapshot` 向组合侧暴露最近一次模型响应的可选 `usage`；它不等于累计用量，也不代表已经实现生产压缩策略。
 
 **验收条件：**
 
 - [x] 压缩后 resume 重建的历史与压缩基线一致。
 - [x] 任何压缩结果都不切断 tool_call/tool_result 配对，切割点只在迭代边界。
 - [x] 崩溃于压缩提交前时恢复为未压缩基线（fail-safe），不重复执行已完成的工作。
+
+### H5b：通用生产 Compaction 策略（未开始，独立 proposal）
+
+**依赖：** H5a。**强制要求：** 未来 proposal 必须先逐项回答以下问题，不得以“以后可配置”代替语义设计，也不得为了接入策略扩大 kernel 职责。
+
+- [ ] 定义普通无 Tool Turn、跨 Turn 历史与 Tool cycle 三类触发边界；明确现有 `prepare_next_turn` 只能覆盖哪些边界，其余边界应由哪个组合侧入口承担。
+- [ ] 定义 usage 度量：最近一次 `input_tokens`、跨调用累计用量或对 committed context 的确定性估算三者选哪一个；同时固定 provider 不报 usage、重启和 resume 时的等价语义。
+- [ ] 定义 summary 的 provider、model、最大输入/输出 budget、超时与取消边界，并明确这些身份如何被版本固定、恢复和计费。
+- [ ] 定义 summary 生成失败、超时、provider 不可用、非法输出与耐久提交失败的语义：本轮继续使用未压缩上下文、重试，还是 fail closed 结束 Turn。
+- [ ] 定义 cut 策略与防风暴规则：最小保留后缀、tool_call/tool_result 配对、重复压缩的滞回/冷却、每 Turn 上限、summary 膨胀与不产生有效收缩时的停止条件。
+- [ ] 定义 compaction handler 的稳定版本身份与 ordered handler chain 演进；特别解决新 handler 改变 chain version 后，旧 running Turn 如何以原固定版本 resume，不得默认将其变成 `runtime_unavailable`。
+- [ ] 明确 journal 与 companion 两份 summary 的不同职责：journal 保存 handler decision 以闭合 `Completed(Compact)` 到 `TranscriptCompacted` 的崩溃窗口，companion 保存 kernel 提交的 typed marker 与 retained frontier；固定两者的一致性、保留和读取语义，不得误称全局只有一份物理摘要。
+- [ ] 定义敏感信息、成本与质量边界：summary provider 的数据外发范围、持久化与日志禁止项、额外 token 成本归属、摘要长度/完整性/幻觉的质量门槛及不合格时的处置。
+
+### H5c：Compaction 产品与故障验收（未开始）
+
+**依赖：** H5b、P4a。
+
+- [ ] 生产者证据单独验收：从真实生产 compaction handler 的触发判定、summary 调用、journaled decision、kernel `TranscriptCompacted` 到 Postgres companion 提交全链路；直接 seed 数据库不得充当生产者证据。
+- [ ] 消费者证据单独验收：使用已确认的 durable compaction fixture 分别验证 fast path、pointer-only full replay fallback、必需 companion/summary 损坏 fail closed、NATS 丢失后 PG 冷恢复、history 原文分页与 Web marker；消费者证据不反向证明生产策略已接入。
+- [ ] 对 journal commit 前后、companion transaction、commit acknowledgement、后续 iteration boundary、重启/resume 分别建立单一故障的确定性场景；每个场景使用独立 fixture 和 durable oracle，不把多个窗口串成一个手工 E2E。
+- [ ] 生产者与消费者证据全部通过后，再将真实 compaction 触发、崩溃恢复和 marker 交互加入当前版本 Alpha 结束条件。
 
 ### S1：第一档运行时 Skill
 
@@ -366,6 +388,20 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 - [ ] 在首个生产持久化格式变更前建立数据迁移机制。
 - [ ] 在所有持久化边界增加进程终止故障测试。
 - [ ] 校验部署中的协议和 SDK 版本兼容性。
+
+### P4a：确定性故障测试基建 PATCH
+
+**依赖：** P1。**范围：** 只提供测试编排与证据能力，不改变生产协议、运行时真相或业务语义。
+
+- [ ] 以独立 proposal 定义一次只注入一个故障、可重复运行、可机器判定的测试协议与 fixture 生命周期。
+- [ ] 实现 scripted LLM gateway：可精确产生 text/tool/usage/error/slow/pending 序列，并在不记录 prompt 或 credential 的前提下暴露调用次数和安全边界信号。
+- [ ] 实现 observable test Tool：使用隔离副作用目标，记录 CallId、调用次数与开始/完成边界，支持在副作用前后可控暂停，但不为生产 Tool 定义通用幂等语义。
+- [ ] 实现 PG commit proxy：区分 transaction 未到 COMMIT、COMMIT 可能已到达但 acknowledgement 丢失、以及 commit 已确认三类窗口，支持精确切断和恢复连接。
+- [ ] 实现 disposable Postgres malformed-fixture builder：只面向带明确测试标记的独立 database，以 fresh AgentRuntime 一次构造一种 missing/malformed companion、非法 retained pointer、unsupported event version/payload、foreign identity 或 high-water/ledger inconsistency；每例保存安全只读 oracle 后重建 database，禁止连接共享/生产地址，也禁止把该入口编进 production binary。
+- [ ] 实现 NATS fault/retention fixture：覆盖不可用、慢 publish、publish loss、有界队列压力、retention eviction、cursor expiry 与 stream generation 重建，且每次使用独立 stream。
+- [ ] 实现 process controller：只操作精确 PID/容器身份，支持启动、等待安全边界、暂停、终止、SIGTERM 和使用同一 PG/NATS 重启，不使用宽泛进程匹配。
+- [ ] 实现统一证据采集：只记录安全 identity、event type/version/sequence、state high-water、HTTP status/error code、cursor 行为和用户可见结果；输出可对比、可关联 CI，禁止 payload、prompt、Tool arguments/result、summary、provider body 与 secret。
+- [ ] 所有精确暂停与故障开关必须留在 test binary、proxy 或容器 fixture 中；禁止向 production binary 加入 failpoint、debug endpoint、绕过安全边界的管理入口或第二套状态/真相源。
 
 ## 8. 并行与串行关系
 
