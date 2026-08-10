@@ -175,6 +175,11 @@ export function ConversationThread({
   // 再纯淡入。旧内容直接随 React 替换消失，不做快照覆盖层——快照层会透出
   // 底层新内容且无法复现旧滚动位置，是"中间一闪而过"的来源
   const [isSwitching, setIsSwitching] = useState(false)
+  // 首发 createFlow 的镜像（render 相位）：新 runtime id 确立后 recovering
+  // 会把 items 清空再填充，这次填充不是"首发正向过场"——否则欢迎语会被
+  // 重新渲染并再播一次淡出（用户看到的"返回数据后欢迎语又闪一下"）。
+  // 渲染期判定不能读 ref（react-hooks/refs），故与 suppressNextFlipRef 同步维护
+  const [suppressCreateFill, setSuppressCreateFill] = useState(false)
 
   // derive-state-during-render：检测会话切换与空 ⇄ 非空翻转。
   // pendingSend = 当前 null 会话内已发出首条消息；随后的 null → 新 runtime id
@@ -190,7 +195,14 @@ export function ConversationThread({
   if (track.conversationId !== conversationId) {
     const createFlow = track.conversationId === null && track.pendingSend
     setTrack({ conversationId, sendVersion, isEmpty, pendingSend: false })
-    if (!createFlow) setIsSwitching(true)
+    if (!createFlow) {
+      setIsSwitching(true)
+      setSuppressCreateFill(false)
+    } else if (isEmpty) {
+      // createFlow 且当前为空 = 新会话 recovering 窗口：随后的恢复填充
+      // 不是首发正向过场，抑制欢迎语复现（effect 侧由 suppressNextFlipRef 兜底）
+      setSuppressCreateFill(true)
+    }
   } else if (track.isEmpty !== isEmpty || track.sendVersion !== sendVersion) {
     setTrack({
       ...track,
@@ -200,6 +212,9 @@ export function ConversationThread({
         track.pendingSend ||
         (conversationId === null && sendVersion !== track.sendVersion),
     })
+    // 恢复填充落地的这次翻转即被抑制的对象，消费掉
+    if (suppressCreateFill && track.isEmpty && !isEmpty)
+      setSuppressCreateFill(false)
   }
   // 同一会话内空 → 有消息（首发或同一会话首条）的正向 FLIP 即将播放：
   // 保持欢迎语本帧可见，让 GSAP 在原位置淡出，避免 React hidden 造成的闪烁
@@ -207,7 +222,8 @@ export function ConversationThread({
     !isEmpty &&
     track.isEmpty &&
     track.conversationId === conversationId &&
-    !isSwitching
+    !isSwitching &&
+    !suppressCreateFill
   if (isForwardFlip && !leavingEmpty) {
     setLeavingEmpty(true)
   }
@@ -329,8 +345,11 @@ export function ConversationThread({
         pendingSendRef.current &&
         previousConversationId === null
       ) {
-        // 首发创建：send 后的 null → 新 runtime id 是同一对话的确立（消费一次）
+        // 首发创建：send 后的 null → 新 runtime id 是同一对话的确立（消费一次）。
+        // 当前为空 = 进入 recovering 窗口，随后的恢复填充翻转必须抑制，
+        // 否则欢迎语会以 fixed 旧位置复现再淡出一次（"返回数据后闪一下"）
         pendingSendRef.current = false
+        if (isEmpty) suppressNextFlipRef.current = true
       } else if (conversationChanged) {
         // 会话切换：composer 一律不做位置动画；内容淡入由切换过场接管；
         // 恢复填充引起的下一次翻转也抑制
