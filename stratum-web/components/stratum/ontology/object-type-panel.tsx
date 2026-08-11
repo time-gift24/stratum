@@ -1,6 +1,7 @@
 "use client"
 
-import { Plus, Trash2Icon, XIcon } from "lucide-react"
+import { useState, type CSSProperties } from "react"
+import { Check, Plus, Trash2Icon, XIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -20,44 +21,35 @@ import type {
   OntologyProperty,
   OntologyPropertyValueType,
 } from "@/features/ontology-editor/types"
-import { isValidOntologyName } from "@/features/ontology-editor/validation"
+import { nodeHue } from "@/features/ontology-editor/hue"
+import {
+  nextPropertyName,
+  PROPERTY_VALUE_TYPES,
+  validatePropertyDisplayName,
+  validatePropertyName,
+} from "@/features/ontology-editor/property"
 import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import { cn } from "@/lib/utils"
 
+import auroraStyles from "./ontology-aurora.module.css"
+
 /**
- * Object Type 编辑面板（宽列表）：头部 display_name / name + 关闭；
- * name / display_name / description 失焦提交；属性区一属性一行——
- * name（mono）· display_name · value_type（Select）· 必填 · 删除全部
- * 在单行内完成，行间 divide-y、悬停反馈；底部「+ 添加属性」行自动命名。
- * 422 违例在对象级与属性行下方内联展示。删除由调用方弹确认对话框。
+ * Object Type 编辑面板——方向契约：
+ * THESIS：面板是选中节点的「规格表」——属性区是真实 <table>（sticky 表头
+ * 声明列语义、# 序号栅格），不是卡片堆；身份头与画布节点共享同一
+ * --node-hue 极光染色，表里表外是同一个对象。
+ * HEADER：kicker（对象类型）+ 可编辑 display_name 标题 + name chip + 统计
+ * （N 属性 · M 必填 · K 违例）；顶部衬 .aurora 磨砂染色。
+ * TABLE：默认只读（名称 mono / 显示名 / 类型 badge / 必填勾选 / 序号），
+ * 双击行进入编辑模式——该行变为 ghost 输入 + Select + 勾选 + 删除，
+ * Escape 退出；422 违例以 colSpan 子行内联在对应属性下方。
+ * FOOTER：固定底栏「+ 添加属性」自动命名；画布聚焦（深度 + 聚焦邻域）
+ * 与安静的删除入口。删除 Object Type 本身由调用方弹确认对话框。
  */
 
-const NAME_HINT = "需匹配 ^[a-z][a-z0-9_]{0,63}$（小写字母开头，可含数字与下划线）"
-
-const VALUE_TYPES: readonly OntologyPropertyValueType[] = [
-  "string",
-  "integer",
-  "number",
-  "boolean",
-  "date",
-  "date_time",
-]
-
-function validateName(next: string): string | null {
-  return isValidOntologyName(next) ? null : NAME_HINT
-}
-
-function validateDisplayName(next: string): string | null {
-  return next.trim() === "" ? "显示名不能为空" : null
-}
-
-/** 新属性的自动命名：field_n，取不冲突的最小序号 */
-function nextPropertyName(properties: readonly OntologyProperty[]): string {
-  const taken = new Set(properties.map((property) => property.name))
-  let index = properties.length + 1
-  while (taken.has(`field_${index}`)) index += 1
-  return `field_${index}`
-}
+/** 表格单元格的 ghost 输入：平时无边无底，悬停/聚焦才显现控件边界 */
+const GHOST_CELL =
+  "border-transparent bg-transparent px-1.5 shadow-none hover:border-input hover:bg-input/20 dark:bg-transparent dark:hover:bg-input/30"
 
 export type PropertyInput = {
   name: string
@@ -98,6 +90,17 @@ export function ObjectTypePanel({
   onRemoveProperty(propertyId: string): void
   onClose(): void
 }) {
+  /** 双击进入编辑的属性行；Escape / 切换 Object Type 退出 */
+  const [editingPropertyId, setEditingPropertyId] = useState<string | null>(
+    null
+  )
+  // derive-during-render：切换选中对象时重置行编辑态
+  const [prevObjectTypeId, setPrevObjectTypeId] = useState(objectType.id)
+  if (objectType.id !== prevObjectTypeId) {
+    setPrevObjectTypeId(objectType.id)
+    setEditingPropertyId(null)
+  }
+
   const addProperty = () => {
     const name = nextPropertyName(objectType.properties)
     onAddProperty({
@@ -107,36 +110,75 @@ export function ObjectTypePanel({
       required: false,
     })
   }
+  const requiredCount = objectType.properties.filter(
+    (property) => property.required
+  ).length
+  const violationCount =
+    messages.length +
+    objectType.properties.reduce(
+      (count, property) =>
+        count + (propertyMessages.get(property.id)?.length ?? 0),
+      0
+    )
 
   return (
     <aside
       aria-label={`Object Type ${objectType.display_name} 编辑面板`}
-      className="flex h-full w-full flex-col overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-[0_8px_30px] shadow-black/10"
+      className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-[0_8px_30px] shadow-black/10"
+      style={{ "--node-hue": nodeHue(objectType.id) } as CSSProperties}
     >
-      {/* 列表头：display_name / name + 关闭 */}
-      <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-medium">
-            {objectType.display_name}
-          </h2>
-          <p className="truncate font-mono text-[0.6875rem] text-muted-foreground">
-            {objectType.name}
+      {/* 身份头：与画布节点同色相的极光染色 + 标题/name/统计 */}
+      <header className="relative border-b border-border px-3 pt-2.5 pb-3">
+        <div
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-2 top-0 h-16 blur-xl",
+            auroraStyles.aurora
+          )}
+        />
+        <div className="relative flex items-center justify-between gap-2 px-1.5">
+          <p className="font-mono text-[0.625rem] tracking-[0.2em] text-muted-foreground">
+            对象类型
           </p>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="关闭面板"
+            onClick={onClose}
+          >
+            <XIcon />
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="关闭面板"
-          onClick={onClose}
-        >
-          <XIcon />
-        </Button>
-      </div>
+        <div className="relative mt-0.5">
+          <CommitInput
+            ariaLabel="Object Type 显示名"
+            value={objectType.display_name}
+            validate={validatePropertyDisplayName}
+            onCommit={(displayName) =>
+              onUpdate({ ...objectType, display_name: displayName })
+            }
+            className={cn(GHOST_CELL, "h-9 text-base font-medium")}
+          />
+        </div>
+        <div className="relative mt-1 flex items-center gap-2 px-1.5">
+          <code className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted-foreground">
+            {objectType.name}
+          </code>
+          <span className="text-[0.6875rem] text-muted-foreground">
+            {objectType.properties.length} 属性 · {requiredCount} 必填
+          </span>
+          {violationCount > 0 && (
+            <span className="text-[0.6875rem] text-destructive">
+              {violationCount} 违例
+            </span>
+          )}
+        </div>
+      </header>
 
       {messages.length > 0 && (
         <div
           role="alert"
-          className="mx-4 mb-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
+          className="mx-3 mt-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
         >
           {messages.map((message) => (
             <p key={message}>{message}</p>
@@ -144,25 +186,15 @@ export function ObjectTypePanel({
         </div>
       )}
 
-      {/* 元信息：name / display_name / description 失焦提交 */}
-      <div className="flex flex-col gap-2 border-b border-border px-4 pb-3">
+      {/* 元信息：name / description 失焦提交（display_name 在身份头直接改） */}
+      <div className="flex flex-col gap-2 border-b border-border px-4 py-3">
         <FieldRow label="名称（name）">
           <CommitInput
             mono
             ariaLabel="Object Type 名称"
             value={objectType.name}
-            validate={validateName}
+            validate={validatePropertyName}
             onCommit={(name) => onUpdate({ ...objectType, name })}
-          />
-        </FieldRow>
-        <FieldRow label="显示名（display_name）">
-          <CommitInput
-            ariaLabel="Object Type 显示名"
-            value={objectType.display_name}
-            validate={validateDisplayName}
-            onCommit={(displayName) =>
-              onUpdate({ ...objectType, display_name: displayName })
-            }
           />
         </FieldRow>
         <FieldRow label="描述（description，可选）">
@@ -180,24 +212,84 @@ export function ObjectTypePanel({
         </FieldRow>
       </div>
 
-      {/* 属性列表：一属性一行，行内完成全部编辑 */}
-      <section aria-label="属性列表" className="flex flex-col">
+      {/* 属性规格表：sticky 表头 + # 序号栅格；默认只读，双击行进入编辑 */}
+      <section
+        aria-label="属性列表"
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <h3 className="px-4 pt-3 pb-1 text-[0.6875rem] font-medium text-muted-foreground">
           属性（{objectType.properties.length}）
+          <span className="ml-1.5 font-normal">· 双击行进入编辑</span>
         </h3>
-        <div className="flex flex-col divide-y divide-border/60">
-          {objectType.properties.length === 0 && (
-            <p className="px-4 py-2 text-xs text-muted-foreground">暂无属性</p>
-          )}
-          {objectType.properties.map((property) => (
-            <PropertyRow
-              key={property.id}
-              property={property}
-              messages={propertyMessages.get(property.id) ?? []}
-              onUpdate={(next) => onUpdateProperty(next)}
-              onRemove={() => onRemoveProperty(property.id)}
-            />
-          ))}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {/* border-separate：collapsed 边框在 sticky thead 上会丢失（Chrome），
+              分隔线一律挂在 th/td 单元格上 */}
+          <table className="w-full table-fixed border-separate border-spacing-0 text-xs">
+            <thead className="sticky top-0 z-10 bg-popover">
+              <tr className="text-[0.6875rem] text-muted-foreground">
+                <th
+                  scope="col"
+                  className="w-7 border-b border-border px-1 py-1.5 text-right font-normal"
+                >
+                  #
+                </th>
+                <th
+                  scope="col"
+                  className="border-b border-border px-1.5 py-1.5 text-left font-medium"
+                >
+                  属性名
+                </th>
+                <th
+                  scope="col"
+                  className="w-[26%] border-b border-border px-1.5 py-1.5 text-left font-medium"
+                >
+                  显示名
+                </th>
+                <th
+                  scope="col"
+                  className="w-[6.25rem] border-b border-border px-1.5 py-1.5 text-left font-medium"
+                >
+                  类型
+                </th>
+                <th
+                  scope="col"
+                  className="w-10 border-b border-border px-1 py-1.5 text-center font-medium"
+                >
+                  必填
+                </th>
+                <th
+                  scope="col"
+                  className="w-8 border-b border-border"
+                  aria-label="操作"
+                />
+              </tr>
+            </thead>
+            <tbody>
+              {objectType.properties.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="border-b border-border/50 px-4 py-6 text-center text-xs text-muted-foreground"
+                  >
+                    暂无属性，点击下方「添加属性」创建第一个字段
+                  </td>
+                </tr>
+              )}
+              {objectType.properties.map((property, index) => (
+                <PropertyRow
+                  key={property.id}
+                  index={index + 1}
+                  property={property}
+                  messages={propertyMessages.get(property.id) ?? []}
+                  editing={editingPropertyId === property.id}
+                  onStartEdit={() => setEditingPropertyId(property.id)}
+                  onExitEdit={() => setEditingPropertyId(null)}
+                  onUpdate={(next) => onUpdateProperty(next)}
+                  onRemove={() => onRemoveProperty(property.id)}
+                />
+              ))}
+            </tbody>
+          </table>
         </div>
         <div className="border-t border-border">
           <button
@@ -217,19 +309,23 @@ export function ObjectTypePanel({
         </div>
       </section>
 
-      <section
-        aria-label="聚焦邻域"
-        className="flex flex-col gap-1.5 border-t border-border px-4 py-3"
-      >
-        <h3 className="text-[0.6875rem] font-medium text-muted-foreground">
-          画布聚焦
-        </h3>
-        <div className="flex items-center gap-2">
+      <div className="border-t border-border">
+        <section
+          aria-label="聚焦邻域"
+          className="flex items-center gap-2 px-4 py-2.5"
+        >
+          <h3 className="shrink-0 text-[0.6875rem] font-medium text-muted-foreground">
+            画布聚焦
+          </h3>
           <Select
             value={focusDepth}
             onValueChange={(next) => onFocusDepthChange(next ?? 1)}
           >
-            <SelectTrigger aria-label="聚焦深度" className="w-24">
+            <SelectTrigger
+              aria-label="聚焦深度"
+              className="ml-auto w-24"
+              size="sm"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -246,127 +342,196 @@ export function ObjectTypePanel({
           <Button variant="outline" size="sm" onClick={onFocus}>
             聚焦邻域
           </Button>
+        </section>
+        <div className="border-t border-border px-4 py-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={onDelete}
+          >
+            <Trash2Icon data-icon="inline-start" />
+            删除该 Object Type
+          </Button>
         </div>
-        <p className="text-[0.6875rem] text-muted-foreground">
-          聚焦基于本地草稿计算，未保存的新节点与连线也会计入。
-        </p>
-      </section>
-
-      <div className="mt-auto border-t border-border px-4 py-3">
-        <Button
-          variant="destructive"
-          size="sm"
-          className="w-full"
-          onClick={onDelete}
-        >
-          <Trash2Icon data-icon="inline-start" />
-          删除该 Object Type
-        </Button>
       </div>
     </aside>
   )
 }
 
 /**
- * 属性行：name（mono）· display_name · value_type（Select）· 必填 · 删除
- * 全部单行内完成；行级悬停反馈，422 违例内联在行下方。
+ * 属性行（表体行 + 违例子行），两态：
+ * 只读态（默认）——# 序号 / 名称 mono / 显示名 / 类型 badge / 必填勾选图标，
+ * 行悬停轻微反馈，双击整行进入编辑态；
+ * 编辑态——ghost 输入（名称失焦提交并校验）/ ghost Select / 勾选 / 删除
+ * 常显，Escape 退出编辑态。
+ * 422 违例以 colSpan 子行内联在本行下方。
  */
 function PropertyRow({
+  index,
   property,
   messages,
+  editing,
+  onStartEdit,
+  onExitEdit,
   onUpdate,
   onRemove,
 }: {
+  index: number
   property: OntologyProperty
   messages: readonly string[]
+  editing: boolean
+  onStartEdit(): void
+  onExitEdit(): void
   onUpdate(next: OntologyProperty): void
   onRemove(): void
 }) {
   const hasViolations = messages.length > 0
+  const cellBorder = "border-b border-border/50"
   return (
-    <div className={cn("flex flex-col", hasViolations && "bg-destructive/5")}>
-      <div className="flex items-center gap-2 px-4 py-1.5 transition-colors hover:bg-muted/40">
-        <div className="min-w-0 flex-1">
-          <CommitInput
-            mono
-            ariaLabel={`属性 ${property.name} 名称`}
-            value={property.name}
-            validate={validateName}
-            onCommit={(name) => onUpdate({ ...property, name })}
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <CommitInput
-            ariaLabel={`属性 ${property.name} 显示名`}
-            value={property.display_name}
-            validate={validateDisplayName}
-            onCommit={(displayName) =>
-              onUpdate({ ...property, display_name: displayName })
-            }
-          />
-        </div>
-        <Select
-          value={property.value_type}
-          onValueChange={(valueType) =>
-            onUpdate({
-              ...property,
-              value_type: valueType as OntologyPropertyValueType,
-            })
-          }
+    <>
+      <tr
+        tabIndex={editing ? -1 : 0}
+        aria-label={`属性 ${property.name}，双击进入编辑`}
+        onDoubleClick={onStartEdit}
+        onKeyDown={(event) => {
+          if (editing && event.key === "Escape") onExitEdit()
+          if (!editing && event.key === "Enter") onStartEdit()
+        }}
+        className={cn(
+          "outline-none transition-colors",
+          editing ? "bg-muted/50" : "hover:bg-muted/30 focus-visible:bg-muted/30",
+          hasViolations && "bg-destructive/5"
+        )}
+      >
+        <td
+          className={cn(
+            cellBorder,
+            "px-1 py-0.5 text-right font-mono text-[0.625rem] text-muted-foreground"
+          )}
         >
-          <SelectTrigger
-            size="sm"
-            aria-label={`属性 ${property.name} 值类型`}
-            className="w-28 shrink-0 font-mono text-[0.6875rem]"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {VALUE_TYPES.map((valueType) => (
-              <SelectItem
-                key={valueType}
-                value={valueType}
-                className="font-mono text-[0.6875rem]"
-              >
-                {valueType}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <label className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            className="size-3.5 accent-primary"
-            checked={property.required}
-            onChange={(event) =>
-              onUpdate({ ...property, required: event.target.checked })
-            }
-          />
-          必填
-        </label>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`删除属性 ${property.display_name}`}
-          onClick={onRemove}
-          className="shrink-0 text-muted-foreground hover:text-destructive"
-        >
-          <Trash2Icon />
-        </Button>
-      </div>
-      {messages.length > 0 && (
-        <div className="flex flex-col gap-0.5 px-4 pb-1.5">
-          {messages.map((message) => (
-            <p
-              key={message}
-              role="alert"
-              className="text-[0.6875rem] text-destructive"
+          {index}
+        </td>
+        <td className={cn(cellBorder, "px-0.5 py-0.5")}>
+          {editing ? (
+            <CommitInput
+              mono
+              ariaLabel={`属性 ${property.name} 名称`}
+              value={property.name}
+              validate={validatePropertyName}
+              onCommit={(name) => onUpdate({ ...property, name })}
+              className={GHOST_CELL}
+            />
+          ) : (
+            <span className="block truncate px-1.5 font-mono text-xs leading-7">
+              {property.name}
+            </span>
+          )}
+        </td>
+        <td className={cn(cellBorder, "px-0.5 py-0.5")}>
+          {editing ? (
+            <CommitInput
+              ariaLabel={`属性 ${property.name} 显示名`}
+              value={property.display_name}
+              validate={validatePropertyDisplayName}
+              onCommit={(displayName) =>
+                onUpdate({ ...property, display_name: displayName })
+              }
+              className={GHOST_CELL}
+            />
+          ) : (
+            <span className="block truncate px-1.5 text-xs leading-7">
+              {property.display_name}
+            </span>
+          )}
+        </td>
+        <td className={cn(cellBorder, "px-0.5 py-0.5")}>
+          {editing ? (
+            <Select
+              value={property.value_type}
+              onValueChange={(valueType) =>
+                onUpdate({
+                  ...property,
+                  value_type: valueType as OntologyPropertyValueType,
+                })
+              }
             >
-              {message}
-            </p>
-          ))}
-        </div>
+              <SelectTrigger
+                size="sm"
+                aria-label={`属性 ${property.name} 值类型`}
+                className={cn(
+                  GHOST_CELL,
+                  "w-full gap-1 font-mono text-[0.6875rem]"
+                )}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PROPERTY_VALUE_TYPES.map((valueType) => (
+                  <SelectItem
+                    key={valueType}
+                    value={valueType}
+                    className="font-mono text-[0.6875rem]"
+                  >
+                    {valueType}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="mx-1.5 inline-block rounded border border-border/60 bg-muted/40 px-1 font-mono text-[0.625rem] leading-5 text-muted-foreground">
+              {property.value_type}
+            </span>
+          )}
+        </td>
+        <td className={cn(cellBorder, "px-1 py-0.5 text-center")}>
+          {editing ? (
+            <input
+              type="checkbox"
+              aria-label={`属性 ${property.name} 必填`}
+              className="size-3.5 accent-primary"
+              checked={property.required}
+              onChange={(event) =>
+                onUpdate({ ...property, required: event.target.checked })
+              }
+            />
+          ) : property.required ? (
+            <Check aria-label="必填" className="inline size-3.5 text-primary" />
+          ) : (
+            <span aria-hidden className="text-muted-foreground/60">
+              —
+            </span>
+          )}
+        </td>
+        <td className={cn(cellBorder, "px-1 py-0.5")}>
+          {editing && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`删除属性 ${property.display_name}`}
+              onClick={onRemove}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <Trash2Icon />
+            </Button>
+          )}
+        </td>
+      </tr>
+      {hasViolations && (
+        <tr className="bg-destructive/5">
+          <td colSpan={6} className={cn(cellBorder, "px-4 py-1.5")}>
+            {messages.map((message) => (
+              <p
+                key={message}
+                role="alert"
+                className="text-[0.6875rem] text-destructive"
+              >
+                {message}
+              </p>
+            ))}
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   )
 }

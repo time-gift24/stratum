@@ -18,45 +18,26 @@ import type {
   OntologyPropertyValueType,
 } from "@/features/ontology-editor/types"
 import { nodeHue } from "@/features/ontology-editor/hue"
-import { isValidOntologyName } from "@/features/ontology-editor/validation"
+import {
+  nextPropertyName,
+  PROPERTY_VALUE_TYPES,
+  validatePropertyName,
+} from "@/features/ontology-editor/property"
 import { cn } from "@/lib/utils"
 
-import styles from "./ontology-node.module.css"
+import styles from "./ontology-aurora.module.css"
 
 /**
  * Object Type 画布节点（双层结构）：玻璃背板承载头部（display_name + name +
- * 描述），背板顶部衬一层多色极光（ontology-node.module.css 的 .aurora 三段渐变，
- * 色相由节点 ID 稳定散列为 --node-hue 注入容器，每节点不同，blur 化开形成
- * 磨砂染色，仅漫在头部区域）；内层实心面板承载属性列表——属性行内直接增删改（改名失焦提交、value_type
- * shadcn Select、必填勾选、悬停删除、底部虚线「添加属性」行）。
+ * 描述），背板顶部衬一层多色极光（ontology-aurora.module.css 的 .aurora 三段
+ * 渐变，色相由节点 ID 稳定散列为 --node-hue 注入容器，每节点不同，blur 化开
+ * 形成磨砂染色，仅漫在头部区域）；内层实心面板承载属性列表——属性行内直接
+ * 增删改（改名失焦提交、value_type shadcn Select、必填勾选、悬停删除、
+ * 底部虚线「添加属性」行）。
  * 422 违例挂红框与首条消息（完整列表在编辑面板内联展示）；聚焦模式下非邻域
  * 节点淡出。编辑画布经 propertyActions 传入增删改回调；邻域只读画布省略，
  * 属性行退化为只读。
  */
-
-const NAME_HINT =
-  "需匹配 ^[a-z][a-z0-9_]{0,63}$（小写字母开头，可含数字与下划线）"
-
-const VALUE_TYPES: readonly OntologyPropertyValueType[] = [
-  "string",
-  "integer",
-  "number",
-  "boolean",
-  "date",
-  "date_time",
-]
-
-function validateName(next: string): string | null {
-  return isValidOntologyName(next) ? null : NAME_HINT
-}
-
-/** 新属性的自动命名：field_n，取不冲突的最小序号 */
-function nextPropertyName(properties: readonly OntologyProperty[]): string {
-  const taken = new Set(properties.map((property) => property.name))
-  let index = properties.length + 1
-  while (taken.has(`field_${index}`)) index += 1
-  return `field_${index}`
-}
 
 export type ObjectTypePropertyDraft = {
   name: string
@@ -238,7 +219,7 @@ function NodePropertyRow({
             autoFocus
             ariaLabel={`属性 ${property.name} 名称`}
             value={property.name}
-            validate={validateName}
+            validate={validatePropertyName}
             onCommit={(name) => {
               onUpdate({ ...property, name, display_name: name })
               onFinishRename()
@@ -272,7 +253,7 @@ function NodePropertyRow({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {VALUE_TYPES.map((valueType) => (
+          {PROPERTY_VALUE_TYPES.map((valueType) => (
             <SelectItem
               key={valueType}
               value={valueType}

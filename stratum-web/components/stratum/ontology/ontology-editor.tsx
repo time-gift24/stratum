@@ -482,7 +482,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
             )}
 
             {selectedObjectType !== undefined && (
-              <div className="absolute top-3 right-3 bottom-3 w-[28rem]">
+              <div className="absolute top-3 right-3 bottom-3 z-10 w-[30rem]">
                 <ObjectTypePanel
                     objectType={selectedObjectType}
                     messages={

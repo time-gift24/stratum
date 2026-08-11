@@ -48,6 +48,7 @@ export function CommitInput({
   mono,
   ariaLabel,
   autoFocus,
+  className,
 }: {
   value: string
   onCommit(next: string): void
@@ -57,6 +58,8 @@ export function CommitInput({
   ariaLabel?: string
   /** 挂载即聚焦（如画布节点行内改名、新建后立即编辑） */
   autoFocus?: boolean
+  /** 覆盖 Input 外观（如表格单元格的 ghost 样式） */
+  className?: string
 }) {
   const [draft, setDraft] = useState(value)
   const [error, setError] = useState<string | null>(null)
@@ -96,7 +99,7 @@ export function CommitInput({
         onKeyDown={(event) => {
           if (event.key === "Enter") event.currentTarget.blur()
         }}
-        className={cn(mono && "font-mono")}
+        className={cn(mono && "font-mono", className)}
       />
       {error !== null && (
         <p role="alert" className="text-[0.6875rem] text-destructive">
