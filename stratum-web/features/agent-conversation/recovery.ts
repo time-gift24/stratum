@@ -23,6 +23,11 @@ const COLD_BUFFER_MAX_CHARS = 4 * 1024 * 1024
 const STREAM_RESET_CODE = "stream_reset"
 const PROTOCOL_IDENTITY_CODE = "protocol_identity_error"
 
+/** stream_ready 的就绪上限：健康时远快于此。NATS 挂起（连接保有但订阅
+ *  迟迟不建立）时 ready 永远不定夺，历史会话会被事件流阻塞——超时按
+ *  realtime_unavailable 处理，直接读 PG 快照降级展示 */
+const STREAM_READY_TIMEOUT_MS = 3_000
+
 export type RecoveryDependencies = {
   api: Pick<StratumApi, "getAgentRuntime" | "getAgentRuntimeHistory">
   subscribe: typeof subscribeToAgentRuntimeEvents
@@ -30,6 +35,8 @@ export type RecoveryDependencies = {
   saveCursor(agentRuntimeId: string, cursor: string): void
   clearCursor(agentRuntimeId: string): void
   dispatch(action: ConversationAction): void
+  /** 测试注入点：覆盖 STREAM_READY_TIMEOUT_MS */
+  streamReadyTimeoutMs?: number
 }
 
 type SessionState = {
@@ -124,6 +131,19 @@ async function coldBootstrap(
     readyResolve = resolve
     readyReject = reject
   })
+  // 就绪 deadline：NATS 挂起时订阅迟迟不建立（503 只在订阅失败时返回，
+  // 连接保有但无响应是常态），不能让历史展示无限等事件流
+  const readyDeadline = setTimeout(
+    () =>
+      readyReject(
+        new ApiError(
+          "realtime_unavailable",
+          503,
+          "event stream did not become ready in time"
+        )
+      ),
+    dependencies.streamReadyTimeoutMs ?? STREAM_READY_TIMEOUT_MS
+  )
 
   const subscription = dependencies.subscribe({
     baseUrl: "",
@@ -196,7 +216,9 @@ async function coldBootstrap(
 
   try {
     await ready
+    clearTimeout(readyDeadline)
   } catch (error) {
+    clearTimeout(readyDeadline)
     streamControl.abort()
     unlink()
     if (isApiErrorCode(error, "realtime_unavailable")) {

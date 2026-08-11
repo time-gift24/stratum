@@ -481,6 +481,50 @@ describe("runConversationSession cold bootstrap", () => {
     controller.abort()
     await running
   })
+
+  it("treats a stalled subscription (no stream_ready) as realtime_unavailable after the ready deadline", async () => {
+    const actions: ConversationAction[] = []
+    const controller = new AbortController()
+    const streams = controlledSubscriptions()
+    const running = runConversationSession(
+      {
+        api: {
+          getAgentRuntime: vi.fn(() => Promise.resolve(runtimeView())),
+          getAgentRuntimeHistory: vi.fn(() =>
+            Promise.resolve({
+              items: [],
+              through_event_seq: "7",
+              next_before_event_seq: null,
+              has_more: false,
+            })
+          ),
+        },
+        subscribe: streams.subscribe,
+        loadCursor: () => undefined,
+        saveCursor: () => {},
+        clearCursor: () => {},
+        dispatch: (action) => actions.push(action),
+        streamReadyTimeoutMs: 20,
+      },
+      { agentRuntimeId: RUNTIME_ID, signal: controller.signal }
+    )
+
+    // 订阅永不定夺（NATS 挂起：连接保有但 stream_ready 不到达）；
+    // deadline 后必须走 PG 快照降级，历史不被事件流阻塞
+    await waitUntil(() =>
+      actions.some((action) => action.type === "recovery_ready")
+    )
+    expect(actions.some((action) => action.type === "snapshot_loaded")).toBe(
+      true
+    )
+    expect(
+      actions.some(
+        (action) => action.type === "realtime_degraded" && action.degraded
+      )
+    ).toBe(true)
+    controller.abort()
+    await running
+  })
 })
 
 describe("reconcileConversation", () => {
