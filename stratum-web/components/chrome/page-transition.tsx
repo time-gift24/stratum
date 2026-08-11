@@ -6,6 +6,12 @@ import { usePathname, useRouter } from "next/navigation"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
+import {
+  MOTION_DURATION,
+  MOTION_EASE,
+  prefersReducedMotion,
+} from "@/lib/motion"
+
 gsap.registerPlugin(useGSAP)
 
 /**
@@ -14,6 +20,7 @@ gsap.registerPlugin(useGSAP)
  * hash 锚点、外链、修饰键/非主键点击、prefers-reduced-motion 全部绕行（默认行为）。
  * 方向来源：TransitionLink 点击的一次性预告（armedDirection），
  * 否则按 pathname 在 PAGE_ORDER 中的索引差推导（浏览器前进/后退也有正确方向）。
+ * 时长/缓动走全站统一尺度（lib/motion.ts）：进场 base、退场 fast。
  *
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
@@ -24,10 +31,6 @@ const PAGE_ORDER = ["/conversation", "/excalidraw"]
 let pageElement: HTMLElement | null = null
 let armedDirection: 1 | -1 | null = null
 let lastPathname: string | null = null
-
-function prefersReducedMotion() {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
-}
 
 /** 页面容器：路由变化时从新页方向滑入。挂在 (site)/layout。 */
 export function PageTransition({ children }: { children: React.ReactNode }) {
@@ -65,8 +68,8 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
           {
             x: 0,
             opacity: 1,
-            duration: 0.35,
-            ease: "power2.out",
+            duration: MOTION_DURATION.base,
+            ease: MOTION_EASE.enter,
             // 播完清除内联样式：残留 transform 会把 fixed 的 dock 锁进本容器
             // （transform 使祖先成为 fixed 后代的包含块），破坏其视口定位
             clearProps: "transform,opacity",
@@ -118,8 +121,8 @@ export function TransitionLink({
     gsap.to(el, {
       x: -32 * direction,
       opacity: 0,
-      duration: 0.28,
-      ease: "power2.in",
+      duration: MOTION_DURATION.fast,
+      ease: MOTION_EASE.exit,
       overwrite: "auto",
       onComplete: () => {
         router.push(href)

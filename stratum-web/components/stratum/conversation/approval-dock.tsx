@@ -6,6 +6,7 @@ import gsap from "gsap"
 
 import { ApprovalCard } from "@/components/stratum/conversation/approval-card"
 import type { ToolCallApproval } from "@/components/stratum/conversation/types"
+import { MOTION_DURATION, MOTION_EASE, motionDuration } from "@/lib/motion"
 import { cn } from "@/lib/utils"
 
 gsap.registerPlugin(useGSAP)
@@ -16,8 +17,8 @@ gsap.registerPlugin(useGSAP)
  * pointer-events-none，只有卡片本身接收交互。多个待决按到达顺序竖排
  * （新的靠近 composer）。
  *
- * 动画（GSAP，useGSAP 带 scope）：进场 y 20 + autoAlpha 0 + scale 0.98 → 归位
- * （expo.out 0.42s，多卡 stagger 0.05s）；退场 y 16 + 淡出下滑（power2.in 0.3s），
+ * 动画（GSAP，useGSAP 带 scope）：进场 y 20 + autoAlpha 0 + scale 0.98 →
+ * 归位（全站尺度 base，多卡 stagger 0.05s）；退场 y 16 + 淡出下滑（fast），
  * onComplete 后才从 DOM 移除（父组件把消失的审批暂存进 leaving 集合，
  * derive-state-during-render 推导）。卡片在去留间快速切换可打断续播
  * （overwrite: "auto"）。prefers-reduced-motion 时 duration/delay 为 0。
@@ -135,17 +136,14 @@ function ApprovalDockItem({
     () => {
       const element = rootRef.current
       if (!element) return
-      const reduce = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
 
       if (leaving) {
         gsap.to(element, {
           y: 16,
           autoAlpha: 0,
           scale: 0.98,
-          duration: reduce ? 0 : 0.3,
-          ease: "power2.in",
+          duration: motionDuration(MOTION_DURATION.fast),
+          ease: MOTION_EASE.exit,
           overwrite: "auto",
           onComplete: () => onExitDone(entry.view.approvalId),
         })
@@ -157,9 +155,9 @@ function ApprovalDockItem({
           y: 0,
           autoAlpha: 1,
           scale: 1,
-          duration: reduce ? 0 : 0.42,
-          ease: "expo.out",
-          delay: reduce || mountedRef.current ? 0 : index * 0.05,
+          duration: motionDuration(MOTION_DURATION.base),
+          ease: MOTION_EASE.enter,
+          delay: mountedRef.current ? 0 : motionDuration(index * 0.05),
           overwrite: "auto",
         })
       }

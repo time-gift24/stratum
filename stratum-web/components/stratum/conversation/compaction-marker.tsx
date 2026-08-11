@@ -5,6 +5,7 @@ import { ChevronDown, FoldVertical } from "lucide-react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
+import { MOTION_DURATION, MOTION_EASE, motionDuration } from "@/lib/motion"
 import { cn } from "@/lib/utils"
 
 gsap.registerPlugin(useGSAP)
@@ -39,9 +40,6 @@ export const CompactionMarker = memo(function CompactionMarker({
       const inner = innerRef.current
       if (!container || !inner) return
 
-      const reduce = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
       const rem =
         parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
       const target = open
@@ -58,8 +56,8 @@ export const CompactionMarker = memo(function CompactionMarker({
         {
           height: target,
           autoAlpha: open ? 1 : 0,
-          duration: reduce ? 0 : 0.35,
-          ease: "power3.out",
+          duration: motionDuration(MOTION_DURATION.base),
+          ease: MOTION_EASE.enter,
           overwrite: "auto",
           onComplete: () => {
             if (open) gsap.set(container, { clearProps: "height,opacity,visibility" })
