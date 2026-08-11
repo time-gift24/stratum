@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { ArrowDown, Loader2 } from "lucide-react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
+import { ScrollToPlugin } from "gsap/ScrollToPlugin"
 
 import { CompactionMarker } from "@/components/stratum/conversation/compaction-marker"
 import {
@@ -23,11 +24,13 @@ import { Button } from "@/components/ui/button"
 import {
   MOTION_DURATION,
   MOTION_EASE,
+  motionDuration,
   prefersReducedMotion,
 } from "@/lib/motion"
 import { cn } from "@/lib/utils"
 
 gsap.registerPlugin(useGSAP)
+gsap.registerPlugin(ScrollToPlugin)
 
 /** 空态 ⇄ 稳态双向过场的编排参数：composer 滑动与 welcome 淡入/淡出
  * 同起点（都挂在 timeline 0 位），方向只决定 y 差值；时长/缓动全站统一
@@ -42,6 +45,9 @@ const CHOREO = {
 
 /** 滚动到距顶部该阈值内且有更旧分页时自动加载 */
 const OLDER_LOAD_THRESHOLD = 64
+
+/** 距底部该阈值（px）内视为"近底"，新内容自动贴底跟随 */
+const NEAR_BOTTOM_THRESHOLD = 80
 
 function renderItem(
   item: ConversationItem,
@@ -83,7 +89,11 @@ function renderItem(
 /**
  * ConversationThread —— 对话消息列表（assistant-ui thread 底稿的展示层 fork）。
  * 结构：可滚动 viewport（消息列居中，max-w 44rem）+ composer。数据驱动：
- * items 由调用方持有；滚动到底部仅在用户本就近底时自动跟随，上翻后不打扰。
+ * items 由调用方持有。滚动模型（跟随与否只由用户意图决定）：
+ * 发送 → 垫片（内容不够时在消息列底部垫出可滚空间）+ 平滑锚定到视口
+ * 上 1/3 处，一次性；流式填满垫片 → 撤垫片并开启贴底跟随；
+ * 跟随开启时新内容贴底；用户任何向上滚动手势（wheel）立即关跟随；
+ * 滚回底部（<80px）再开；切换会话全部重置。
  *
  * items 混合三类条目（升序渲染，id = agentRuntimeId:eventSeq 十进制字符串）：
  * 普通消息、TranscriptCompacted 可折叠 marker、安全 terminal marker。
@@ -176,6 +186,19 @@ export function ConversationThread({
     scrollTop: number
   } | null>(null)
   const [nearBottom, setNearBottom] = useState(true)
+  // 已锚定的 sendVersion：每次发送只锚定一次（1/3 处），流式增长不再贴底
+  const anchoredSendRef = useRef(0)
+  // 发送锚定的垫片（px）：发送时内容不足以把用户消息推到 1/3 处，
+  // 在消息列底部垫出可滚空间；流式内容填满后自动撤掉。
+  // 会话切换时经 derive-state-during-render 整体重置
+  const [sendAnchor, setSendAnchor] = useState<{
+    conversationId: string | null | undefined
+    target: number | null
+    spacer: number
+  }>({ conversationId, target: null, spacer: 0 })
+  if (sendAnchor.conversationId !== conversationId) {
+    setSendAnchor({ conversationId, target: null, spacer: 0 })
+  }
 
   // 过场信号的单一事实源（纯函数归约，详见 thread-transition.ts）：
   // render 相位（布局/welcome 可见性/switching 透明度）与 GSAP effect
@@ -191,13 +214,79 @@ export function ConversationThread({
   if (reduced !== transition) setTransition(reduced)
   const { action, switching: isSwitching, leavingEmpty } = reduced
 
-  // 近底时新内容（含流式增长）瞬时贴底——流式期间每 30ms 一帧，
-  // smooth 会反复重启动画造成滞后抖动；平滑只留给用户主动点的「回到底部」
+  // 发送锚定，相位 1（计算）：发送时用户消息先落位；内容不足以把它推到
+  // 视口上 1/3 处时，在消息列底部垫出缺失的滚动空间（垫片）。锚定等
+  // FLIP/切换过场结束才测量（过早量出的位置是错的）。滚动不在此执行——
+  // 垫片随 setState 下一帧才进 DOM，立刻滚动会因最大滚动高度不足被钳住
   useEffect(() => {
     const viewport = viewportRef.current
-    if (!viewport || !nearBottom) return
+    if (!viewport) return
+    if (
+      sendVersion === undefined ||
+      sendVersion <= anchoredSendRef.current ||
+      isSwitching ||
+      leavingEmpty
+    )
+      return
+    const userMessages = viewport.querySelectorAll(
+      '[data-slot="user-message"]'
+    )
+    const last = userMessages[userMessages.length - 1]
+    if (last === undefined) return
+    anchoredSendRef.current = sendVersion
+    const target = Math.max(
+      0,
+      viewport.scrollTop +
+        last.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top -
+        viewport.clientHeight / 3
+    )
+    setSendAnchor({
+      conversationId,
+      target,
+      spacer: Math.max(
+        0,
+        target - (viewport.scrollHeight - viewport.clientHeight)
+      ),
+    })
+  }, [items, sendVersion, conversationId, isSwitching, leavingEmpty])
+
+  // 发送锚定，相位 2（执行）：垫片已入 DOM、目标可达后平滑滚动到位
+  //（GSAP base 档，reduced-motion 瞬时），完成后按最终位置判定近底
+  useEffect(() => {
+    const viewport = viewportRef.current
+    const target = sendAnchor.target
+    if (!viewport || target === null) return
+    gsap.to(viewport, {
+      scrollTo: { y: target },
+      duration: motionDuration(MOTION_DURATION.base),
+      ease: MOTION_EASE.enter,
+      overwrite: "auto",
+      onComplete: () =>
+        setNearBottom(
+          viewport.scrollHeight - target - viewport.clientHeight <
+            NEAR_BOTTOM_THRESHOLD
+        ),
+    })
+  }, [sendAnchor])
+
+  // 垫片自持 + 近底跟随：流式内容填满垫片（天然可达锚点）即撤掉并恢复
+  // 贴底跟随——新文段触底后继续自动滚动；否则仅在用户近底时跟随，
+  // 上翻不打扰
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    if (sendAnchor.spacer > 0 && sendAnchor.target !== null) {
+      const naturalMax =
+        viewport.scrollHeight - sendAnchor.spacer - viewport.clientHeight
+      if (naturalMax >= sendAnchor.target) {
+        setSendAnchor({ conversationId, target: null, spacer: 0 })
+        setNearBottom(true)
+      }
+    }
+    if (!nearBottom) return
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
-  }, [items, nearBottom])
+  }, [items, nearBottom, sendAnchor, conversationId])
 
   // 向上分页完成后恢复滚动位置：旧条目 prepend 在顶部，scrollHeight 增量
   // 加回 scrollTop，用户视口不动
@@ -362,7 +451,7 @@ export function ConversationThread({
     if (!viewport) return
     const gap =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    setNearBottom(gap < 80)
+    setNearBottom(gap < NEAR_BOTTOM_THRESHOLD)
 
     // 接近顶部且还有更旧分页：记录滚动锚点后请求上一页
     if (
@@ -380,8 +469,9 @@ export function ConversationThread({
   }
 
   const scrollToBottom = () => {
-    viewportRef.current?.scrollTo({
-      top: viewportRef.current.scrollHeight,
+    const viewport = viewportRef.current
+    viewport?.scrollTo({
+      top: viewport.scrollHeight - sendAnchor.spacer,
       behavior: "smooth",
     })
   }
@@ -395,6 +485,11 @@ export function ConversationThread({
       <div
         ref={viewportRef}
         onScroll={handleScroll}
+        onWheel={(event) => {
+          // 用户向上滚动手势立即关掉贴底跟随（程序滚动不触发 wheel）——
+          // 否则流式每帧贴底会把用户拽回去，"向上翻"永远失效
+          if (event.deltaY < 0) setNearBottom(false)
+        }}
         className="relative flex flex-1 flex-col overflow-x-hidden overflow-y-auto"
       >
         <div className="relative mx-auto flex w-full max-w-[44rem] flex-1 flex-col px-4 pt-6">
@@ -435,6 +530,11 @@ export function ConversationThread({
               })
             )}
           </div>
+
+          {/* 发送锚定垫片：流式回复的生长空间（填满即撤），见上方 effect */}
+          {sendAnchor.spacer > 0 ? (
+            <div aria-hidden style={{ height: sendAnchor.spacer }} />
+          ) : null}
 
           {composer ? (
             <div
