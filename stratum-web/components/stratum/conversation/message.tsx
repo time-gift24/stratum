@@ -16,6 +16,7 @@ import {
 import { Streamdown } from "streamdown"
 
 import type { ConversationMessage } from "@/components/stratum/conversation/types"
+import { Notice } from "@/components/stratum/conversation/notice"
 import { Reasoning } from "@/components/stratum/conversation/reasoning"
 import { ToolGroup } from "@/components/stratum/conversation/tool-group"
 import { useSmoothText } from "@/hooks/use-smooth-text"
@@ -278,26 +279,26 @@ export const AssistantMessage = memo(function AssistantMessage({
         </Streamdown>
       </div>
       {message.status === "error" ? (
-        <div className="mt-2 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-foreground">
-          <TriangleAlert
-            aria-hidden
-            className="size-4 shrink-0 text-destructive"
-          />
-          <p className="min-w-0 flex-1 text-muted-foreground">
-            生成中断，以上内容不完整。
-          </p>
-          {onReload ? (
-            <Button
-              variant="outline"
-              size="xs"
-              className="shrink-0 rounded-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              onClick={() => onReload(message)}
-            >
-              <RotateCcw aria-hidden />
-              重试
-            </Button>
-          ) : null}
-        </div>
+        <Notice
+          tone="error"
+          icon={TriangleAlert}
+          className="mt-2"
+          action={
+            onReload ? (
+              <Button
+                variant="outline"
+                size="xs"
+                className="shrink-0 rounded-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => onReload(message)}
+              >
+                <RotateCcw aria-hidden />
+                重试
+              </Button>
+            ) : undefined
+          }
+        >
+          生成中断，以上内容不完整。
+        </Notice>
       ) : null}
       <div className="mt-1.5 flex min-h-7 items-center gap-1">
         {versions ? (
