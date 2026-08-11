@@ -49,8 +49,8 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 3. **复用依靠组件边界。** 重复模式提取为 `components/stratum/` 下的模块级 React 组件。
 4. **颜色只消费语义 Token。** 不写 Hex、RGB 或同义颜色变量；状态优先使用 `data-*` / ARIA 变体。
 5. **优先使用 Tailwind v4 标准能力。** 任意值仅用于 Token 无法表达的真实约束；重复的任意值提升为 `@theme` Token。
-6. **React 结构必须可维护。** 不在组件函数内部声明子组件；可推导的值不另建 state；effect 依赖保持稳定；仅对真正昂贵的计算使用 memoize。
-7. **外部组件保持隔离。** `components/ui/`、`components/react-bits/`、`components/assistant-ui/` 的适配通过 props、工具类、CSS 变量或包裹组件完成，不修改供应组件内部实现。
+6. **React 结构必须可维护。** 不在组件函数内部声明子组件；可推导的值不另建 state；effect 依赖保持稳定；仅对真实昂贵计算 memoize。不要用 ref 缓存上一次渲染的值（当前 `react-hooks` lint 禁止渲染期读 `ref.current`，包括 `useMemo` 内）；需要"上一次已提交值"时用 derive-during-render（参照 `site-chrome.tsx` / `ontology-canvas.tsx` 的既有模式）。
+7. **外部组件保持隔离。** `components/ui/`、`components/react-bits/`、`components/assistant-ui/` 的适配通过 props、utility class、CSS 变量或包裹组件完成，不改供应组件内部实现。
 
 ## 设计上下文
 

@@ -95,10 +95,18 @@ export const initialOntologyEditorState: OntologyEditorState = {
 }
 
 // 键序无关的深度相等：dirty 判定与「远端是否等于 in_flight」都依赖它。
+// 先做引用与集合大小的快路径，避免每次 dispatch 都对两份文档做全量 canonicalize。
 export function ontologyDocumentsEqual(
   left: OntologyDocument,
   right: OntologyDocument
 ): boolean {
+  if (left === right) return true
+  if (
+    left.object_types.length !== right.object_types.length ||
+    left.link_types.length !== right.link_types.length ||
+    left.canvas.positions.length !== right.canvas.positions.length
+  )
+    return false
   return canonicalize(left) === canonicalize(right)
 }
 

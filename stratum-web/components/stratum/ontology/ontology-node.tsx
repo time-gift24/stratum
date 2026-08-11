@@ -1,25 +1,34 @@
 "use client"
 
-import { useState } from "react"
+import { useState, type CSSProperties } from "react"
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react"
 import { CircleAlert, Plus, Trash2Icon } from "lucide-react"
 
+import { CommitInput } from "@/components/stratum/ontology/form-controls"
 import {
-  CommitInput,
-  nativeSelectClassName,
-} from "@/components/stratum/ontology/form-controls"
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import type {
   OntologyObjectType,
   OntologyProperty,
   OntologyPropertyValueType,
 } from "@/features/ontology-editor/types"
+import { nodeHue } from "@/features/ontology-editor/hue"
 import { isValidOntologyName } from "@/features/ontology-editor/validation"
 import { cn } from "@/lib/utils"
 
+import styles from "./ontology-node.module.css"
+
 /**
  * Object Type 画布节点（双层结构）：玻璃背板承载头部（display_name + name +
- * 描述），内层实心面板承载属性列表——属性行内直接增删改（改名失焦提交、
- * value_type 六选、必填勾选、悬停删除、底部虚线「添加属性」行）。
+ * 描述），背板顶部衬一层多色极光（ontology-node.module.css 的 .aurora 三段渐变，
+ * 色相由节点 ID 稳定散列为 --node-hue 注入容器，每节点不同，blur 化开形成
+ * 磨砂染色，仅漫在头部区域）；内层实心面板承载属性列表——属性行内直接增删改（改名失焦提交、value_type
+ * shadcn Select、必填勾选、悬停删除、底部虚线「添加属性」行）。
  * 422 违例挂红框与首条消息（完整列表在编辑面板内联展示）；聚焦模式下非邻域
  * 节点淡出。编辑画布经 propertyActions 传入增删改回调；邻域只读画布省略，
  * 属性行退化为只读。
@@ -103,9 +112,18 @@ export function OntologyObjectTypeNode({
         hasViolations && "border-destructive ring-2 ring-destructive/30",
         dimmed && "opacity-30"
       )}
+      style={{ "--node-hue": nodeHue(objectType.id) } as CSSProperties}
     >
       <Handle type="target" position={Position.Left} />
-      <header className="px-1.5 pt-0.5 pb-1.5">
+      {/* 顶部极光：色相按节点 ID 散列（--node-hue），blur 化开只漫在头部 */}
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-x-3 top-0 h-14 rounded-t-2xl blur-xl",
+          styles.aurora
+        )}
+      />
+      <header className="relative px-1.5 pt-0.5 pb-1.5">
         <p className="truncate text-sm font-medium">{objectType.display_name}</p>
         <p className="truncate font-mono text-[0.6875rem] text-muted-foreground">
           {objectType.name}
@@ -117,7 +135,7 @@ export function OntologyObjectTypeNode({
             </p>
           )}
       </header>
-      <div className="nodrag flex flex-col gap-0.5 rounded-xl border border-border/50 bg-popover px-1.5 py-1.5 text-popover-foreground">
+      <div className="nodrag relative flex flex-col gap-0.5 rounded-xl border border-border/50 bg-popover px-1.5 py-1.5 text-popover-foreground">
         {objectType.properties.length === 0 && (
           <p className="px-1 py-0.5 text-[0.6875rem] text-muted-foreground">
             暂无属性
@@ -172,7 +190,7 @@ export function OntologyObjectTypeNode({
 /**
  * 属性行：display_name 主文本 + mono value_type + 必填标记。
  * 有 onUpdate/onRemove（编辑画布）时行内可改：点名字进入失焦提交的改名输入，
- * value_type 原生 select、必填 checkbox、删除按钮悬停显现；否则整行只读。
+ * value_type shadcn Select、必填 checkbox、删除按钮悬停显现；否则整行只读。
  * 节点层改名以 name 为准（需通过命名校验），display_name 同步为同值；
  * 两者需要不同时走编辑面板分别修改。
  */
@@ -237,26 +255,34 @@ function NodePropertyRow({
           {property.name}
         </button>
       )}
-      <select
-        aria-label={`属性 ${property.name} 值类型`}
-        className={cn(
-          nativeSelectClassName,
-          "nowheel h-6 w-auto shrink-0 px-1 font-mono text-[0.625rem]"
-        )}
+      <Select
         value={property.value_type}
-        onChange={(event) =>
+        onValueChange={(valueType) =>
           onUpdate({
             ...property,
-            value_type: event.target.value as OntologyPropertyValueType,
+            value_type: valueType as OntologyPropertyValueType,
           })
         }
       >
-        {VALUE_TYPES.map((valueType) => (
-          <option key={valueType} value={valueType}>
-            {valueType}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger
+          size="sm"
+          aria-label={`属性 ${property.name} 值类型`}
+          className="nodrag nowheel w-auto shrink-0 gap-1 px-1.5 py-0 font-mono text-[0.625rem]"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {VALUE_TYPES.map((valueType) => (
+            <SelectItem
+              key={valueType}
+              value={valueType}
+              className="font-mono text-[0.6875rem]"
+            >
+              {valueType}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <input
         type="checkbox"
         aria-label={`属性 ${property.name} 必填`}

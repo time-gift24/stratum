@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
 
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
-import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
+import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 import { createUuidV7 } from "@/features/ontology-editor/ids"
 import {
   browserOntologyDraftStore,
@@ -102,13 +102,17 @@ export function useOntologyEditor(
     stateRef.current = state
   }, [state])
 
-  // 加载：GET → acknowledged + candidate 深拷贝 → 检查 IndexedDB 草稿
+  // 加载：GET 与 IndexedDB 草稿读取并发 → acknowledged + candidate 深拷贝 → 草稿处置
   useEffect(() => {
     if (ontologyId === null) return
     let cancelled = false
 
     dispatch({ type: "load_started", ontologyId })
     void (async () => {
+      // 草稿读取与 GET 同时发出；先挂 noop catch，避免 GET 先失败时草稿
+      // Promise 成为 unhandled rejection（真正 await 时仍会抛错）
+      const draftPromise = draftStore?.loadDraft(ontologyId) ?? null
+      draftPromise?.catch(() => {})
       try {
         const resource = await api.getOntology(ontologyId)
         if (cancelled) return
@@ -119,14 +123,14 @@ export function useOntologyEditor(
           etag: resource.etag,
         })
 
-        if (draftStore === null) return
-        const draft = await draftStore.loadDraft(ontologyId)
+        if (draftPromise === null) return
+        const draft = await draftPromise
         if (cancelled) return
         setDraftCheckedId(ontologyId)
         if (draft === null) return
         if (ontologyDocumentsEqual(draft.candidate, resource.document)) {
           // 草稿与 acknowledged 一致：无需提示，直接清掉
-          void draftStore.clearDraft(ontologyId).catch(() => {})
+          void draftStore?.clearDraft(ontologyId).catch(() => {})
           return
         }
         dispatch({ type: "draft_found", draft })
@@ -144,14 +148,16 @@ export function useOntologyEditor(
 
   const dirty = isOntologyEditorDirty(state)
 
-  // 草稿持久化：candidate 变化（dirty）时防抖写入；干净时清除
+  // 草稿持久化：candidate 变化（dirty）时防抖写入；干净时清除。
+  // 依赖收窄到实际读取的原语，避免无关 dispatch 重置防抖计时器。
+  const phase = state.phase
+  const candidate = state.candidate
+  const baseEtag = state.acknowledged?.etag
   useEffect(() => {
     if (draftStore === null || ontologyId === null) return
-    if (state.phase !== "ready") return
+    if (phase !== "ready") return
 
     if (dirty) {
-      const candidate = state.candidate
-      const baseEtag = state.acknowledged?.etag
       if (candidate === null || baseEtag === undefined) return
       const timer = setTimeout(() => {
         // 有意吞掉错误：草稿持久化失败不影响编辑主流程，草稿仅用于崩溃恢复
@@ -170,7 +176,15 @@ export function useOntologyEditor(
       // 有意吞掉错误：草稿持久化失败不影响编辑主流程，草稿仅用于崩溃恢复
       void draftStore.clearDraft(ontologyId).catch(() => {})
     return undefined
-  }, [draftStore, ontologyId, state, dirty, draftCheckedId])
+  }, [
+    draftStore,
+    ontologyId,
+    phase,
+    candidate,
+    baseEtag,
+    dirty,
+    draftCheckedId,
+  ])
 
   const reload = useCallback(() => {
     setReloadVersion((version) => version + 1)

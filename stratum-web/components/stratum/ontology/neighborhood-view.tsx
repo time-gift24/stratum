@@ -4,16 +4,21 @@ import { useMemo, useState } from "react"
 import { Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { nativeSelectClassName } from "@/components/stratum/ontology/form-controls"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { NeighborhoodCanvas } from "@/components/stratum/ontology/ontology-canvas"
 import { ApiError } from "@/lib/stratum/api"
-import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
+import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import type {
   OntologyNeighborhood,
   OntologyObjectType,
 } from "@/features/ontology-editor/types"
-import { cn } from "@/lib/utils"
 
 /**
  * Neighborhood 只读聚焦视图（持久化图）：选择起点 object type 与 depth
@@ -66,31 +71,36 @@ export function NeighborhoodView({
         <span className="text-xs text-muted-foreground">
           只读邻域（持久化图，不含未保存更改）
         </span>
-        <select
-          aria-label="邻域起点 Object Type"
-          className={cn(nativeSelectClassName, "w-56")}
-          value={originId}
-          onChange={(event) => setOriginId(event.target.value)}
+        <Select
+          value={originId === "" ? null : originId}
+          onValueChange={(next) => setOriginId(next ?? "")}
         >
-          <option value="">选择起点 Object Type…</option>
-          {objectTypes.map((objectType) => (
-            <option key={objectType.id} value={objectType.id}>
-              {objectType.display_name}（{objectType.name}）
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="邻域深度"
-          className={cn(nativeSelectClassName, "w-24")}
+          <SelectTrigger aria-label="邻域起点 Object Type" className="w-56">
+            <SelectValue placeholder="选择起点 Object Type…" />
+          </SelectTrigger>
+          <SelectContent>
+            {objectTypes.map((objectType) => (
+              <SelectItem key={objectType.id} value={objectType.id}>
+                {objectType.display_name}（{objectType.name}）
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
           value={depth}
-          onChange={(event) => setDepth(Number(event.target.value))}
+          onValueChange={(next) => setDepth(next ?? 1)}
         >
-          {Array.from({ length: MAX_NEIGHBORHOOD_DEPTH + 1 }, (_, value) => (
-            <option key={value} value={value}>
-              深度 {value}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="邻域深度" className="w-24">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Array.from({ length: MAX_NEIGHBORHOOD_DEPTH + 1 }, (_, value) => (
+              <SelectItem key={value} value={value}>
+                深度 {value}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button
           size="sm"
           disabled={originId === "" || status.kind === "loading"}

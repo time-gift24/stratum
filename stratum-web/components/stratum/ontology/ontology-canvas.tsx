@@ -50,6 +50,10 @@ const edgeTypes = { ontologyLinkType: OntologyLinkTypeEdge }
 
 const MINIMAP_PROPS = { pannable: true, zoomable: true } as const
 
+// 共享空违例列表 / 边箭头：避免每次 derive 分配新对象，保持 node/edge data 引用稳定
+const EMPTY_MESSAGES: readonly string[] = []
+const EDGE_MARKER_END = { type: MarkerType.ArrowClosed } as const
+
 export type CanvasSelection = {
   kind: "objectType" | "linkType"
   id: string
@@ -57,6 +61,8 @@ export type CanvasSelection = {
 
 type CanvasMessages = ReadonlyMap<string, readonly string[]>
 
+// reducer 保证未触碰的 objectType/linkType 引用不变；对象复用发生在下方的
+// derive-during-render 重同步里（拿新 derive 结果与渲染中的 node/edge 比对）。
 function toNodes(
   document: OntologyDocument,
   focus: LocalNeighborhood | null,
@@ -70,7 +76,7 @@ function toNodes(
     position: positions.get(objectType.id) ?? { x: 0, y: 0 },
     data: {
       objectType,
-      violations: objectViolations.get(objectType.id) ?? [],
+      violations: objectViolations.get(objectType.id) ?? EMPTY_MESSAGES,
       dimmed: focus !== null && !focus.objectTypeIds.has(objectType.id),
       propertyActions,
     },
@@ -82,21 +88,22 @@ function toEdges(
   focus: LocalNeighborhood | null,
   linkViolations: CanvasMessages
 ): LinkTypeEdge[] {
-  return linkTypes.map((linkType) => ({
-    id: linkType.id,
-    type: "ontologyLinkType" as const,
-    source: linkType.source_object_type_id,
-    target: linkType.target_object_type_id,
-    markerEnd: { type: MarkerType.ArrowClosed },
-    className: cn(
-      focus !== null && !focus.linkTypeIds.has(linkType.id) && "edgeDimmed"
-    ),
-    data: {
-      linkType,
-      violations: linkViolations.get(linkType.id) ?? [],
-      dimmed: focus !== null && !focus.linkTypeIds.has(linkType.id),
-    },
-  }))
+  return linkTypes.map((linkType) => {
+    const dimmed = focus !== null && !focus.linkTypeIds.has(linkType.id)
+    return {
+      id: linkType.id,
+      type: "ontologyLinkType" as const,
+      source: linkType.source_object_type_id,
+      target: linkType.target_object_type_id,
+      markerEnd: EDGE_MARKER_END,
+      className: cn(dimmed && "edgeDimmed"),
+      data: {
+        linkType,
+        violations: linkViolations.get(linkType.id) ?? EMPTY_MESSAGES,
+        dimmed,
+      },
+    }
+  })
 }
 
 export function OntologyCanvas({
@@ -136,23 +143,44 @@ export function OntologyCanvas({
 
   if (baseNodes !== prevBase.nodes) {
     setPrevBase({ nodes: baseNodes, edges: baseEdges })
+    const beforeById = new Map(nodes.map((entry) => [entry.id, entry]))
     setNodes(
       baseNodes.map((node) => {
-        const before = nodes.find((entry) => entry.id === node.id)
-        return before === undefined
-          ? node
-          : { ...node, selected: before.selected }
+        const before = beforeById.get(node.id)
+        if (before === undefined) return node
+        // 输入（实体/违例数组引用、dimmed、propertyActions、坐标）全部一致时
+        // 复用渲染中的对象，顺带保留 selected 与本地测量/拖拽态；
+        // 否则仅把内部选中态搬到新对象上
+        if (
+          before.data.objectType === node.data.objectType &&
+          before.data.violations === node.data.violations &&
+          before.data.dimmed === node.data.dimmed &&
+          before.data.propertyActions === node.data.propertyActions &&
+          before.position.x === node.position.x &&
+          before.position.y === node.position.y
+        )
+          return before
+        return before.selected ? { ...node, selected: true } : node
       })
     )
   }
   if (baseEdges !== prevBase.edges) {
     setPrevBase({ nodes: baseNodes, edges: baseEdges })
+    const beforeById = new Map(edges.map((entry) => [entry.id, entry]))
     setEdges(
       baseEdges.map((edge) => {
-        const before = edges.find((entry) => entry.id === edge.id)
-        return before === undefined
-          ? edge
-          : { ...edge, selected: before.selected }
+        const before = beforeById.get(edge.id)
+        const beforeData = before?.data
+        const data = edge.data
+        if (before === undefined || beforeData === undefined || data === undefined)
+          return edge
+        if (
+          beforeData.linkType === data.linkType &&
+          beforeData.violations === data.violations &&
+          beforeData.dimmed === data.dimmed
+        )
+          return before
+        return before.selected ? { ...edge, selected: true } : edge
       })
     )
   }
@@ -239,7 +267,7 @@ export function NeighborhoodCanvas({
       type: "ontologyObjectType" as const,
       position: positions.get(objectType.id) ?? { x: 0, y: 0 },
       draggable: false,
-      data: { objectType, violations: [], dimmed: false },
+      data: { objectType, violations: EMPTY_MESSAGES, dimmed: false },
     }))
   }, [neighborhood])
 
@@ -250,9 +278,9 @@ export function NeighborhoodCanvas({
         type: "ontologyLinkType" as const,
         source: linkType.source_object_type_id,
         target: linkType.target_object_type_id,
-        markerEnd: { type: MarkerType.ArrowClosed },
+        markerEnd: EDGE_MARKER_END,
         selectable: false,
-        data: { linkType, violations: [], dimmed: false },
+        data: { linkType, violations: EMPTY_MESSAGES, dimmed: false },
       })),
     [neighborhood]
   )

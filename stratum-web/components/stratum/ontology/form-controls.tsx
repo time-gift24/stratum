@@ -7,8 +7,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 /**
- * 编辑面板共享控件：失焦/回车提交的文本输入（本地草稿态，非法值不提交），
- * 原生 select/checkbox 的 token 化样式。name 类字段经 validate 先行校验。
+ * 编辑面板共享控件：失焦/回车提交的文本输入（本地草稿态，非法值不提交）。
+ * name 类字段经 validate 先行校验。
  */
 
 export function FieldRow({
@@ -138,6 +138,3 @@ export function CommitTextarea({
     />
   )
 }
-
-export const nativeSelectClassName =
-  "h-7 w-full rounded-md border border-input bg-input/20 px-2 text-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"

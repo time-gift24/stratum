@@ -88,22 +88,31 @@ export function OntologyEditor({ ontologyId }: { ontologyId: string }) {
 }
 
 /** 422 / 客户端校验违例按映射目标分组：节点、属性、边内联，其余进全局区 */
+type GroupedViolations = {
+  objectViolations: ReadonlyMap<string, readonly string[]>
+  propertyViolations: ReadonlyMap<string, readonly string[]>
+  linkViolations: ReadonlyMap<string, readonly string[]>
+  globalViolations: readonly OntologyViolation[]
+}
+
+// 无违例时共享同一冻结对象，保持 prop 引用稳定，避免画布无谓重渲染
+const EMPTY_GROUPED_VIOLATIONS: GroupedViolations = Object.freeze({
+  objectViolations: new Map<string, readonly string[]>(),
+  propertyViolations: new Map<string, readonly string[]>(),
+  linkViolations: new Map<string, readonly string[]>(),
+  globalViolations: Object.freeze([]) as readonly OntologyViolation[],
+})
+
 function groupViolations(
   document: OntologyEditor["state"]["candidate"],
   violations: readonly OntologyViolation[] | null
-) {
+): GroupedViolations {
+  if (document === null || violations === null || violations.length === 0)
+    return EMPTY_GROUPED_VIOLATIONS
   const objectViolations = new Map<string, string[]>()
   const propertyViolations = new Map<string, string[]>()
   const linkViolations = new Map<string, string[]>()
   const globalViolations: OntologyViolation[] = []
-  if (document === null || violations === null || violations.length === 0) {
-    return {
-      objectViolations,
-      propertyViolations,
-      linkViolations,
-      globalViolations,
-    }
-  }
   for (const { violation, target } of mapViolations(document, violations)) {
     const push = (map: Map<string, string[]>, key: string) => {
       const bucket = map.get(key)
@@ -139,7 +148,7 @@ function propertyMessagesFor(
 }
 
 function ReadyEditor({ editor }: { editor: OntologyEditor }) {
-  const { state, dirty } = editor
+  const { state, dirty, save } = editor
   const candidate = state.candidate
 
   const [selection, setSelection] = useState<CanvasSelection>(null)
@@ -224,8 +233,8 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
       return
     }
     setClientViolations(null)
-    await editor.save()
-  }, [candidate, editor])
+    await save()
+  }, [candidate, save])
 
   if (candidate === null) return null
 
@@ -473,7 +482,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
             )}
 
             {selectedObjectType !== undefined && (
-              <div className="absolute top-3 right-3 bottom-3 w-80">
+              <div className="absolute top-3 right-3 bottom-3 w-[28rem]">
                 <ObjectTypePanel
                     objectType={selectedObjectType}
                     messages={

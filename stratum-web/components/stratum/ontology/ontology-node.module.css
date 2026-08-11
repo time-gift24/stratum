@@ -1,0 +1,24 @@
+/**
+ * 节点顶部极光：三段 oklch 渐变，blur 化开成磨砂染色。
+ * 必须是真实 class 而非自定义属性——自定义属性在 :root 计算时就固化 var()，
+ * 后代节点覆盖的 --node-hue 无法生效；真实属性在使用处解析，才能按节点
+ * 继承容器注入的 --node-hue（features/ontology-editor/hue.ts 的 nodeHue）。
+ * 亮暗两态同一套规则，随 .dark 切换；--node-hue 缺省 240（蓝）。
+ */
+.aurora {
+  background-image: linear-gradient(
+    90deg,
+    oklch(0.82 0.09 var(--node-hue, 240) / 35%),
+    oklch(0.78 0.11 calc(var(--node-hue, 240) + 60) / 30%),
+    oklch(0.82 0.11 calc(var(--node-hue, 240) + 110) / 35%)
+  );
+}
+
+:global(.dark) .aurora {
+  background-image: linear-gradient(
+    90deg,
+    oklch(0.72 0.13 var(--node-hue, 240) / 45%),
+    oklch(0.7 0.15 calc(var(--node-hue, 240) + 60) / 40%),
+    oklch(0.75 0.15 calc(var(--node-hue, 240) + 110) / 45%)
+  );
+}

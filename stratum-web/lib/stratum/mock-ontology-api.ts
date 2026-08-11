@@ -1,6 +1,7 @@
 // 开发预览用的 Ontology API 内存 mock。仅在
 // NEXT_PUBLIC_STRATUM_API_MOCK=ontology 且调用方未显式传入 api 时，
-// 由 resolveOntologyApi 启用；未设置环境变量时行为与之前完全一致。
+// 由 lib/stratum/ontology-api.ts 的 resolveOntologyApi 经动态 import 启用；
+// 未设置环境变量时该模块不会进入运行时加载路径。
 // 语义对齐 docs/ontology/API.md：强 ETag（"rev-N"，PUT 成功即递增）、
 // 404 ontology_not_found / object_type_not_found、409 ontology_name_conflict、
 // 412 ontology_precondition_failed、邻域按持久化文档做真实双向 BFS。
@@ -8,8 +9,6 @@
 
 import {
   ApiError,
-  createStratumApi,
-  STRATUM_API_BASE_URL,
   type OntologyResource,
   type StratumApi,
 } from "@/lib/stratum/api"
@@ -207,6 +206,12 @@ export function createMockOntologyApi(options?: {
         )
 
       const maxDepth = Math.max(0, Math.min(5, depth ?? 1))
+      // 邻接表：按文档顺序为每个 Object Type 累计邻居，BFS 不再逐节点全表扫描
+      const adjacency = new Map<string, string[]>()
+      for (const link of document.link_types) {
+        pushNeighbor(adjacency, link.source_object_type_id, link.target_object_type_id)
+        pushNeighbor(adjacency, link.target_object_type_id, link.source_object_type_id)
+      }
       // 沿 Link Type 双向 BFS，记录每个 Object Type 的最短跳数
       const distances = new Map<string, number>([[objectTypeId, 0]])
       const queue = [objectTypeId]
@@ -214,14 +219,8 @@ export function createMockOntologyApi(options?: {
         const current = queue[head] as string
         const currentDepth = distances.get(current) as number
         if (currentDepth >= maxDepth) continue
-        for (const link of document.link_types) {
-          const neighbor =
-            link.source_object_type_id === current
-              ? link.target_object_type_id
-              : link.target_object_type_id === current
-                ? link.source_object_type_id
-                : null
-          if (neighbor === null || distances.has(neighbor)) continue
+        for (const neighbor of adjacency.get(current) ?? []) {
+          if (distances.has(neighbor)) continue
           distances.set(neighbor, currentDepth + 1)
           queue.push(neighbor)
         }
@@ -251,41 +250,14 @@ export function createMockOntologyApi(options?: {
   }
 }
 
-// 两个 hook 共用的解析入口：显式传入的 api 永远优先；
-// 环境变量开启时返回模块级单例 mock，保证列表页与编辑器共享同一份内存数据。
-let sharedMockApi: StratumApi | null = null
-
-export function resolveOntologyApi(
-  apiOption: StratumApi | undefined
-): StratumApi {
-  if (apiOption !== undefined) return apiOption
-  if (process.env.NEXT_PUBLIC_STRATUM_API_MOCK !== "ontology")
-    return createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
-  sharedMockApi ??= withUnsupportedMethods(createMockOntologyApi())
-  return sharedMockApi
-}
-
-// mock 只覆盖 Ontology 方法；其余 StratumApi 方法以显式 501 兜底，保持类型完整。
-function withUnsupportedMethods(ontology: OntologyApi): StratumApi {
-  const unsupported = async (): Promise<never> => {
-    throw new ApiError(
-      "mock_not_supported",
-      501,
-      "the ontology mock only implements ontology endpoints"
-    )
-  }
-  return {
-    ...ontology,
-    createAgent: unsupported,
-    getAgentTemplates: unsupported,
-    getModels: unsupported,
-    getAgent: unsupported,
-    getHistory: unsupported,
-    sendMessage: unsupported,
-    resume: unsupported,
-    cancel: unsupported,
-    resolveApproval: unsupported,
-  }
+function pushNeighbor(
+  adjacency: Map<string, string[]>,
+  from: string,
+  to: string
+): void {
+  const bucket = adjacency.get(from)
+  if (bucket === undefined) adjacency.set(from, [to])
+  else bucket.push(to)
 }
 
 // ---- 种子数据 ----

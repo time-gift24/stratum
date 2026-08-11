@@ -16,8 +16,14 @@ import { Input } from "@/components/ui/input"
 import {
   CommitInput,
   FieldRow,
-  nativeSelectClassName,
 } from "@/components/stratum/ontology/form-controls"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import type {
   OntologyLinkCardinality,
   OntologyLinkType,
@@ -49,20 +55,21 @@ function CardinalitySelect({
   onChange(next: OntologyLinkCardinality): void
 }) {
   return (
-    <select
-      aria-label={ariaLabel}
-      className={nativeSelectClassName}
+    <Select
       value={value}
-      onChange={(event) =>
-        onChange(event.target.value as OntologyLinkCardinality)
-      }
+      onValueChange={(next) => onChange(next as OntologyLinkCardinality)}
     >
-      {CARDINALITY_OPTIONS.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger aria-label={ariaLabel} className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {CARDINALITY_OPTIONS.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 

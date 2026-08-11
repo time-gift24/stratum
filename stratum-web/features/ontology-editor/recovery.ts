@@ -25,8 +25,14 @@ function promisifyRequest<T>(request: IDBRequest<T>): Promise<T> {
   })
 }
 
+// 每个 factory 缓存一条打开中的连接，避免每次读写都 open/close 整个数据库；
+// 打开失败时清除缓存，下次操作可重试。
+const openPromiseByFactory = new WeakMap<IDBFactory, Promise<IDBDatabase>>()
+
 function openDatabase(factory: IDBFactory): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  const cached = openPromiseByFactory.get(factory)
+  if (cached !== undefined) return cached
+  const promise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = factory.open(DATABASE_NAME, DATABASE_VERSION)
     request.onupgradeneeded = () => {
       request.result.createObjectStore(STORE_NAME, { keyPath: "ontology_id" })
@@ -35,6 +41,11 @@ function openDatabase(factory: IDBFactory): Promise<IDBDatabase> {
     request.onerror = () =>
       reject(request.error ?? new Error("indexeddb open failed"))
   })
+  openPromiseByFactory.set(factory, promise)
+  promise.catch(() => {
+    openPromiseByFactory.delete(factory)
+  })
+  return promise
 }
 
 async function withStore<T>(
@@ -43,12 +54,8 @@ async function withStore<T>(
   run: (store: IDBObjectStore) => IDBRequest<T>
 ): Promise<T> {
   const database = await openDatabase(factory)
-  try {
-    const transaction = database.transaction(STORE_NAME, mode)
-    return await promisifyRequest(run(transaction.objectStore(STORE_NAME)))
-  } finally {
-    database.close()
-  }
+  const transaction = database.transaction(STORE_NAME, mode)
+  return promisifyRequest(run(transaction.objectStore(STORE_NAME)))
 }
 
 export function createOntologyDraftStore(

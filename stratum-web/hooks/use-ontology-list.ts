@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 
 import type { OntologyListPage } from "@/features/ontology-editor/types"
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
-import { resolveOntologyApi } from "@/lib/stratum/mock-ontology-api"
+import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 
 // 契约（docs/ontology/API.md）：per_page 默认 20，sort 默认 -updated_at。
 export const ONTOLOGY_LIST_PER_PAGE = 20

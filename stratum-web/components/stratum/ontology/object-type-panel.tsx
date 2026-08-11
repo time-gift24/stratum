@@ -1,15 +1,19 @@
 "use client"
 
-import { useState } from "react"
 import { Plus, Trash2Icon, XIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   CommitInput,
   CommitTextarea,
   FieldRow,
-  nativeSelectClassName,
 } from "@/components/stratum/ontology/form-controls"
 import type {
   OntologyObjectType,
@@ -21,9 +25,11 @@ import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import { cn } from "@/lib/utils"
 
 /**
- * Object Type 编辑面板：name / display_name / description 失焦提交；
- * properties 行内管理（value_type 六选枚举 + required 开关）；422 违例
- * 在对象级与属性行内联展示。删除由调用方弹确认对话框。
+ * Object Type 编辑面板（宽列表）：头部 display_name / name + 关闭；
+ * name / display_name / description 失焦提交；属性区一属性一行——
+ * name（mono）· display_name · value_type（Select）· 必填 · 删除全部
+ * 在单行内完成，行间 divide-y、悬停反馈；底部「+ 添加属性」行自动命名。
+ * 422 违例在对象级与属性行下方内联展示。删除由调用方弹确认对话框。
  */
 
 const NAME_HINT = "需匹配 ^[a-z][a-z0-9_]{0,63}$（小写字母开头，可含数字与下划线）"
@@ -43,6 +49,14 @@ function validateName(next: string): string | null {
 
 function validateDisplayName(next: string): string | null {
   return next.trim() === "" ? "显示名不能为空" : null
+}
+
+/** 新属性的自动命名：field_n，取不冲突的最小序号 */
+function nextPropertyName(properties: readonly OntologyProperty[]): string {
+  const taken = new Set(properties.map((property) => property.name))
+  let index = properties.length + 1
+  while (taken.has(`field_${index}`)) index += 1
+  return `field_${index}`
 }
 
 export type PropertyInput = {
@@ -84,12 +98,23 @@ export function ObjectTypePanel({
   onRemoveProperty(propertyId: string): void
   onClose(): void
 }) {
+  const addProperty = () => {
+    const name = nextPropertyName(objectType.properties)
+    onAddProperty({
+      name,
+      display_name: name,
+      value_type: "string",
+      required: false,
+    })
+  }
+
   return (
     <aside
       aria-label={`Object Type ${objectType.display_name} 编辑面板`}
-      className="flex h-full flex-col gap-3 overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-[0_8px_30px] shadow-black/10"
+      className="flex h-full w-full flex-col overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-[0_8px_30px] shadow-black/10"
     >
-      <div className="flex items-start justify-between gap-2">
+      {/* 列表头：display_name / name + 关闭 */}
+      <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-medium">
             {objectType.display_name}
@@ -111,7 +136,7 @@ export function ObjectTypePanel({
       {messages.length > 0 && (
         <div
           role="alert"
-          className="rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
+          className="mx-4 mb-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
         >
           {messages.map((message) => (
             <p key={message}>{message}</p>
@@ -119,81 +144,105 @@ export function ObjectTypePanel({
         </div>
       )}
 
-      <FieldRow label="名称（name）">
-        <CommitInput
-          mono
-          ariaLabel="Object Type 名称"
-          value={objectType.name}
-          validate={validateName}
-          onCommit={(name) => onUpdate({ ...objectType, name })}
-        />
-      </FieldRow>
-      <FieldRow label="显示名（display_name）">
-        <CommitInput
-          ariaLabel="Object Type 显示名"
-          value={objectType.display_name}
-          validate={validateDisplayName}
-          onCommit={(displayName) =>
-            onUpdate({ ...objectType, display_name: displayName })
-          }
-        />
-      </FieldRow>
-      <FieldRow label="描述（description，可选）">
-        <CommitTextarea
-          ariaLabel="Object Type 描述"
-          value={objectType.description ?? ""}
-          placeholder="留空表示无描述"
-          onCommit={(description) =>
-            onUpdate({
-              ...objectType,
-              description: description === "" ? undefined : description,
-            })
-          }
-        />
-      </FieldRow>
+      {/* 元信息：name / display_name / description 失焦提交 */}
+      <div className="flex flex-col gap-2 border-b border-border px-4 pb-3">
+        <FieldRow label="名称（name）">
+          <CommitInput
+            mono
+            ariaLabel="Object Type 名称"
+            value={objectType.name}
+            validate={validateName}
+            onCommit={(name) => onUpdate({ ...objectType, name })}
+          />
+        </FieldRow>
+        <FieldRow label="显示名（display_name）">
+          <CommitInput
+            ariaLabel="Object Type 显示名"
+            value={objectType.display_name}
+            validate={validateDisplayName}
+            onCommit={(displayName) =>
+              onUpdate({ ...objectType, display_name: displayName })
+            }
+          />
+        </FieldRow>
+        <FieldRow label="描述（description，可选）">
+          <CommitTextarea
+            ariaLabel="Object Type 描述"
+            value={objectType.description ?? ""}
+            placeholder="留空表示无描述"
+            onCommit={(description) =>
+              onUpdate({
+                ...objectType,
+                description: description === "" ? undefined : description,
+              })
+            }
+          />
+        </FieldRow>
+      </div>
 
-      <section aria-label="属性列表" className="flex flex-col gap-2">
-        <h3 className="text-[0.6875rem] font-medium text-muted-foreground">
+      {/* 属性列表：一属性一行，行内完成全部编辑 */}
+      <section aria-label="属性列表" className="flex flex-col">
+        <h3 className="px-4 pt-3 pb-1 text-[0.6875rem] font-medium text-muted-foreground">
           属性（{objectType.properties.length}）
         </h3>
-        {objectType.properties.map((property) => (
-          <PropertyRow
-            key={property.id}
-            property={property}
-            messages={propertyMessages.get(property.id) ?? []}
-            onUpdate={(next) => onUpdateProperty(next)}
-            onRemove={() => onRemoveProperty(property.id)}
-          />
-        ))}
-        <AddPropertyForm
-          disabled={!canAddProperty}
-          limitMessage={propertyLimitMessage}
-          onAdd={onAddProperty}
-        />
+        <div className="flex flex-col divide-y divide-border/60">
+          {objectType.properties.length === 0 && (
+            <p className="px-4 py-2 text-xs text-muted-foreground">暂无属性</p>
+          )}
+          {objectType.properties.map((property) => (
+            <PropertyRow
+              key={property.id}
+              property={property}
+              messages={propertyMessages.get(property.id) ?? []}
+              onUpdate={(next) => onUpdateProperty(next)}
+              onRemove={() => onRemoveProperty(property.id)}
+            />
+          ))}
+        </div>
+        <div className="border-t border-border">
+          <button
+            type="button"
+            disabled={!canAddProperty}
+            onClick={addProperty}
+            className="flex w-full items-center gap-1.5 px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+          >
+            <Plus aria-hidden className="size-3.5" />
+            添加属性
+          </button>
+          {!canAddProperty && propertyLimitMessage !== null && (
+            <p className="px-4 pb-2 text-[0.6875rem] text-muted-foreground">
+              {propertyLimitMessage}
+            </p>
+          )}
+        </div>
       </section>
 
-      <section aria-label="聚焦邻域" className="flex flex-col gap-1.5">
+      <section
+        aria-label="聚焦邻域"
+        className="flex flex-col gap-1.5 border-t border-border px-4 py-3"
+      >
         <h3 className="text-[0.6875rem] font-medium text-muted-foreground">
           画布聚焦
         </h3>
         <div className="flex items-center gap-2">
-          <select
-            aria-label="聚焦深度"
-            className={cn(nativeSelectClassName, "w-24")}
+          <Select
             value={focusDepth}
-            onChange={(event) =>
-              onFocusDepthChange(Number(event.target.value))
-            }
+            onValueChange={(next) => onFocusDepthChange(next ?? 1)}
           >
-            {Array.from(
-              { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
-              (_, depth) => (
-                <option key={depth} value={depth}>
-                  深度 {depth}
-                </option>
-              )
-            )}
-          </select>
+            <SelectTrigger aria-label="聚焦深度" className="w-24">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {Array.from(
+                { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
+                (_, depth) => (
+                  <SelectItem key={depth} value={depth}>
+                    深度 {depth}
+                  </SelectItem>
+                )
+              )}
+            </SelectContent>
+          </Select>
           <Button variant="outline" size="sm" onClick={onFocus}>
             聚焦邻域
           </Button>
@@ -203,7 +252,7 @@ export function ObjectTypePanel({
         </p>
       </section>
 
-      <div className="mt-auto border-t border-border pt-3">
+      <div className="mt-auto border-t border-border px-4 py-3">
         <Button
           variant="destructive"
           size="sm"
@@ -218,6 +267,10 @@ export function ObjectTypePanel({
   )
 }
 
+/**
+ * 属性行：name（mono）· display_name · value_type（Select）· 必填 · 删除
+ * 全部单行内完成；行级悬停反馈，422 违例内联在行下方。
+ */
 function PropertyRow({
   property,
   messages,
@@ -231,55 +284,55 @@ function PropertyRow({
 }) {
   const hasViolations = messages.length > 0
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-1.5 rounded-lg border px-2 py-1.5",
-        hasViolations ? "border-destructive/50" : "border-border"
-      )}
-    >
-      <div className="flex items-center gap-1.5">
-        <CommitInput
-          mono
-          ariaLabel={`属性 ${property.name} 名称`}
-          value={property.name}
-          validate={validateName}
-          onCommit={(name) => onUpdate({ ...property, name })}
-        />
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`删除属性 ${property.display_name}`}
-          onClick={onRemove}
-        >
-          <Trash2Icon />
-        </Button>
-      </div>
-      <CommitInput
-        ariaLabel={`属性 ${property.name} 显示名`}
-        value={property.display_name}
-        validate={validateDisplayName}
-        onCommit={(displayName) =>
-          onUpdate({ ...property, display_name: displayName })
-        }
-      />
-      <div className="flex items-center gap-2">
-        <select
-          aria-label={`属性 ${property.name} 值类型`}
-          className={nativeSelectClassName}
+    <div className={cn("flex flex-col", hasViolations && "bg-destructive/5")}>
+      <div className="flex items-center gap-2 px-4 py-1.5 transition-colors hover:bg-muted/40">
+        <div className="min-w-0 flex-1">
+          <CommitInput
+            mono
+            ariaLabel={`属性 ${property.name} 名称`}
+            value={property.name}
+            validate={validateName}
+            onCommit={(name) => onUpdate({ ...property, name })}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <CommitInput
+            ariaLabel={`属性 ${property.name} 显示名`}
+            value={property.display_name}
+            validate={validateDisplayName}
+            onCommit={(displayName) =>
+              onUpdate({ ...property, display_name: displayName })
+            }
+          />
+        </div>
+        <Select
           value={property.value_type}
-          onChange={(event) =>
+          onValueChange={(valueType) =>
             onUpdate({
               ...property,
-              value_type: event.target.value as OntologyPropertyValueType,
+              value_type: valueType as OntologyPropertyValueType,
             })
           }
         >
-          {VALUE_TYPES.map((valueType) => (
-            <option key={valueType} value={valueType}>
-              {valueType}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger
+            size="sm"
+            aria-label={`属性 ${property.name} 值类型`}
+            className="w-28 shrink-0 font-mono text-[0.6875rem]"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {VALUE_TYPES.map((valueType) => (
+              <SelectItem
+                key={valueType}
+                value={valueType}
+                className="font-mono text-[0.6875rem]"
+              >
+                {valueType}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <label className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
           <input
             type="checkbox"
@@ -291,112 +344,28 @@ function PropertyRow({
           />
           必填
         </label>
-      </div>
-      {messages.map((message) => (
-        <p key={message} role="alert" className="text-[0.6875rem] text-destructive">
-          {message}
-        </p>
-      ))}
-    </div>
-  )
-}
-
-function AddPropertyForm({
-  disabled,
-  limitMessage,
-  onAdd,
-}: {
-  disabled: boolean
-  limitMessage: string | null
-  onAdd(input: PropertyInput): void
-}) {
-  const [name, setName] = useState("")
-  const [displayName, setDisplayName] = useState("")
-  const [valueType, setValueType] =
-    useState<OntologyPropertyValueType>("string")
-  const [required, setRequired] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const submit = () => {
-    const nameError = validateName(name)
-    if (nameError !== null) {
-      setError(nameError)
-      return
-    }
-    if (displayName.trim() === "") {
-      setError("显示名不能为空")
-      return
-    }
-    setError(null)
-    onAdd({ name, display_name: displayName, value_type: valueType, required })
-    setName("")
-    setDisplayName("")
-    setValueType("string")
-    setRequired(false)
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-dashed border-border px-2 py-2">
-      <div className="flex items-center gap-1.5">
-        <Input
-          aria-label="新属性名称"
-          placeholder="name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          className="font-mono"
-          disabled={disabled}
-        />
-        <Input
-          aria-label="新属性显示名"
-          placeholder="显示名"
-          value={displayName}
-          onChange={(event) => setDisplayName(event.target.value)}
-          disabled={disabled}
-        />
-      </div>
-      <div className="flex items-center gap-2">
-        <select
-          aria-label="新属性值类型"
-          className={nativeSelectClassName}
-          value={valueType}
-          onChange={(event) =>
-            setValueType(event.target.value as OntologyPropertyValueType)
-          }
-          disabled={disabled}
-        >
-          {VALUE_TYPES.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-        <label className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            className="size-3.5 accent-primary"
-            checked={required}
-            onChange={(event) => setRequired(event.target.checked)}
-            disabled={disabled}
-          />
-          必填
-        </label>
         <Button
-          variant="outline"
-          size="sm"
-          onClick={submit}
-          disabled={disabled}
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`删除属性 ${property.display_name}`}
+          onClick={onRemove}
+          className="shrink-0 text-muted-foreground hover:text-destructive"
         >
-          <Plus data-icon="inline-start" />
-          添加属性
+          <Trash2Icon />
         </Button>
       </div>
-      {error !== null && (
-        <p role="alert" className="text-[0.6875rem] text-destructive">
-          {error}
-        </p>
-      )}
-      {disabled && limitMessage !== null && (
-        <p className="text-[0.6875rem] text-muted-foreground">{limitMessage}</p>
+      {messages.length > 0 && (
+        <div className="flex flex-col gap-0.5 px-4 pb-1.5">
+          {messages.map((message) => (
+            <p
+              key={message}
+              role="alert"
+              className="text-[0.6875rem] text-destructive"
+            >
+              {message}
+            </p>
+          ))}
+        </div>
       )}
     </div>
   )
