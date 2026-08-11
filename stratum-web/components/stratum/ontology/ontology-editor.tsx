@@ -103,6 +103,23 @@ const EMPTY_GROUPED_VIOLATIONS: GroupedViolations = Object.freeze({
   globalViolations: Object.freeze([]) as readonly OntologyViolation[],
 })
 
+/**
+ * 保存失败的稳定 code → 中文文案。契约规定 message 只是安全可读文本、
+ * 不是控制流契约，因此已知 code 一律走本地映射；未知 code 回退服务端
+ * message。409 ontology_entity_id_conflict：子实体 ID 在全部现存
+ * Ontology 中按类型全局唯一，冲突说明本地 candidate 已过期（硬删除
+ * 无 tombstone，客户端不复用已删除 ID）。
+ */
+const SAVE_ERROR_TEXT: Readonly<Record<string, string>> = {
+  save_unconfirmed: "保存结果未确认，请检查远端状态后重试。",
+  ontology_entity_id_conflict:
+    "保存失败：实体 ID 已被另一个 Ontology 使用，本地草稿可能已过期，请重新加载后再编辑。",
+  ontology_name_conflict:
+    "保存失败：名称已被其他 Ontology 使用，请改名后重试。",
+  ontology_payload_too_large: "保存失败：文档超过 2 MiB 上限。",
+  ontology_store_unavailable: "保存失败：存储服务暂不可用，请稍后重试。",
+}
+
 function groupViolations(
   document: OntologyEditor["state"]["candidate"],
   violations: readonly OntologyViolation[] | null
@@ -381,9 +398,8 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
           >
             <CircleAlert aria-hidden className="size-3.5" />
             <span>
-              {state.saveError.code === "save_unconfirmed"
-                ? "保存结果未确认，请检查远端状态后重试。"
-                : `保存失败：${state.saveError.message}`}
+              {SAVE_ERROR_TEXT[state.saveError.code] ??
+                `保存失败：${state.saveError.message}`}
             </span>
             <Button
               variant="outline"

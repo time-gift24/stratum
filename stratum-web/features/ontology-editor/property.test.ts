@@ -26,6 +26,16 @@ describe("validatePropertyName", () => {
     expect(validatePropertyName("Order")).toContain("^[a-z]")
     expect(validatePropertyName("")).toContain("^[a-z]")
   })
+
+  it.each([
+    ["大写开头", "Order_no"],
+    ["数字开头", "1st"],
+    ["含连字符", "order-no"],
+    ["含空格", "order no"],
+    ["超过 64 字符", `a${"b".repeat(64)}`],
+  ])("参数化非法用例：%s", (_label, name) => {
+    expect(validatePropertyName(name)).not.toBeNull()
+  })
 })
 
 describe("validatePropertyDisplayName", () => {

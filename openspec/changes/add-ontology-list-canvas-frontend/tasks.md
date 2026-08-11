@@ -50,6 +50,7 @@
 - [x] 6.3 对照 PRODUCT.md / DESIGN.md 走查视觉与文案（中文、语义 token、无装饰动画、prefers-reduced-motion）
 - [x] 6.4 constitution-review：对照根 CONSTITUTION.md 派发子代理分条款审查本 change 完整 diff，修复全部 red-flag 与 violation
 - [x] 6.5 更新 `stratum-web/AGENTS.md`（或对应 AGENTS.md）归档最终实现约定
+- [x] 6.6 同步后端澄清：子实体 ID 在全部现存 Ontology 中按类型全局唯一，冲突返回 409 `ontology_entity_id_conflict`，硬删除无 tombstone——API.md、spec delta 与保存失败 code 文案映射已同步，并对完整新 diff 重新运行验证与 constitution-review
 
 ## 7. 归档准备
 

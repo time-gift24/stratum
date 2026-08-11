@@ -20,7 +20,7 @@ Ontology 画布编辑器：基于 `@xyflow/react` 的 schema 图编辑，实现 
 
 ### Requirement: Object Type 与 Link Type 编辑
 
-系统 SHALL 支持在画布上新增、编辑、删除 Object Type（含 `name`、`display_name`、可选 `description`、`properties[]`）与 Link Type（含 `source_object_type_id`、`target_object_type_id`、`source_to_target`、`target_to_source` ∈ `one|many`）。Property 的 `value_type` MUST 限定为 `string|integer|number|boolean|date|date_time` 之一。所有编辑 MUST 只修改 `candidate`，不直接触发写请求。新建 Object Type、Property、Link Type 的 ID MUST 由客户端生成 UUIDv7。`name` 字段 MUST 在客户端按 `^[a-z][a-z0-9_]{0,63}$` 先行校验。
+系统 SHALL 支持在画布上新增、编辑、删除 Object Type（含 `name`、`display_name`、可选 `description`、`properties[]`）与 Link Type（含 `source_object_type_id`、`target_object_type_id`、`source_to_target`、`target_to_source` ∈ `one|many`）。Property 的 `value_type` MUST 限定为 `string|integer|number|boolean|date|date_time` 之一。所有编辑 MUST 只修改 `candidate`，不直接触发写请求。新建 Object Type、Property、Link Type 的 ID MUST 由客户端生成 UUIDv7；这些 ID 在全部现存 Ontology 中按类型全局唯一，删除为硬删除（无 tombstone），客户端 MUST NOT 主动复用已删除 ID。`name` 字段 MUST 在客户端按 `^[a-z][a-z0-9_]{0,63}$` 先行校验。
 
 #### Scenario: 新增 Object Type
 
@@ -64,6 +64,16 @@ Ontology 画布编辑器：基于 `@xyflow/react` 的 schema 图编辑，实现 
 
 - **WHEN** PUT 返回 412 `ontology_precondition_failed`
 - **THEN** candidate 保持原样，系统重新读取最新资源与 ETag，向用户展示调和界面（保留本地版本 / 采用远端版本），由用户显式选择
+
+#### Scenario: 子实体 ID 已被其他 Ontology 使用
+
+- **WHEN** PUT 返回 409 `ontology_entity_id_conflict`（candidate 中某 Object Type / Property / Link Type ID 已属于另一现存 Ontology）
+- **THEN** candidate 保持原样，系统按稳定 code 映射的中文文案提示保存失败并允许重试，不静默重试、不自动改 ID
+
+#### Scenario: 其他确定性保存失败
+
+- **WHEN** PUT 返回 409 `ontology_name_conflict`、413、428 或 5xx 等非 412/422 错误
+- **THEN** candidate 保持原样，系统按稳定 code 映射的中文文案（未知 code 回退服务端 message）提示保存失败
 
 ### Requirement: 422 校验违例映射
 
