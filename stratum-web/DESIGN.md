@@ -11,6 +11,8 @@
 - 唯一来源 `app/globals.css`（shadcn neutral 基色 + cssVariables），`:root` / `.dark` 双份，在 `@theme inline` 登记为 Tailwind 色。组件只消费语义 token（`bg-card`、`text-muted-foreground`、`border-border`、`bg-popover` 等），禁止写死色值/hex。
 - `--primary(-foreground)` = 绿（浅色 `oklch(0.72 0.18 155)` / 深色 `oklch(0.87 0.22 150)`，前景深绿），`--ring`、`--sidebar-primary` 同源。语义：主行动（发送按钮）、选中态（会话 rail、provider chips、模型勾）、焦点环。
 - `--destructive` = 错误语义：发送失败、生成中断、连接错误、会话 404。
+- `--warning` = 黄（浅色 `oklch(0.65 0.15 75)` / 深色 `oklch(0.79 0.13 80)`）：需要知晓但非错误的进行中/降级语义——恢复执行、实时降级。与绿 primary（色相 155）、红 destructive（色相 27）拉开色相距离。
+- 会话页所有状态提示统一走 `components/stratum/conversation/notice.tsx` 的 Notice：左对齐 tinted 横幅，结构恒定（图标 + 正文 + 可选尾部动作），三档色调 error（destructive/40 描边 + /10 底）/ warning（同构黄）/ neutral（muted 灰，取消类终态与纯信息）。terminal marker（failed/cancelled）、composer 上方提示栈（resume / degraded / 取消请求）、生成中断横幅全部同构，不做居中或裸文字特例。
 - `--muted(-foreground)` = 次级文字与纯悬停反馈；`--accent(-foreground)` = 分段控件选中底（model-selector 的 Thinking 行）。
 - 主题切换：`components/theme-provider.tsx`（next-themes）+ `.dark` class，整站跟随主题；不存在固定暗色的子世界。
 - 遗产 token：`--canvas-grid`、`--edge`、`--port-model/-positive/-negative`、`--node-aurora` 的消费方（canvas/markdown 页）已删除，不再具有设计语义，新组件不得使用，待后续清理。例外：`--port-image`（蓝，light `oklch(0.6 0.15 250)` / dark `oklch(0.72 0.13 240)`）重新启用为"AI 处理中"状态色——目前只用于 reasoning streaming 的 Brain 图标与 shimmer（完成/折叠态回 muted 中性）；蓝只编码"进行中"，不做装饰。
@@ -19,7 +21,7 @@
 ## Typography
 
 - Geist（`font-sans`）：界面正文与控件；Geist Mono（`font-mono`）：html 默认基底、数据感场景；Roboto Slab（`--font-heading` → `font-heading`）：展示性标题（如对话页 welcome）。均由 `app/layout.tsx` 经 next/font 加载。
-- 消息体排版：`components/stratum/styles/prose-medium.module.css`——`--font-reading`（Charter 系 + 中文宋体系衬线，系统字体零加载），对话用 `.proseMediumChat` 档（15→17px，行高收紧）。只消费外层 token、随主题切换；module 内规则保持无 `@layer`，压过 streamdown 注入元素的 utility class。
+- 消息体排版：`components/stratum/styles/prose-medium.module.css`——`--font-reading`（Charter 系 + 中文宋体系衬线，系统字体零加载），对话用 `.proseMediumChat` 档（15→17px，行高 1.6，段落/列表/代码块等块级间距全面收紧到 0.2–1em，双类选择器压过文章档规则）。代码块与表格共享同一 ghost 语言：单描边圆角容器 + hairline，header/表头一律中性（transparent 底 + muted 文字），无 primary 彩色面。只消费外层 token、随主题切换；module 内规则保持无 `@layer`，压过 streamdown 注入元素的 utility class。
 - 组件级 CSS 一律 CSS Module 随组件走（共享的放 `components/stratum/styles/`），不进 `globals.css`（globals 只放 token 与第三方样式引入）。
 
 ## Layout & Chrome
@@ -41,5 +43,6 @@
 ## Motion
 
 - 动画库统一 GSAP（`gsap` + `@gsap/react`，`useGSAP` 带 scope）：SiteNav 入场/下拉、PageTransition 方向性页面转场（`components/chrome/page-transition.tsx`，`PAGE_ORDER` 当前仅 `/conversation`）。不引入第二个动画库。
+- 时长/缓动全站统一尺度，唯一事实源是 `lib/motion.ts`：时长三档 fast 0.3s（退场/纯淡入淡出）、base 0.4s（进场/高度手风琴）、slow 0.55s（大位移，如 composer 中心 ⇄ 底部）；缓动两条 enter `expo.out`（一切"出现"）、exit `power2.in`（一切"消失"）。reduced-motion 判定与瞬时化（`motionDuration`）也由该模块提供，调用处不各自写 matchMedia 三元。例外：锚点滚动（`lib/scroll-to.ts`）按距离自适应属滚动行程，不纳入；react-bits 底稿只读不强制对齐。
 - 基础件（popover、dialog 等）的进出动效来自 tw-animate-css，随 `components/ui` 底稿走，不再叠加。
 - 所有动效必须提供 `prefers-reduced-motion` 最终态；不做装饰性循环、滚动劫持。流式消息的 caret 是排版状态而非动效，由 streamdown 提供。
