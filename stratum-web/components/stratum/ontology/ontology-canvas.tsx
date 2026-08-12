@@ -132,7 +132,7 @@ export function OntologyCanvas({
   )
   const baseEdges = useMemo(
     () => toEdges(document.link_types, focus, linkViolations),
-    [document, focus, linkViolations]
+    [document.link_types, focus, linkViolations]
   )
 
   // 本地渲染态：拖拽/框选等交互即时应用；外部数据变化时重建并保留内部选中态

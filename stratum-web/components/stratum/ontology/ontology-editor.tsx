@@ -24,10 +24,7 @@ import {
   LinkTypePanel,
 } from "@/components/stratum/ontology/link-type-dialog"
 import type { ObjectTypePropertyActions } from "@/components/stratum/ontology/ontology-node"
-import {
-  useOntologyEditor,
-  type OntologyEditor,
-} from "@/hooks/use-ontology-editor"
+import type { OntologyEditor as OntologyEditorController } from "@/hooks/use-ontology-editor"
 import { computeLocalNeighborhood } from "@/features/ontology-editor/neighborhood"
 import { mapViolations } from "@/features/ontology-editor/violations"
 import {
@@ -48,8 +45,11 @@ import { cn } from "@/lib/utils"
  * 所有编辑只写 candidate；保存经 hook 的 PUT + If-Match 流程。
  */
 
-export function OntologyEditor({ ontologyId }: { ontologyId: string }) {
-  const editor = useOntologyEditor(ontologyId)
+export function OntologyEditor({
+  editor,
+}: {
+  editor: OntologyEditorController
+}) {
   const { state } = editor
 
   return (
@@ -122,8 +122,8 @@ const SAVE_ERROR_TEXT: Readonly<Record<string, string>> = {
 }
 
 function groupViolations(
-  pointerDocument: OntologyEditor["state"]["candidate"],
-  displayedDocument: OntologyEditor["state"]["candidate"],
+  pointerDocument: OntologyEditorController["state"]["candidate"],
+  displayedDocument: OntologyEditorController["state"]["candidate"],
   violations: readonly OntologyViolation[] | null
 ): GroupedViolations {
   if (
@@ -203,7 +203,7 @@ function propertyMessagesFor(
   return result
 }
 
-function ReadyEditor({ editor }: { editor: OntologyEditor }) {
+function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
   const { state, dirty, save } = editor
   const candidate = state.candidate
 
@@ -229,22 +229,28 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
   >(null)
 
   const limits = ONTOLOGY_MVP_LIMITS
+  const objectTypes = candidate?.object_types
+  const linkTypes = candidate?.link_types
   const totalProperties = useMemo(
     () =>
-      (candidate?.object_types ?? []).reduce(
+      (objectTypes ?? []).reduce(
         (sum, objectType) => sum + objectType.properties.length,
         0
       ),
-    [candidate]
+    [objectTypes]
   )
 
   // 本地聚焦：由 candidate 实时计算，未保存编辑立即可见；origin 被删后自动失效
   const focusNeighborhood = useMemo(
     () =>
-      candidate !== null && focus !== null
-        ? computeLocalNeighborhood(candidate, focus.originId, focus.depth)
+      objectTypes !== undefined && linkTypes !== undefined && focus !== null
+        ? computeLocalNeighborhood(
+            { object_types: objectTypes, link_types: linkTypes },
+            focus.originId,
+            focus.depth
+          )
         : null,
-    [candidate, focus]
+    [objectTypes, linkTypes, focus]
   )
   const activeFocus = focusNeighborhood !== null ? focus : null
 

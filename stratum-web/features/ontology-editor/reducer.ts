@@ -140,12 +140,15 @@ export function isOntologyEditorDirty(state: OntologyEditorState): boolean {
 
 // 只有当前加载轮次已检查草稿、没有待用户处置的候选且编辑器干净时，
 // 才可删除 IndexedDB 记录。这同时避免同 ontology 重载沿用上轮检查结果。
-export function canClearOntologyDraft(state: OntologyEditorState): boolean {
+export function canClearOntologyDraft(
+  state: OntologyEditorState,
+  dirty = isOntologyEditorDirty(state)
+): boolean {
   return (
     state.phase === "ready" &&
     state.draftChecked &&
     state.draftAvailable === null &&
-    !isOntologyEditorDirty(state)
+    !dirty
   )
 }
 

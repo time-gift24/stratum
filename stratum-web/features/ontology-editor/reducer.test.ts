@@ -678,6 +678,7 @@ describe("crash recovery drafts", () => {
 
     expect(state.draftChecked).toBe(true)
     expect(canClearOntologyDraft(state)).toBe(true)
+    expect(canClearOntologyDraft(state, true)).toBe(false)
   })
 
   it("restores the draft candidate and clears the offer", () => {

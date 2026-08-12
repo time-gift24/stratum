@@ -176,7 +176,8 @@ export function useOntologyEditor(
   }, [api, draftStore, ontologyId, reloadVersion])
 
   const dirty = isOntologyEditorDirty(state)
-  const canClearDraft = canClearOntologyDraft(state)
+  // 复用上方已完成的文档比较，避免最大 candidate 在同一 render 被 canonicalize 两次。
+  const canClearDraft = canClearOntologyDraft(state, dirty)
 
   // 草稿持久化：candidate 变化（dirty）时防抖写入；干净时清除。
   // 依赖收窄到实际读取的原语，避免无关 dispatch 重置防抖计时器。

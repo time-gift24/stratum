@@ -2,9 +2,12 @@
 
 import dynamic from "next/dynamic"
 
+import { useOntologyEditor } from "@/hooks/use-ontology-editor"
+
 /**
- * OntologyEditorWorkspace —— 编辑器页外壳：动态加载画布编辑器
- * （SSR 关闭，xyflow 库与样式表不进首屏），加载中显示同形状骨架。
+ * OntologyEditorWorkspace —— 编辑器页外壳：立即启动文档与本地草稿读取，
+ * 同时动态加载画布编辑器（SSR 关闭，xyflow 库与样式表不进首屏）。
+ * 数据加载不等待重型画布 chunk，加载中显示同形状骨架。
  */
 
 function EditorSkeleton() {
@@ -24,13 +27,19 @@ const OntologyEditor = dynamic(
   { ssr: false, loading: () => <EditorSkeleton /> }
 )
 
-export function OntologyEditorWorkspace({ ontologyId }: { ontologyId: string }) {
+export function OntologyEditorWorkspace({
+  ontologyId,
+}: {
+  ontologyId: string
+}) {
+  const editor = useOntologyEditor(ontologyId)
+
   return (
     <div
       data-slot="ontology-editor-workspace"
       className="h-full w-full bg-background"
     >
-      <OntologyEditor ontologyId={ontologyId} />
+      <OntologyEditor editor={editor} />
     </div>
   )
 }
