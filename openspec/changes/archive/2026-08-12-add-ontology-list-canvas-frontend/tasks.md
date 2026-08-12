@@ -55,4 +55,4 @@
 ## 7. 归档准备
 
 - [x] 7.1 运行 `openspec validate --all --strict` 通过，确认失效 change 不会合并到主 specs
-- [ ] 7.2 确认所有任务真实完成并验证后，执行 `/opsx:archive`
+- [x] 7.2 确认所有任务真实完成并验证后，执行 `/opsx:archive`
