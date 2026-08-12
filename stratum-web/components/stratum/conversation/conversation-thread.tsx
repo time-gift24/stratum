@@ -90,8 +90,10 @@ function renderItem(
  * ConversationThread —— 对话消息列表（assistant-ui thread 底稿的展示层 fork）。
  * 结构：可滚动 viewport（消息列居中，max-w 44rem）+ composer。数据驱动：
  * items 由调用方持有。滚动模型（跟随与否只由用户意图决定）：
- * 发送 → 垫片（内容不够时在消息列底部垫出可滚空间）+ 平滑锚定到视口
- * 上 1/3 处，一次性；流式填满垫片 → 撤垫片并开启贴底跟随；
+ * 发送 → 乐观消息落位后（发送信号提交时它尚未进 DOM，先布防等待）
+ * 垫片（内容不够时在消息列底部垫出可滚空间）+ 平滑锚定到视口
+ * 上 1/3 处，一次性；流式增长同步收缩垫片（scrollHeight 恒定，视口
+ * 不动）→ 垫片耗尽恢复贴底跟随；
  * 跟随开启时新内容贴底；用户任何向上滚动手势（wheel）立即关跟随；
  * 滚回底部（<80px）再开；切换会话全部重置。
  *
@@ -186,8 +188,19 @@ export function ConversationThread({
     scrollTop: number
   } | null>(null)
   const [nearBottom, setNearBottom] = useState(true)
-  // 已锚定的 sendVersion：每次发送只锚定一次（1/3 处），流式增长不再贴底
+  // 发送锚定游标：发送信号提交时乐观消息尚未进 DOM（turn_accepted 是异步
+  // dispatch），先布防记录此刻最后的用户消息元素，等本次发送的消息渲染后
+  // 再锚定；否则会把上一条旧消息当目标——视口错滚到顶部并锁死本轮跟随
+  const sendAnchorCursorRef = useRef<{
+    version: number
+    conversationId: string | null | undefined
+    lastUser: Element | null
+  } | null>(null)
+  // 已锚定（或已作废）的 sendVersion：每次发送至多锚定一次（1/3 处）
   const anchoredSendRef = useRef(0)
+  // 已发起 tween 的锚定目标：垫片收缩会反复更新 sendAnchor，不得因此重启
+  // tween——否则流式期间上翻的用户会被 tween 拉回锚点
+  const anchorTweenedRef = useRef<number | null>(null)
   // 发送锚定的垫片（px）：发送时内容不足以把用户消息推到 1/3 处，
   // 在消息列底部垫出可滚空间；流式内容填满后自动撤掉。
   // 会话切换时经 derive-state-during-render 整体重置
@@ -221,6 +234,18 @@ export function ConversationThread({
   useEffect(() => {
     const viewport = viewportRef.current
     if (!viewport) return
+    const userMessages = viewport.querySelectorAll(
+      '[data-slot="user-message"]'
+    )
+    const last = userMessages[userMessages.length - 1] ?? null
+
+    // 布防期间切换了会话：旧布防作废，该次发送随之不再锚定
+    const cursor = sendAnchorCursorRef.current
+    if (cursor !== null && cursor.conversationId !== conversationId) {
+      sendAnchorCursorRef.current = null
+      anchoredSendRef.current = Math.max(anchoredSendRef.current, cursor.version)
+      return
+    }
     if (
       sendVersion === undefined ||
       sendVersion <= anchoredSendRef.current ||
@@ -228,12 +253,18 @@ export function ConversationThread({
       leavingEmpty
     )
       return
-    const userMessages = viewport.querySelectorAll(
-      '[data-slot="user-message"]'
-    )
-    const last = userMessages[userMessages.length - 1]
-    if (last === undefined) return
+    // 发送信号刚到的提交：乐观消息要等 turn_accepted（异步 dispatch）才进
+    // DOM，先布防；此刻测量会量到上一条旧消息
+    if (cursor === null || cursor.version !== sendVersion) {
+      sendAnchorCursorRef.current = { version: sendVersion, conversationId, lastUser: last }
+      return
+    }
+    // 最后的用户消息仍是布防时那条：本次发送的消息还没渲染，等下一个提交
+    if (last === null || last === cursor.lastUser) return
+
     anchoredSendRef.current = sendVersion
+    // 布防游标保留到锚定 tween 完成（相位 2 onComplete 清除）——它是
+    // 跟随 effect 判定"锚定进行中、抑制瞬时贴底"的依据
     const target = Math.max(
       0,
       viewport.scrollTop +
@@ -252,39 +283,69 @@ export function ConversationThread({
   }, [items, sendVersion, conversationId, isSwitching, leavingEmpty])
 
   // 发送锚定，相位 2（执行）：垫片已入 DOM、目标可达后平滑滚动到位
-  //（GSAP base 档，reduced-motion 瞬时），完成后按最终位置判定近底
+  //（GSAP base 档，reduced-motion 瞬时）。每个目标只 tween 一次——垫片
+  // 收缩会反复更新 sendAnchor，重启 tween 会把流式期间上翻的用户拉回
+  // 锚点；完成后解除布防（恢复贴底跟随）并按最终位置判定近底
   useEffect(() => {
     const viewport = viewportRef.current
     const target = sendAnchor.target
-    if (!viewport || target === null) return
+    if (!viewport || target === null) {
+      anchorTweenedRef.current = null
+      return
+    }
+    if (anchorTweenedRef.current === target) return
+    anchorTweenedRef.current = target
     gsap.to(viewport, {
       scrollTo: { y: target },
       duration: motionDuration(MOTION_DURATION.base),
       ease: MOTION_EASE.enter,
       overwrite: "auto",
-      onComplete: () =>
+      onComplete: () => {
+        sendAnchorCursorRef.current = null
         setNearBottom(
           viewport.scrollHeight - target - viewport.clientHeight <
             NEAR_BOTTOM_THRESHOLD
-        ),
+        )
+      },
     })
   }, [sendAnchor])
 
-  // 垫片自持 + 近底跟随：流式内容填满垫片（天然可达锚点）即撤掉并恢复
-  // 贴底跟随——新文段触底后继续自动滚动；否则仅在用户近底时跟随，
-  // 上翻不打扰
+  // 垫片自持 + 近底跟随：流式内容长一点、垫片就缩一点（scrollHeight 恒定，
+  // 视口不动，新文段直接填进垫片区——一次性撤掉会被浏览器钳位 scrollTop，
+  // 可见内容瞬移）；垫片耗尽即恢复贴底跟随——新文段触底后继续自动滚动。
+  // 恢复跟随只在用户仍近底时发生：流式期间上翻过的用户不被拽回；
+  // 布防/锚定 tween 进行中抑制瞬时贴底，滚动交给锚定 tween
   useEffect(() => {
     const viewport = viewportRef.current
     if (!viewport) return
     if (sendAnchor.spacer > 0 && sendAnchor.target !== null) {
       const naturalMax =
         viewport.scrollHeight - sendAnchor.spacer - viewport.clientHeight
-      if (naturalMax >= sendAnchor.target) {
+      const nextSpacer = Math.max(0, sendAnchor.target - naturalMax)
+      // 1px 容差：小数高度经四舍五入会让 scrollHeight 在相邻整数间往返，
+      // 无容差垫片会在两个取值间 2-循环（Maximum update depth）
+      if (nextSpacer <= 1) {
         setSendAnchor({ conversationId, target: null, spacer: 0 })
-        setNearBottom(true)
+        setNearBottom(
+          viewport.scrollHeight -
+            viewport.scrollTop -
+            viewport.clientHeight <
+            NEAR_BOTTOM_THRESHOLD
+        )
+      } else if (Math.abs(nextSpacer - sendAnchor.spacer) > 1) {
+        setSendAnchor({
+          conversationId,
+          target: sendAnchor.target,
+          spacer: nextSpacer,
+        })
       }
     }
-    if (!nearBottom) return
+    if (
+      !nearBottom ||
+      sendAnchorCursorRef.current !== null ||
+      sendAnchor.target !== null
+    )
+      return
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
   }, [items, nearBottom, sendAnchor, conversationId])
 
