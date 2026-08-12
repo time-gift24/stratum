@@ -110,4 +110,4 @@
 - [x] 10.9 派发独立 `constitution-review` 子代理逐条检查完整diff，修复全部 red flag、violation 与高风险 constitution gap
 - [x] 10.10 修复审查finding后重新运行 OpenSpec、Rust、real PG/NATS、Web、deletion proof 与 kernel-restraint 全部门禁
 - [x] 10.11 逐项核对checkbox与具体evidence，以最终implementation convention更新受影响 `AGENTS.md`，并在merge前提醒用户确认归档文档
-- [ ] 10.12 只有implementation、10.3的八个基础journey、10.4的两个stock-Compose外部故障、独立审查与文档全部完成后，才准备sync/archive `complete-postgres-agent-runtime`；后续P4a fault harness（含确定性API SIGTERM/drain/restart）与H5b/H5c production compaction不阻塞本change，本次apply不提前归档
+- [x] 10.12 只有implementation、10.3的八个基础journey、10.4的两个stock-Compose外部故障、独立审查与文档全部完成后，才准备sync/archive `complete-postgres-agent-runtime`；后续P4a fault harness（含确定性API SIGTERM/drain/restart）与H5b/H5c production compaction不阻塞本change，本次apply不提前归档
