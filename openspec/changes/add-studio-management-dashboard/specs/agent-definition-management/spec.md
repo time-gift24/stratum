@@ -5,7 +5,7 @@ Stratum API SHALL 通过 `/v1/agent-definitions` 提供与 runtime `/v1/agents` 
 
 #### Scenario: 分页列出 definitions
 - **WHEN** 客户端 GET `/v1/agent-definitions?page=1&per_page=20&sort=-updated_at`
-- **THEN** API 必须返回 `data` 与统一 pagination envelope，且每项包含 agent name、作者版本标签、model configuration、tools、prompt 和 updated_at 的真实持久化投影
+- **THEN** API 必须返回 `data` 与统一 pagination envelope，且每项包含 agent name、model configuration、tools、prompt 和 updated_at 的真实持久化投影
 
 #### Scenario: 创建 definition
 - **WHEN** 客户端 POST 一个有效且名称未占用的 definition
@@ -24,15 +24,11 @@ Stratum API SHALL 通过 `/v1/agent-definitions` 提供与 runtime `/v1/agents` 
 - **THEN** API 必须返回 204，仅删除 template definition，不得删除已存在的 runtime Agent、Session、history 或 event
 
 ### Requirement: Agent definition 校验
-Agent definition 边界 MUST 校验名称、作者版本标签、Model、parameters、tools 和 prompt，并拒绝未知字段。
+Agent definition 边界 MUST 校验名称、Model、parameters、tools 和 prompt，并拒绝未知字段。
 
 #### Scenario: 名称无效
 - **WHEN** agent name 不匹配既有 `AgentName` 规则
-- **THEN** API 必须返回 400，且不得创建或覆盖 definition
-
-#### Scenario: 版本标签复用
-- **WHEN** 更新 definition 的行为字段但没有提供新的作者版本标签
-- **THEN** API 必须返回 422，且不得让同一 `(agent_name, version)` 指向不同不可变 Agent template
+- **THEN** API 必须返回 400，且不得创建或覆盖文件
 
 #### Scenario: Model 不存在
 - **WHEN** definition 引用当前 managed catalog 中不存在的 Model
@@ -77,12 +73,12 @@ Agent definition 更新 SHALL 只影响之后创建的 runtime Agent，现存 ru
 - **THEN** 删除可以成功且历史保持可恢复，但以后以该 definition 名称创建 Agent 必须返回 404
 
 ### Requirement: Definition 持久化安全
-Agent definition MUST 通过独立 Studio PostgreSQL database 的事务写入；执行 durable ledger 与只读 template filesystem 不得承载管理写入。
+Agent definition MUST 通过 `stratum-filesystem` 在 `/templates` 边界内做 crash-consistent 写入，不得在业务请求路径直接使用宿主文件系统。
 
 #### Scenario: 写入过程中失败
-- **WHEN** definition 写入、catalog revision 推进或事务提交任一步失败
-- **THEN** API 必须返回类型化 5xx，旧 definition 仍保持完整可读，且不得留下部分提交的 Provider、Model 或 definition 引用
+- **WHEN** 临时写、fsync 或原子 rename 任一步失败
+- **THEN** API 必须返回类型化 5xx，旧 definition 仍保持完整可读，且不得留下被列表识别为有效资源的半文件
 
 #### Scenario: 启动恢复
-- **WHEN** Host 启动并发现无法解码、引用无效或版本不变量损坏的 Studio definition
+- **WHEN** Host 启动并发现无效 UTF-8、未知字段或非法 definition
 - **THEN** 恢复必须 fail closed 并报告安全错误，不得静默忽略或猜测修复
