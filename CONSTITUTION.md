@@ -71,7 +71,7 @@
 - 敏感数据（LLM API key、token、用户凭据）绝对禁止进入 span 字段和日志消息。
 - 错误只在真正处理它的边界记录一次，禁止逐层重复 log。
 - 禁止 `println!` / `eprintln!`（CLI 输出场景除外）。
-- **Metrics（强制，分阶段落地）**：`metrics` facade 尚未引入仓库（平台任务，见 TODO.md）。facade 落地前，新增关键路径必须（SHALL）先以 tracing 事件覆盖；facade 就绪后，关键业务操作（turn 执行、LLM 调用、hook 调用、store 读写失败）必须记录 counter / histogram；指标名 snake_case，label 禁止高基数值（如 session_id、用户输入）。
+- **Metrics（强制，分阶段落地）**：`metrics` facade 尚未引入仓库（平台任务，见 `stratum-web/context-site/content/todo.ts` 的 P3）。facade 落地前，新增关键路径必须（SHALL）先以 tracing 事件覆盖；facade 就绪后，关键业务操作（turn 执行、LLM 调用、hook 调用、store 读写失败）必须记录 counter / histogram；指标名 snake_case，label 禁止高基数值（如 session_id、用户输入）。
 - **OpenTelemetry（强制）**：`stratum-api` 必须接入 OTLP exporter，trace 须贯通 HTTP 请求 → turn 执行 → LLM 调用链路。
 
 ---
@@ -178,7 +178,7 @@
 - 默认选择能工作的最小设计；禁止为"以后可能需要"提前增加 wrapper / adapter / facade / manager 层或 snapshot 机制。
 - 一个 trait 至少要有真实的多实现需求，单实现优先具体类型；配置项必须有真实使用场景，不会被改变的值不配置化。
 - 优先复用标准库、已有 crate 内部函数和已引入依赖；新增依赖必须说明理由（含许可证与安全性）。
-- 明显的扩展点先记 TODO 或注释，需求出现后再实现。
+- 明显的扩展点先记入 `stratum-web/context-site/content/todo.ts` 或局部注释，需求出现后再实现。
 - 公共 API 必须有 `///` 文档；crate / module 意图用 `//!` 说明；示例避免 `unwrap()`。
 - 实现完成后、PR 合入前，把最终设计约定归档到相关 crate 的 `AGENTS.md`。
 
@@ -192,6 +192,17 @@
 - 独立异步工作必须尽早启动并并行等待，禁止无依赖的串行 `await`；重型且非首屏必需的客户端模块使用静态可分析的动态 import，避免无收益的 barrel import 与整包加载。
 - `stratum-web/app/globals.css` 必须保持简洁，只允许全局 reset / base、设计 token 与主题、真正跨页面的基础规则，以及无法局部化的第三方样式入口。功能专属选择器、单页布局、组件细节和一次性动画必须放在使用方、CSS Module 或局部样式中；新增全局规则时必须能说明其全局作用域，并同步删除失效规则。
 - 前端逻辑改动必须通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与 `pnpm build`；性能修复应以可复现的关键路径、bundle 或渲染证据为依据，禁止无测量的投机性 memo / cache / abstraction。
+
+---
+
+## 15. 领域知识与工程待办（强制）
+
+- `stratum-web/context-site/content/context.ts` 是领域手册唯一人工维护源；`stratum-web/context-site/content/todo.ts` 是工程待办唯一人工维护源。禁止恢复或新增并行的 `CONTEXT.md`、`TODO.md`，也禁止在别处维护同一份术语、风险或待办真相。
+- 根目录 `CONTEXT.html` 是由上述 typed sources、`stratum-web` 暗色语义 token、系统中文字体栈与本地 GSAP runtime 生成的自包含只读制品。它必须无需服务器、网络请求或产品 API 即可直接打开；禁止手工编辑。
+- 领域结论、风险或待办发生变更时，必须运行 `pnpm build:context-site` 并提交同步后的 `CONTEXT.html`；CI 必须运行 `pnpm check:context-site` 做 byte-for-byte 同步校验。
+- `context-site` 可以单向读取 `stratum-web` 的视觉 token、字体与构建依赖；产品 Next.js 代码禁止导入 `context-site`。该站点不得成为产品 route、不得进入 Next.js 产品构建或 Docker 镜像，也不得连接运行时后端。
+- 由 grilling、设计访谈或探索过程产生的草稿不进入知识源。只有用户明确确认的领域结论才写入 `context.ts`；只有明确确认的工程事项才写入 `todo.ts`。来源不明、未经确认或仅由审查者推测的内容必须标为“审阅提示”，不得冒充“当前事实”。
+- 每个领域概念至少记录定义、正常路径、失败模式、恢复路径、强制不变量、风险与可定位证据；示例只使用合成 identity。图示由 typed data 生成语义 HTML/CSS，不引入运行时图表 DSL 或第二份图形事实源。
 
 ---
 

@@ -25,7 +25,7 @@
 - SQL corruption、非法 durable shape、compaction pointer 损坏；
 - compaction 线上触发与 summary Hook。当前 production composition 尚未注册 compaction Hook。
 
-当前 stock Compose 可执行的两个外部故障——F01 NATS stop/recover、F02 Postgres stop/recover——见 [ALPHA_FAULT_INJECTION.md](ALPHA_FAULT_INJECTION.md)。上面列出的精确 COMMIT、Tool crash、hosted slow/pending Turn 上的 API SIGTERM、slow/full/expiry/overflow 与 SQL corruption 场景延期到 [TODO.md](TODO.md) 的 P4a；production compaction 策略与 Hook 延期到 H5b，对应产品/故障验收延期到 H5c。完成本文档不会自动完成 OpenSpec `10.4` 或 `10.12`。
+当前 stock Compose 可执行的两个外部故障——F01 NATS stop/recover、F02 Postgres stop/recover——见 [ALPHA_FAULT_INJECTION.md](ALPHA_FAULT_INJECTION.md)。上面列出的精确 COMMIT、Tool crash、hosted slow/pending Turn 上的 API SIGTERM、slow/full/expiry/overflow 与 SQL corruption 场景延期到 [P4a](CONTEXT.html#todo/p4a)；production compaction 策略与 Hook 延期到 [H5b](CONTEXT.html#todo/h5b)，对应产品/故障验收延期到 [H5c](CONTEXT.html#todo/h5c)。完成本文档不会自动完成 OpenSpec `10.4` 或 `10.12`。
 
 已经能由单元测试或 crate-local ignored integration test 确定性覆盖的行为，不在这里重复手工模拟。本文档只补真实 Compose 进程、真实浏览器和真实 provider 边界的证据。
 
@@ -36,7 +36,7 @@
 3. 只使用合成测试数据。prompt、Echo arguments/result、approval 和完整 conversation 会持久化；当前没有 delete API。真实 LLM 会外发上下文并产生费用，只能使用低权限、限额测试 key。
 4. 真实 provider key、token、数据库连接凭据和本地 secret 配置不得加入 Git。证据中不得出现它们的值。
 5. 证据不得保存原始 prompt、assistant 正文、reasoning、Echo arguments/result、provider body、SQL connection string 或 credential。截图必须裁切或遮盖正文，只保留状态、控件和安全 identity。
-6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `TODO.md` 的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F02 扩大范围。
+6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `CONTEXT.html` 工程待办中的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F02 扩大范围。
 7. 每条 journey 都创建自己的 fresh AgentRuntime；不得复用其他 journey 的 AgentRuntime、Session、Turn、Approval 或浏览器恢复状态。某条 journey 的结果不得作为另一条的 fixture。
 8. J04 的 approve 与 reject 分别使用两个 fresh AgentRuntime，避免第一条路径留下的 Turn/history 影响第二条。
 9. journey 之间可以复用同一健康的 disposable Compose stack，但开始前必须重新确认服务身份与 health；任何被手工篡改或发生未知状态的 stack 都必须丢弃重建。
@@ -425,4 +425,4 @@ WHERE actual.event_seq IS NULL;
 11. 相关 Rust、real Postgres/NATS/API integration、Web test/typecheck/lint/build 与 OpenSpec strict validation 仍保持通过。
 12. 证据满足脱敏规则，未提交 provider key、本地 secret 配置或用户/Tool 敏感正文。
 
-本文档的 J01—J08 只对应当前 production-like 人工 journey；F01—F02 是否完成，以 `ALPHA_FAULT_INJECTION.md` 为准，本文件中央表只汇总结果。P4a 精确故障测试基建（含确定性 API SIGTERM/drain/restart）、H5b production compaction 策略/Hook 与 H5c 产品/故障验收仍以 `TODO.md` 为准。在当前独立 gate 满足前，不得仅凭 J01—J08 把 OpenSpec `10.4` 或 `10.12` 标记完成。
+本文档的 J01—J08 只对应当前 production-like 人工 journey；F01—F02 是否完成，以 `ALPHA_FAULT_INJECTION.md` 为准，本文件中央表只汇总结果。P4a 精确故障测试基建（含确定性 API SIGTERM/drain/restart）、H5b production compaction 策略/Hook 与 H5c 产品/故障验收仍以 `CONTEXT.html` 工程待办为准。在当前独立 gate 满足前，不得仅凭 J01—J08 把 OpenSpec `10.4` 或 `10.12` 标记完成。

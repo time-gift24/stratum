@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:context-site": "node context-site/generate.mts",
+    "check:context-site": "node context-site/check.mts",
     "start": "next start",
     "lint": "eslint",
-    "format": "prettier --write \"**/*.{ts,tsx}\"",
+    "format": "prettier --write \"**/*.{ts,tsx,mts,css,js}\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

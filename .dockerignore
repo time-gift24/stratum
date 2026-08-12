@@ -12,3 +12,5 @@ stratum-web/.react-router
 !.env.example
 .stratum
 .superpowers
+CONTEXT.html
+stratum-web/context-site

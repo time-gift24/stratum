@@ -4,9 +4,9 @@
 
 本文只记录当前 stock Compose 环境无需生产 failpoint 即可执行的两个 Alpha 外部故障。仓库默认使用 `podman compose`；使用 Docker 时，把下文命令中的 `podman` 替换为 `docker`，其余参数保持不变。
 
-| ID | 唯一故障 | Compose project |
-|---|---|---|
-| F01 | 停止并恢复 NATS | `stratum-alpha-fi-nats` |
+| ID  | 唯一故障            | Compose project             |
+| --- | ------------------- | --------------------------- |
+| F01 | 停止并恢复 NATS     | `stratum-alpha-fi-nats`     |
 | F02 | 停止并恢复 Postgres | `stratum-alpha-fi-postgres` |
 
 两例必须顺序执行并各自使用新的 Compose project、数据库 volume、NATS volume、AgentRuntime 和合成测试数据。每例完成后先保存证据，再执行该例的 cleanup；不得复用已经受过故障影响的 fixture。
@@ -20,7 +20,7 @@
 - 直接 SQL corruption、非法持久化 shape 或 identity 注入；
 - 真实 compaction producer、阈值策略、摘要 Hook 与 producer crash window。
 
-前五类由 `TODO.md` 的 P4a 后续测试基础设施负责；其中 API SIGTERM 必须等 scripted LLM/可观察 Tool 能稳定制造 hosted slow/pending Turn、process controller 能锁定精确进程与边界后再执行，不能继续依赖真实 provider 的偶然时序。production compaction 策略/Hook 由 H5b 设计，producer 与 consumer 的产品/故障验收由 H5c 负责。本文件不得据此把这些场景记为通过，也不得为执行它们增加公开 debug endpoint、生产 failpoint、特殊协议字段或第二套状态。
+前五类由 `CONTEXT.html` 工程待办中的 P4a 后续测试基础设施负责；其中 API SIGTERM 必须等 scripted LLM/可观察 Tool 能稳定制造 hosted slow/pending Turn、process controller 能锁定精确进程与边界后再执行，不能继续依赖真实 provider 的偶然时序。production compaction 策略/Hook 由 H5b 设计，producer 与 consumer 的产品/故障验收由 H5c 负责。本文件不得据此把这些场景记为通过，也不得为执行它们增加公开 debug endpoint、生产 failpoint、特殊协议字段或第二套状态。
 
 执行任一 fixture 前，必须先按 [ALPHA_TEST.md](ALPHA_TEST.md) 的“本地 provider secret 配置”生成 Git 忽略的 `.stratum/alpha/config.toml` 与 Compose override。下文每条 Compose 命令都显式传入该 override；缺失文件或空 credential 时不得开始故障注入。
 
@@ -165,7 +165,9 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 ### 用户可见 oracle
 
 - 页面显示存储暂不可用或请求失败，不把缓存状态冒充成最新真相，也不伪造 finished/failed/cancelled。
+- 存储错误只出现在 conversation 外的单一、可操作 notice 中，不作为 assistant/system 正文插入 timeline；故障前后的历史消息条数保持不变。
 - 恢复并 refresh/reconcile 后，同一 AgentRuntime 的既有历史重新出现，不创建替代对话。
+- Postgres 恢复且一次正常 view 或明确重试的 Turn 成功后，notice 丝滑退出且只退出一次；不得抢走当前焦点、强制滚动或遮挡已恢复历史。
 - 用户明确重试后可以继续运行；失败期间的输入不得以 ghost message 形式自行出现。
 
 ### 证据
@@ -175,6 +177,7 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 - view/history/command 的 HTTP status 与 `error.code`；
 - 故障前后安全 SQL 查询和 event sequence 连续性；
 - 存储不可用、恢复后同一对话和明确重试结果的页面截图；
+- 记录 notice 所在 DOM 区域、恢复前后消息数量、焦点目标与滚动位置，确认错误未进入对话正文且退出不扰动阅读位置；
 - 只含安全 metadata 的 API/Postgres 日志片段。
 
 ### Cleanup
@@ -184,7 +187,7 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml down -v --remove-orphans
 ```
 
-确认该 project 已完全清理，本轮 stock Compose 外部故障即执行完毕。API SIGTERM/drain/restart 的确定性场景由 `TODO.md` P4a 接管。
+确认该 project 已完全清理，本轮 stock Compose 外部故障即执行完毕。API SIGTERM/drain/restart 的确定性场景由 `CONTEXT.html` 工程待办 P4a 接管。
 
 ## 本轮完成判定
 

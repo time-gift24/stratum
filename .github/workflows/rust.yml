@@ -50,6 +50,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Check generated context site
+        run: pnpm check:context-site
+
       - name: Build
         run: pnpm build
 
