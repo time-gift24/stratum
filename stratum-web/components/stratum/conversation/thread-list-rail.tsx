@@ -9,8 +9,8 @@ import { cn } from "@/lib/utils"
 /**
  * ThreadListRail —— 紧凑会话栏：默认收成一条图标列（卡片浮于消息区左上，
  * 消息列保持视口居中），点开关向右展开出完整标题；点选会话后立即收回。
- * 选中态用 primary 染底（与 dock 的 hover 语言一致：bg-primary/15 + text-primary），
- * 收起时也有颜色标记。无遮罩，Esc 收回。
+ * light 选中态使用稀缺 sage accent，dark 保留 primary 染底；收起时也有
+ * 形状与颜色双重标记。无遮罩，Esc 收回。
  */
 export const ThreadListRail = memo(function ThreadListRail({
   threads,
@@ -55,9 +55,9 @@ export const ThreadListRail = memo(function ThreadListRail({
       title={label}
       onClick={onClick}
       className={cn(
-        "flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm transition-colors",
+        "flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/60",
         active
-          ? "bg-primary/15 text-primary"
+          ? "bg-accent/60 text-accent-foreground dark:bg-primary/15 dark:text-primary"
           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       )}
     >
@@ -77,7 +77,7 @@ export const ThreadListRail = memo(function ThreadListRail({
     <div
       data-slot="thread-list-rail"
       className={cn(
-        "absolute top-2 left-3 z-10 flex flex-col gap-1 overflow-hidden rounded-2xl border border-border bg-card/95 p-1.5 shadow-xl backdrop-blur transition-[width] duration-300 ease-out",
+        "absolute top-2 left-3 z-10 flex flex-col gap-1 overflow-hidden rounded-2xl border border-border bg-card p-1.5 shadow-sm transition-[width] duration-300 ease-out dark:bg-card/95 dark:shadow-xl dark:backdrop-blur",
         expanded ? "w-64" : "w-11",
         className
       )}
@@ -87,7 +87,7 @@ export const ThreadListRail = memo(function ThreadListRail({
           type="button"
           aria-label={expanded ? "收起会话列表" : "展开会话列表"}
           onClick={() => setExpanded((v) => !v)}
-          className="flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm text-muted-foreground transition-colors hover:text-primary"
+          className="flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 dark:hover:text-primary"
         >
           <span className={iconSlot}>
             {expanded ? (

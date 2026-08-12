@@ -8,15 +8,13 @@ web
 
 ## Users
 
-与仓库根 `PRODUCT.md` 一致：主要使用者是通过对话委托真实任务的人——他们希望 Agent 持续推进工作，而不必理解 Runtime、事件协议等工程概念。配置 Agent、编排工作流的开发者是第二类使用者，但本前端当前不承载其界面。
-
-本目录是 Stratum 的 Web 前端层，只服务第一类的对话场景。
+与仓库根 `PRODUCT.md` 一致：主要使用者通过对话委托真实任务；配置 Agent 的开发者与管理员是第二类使用者。Web 前端分别以对话和 Studio 服务两类任务，信息架构与概念必须保持边界。
 
 ## Product Purpose
 
-Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。当前是单对话页应用：`/conversation` 是唯一页面，`/` 直接重定向到它。使用者在这里发起真实任务、看流式回复、切换与恢复历史会话、选择模型与 Thinking 等级。
+Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/conversation` 承载任务执行，`/excalidraw` 承载独立白板，`/studio` 承载 Provider、Model 与 Agent definition 管理；`/` 仍直接重定向到对话。
 
-成功标准：发起任务、理解反馈、恢复会话、处理错误，每一步都清晰可信——而不是一个好看的聊天壳。
+成功标准：发起任务、理解反馈、恢复会话和管理真实 Agent 配置都清晰可信；Studio 的 revision、校验、引用 blocker 和 secret 状态必须如实呈现。
 
 ## Positioning
 
@@ -33,8 +31,9 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。�
 
 ## Capabilities and Constraints
 
-- 单页面：`app/(site)/conversation/page.tsx` 是唯一业务页面；`app/(site)/page.tsx` 只做 `redirect("/conversation")`。
+- 路由分工：`/conversation` 面向最终用户，`/excalidraw` 是沉浸白板，`/studio` 与其子路由面向开发者/管理员；`app/(site)/page.tsx` 只做 `redirect("/conversation")`。
 - 数据必须真实：消息、流式草稿、运行/失败状态、连接错误、会话 404 都有可见的对应状态；禁止 mock 数据与演示文案。
+- Studio 首期只管理 Provider、Model 和 Agent definition。Agent-first 仪表盘不显示 Agents 页签、说明区、Prompt 摘要、假指标、健康灯或监控占位；资源管理仅从右上设置进入。
 - 外部/底稿组件隔离：`components/ui`（shadcn 官方）、`components/react-bits`、`components/assistant-ui`（CLI 底稿，只读参考）不改内部实现；适配经 props、组合、包裹层和 token 完成。
 - 组件获取一律走 shadcn CLI；fork 产物落 `components/stratum/`，数据全部走 props。
 - 模型配置 schema 驱动：模型列表与 Thinking 等级来自 `GET /v1/models` 的 `parameters_schema`，UI 严禁硬编码等级（见 `lib/stratum/model-config.ts` 的 `thinkingLevels`）。
@@ -56,7 +55,7 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。�
 
 ## Product Principles
 
-1. **对话即产品。** 只有一个页面，也必须完整可用：发起、流式、恢复、重连、错误可见。
+1. **界面各守任务边界。** 对话完整承载执行；Studio 完整承载配置，不互相泄漏概念。
 2. **真实状态胜过演示感。** 一切数据来自真实后端；加载、错误、空态如实描述过程。
 3. **渐进式透明。** 思考与工具执行默认折叠、按需展开；待决审批例外，必须直接可见可操作。
 4. **schema 驱动配置。** 模型能力（含 Thinking 等级）由后端 schema 决定，UI 只解析、不假设。

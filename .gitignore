@@ -1,6 +1,9 @@
 target/
 .worktrees/
 .impeccable/
+!stratum-web/.impeccable/
+!stratum-web/.impeccable/surfaces/
+!stratum-web/.impeccable/surfaces/*.md
 *.swp
 .DS_Store
 config.toml

@@ -177,7 +177,7 @@ export const ModelSelector = memo(function ModelSelector({
                         "rounded-full px-2 py-0.5 text-xs transition-colors outline-none",
                         "focus-visible:ring-2 focus-visible:ring-ring/50",
                         active
-                          ? "bg-primary/15 text-primary"
+                          ? "bg-accent/60 text-accent-foreground dark:bg-primary/15 dark:text-primary"
                           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                       )}
                     >
@@ -210,7 +210,10 @@ export const ModelSelector = memo(function ModelSelector({
                       {entry.name}
                     </span>
                     {entry.id === selectedModelId ? (
-                      <Check aria-hidden className="size-4 text-primary" />
+                      <Check
+                        aria-hidden
+                        className="size-4 text-accent dark:text-primary"
+                      />
                     ) : null}
                   </CommandItem>
                 ))}
