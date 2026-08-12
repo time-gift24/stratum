@@ -16,8 +16,12 @@ semantics, and the admission gate.
 make -C crates/stratum-api test-integration
 ```
 
-Brings up `docker-compose.test.yml` (Postgres 17 on 45433, NATS `-js` on 44228; compose project
-`stratum-api-test`), runs `tests/api.rs` with `--test-threads=1`, then `down -v`. The suite drives
+Brings up `docker-compose.test.yml` (compose project `stratum-api-test`) with dynamically published
+loopback ports for Postgres 17 and NATS `-js`, injects the resolved endpoints into the test process,
+runs `tests/api.rs` with `--test-threads=1`, then `down -v`. Dynamic ports prevent collisions with
+runner services and ephemeral client sockets. A manually managed `make test-up` stack still defaults
+to Postgres 45433 and NATS 44228 unless `STRATUM_API_TEST_PG_HOST_PORT` /
+`STRATUM_API_TEST_NATS_HOST_PORT` override them. The suite drives
 the real router (tower `oneshot`) against real Postgres/NATS with a scripted mock LLM provider and
 covers: the create idempotency matrix, admission CAS/session rules, started-only reconciliation,
 full turns, the approval lifecycle, cancel races, history pagination and compaction markers, the

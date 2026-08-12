@@ -27,13 +27,19 @@ use stratum_llm::{
 use stratum_postgres::PostgresBackend;
 use tower::ServiceExt;
 
-/// Postgres of the test compose stack (port 45433 is unique to this crate).
+/// Postgres of the test compose stack.
+///
+/// `make test-integration` injects the dynamically published host port. The
+/// fixed default remains available for manually managed `make test-up` stacks.
 pub fn pg_url() -> String {
     std::env::var("STRATUM_API_TEST_PG_URL")
         .unwrap_or_else(|_| "postgres://stratum:stratum@127.0.0.1:45433/stratum_test".to_owned())
 }
 
-/// NATS of the test compose stack (port 44228 is unique to this crate).
+/// NATS of the test compose stack.
+///
+/// `make test-integration` injects the dynamically published host port. The
+/// fixed default remains available for manually managed `make test-up` stacks.
 pub fn nats_url() -> String {
     std::env::var("STRATUM_API_TEST_NATS_URL")
         .unwrap_or_else(|_| "nats://127.0.0.1:44228".to_owned())
@@ -362,6 +368,7 @@ pub async fn default_tail_config() -> Option<NatsAgentRuntimeTail> {
 }
 
 fn test_config(root: &Path) -> Config {
+    let nats_url = nats_url();
     Config::parse(&format!(
         r#"
 [agent]
@@ -378,7 +385,7 @@ models = ["test-model"]
 bind = "127.0.0.1:0"
 
 [nats]
-url = "nats://127.0.0.1:44228"
+url = {nats_url:?}
 stream_name = "AGENT_RUNTIME_TAIL"
 subject_prefix = "events.agent"
 replicas = 1
@@ -389,7 +396,7 @@ max_messages = 100000
 [postgres]
 url = "postgres://unused:unused@127.0.0.1:1/unused"
 "#,
-        root = root.to_string_lossy()
+        root = root.to_string_lossy(),
     ))
     .expect("test config parses")
 }

@@ -85,7 +85,10 @@
   代次，不在进程重启或代次退休后重新灌入旧历史。
 - 测试：单元测试位于各模块的 `#[cfg(test)]`；容器集成测试位于 `tests/api.rs` +
   `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，Compose 项目
-  `stratum-api-test`，PG 45433 / NATS 44228，与其他 crate 的端口错开）。
+  `stratum-api-test`）。完整集成命令让 Docker/Podman 动态发布 loopback host ports，
+  再把实际 PG/NATS endpoint 注入测试进程，避免 CI runner 服务或 ephemeral client
+  socket 占用固定端口；手动 `make test-up` 仍默认 PG 45433 / NATS 44228，也可通过
+  `STRATUM_API_TEST_PG_HOST_PORT` / `STRATUM_API_TEST_NATS_HOST_PORT` 覆盖。
 - OTLP 由 `telemetry.rs::init_telemetry()` 按环境激活：设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时安装 OTLP span 导出器（HTTP/protobuf、`reqwest-blocking`、不使用 `tonic`）与 `tracing-opentelemetry` 层，未设置时与纯 `fmt` 行为完全一致；进程退出前必须经 `TelemetryGuard::shutdown()` 刷出数据。采集器端点仅支持 `http://`。
 - 审批等待器使用 RAII 注册守卫（`Drop` 时按精确注册身份注销）；`register` 返回守卫+接收端，提前命中/读取错误/取消均不泄漏。
 - 审批处理器必须注册后立即读取 PG，并在通知、取消与内部固定上限节拍

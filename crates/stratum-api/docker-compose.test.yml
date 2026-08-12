@@ -13,7 +13,7 @@ services:
       timeout: 2s
       retries: 20
     ports:
-      - "45433:5432"
+      - "127.0.0.1:${STRATUM_API_TEST_PG_HOST_PORT-45433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -26,7 +26,7 @@ services:
       timeout: 2s
       retries: 20
     ports:
-      - "44228:4222"
+      - "127.0.0.1:${STRATUM_API_TEST_NATS_HOST_PORT-44228}:4222"
     volumes:
       - nats-data:/data
 

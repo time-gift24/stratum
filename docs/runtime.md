@@ -152,8 +152,9 @@ create 都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned de
   端口：
   - `make -C crates/stratum-postgres test-integration`（Postgres 17，端口 45432）；
   - `make -C crates/stratum-infra test-integration`（NATS `-js`）；
-  - `make -C crates/stratum-api test-integration`（Postgres 45433 + NATS 44228，
-    `tests/api.rs` 以 `--test-threads=1` 运行）。
+  - `make -C crates/stratum-api test-integration`（Postgres + NATS 动态发布 loopback
+    host ports 并注入测试进程，`tests/api.rs` 以 `--test-threads=1` 运行；手动
+    `test-up` 默认仍为 45433 / 44228）。
 - 细节见 `crates/stratum-api/TESTING.md` 与各 crate `AGENTS.md` 的测试章节。
 
 ## 9. 明确延期（本 runtime 不提供）
