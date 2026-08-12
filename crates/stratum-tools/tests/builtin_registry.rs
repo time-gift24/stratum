@@ -697,7 +697,7 @@ fn tool_set_fingerprint_is_stable_and_includes_authorization_policy() {
 }
 
 #[tokio::test]
-async fn cancelled_apply_patch_preserves_existing_content_and_version() {
+async fn cancelled_apply_patch_preserves_existing_content() {
     let (filesystem, root) = apply_patch_test_filesystem("cancelled-update").await;
     let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
     filesystem
@@ -705,10 +705,9 @@ async fn cancelled_apply_patch_preserves_existing_content_and_version() {
         .await
         .expect("seed file");
     let before = filesystem
-        .get(&path)
+        .read_file(&path)
         .await
-        .expect("get should succeed")
-        .expect("seeded file should exist");
+        .expect("read should succeed");
     let mut registry = BuiltinToolRegistry::default();
     registry
         .register(
@@ -740,9 +739,8 @@ async fn cancelled_apply_patch_preserves_existing_content_and_version() {
 
     assert!(matches!(error, ToolError::Cancelled));
     let after = filesystem
-        .get(&path)
+        .read_file(&path)
         .await
-        .expect("get should succeed")
         .expect("cancelled patch should preserve the file");
     assert_eq!(after, before);
 

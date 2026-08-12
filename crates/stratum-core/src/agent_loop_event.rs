@@ -12,10 +12,10 @@ use crate::{
 /// Durable agent-loop events that require persistence acknowledgement.
 ///
 /// The persistence format is JSON (`{"type": ..., "data": ...}` per event).
-/// Deserialization buffers through [`Value`] so logs written before
-/// `LoopStarted` carried its optional `extension_set_version_id` — a bare
-/// `{"type": "loop_started"}` line without a `data` key — still parse.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Deserialization is strict: unknown variants or malformed shapes fail
+/// closed; no legacy shapes are upgraded (the beta filesystem backend that
+/// produced them is deleted).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DurableAgentEvent {
@@ -144,189 +144,6 @@ pub enum DurableAgentEvent {
         /// when no response reported usage.
         usage: TokenUsage,
     },
-}
-
-/// Deserialization mirror of [`DurableAgentEvent`].
-///
-/// The manual [`Deserialize`] front door buffers the wire value, upgrades the
-/// legacy unit-shaped `loop_started` (no `data` key, written before the
-/// extension set version existed), and dispatches through this derived copy.
-/// It must mirror [`DurableAgentEvent`] variant for variant; the round-trip
-/// tests over every variant catch drift.
-#[derive(Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-enum DurableAgentEventWire {
-    LoopStarted {
-        #[serde(default)]
-        extension_set_version_id: Option<ExtensionSetVersionId>,
-    },
-    MessageAppended {
-        message: ChatMessage,
-    },
-    ToolApprovalRequested {
-        approval_id: ApprovalId,
-        call_id: CallId,
-        tool_name: ToolName,
-        arguments: Value,
-        tool_kind: ToolKind,
-        danger_level: DangerLevel,
-    },
-    ToolApprovalResolved {
-        approval_id: ApprovalId,
-        decision: ApprovalDecision,
-    },
-    ToolExecutionStarted {
-        call_id: CallId,
-        tool_name: ToolName,
-    },
-    HookInvocationPending {
-        invocation_id: HookInvocationId,
-        point: HookPoint,
-        iteration: u64,
-        #[serde(default)]
-        call_id: Option<CallId>,
-        input_digest: HookInputDigest,
-    },
-    HookInvocationCompleted {
-        invocation_id: HookInvocationId,
-        decision: HookDecisionRecord,
-    },
-    HookInvocationFailed {
-        invocation_id: HookInvocationId,
-        failure: HookFailure,
-    },
-    TranscriptCompacted {
-        upto: u64,
-        summary: ChatMessage,
-        compacted_iteration: u64,
-    },
-    IterationCompleted {
-        iteration: u64,
-        usage: TokenUsage,
-    },
-    LoopFinished {
-        finish_reason: String,
-        usage: TokenUsage,
-    },
-    LoopFailed {
-        error_text: String,
-        usage: TokenUsage,
-    },
-    LoopCancelled {
-        usage: TokenUsage,
-    },
-}
-
-impl From<DurableAgentEventWire> for DurableAgentEvent {
-    fn from(wire: DurableAgentEventWire) -> Self {
-        match wire {
-            DurableAgentEventWire::LoopStarted {
-                extension_set_version_id,
-            } => Self::LoopStarted {
-                extension_set_version_id,
-            },
-            DurableAgentEventWire::MessageAppended { message } => Self::MessageAppended { message },
-            DurableAgentEventWire::ToolApprovalRequested {
-                approval_id,
-                call_id,
-                tool_name,
-                arguments,
-                tool_kind,
-                danger_level,
-            } => Self::ToolApprovalRequested {
-                approval_id,
-                call_id,
-                tool_name,
-                arguments,
-                tool_kind,
-                danger_level,
-            },
-            DurableAgentEventWire::ToolApprovalResolved {
-                approval_id,
-                decision,
-            } => Self::ToolApprovalResolved {
-                approval_id,
-                decision,
-            },
-            DurableAgentEventWire::ToolExecutionStarted { call_id, tool_name } => {
-                Self::ToolExecutionStarted { call_id, tool_name }
-            }
-            DurableAgentEventWire::HookInvocationPending {
-                invocation_id,
-                point,
-                iteration,
-                call_id,
-                input_digest,
-            } => Self::HookInvocationPending {
-                invocation_id,
-                point,
-                iteration,
-                call_id,
-                input_digest,
-            },
-            DurableAgentEventWire::HookInvocationCompleted {
-                invocation_id,
-                decision,
-            } => Self::HookInvocationCompleted {
-                invocation_id,
-                decision,
-            },
-            DurableAgentEventWire::HookInvocationFailed {
-                invocation_id,
-                failure,
-            } => Self::HookInvocationFailed {
-                invocation_id,
-                failure,
-            },
-            DurableAgentEventWire::TranscriptCompacted {
-                upto,
-                summary,
-                compacted_iteration,
-            } => Self::TranscriptCompacted {
-                upto,
-                summary,
-                compacted_iteration,
-            },
-            DurableAgentEventWire::IterationCompleted { iteration, usage } => {
-                Self::IterationCompleted { iteration, usage }
-            }
-            DurableAgentEventWire::LoopFinished {
-                finish_reason,
-                usage,
-            } => Self::LoopFinished {
-                finish_reason,
-                usage,
-            },
-            DurableAgentEventWire::LoopFailed { error_text, usage } => {
-                Self::LoopFailed { error_text, usage }
-            }
-            DurableAgentEventWire::LoopCancelled { usage } => Self::LoopCancelled { usage },
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for DurableAgentEvent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut value = Value::deserialize(deserializer)?;
-        if let Some(object) = value.as_object_mut() {
-            let is_loop_started =
-                object.get("type").and_then(Value::as_str) == Some("loop_started");
-            if is_loop_started {
-                // Logs written before the extension set version existed
-                // serialized the unit variant without a `data` key; upgrade
-                // them to the current shape before variant dispatch.
-                object
-                    .entry("data")
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-            }
-        }
-        serde_json::from_value::<DurableAgentEventWire>(value)
-            .map(Self::from)
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 impl DurableAgentEvent {
@@ -645,19 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_loop_started_without_data_still_parses() -> serde_json::Result<()> {
-        // Logs written before the extension set version existed serialized the
-        // unit variant without a `data` key at all.
+    fn legacy_loop_started_without_data_is_rejected() {
+        // The beta filesystem backend that wrote data-less `loop_started`
+        // lines is deleted; the shape must fail closed, never be upgraded.
         let legacy = json!({ "type": "loop_started" });
 
-        assert_eq!(
-            serde_json::from_value::<DurableAgentEvent>(legacy)?,
-            DurableAgentEvent::LoopStarted {
-                extension_set_version_id: None,
-            }
-        );
-
-        Ok(())
+        assert!(serde_json::from_value::<DurableAgentEvent>(legacy).is_err());
     }
 
     #[test]

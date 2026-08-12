@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Map, Value, json};
 use stratum_core::CallId;
 use stratum_llm::{
     ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, ConfigurableLlmProvider, FinishReason,
-    LlmError, LlmProvider, OpenAICompatibleProvider, ToolCallDelta,
+    LlmError, LlmProvider, LlmTimeouts, OpenAICompatibleProvider, ToolCallDelta,
 };
 
 mod support;
@@ -81,6 +83,7 @@ async fn builder_uses_injected_client() {
                 .expect("model id parses"),
         )
         .client(client)
+        .timeouts(test_timeouts())
         .build();
 
     provider
@@ -646,5 +649,15 @@ fn test_provider(base_url: impl Into<String>) -> OpenAICompatibleProvider {
         "openai_compatible:gpt-configured"
             .parse()
             .expect("model id parses"),
+        test_timeouts(),
+    )
+}
+
+fn test_timeouts() -> LlmTimeouts {
+    LlmTimeouts::new(
+        Duration::from_secs(2),
+        Duration::from_secs(10),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
     )
 }

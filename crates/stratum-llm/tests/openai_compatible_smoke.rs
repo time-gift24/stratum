@@ -1,8 +1,8 @@
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
 use stratum_core::ModelId;
 use stratum_llm::{
-    ApiKey, ChatMessage, ChatRequest, ChatRole, LlmProvider, OpenAICompatibleProvider,
+    ApiKey, ChatMessage, ChatRequest, ChatRole, LlmProvider, LlmTimeouts, OpenAICompatibleProvider,
 };
 
 #[tokio::test]
@@ -11,7 +11,7 @@ async fn openai_compatible_provider_returns_chat_response() -> Result<(), Box<dy
     let base_url = std::env::var("STRATUM_LLM_TEST_BASE_URL")?;
     let api_key = ApiKey::new(std::env::var("STRATUM_LLM_TEST_API_KEY")?);
     let model: ModelId = std::env::var("STRATUM_LLM_TEST_MODEL")?.parse()?;
-    let provider = OpenAICompatibleProvider::new(base_url, api_key, model.clone());
+    let provider = OpenAICompatibleProvider::new(base_url, api_key, model.clone(), test_timeouts());
 
     let response = provider
         .chat(ChatRequest::new(model).with_message(ChatMessage::user("Say ok.")))
@@ -20,4 +20,13 @@ async fn openai_compatible_provider_returns_chat_response() -> Result<(), Box<dy
     assert_eq!(response.message.role, ChatRole::Assistant);
 
     Ok(())
+}
+
+fn test_timeouts() -> LlmTimeouts {
+    LlmTimeouts::new(
+        Duration::from_secs(10),
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    )
 }

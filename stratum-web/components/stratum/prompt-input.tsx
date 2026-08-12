@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { ArrowUp, Plus } from "lucide-react"
+import { ArrowUp, Plus, Square } from "lucide-react"
 
 import { BorderGlow } from "@/components/react-bits/border-glow"
 import { Button } from "@/components/ui/button"
@@ -21,11 +21,12 @@ const useIsomorphicLayoutEffect =
 /**
  * PromptInput —— Gemini 式提示词输入框（多行自适应 + 双结构）。
  * 单行：横向药丸——左侧 + 按钮 / 中间自动生长的 textarea / 右侧 trailing
- * 插槽与发送（items-end 底部对齐）。多行（scrollHeight 超单行高 + 2px 迟滞
- * 判定）：textarea 独占顶部整行，下方控制行（左 + 按钮，右 trailing + 发送，
- * justify-between）；删回单行立即切回。单一 DOM 顺序 + flex-wrap 实现，
- * textarea 不 remount、不丢焦点。multiline 的变更只来自输入事件（含窄形态
- * 退出预判）；形态翻转后按新宽度重测高度（layout 时机，只调高度不重判）。
+ * 插槽与发送（items-center 垂直居中）。多行（scrollHeight 超单行高 + 2px
+ * 迟滞判定）：textarea 独占顶部整行，下方控制行（左 + 按钮，右 trailing +
+ * 发送；trailing 组 ms-auto 恒钉右侧，无 leading 时不左滑）；删回单行
+ * 立即切回。单一 DOM 顺序 + flex-wrap 实现，textarea 不 remount、不丢焦点。
+ * multiline 的变更只来自输入事件（含窄形态退出预判）；形态翻转后按新宽度
+ * 重测高度（layout 时机，只调高度不重判）。
  * 默认 1 行高，换行/长文本自动生长（scrollHeight 手法），超过 10rem 内部滚动。
  * Enter 提交、Shift+Enter 换行、IME 组合态 Enter 不提交；空输入禁用发送。
  * 激活态：聚焦时 BorderGlow 全线段点亮——整圈 mesh 渐变边框 + 全周外发光
@@ -34,19 +35,30 @@ const useIsomorphicLayoutEffect =
  */
 export function PromptInput({
   placeholder = "问问 Stratum",
+  leading,
   trailing,
   value,
   onChange,
   onSubmit,
+  running = false,
+  cancelRequested = false,
+  onCancel,
   className,
 }: {
   placeholder?: string
+  /** 输入框左侧控制位（如 Agent 选择器）；不传渲染默认 + 按钮，传 null 则不渲染 */
+  leading?: React.ReactNode
   /** 输入框右侧、发送按钮之前的插槽（如模型选择器）；不传则不渲染 */
   trailing?: React.ReactNode
   /** 受控值；不传则内部自管（提交后自动清空） */
   value?: string
   onChange?: (value: string) => void
   onSubmit?: (value: string) => void
+  /** Turn 运行中：发送按钮替换为取消按钮（信号语义，非立即终态） */
+  running?: boolean
+  /** cancel 202 已接受但 durable terminal 未确认：按钮禁用等待收敛 */
+  cancelRequested?: boolean
+  onCancel?: () => void
   className?: string
 }) {
   const [innerValue, setInnerValue] = useState("")
@@ -151,7 +163,8 @@ export function PromptInput({
 
   const submit = () => {
     if (!canSend) return
-    onSubmit?.(currentValue.trim())
+    // 合同：trim 只用于 canSend 空判定，提交一律用原文（后端原样持久化）
+    onSubmit?.(currentValue)
     if (!controlled) setInnerValue("")
     // 提交后回到单行结构（高度由上面的 effect 回收）
     setMultiline(false)
@@ -184,17 +197,24 @@ export function PromptInput({
         className="rounded-[28px]"
       >
         {/* 单一 DOM 顺序 + flex-wrap：单行 = 横向药丸（+ / textarea / trailing+send）；
-            多行 = textarea order-first basis-full 独占首行，控制行 justify-between
-            （左 + 按钮、右 trailing + 发送）。textarea 节点不 remount、不丢焦点 */}
-        <div className="flex flex-wrap items-end justify-between gap-1.5 rounded-[28px] p-1.5 shadow-[0_8px_30px] shadow-black/10">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="mb-1 rounded-full"
-            aria-label="添加附件"
-          >
-            <Plus aria-hidden />
-          </Button>
+            多行 = textarea order-first basis-full 独占首行，控制行左 + 按钮、
+            右 trailing + 发送（trailing 组 ms-auto 恒钉右侧——已有会话没有
+            leading 时控制组也不能滑到左边）。textarea 节点不 remount、不丢焦点。
+            items-center：按钮（28px）与单行文行（44px）垂直居中；
+            p-2 + textarea px-2：文字离左缘 16px、按钮离右缘 8px 的呼吸 */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-[28px] p-2 shadow-[0_8px_30px] shadow-black/10">
+          {leading !== undefined ? (
+            leading
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="rounded-full"
+              aria-label="添加附件"
+            >
+              <Plus aria-hidden />
+            </Button>
+          )}
           <textarea
             ref={textareaRef}
             rows={1}
@@ -214,21 +234,34 @@ export function PromptInput({
             aria-label={placeholder}
             style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
             className={cn(
-              "min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1 py-2.5 font-sans text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+              "min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-2 py-2.5 font-sans text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground",
               multiline && "order-first basis-full"
             )}
           />
-          <div className="mb-1 flex items-center gap-1.5">
+          <div className="ms-auto flex items-center gap-1.5">
             {trailing}
-            <Button
-              size="icon"
-              className="rounded-full"
-              aria-label="发送"
-              disabled={!canSend}
-              onClick={submit}
-            >
-              <ArrowUp aria-hidden />
-            </Button>
+            {running && onCancel ? (
+              <Button
+                size="icon"
+                variant="outline"
+                className="rounded-full"
+                aria-label="取消生成"
+                disabled={cancelRequested}
+                onClick={onCancel}
+              >
+                <Square aria-hidden />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                className="rounded-full"
+                aria-label="发送"
+                disabled={!canSend}
+                onClick={submit}
+              >
+                <ArrowUp aria-hidden />
+              </Button>
+            )}
           </div>
         </div>
       </BorderGlow>

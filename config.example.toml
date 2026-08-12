@@ -1,5 +1,8 @@
 [agent]
-storage_root = "./.stratum/agents"
+# Read-only agent template catalog (hot-reloaded per catalog read / create).
+# Must exist, be a directory and be readable at startup; an empty directory is
+# allowed and the service never creates it.
+templates_root = "./templates"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"
@@ -7,16 +10,34 @@ default = "deepseek:deepseek-v4-flash"
 [llm.deepseek]
 api_key = "replace-with-your-api-key"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+connect_timeout_seconds = 10
+request_timeout_seconds = 120
+first_response_timeout_seconds = 30
+stream_idle_timeout_seconds = 60
+# Optional endpoint override (e.g. an LLM gateway or compatible API); when
+# omitted the provider's well-known public endpoint is used. Blank is rejected.
+# base_url = "https://api.deepseek.com"
 
 [api]
 bind = "127.0.0.1:8080"
 allowed_origins = ["http://localhost:5173"]
+shutdown_drain_timeout_seconds = 10
+sse_keep_alive_seconds = 15
+dispatcher_idle_timeout_seconds = 60
 
 [nats]
+# Connection and short AgentRuntime-scoped realtime tail limits. The tail is
+# lossy and never carries durable history.
 url = "nats://127.0.0.1:4222"
-stream_name = "SESSION_EVENTS"
-subject_prefix = "events.session"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
 replicas = 1
-max_age_seconds = 604800
-max_bytes = 1073741824
-max_messages = 1000000
+max_age_seconds = 3600
+max_bytes = 268435456
+max_messages = 100000
+connect_timeout_seconds = 5
+
+[postgres]
+# Postgres is the only execution-fact store; there is no backend selector
+# or fallback. Missing or blank url fails startup.
+url = "postgres://stratum:stratum@127.0.0.1:5432/stratum"

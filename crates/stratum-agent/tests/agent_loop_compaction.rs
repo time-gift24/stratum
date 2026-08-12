@@ -954,12 +954,12 @@ async fn resume_after_a_committed_compaction_does_not_compact_twice() {
     );
 }
 
-// V1: resume from a checkpoint window — `LoopStarted` plus the stream from
-// the first retained message's line — rebuilds the context byte-identically
-// to a full replay, and the window's journaled compact decision is reused
-// without calling the handler again.
+// V1: resume from a compaction companion's retained-suffix window —
+// `LoopStarted` plus the stream from its retained event position — rebuilds
+// the context byte-identically to a full replay, and the window's journaled
+// compact decision is reused without calling the handler again.
 #[tokio::test]
-async fn resume_from_a_checkpoint_window_matches_full_replay_and_reuses_the_journal() {
+async fn resume_from_a_compaction_companion_window_matches_full_replay_and_reuses_the_journal() {
     // Phase 1 compacts at iteration 0 (dropping the four prompts), decides a
     // second compaction at iteration 1, and crashes before that second
     // compaction commits: the surviving stream ends at the journaled compact
@@ -1013,23 +1013,24 @@ async fn resume_from_a_checkpoint_window_matches_full_replay_and_reuses_the_jour
         .expect_err("the simulated crash should stop phase 1");
     let full_events = durable_events(&snapshot(&phase1_operations));
 
-    // The checkpoint window: `LoopStarted` plus everything from the first
-    // retained message's line (the first compaction dropped four messages).
-    let window_start = full_events
+    // The retained-suffix window: `LoopStarted` plus everything from the
+    // companion's retained event position (the first compaction dropped four
+    // messages).
+    let retained_suffix_start_event_position = full_events
         .iter()
         .enumerate()
         .filter(|(_, event)| matches!(event, DurableAgentEvent::MessageAppended { .. }))
         .nth(4)
         .map(|(index, _)| index)
-        .expect("the stream has a fifth message line");
+        .expect("the stream has a fifth message event position");
     let mut window_events = vec![full_events[0].clone()];
-    window_events.extend_from_slice(&full_events[window_start..]);
+    window_events.extend_from_slice(&full_events[retained_suffix_start_event_position..]);
     assert!(
         matches!(
             &window_events[1],
             DurableAgentEvent::MessageAppended { message } if !message.tool_calls.is_empty()
         ),
-        "the window starts at the retained assistant message's line"
+        "the window starts at the retained assistant message's event position"
     );
 
     // Resume once from the full stream and once from the window.

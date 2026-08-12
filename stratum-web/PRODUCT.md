@@ -29,7 +29,7 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。�
 - Next.js 16 + React 19 + Tailwind v4 + streamdown + pnpm；`@/*` alias 映射本目录根。命令：`pnpm dev` / `pnpm lint` / `pnpm typecheck` / `pnpm build`。
 - 后端交互层（核心资产）：`lib/stratum/`（REST client + SSE 订阅 + 协议类型）、`features/agent-conversation/`（事件流 → 会话状态 reducer + recovery）、`hooks/use-agent-conversation.ts`（自包含 hook）。
 - 后端 base URL：`NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"`。
-- 会话恢复 = 历史分页拉取 + SSE replay + cursor 续传；最近会话与 SSE cursor 持久化在 localStorage。
+- 会话恢复 = subscribe-before-snapshot：SSE 等待 `stream_ready` 后以 PG `snapshot_event_seq` 为 barrier 冷启动，按需向上分页；SSE cursor 只存页面内存，仅最近会话列表持久化在 localStorage。
 
 ## Capabilities and Constraints
 

@@ -1,8 +1,8 @@
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
 use stratum_llm::{
     ApiKey, ChatMessage, ChatRequest, ChatRole, DeepSeekModel, DeepSeekProvider, DeepSeekThinking,
-    LlmProvider,
+    LlmProvider, LlmTimeouts,
 };
 
 #[tokio::test]
@@ -19,7 +19,13 @@ async fn deepseek_provider_returns_chat_response() -> Result<(), Box<dyn Error>>
             );
         }
     };
-    let provider = DeepSeekProvider::new(base_url, api_key, model, DeepSeekThinking::Disabled);
+    let provider = DeepSeekProvider::new(
+        base_url,
+        api_key,
+        model,
+        DeepSeekThinking::Disabled,
+        test_timeouts(),
+    );
 
     let response = provider
         .chat(ChatRequest::new(model.model_id()).with_message(ChatMessage::user("Say ok.")))
@@ -28,4 +34,13 @@ async fn deepseek_provider_returns_chat_response() -> Result<(), Box<dyn Error>>
     assert_eq!(response.message.role, ChatRole::Assistant);
 
     Ok(())
+}
+
+fn test_timeouts() -> LlmTimeouts {
+    LlmTimeouts::new(
+        Duration::from_secs(10),
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    )
 }

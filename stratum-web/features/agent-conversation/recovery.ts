@@ -1,265 +1,636 @@
-import type { ConversationAction } from "@/features/agent-conversation/types"
+import type {
+  ConversationAction,
+  DurableFrame,
+} from "@/features/agent-conversation/types"
 import {
   ApiError,
-  type StreamEnvelope,
+  compareEventSeq,
+  type AgentRuntimeDurableRecordV1,
+  type AgentRuntimeHistoryPage,
+  type AgentRuntimeView,
   type StratumApi,
 } from "@/lib/stratum/api"
-import {
-  subscribeToAgentEvents,
-  type SseEvent,
-} from "@/lib/stratum/event-stream"
+import { subscribeToAgentRuntimeEvents } from "@/lib/stratum/event-stream"
 
-const HISTORY_PAGE_LIMIT = 256
+/** Subscribe-before-snapshot recovery and PG reconciliation. */
+
+const HISTORY_PAGE_LIMIT = 50
+const RECONCILE_PAGE_LIMIT = 256
+const RECONCILE_FETCH_TIMEOUT_MS = 30_000
+const COLD_BUFFER_MAX_FRAMES = 256
+const COLD_BUFFER_MAX_CHARS = 4 * 1024 * 1024
+
+const STREAM_RESET_CODE = "stream_reset"
+const PROTOCOL_IDENTITY_CODE = "protocol_identity_error"
+
+/** stream_ready 的就绪上限：健康时远快于此。NATS 挂起（连接保有但订阅
+ *  迟迟不建立）时 ready 永远不定夺，历史会话会被事件流阻塞——超时按
+ *  realtime_unavailable 处理，直接读 PG 快照降级展示 */
+const STREAM_READY_TIMEOUT_MS = 3_000
 
 export type RecoveryDependencies = {
-  api: Pick<StratumApi, "getAgent" | "getHistory">
-  subscribe: typeof subscribeToAgentEvents
-  loadCursor(agentId: string): string | undefined
-  saveCursor(agentId: string, cursor: string): void
-  clearCursor(agentId: string): void
+  api: Pick<StratumApi, "getAgentRuntime" | "getAgentRuntimeHistory">
+  subscribe: typeof subscribeToAgentRuntimeEvents
+  loadCursor(agentRuntimeId: string): string | undefined
+  saveCursor(agentRuntimeId: string, cursor: string): void
+  clearCursor(agentRuntimeId: string): void
   dispatch(action: ConversationAction): void
+  /** 测试注入点：覆盖 STREAM_READY_TIMEOUT_MS */
+  streamReadyTimeoutMs?: number
 }
 
-export async function recoverConversation(
+type SessionState = {
+  cursor: string | undefined
+  agentId: string | undefined
+  /** One no-cursor retry is allowed after a dual-identity failure. */
+  identityRecoveryAttempts: number
+}
+
+export async function runConversationSession(
   dependencies: RecoveryDependencies,
-  input: { agentId: string; signal: AbortSignal }
+  input: { agentRuntimeId: string; signal: AbortSignal }
 ): Promise<void> {
-  let afterCursor = dependencies.loadCursor(input.agentId)
-  let retriedExpiredCursor = false
+  const session: SessionState = {
+    cursor: dependencies.loadCursor(input.agentRuntimeId),
+    agentId: undefined,
+    identityRecoveryAttempts: 0,
+  }
 
   while (!input.signal.aborted) {
     try {
-      await recoverOnce(dependencies, input, afterCursor)
-      return
+      if (session.cursor === undefined)
+        await coldBootstrap(dependencies, input, session)
+      else await resumeTail(dependencies, input, session)
     } catch (error) {
       if (input.signal.aborted) return
-
-      if (!retriedExpiredCursor && isExpiredStreamCursor(error)) {
-        dependencies.clearCursor(input.agentId)
-        afterCursor = undefined
-        retriedExpiredCursor = true
+      if (isApiErrorCode(error, PROTOCOL_IDENTITY_CODE)) {
+        session.cursor = undefined
+        session.agentId = undefined
+        dependencies.clearCursor(input.agentRuntimeId)
+        session.identityRecoveryAttempts += 1
+        if (session.identityRecoveryAttempts <= 1) continue
+        dependencies.dispatch({
+          type: "connection_error",
+          error: protocolIdentityError(),
+        })
+        return
+      }
+      if (
+        isApiErrorCode(error, STREAM_RESET_CODE) ||
+        isApiErrorCode(error, "cursor_expired")
+      ) {
+        session.cursor = undefined
+        session.agentId = undefined
+        session.identityRecoveryAttempts = 0
+        dependencies.clearCursor(input.agentRuntimeId)
         continue
       }
-
-      const connection = connectionError(error)
-      dependencies.dispatch(
-        connection.status === 404
-          ? { type: "missing", error: connection }
-          : { type: "connection_error", error: connection }
-      )
+      if (error instanceof ApiError && error.status === 404) {
+        dependencies.dispatch({ type: "missing", error })
+        return
+      }
+      if (
+        isApiErrorCode(error, "realtime_unavailable") ||
+        session.agentId !== undefined
+      ) {
+        dependencies.dispatch({ type: "realtime_degraded", degraded: true })
+        dependencies.dispatch({ type: "recovery_ready" })
+        await abortDriven(input.signal)
+        return
+      }
+      dependencies.dispatch({
+        type: "connection_error",
+        error: toConnectionError(error),
+      })
       return
     }
   }
 }
 
-async function recoverOnce(
+async function coldBootstrap(
   dependencies: RecoveryDependencies,
-  input: { agentId: string; signal: AbortSignal },
-  afterCursor: string | undefined
+  input: { agentRuntimeId: string; signal: AbortSignal },
+  session: SessionState
 ): Promise<void> {
-  const buffered: BufferedEnvelope[] = []
-  let ready = false
-  let streamCompletion: StreamCompletion | undefined
+  const { agentRuntimeId, signal } = input
+  dependencies.dispatch({ type: "recovery_started", agentRuntimeId })
 
-  const accept = (bufferedEnvelope: BufferedEnvelope) => {
-    dependencies.dispatch({
-      type: "envelope_received",
-      envelope: bufferedEnvelope.envelope,
-    })
-    if (bufferedEnvelope.cursor !== null)
-      dependencies.saveCursor(input.agentId, bufferedEnvelope.cursor)
-  }
+  const buffered: DurableFrame[] = []
+  let bufferedChars = 0
+  let live = false
+  let sawReset = false
+  let latestCursor: string | null = null
+  let streamAgentId: string | undefined
 
-  dependencies.dispatch({
-    type: "recovery_started",
-    agentId: input.agentId,
-    preserveTransient: afterCursor !== undefined,
+  const streamControl = new AbortController()
+  const unlink = linkAbort(signal, streamControl)
+
+  let readyResolve!: () => void
+  let readyReject!: (error: unknown) => void
+  const ready = new Promise<void>((resolve, reject) => {
+    readyResolve = resolve
+    readyReject = reject
   })
-  const subscription = dependencies.subscribe({
-    // The hook binds the configured base URL before this reaches fetch.
-    baseUrl: "",
-    agentId: input.agentId,
-    afterCursor,
-    signal: input.signal,
-    onEvent: (event) => {
-      const envelope = parseEnvelope(event)
-      if (
-        envelope?.event.type !== "agent" ||
-        envelope.event.data.agent_id !== input.agentId
-      )
-        return
+  // 就绪 deadline：NATS 挂起时订阅迟迟不建立（503 只在订阅失败时返回，
+  // 连接保有但无响应是常态），不能让历史展示无限等事件流
+  const readyDeadline = setTimeout(
+    () =>
+      readyReject(
+        new ApiError(
+          "realtime_unavailable",
+          503,
+          "event stream did not become ready in time"
+        )
+      ),
+    dependencies.streamReadyTimeoutMs ?? STREAM_READY_TIMEOUT_MS
+  )
 
-      const received = { envelope, cursor: event.id }
-      if (ready) accept(received)
-      else buffered.push(received)
+  const subscription = dependencies.subscribe({
+    baseUrl: "",
+    agentRuntimeId,
+    signal: streamControl.signal,
+    onFrame: (frame, frameCursor) => {
+      assertFrameIdentity(frame, agentRuntimeId, streamAgentId)
+      streamAgentId ??= frame.agent_id
+
+      if (frame.kind === "control") {
+        if (frame.event.type === "stream_reset") {
+          sawReset = true
+          streamControl.abort()
+          readyReject(new ApiError(STREAM_RESET_CODE, 0, "stream reset"))
+        } else readyResolve()
+        return
+      }
+
+      if (frameCursor !== null) latestCursor = frameCursor
+      if (!live) {
+        // A cold telemetry buffer can never prove a complete call prefix.
+        if (frame.kind === "durable") {
+          const frameChars = JSON.stringify(frame).length
+          if (
+            buffered.length >= COLD_BUFFER_MAX_FRAMES ||
+            bufferedChars + frameChars > COLD_BUFFER_MAX_CHARS
+          ) {
+            sawReset = true
+            streamControl.abort()
+            readyReject(new ApiError(STREAM_RESET_CODE, 0, "stream reset"))
+            return
+          }
+          buffered.push(frame)
+          bufferedChars += frameChars
+        }
+        return
+      }
+
+      // Live application has a PG-established pinned definition fence.
+      assertFrameIdentity(frame, agentRuntimeId, session.agentId)
+      if (frameCursor !== null) {
+        session.cursor = frameCursor
+        dependencies.saveCursor(agentRuntimeId, frameCursor)
+      }
+      dependencies.dispatch(
+        frame.kind === "durable"
+          ? { type: "durable_frame", frame }
+          : { type: "telemetry_frame", frame }
+      )
     },
   })
 
-  void subscription.done.then(
+  const streamEnded: Promise<never> = subscription.done.then(
     () => {
-      const completion: StreamCompletion = { type: "stream_ended" }
-      if (input.signal.aborted) return
-      if (ready) {
-        dependencies.dispatch({
-          type: "connection_error",
-          error: connectionError(completion),
-        })
-      } else {
-        streamCompletion = completion
-      }
+      if (!live) streamControl.abort()
+      throw new ApiError(
+        "stream_closed",
+        0,
+        "event stream closed during recovery"
+      )
     },
     (error: unknown) => {
-      const completion: StreamCompletion = { type: "stream_failed", error }
-      if (input.signal.aborted) return
-      if (ready) {
-        dependencies.dispatch({
-          type: "connection_error",
-          error: connectionError(completion),
-        })
-      } else {
-        streamCompletion = completion
-      }
+      if (!live) streamControl.abort()
+      throw error
     }
   )
+  void streamEnded.catch((error: unknown) => {
+    if (!live && !sawReset) readyReject(error)
+  })
 
-  const view = await dependencies.api.getAgent(input.agentId)
-  throwIfAborted(input.signal)
-  throwIfStreamCompleted(streamCompletion)
-  dependencies.dispatch({ type: "view_loaded", view })
-
-  let afterSeq = 0
-  let hasMore = true
-  while (hasMore) {
-    const page = await dependencies.api.getHistory(input.agentId, {
-      afterSeq,
-      throughSeq: view.last_seq,
-      limit: HISTORY_PAGE_LIMIT,
-    })
-    throwIfAborted(input.signal)
-    throwIfStreamCompleted(streamCompletion)
-    dependencies.dispatch({ type: "history_loaded", events: page.events })
-    afterSeq = page.next_front_seq
-    hasMore = page.has_more
-  }
-
-  for (const received of buffered) {
-    const runtimeEvent = received.envelope.event
-    if (
-      runtimeEvent.type === "agent" &&
-      runtimeEvent.data.event.type === "message" &&
-      runtimeEvent.data.event.data.message_seq <= view.last_seq
-    )
-      continue
-    accept(received)
-  }
-
-  throwIfStreamCompleted(streamCompletion)
-  ready = true
-  dependencies.dispatch({ type: "recovery_ready" })
-}
-
-type BufferedEnvelope = { envelope: StreamEnvelope; cursor: string | null }
-type StreamCompletion =
-  | { type: "stream_ended" }
-  | { type: "stream_failed"; error: unknown }
-
-function parseEnvelope(event: SseEvent): StreamEnvelope | undefined {
   try {
-    const value: unknown = JSON.parse(event.data)
-    return isStreamEnvelope(value) ? value : undefined
-  } catch {
-    return undefined
+    await ready
+    clearTimeout(readyDeadline)
+  } catch (error) {
+    clearTimeout(readyDeadline)
+    streamControl.abort()
+    unlink()
+    if (isApiErrorCode(error, "realtime_unavailable")) {
+      const snapshot = await readSnapshot(dependencies, input)
+      session.agentId = snapshot.view.agent_id
+      session.identityRecoveryAttempts = 0
+      dependencies.dispatch(snapshot)
+      dependencies.dispatch({ type: "realtime_degraded", degraded: true })
+      dependencies.dispatch({ type: "recovery_ready" })
+      return abortDriven(signal)
+    }
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+    throw error
+  }
+
+  try {
+    const snapshot = await Promise.race([
+      readSnapshot(dependencies, {
+        agentRuntimeId,
+        signal: streamControl.signal,
+        expectedAgentId: streamAgentId,
+      }),
+      streamEnded,
+    ])
+    throwIfAborted(signal)
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+
+    session.agentId = snapshot.view.agent_id
+    for (const frame of buffered)
+      assertFrameIdentity(frame, agentRuntimeId, session.agentId)
+
+    dependencies.dispatch(snapshot)
+    for (const frame of buffered)
+      dependencies.dispatch({ type: "durable_frame", frame })
+
+    if (latestCursor !== null) {
+      session.cursor = latestCursor
+      dependencies.saveCursor(agentRuntimeId, latestCursor)
+    }
+    session.identityRecoveryAttempts = 0
+    live = true
+    dependencies.dispatch({ type: "realtime_degraded", degraded: false })
+    dependencies.dispatch({ type: "recovery_ready" })
+  } catch (error) {
+    streamControl.abort()
+    unlink()
+    if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+    throw error
+  }
+
+  return streamEnded
+    .catch((error: unknown) => {
+      if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+      throw error
+    })
+    .finally(unlink)
+}
+
+function resumeTail(
+  dependencies: RecoveryDependencies,
+  input: { agentRuntimeId: string; signal: AbortSignal },
+  session: SessionState
+): Promise<void> {
+  const { agentRuntimeId, signal } = input
+  let sawReset = false
+  const streamControl = new AbortController()
+  const unlink = linkAbort(signal, streamControl)
+
+  const subscription = dependencies.subscribe({
+    baseUrl: "",
+    agentRuntimeId,
+    afterCursor: session.cursor,
+    signal: streamControl.signal,
+    onFrame: (frame, frameCursor) => {
+      assertFrameIdentity(frame, agentRuntimeId, session.agentId)
+      if (frame.kind === "control") {
+        if (frame.event.type === "stream_reset") {
+          sawReset = true
+          streamControl.abort()
+        }
+        return
+      }
+      if (frameCursor !== null) {
+        session.cursor = frameCursor
+        dependencies.saveCursor(agentRuntimeId, frameCursor)
+      }
+      dependencies.dispatch(
+        frame.kind === "durable"
+          ? { type: "durable_frame", frame }
+          : { type: "telemetry_frame", frame }
+      )
+    },
+  })
+
+  return subscription.done
+    .catch((error: unknown) => {
+      if (sawReset) throw new ApiError(STREAM_RESET_CODE, 0, "stream reset")
+      throw error
+    })
+    .finally(unlink)
+}
+
+async function readSnapshot(
+  dependencies: RecoveryDependencies,
+  input: {
+    agentRuntimeId: string
+    signal: AbortSignal
+    expectedAgentId?: string
+  }
+): Promise<Extract<ConversationAction, { type: "snapshot_loaded" }>> {
+  const view = await dependencies.api.getAgentRuntime(input.agentRuntimeId, {
+    signal: input.signal,
+  })
+  throwIfAborted(input.signal)
+  assertViewIdentity(view, input.agentRuntimeId, input.expectedAgentId)
+
+  const page = await dependencies.api.getAgentRuntimeHistory(
+    input.agentRuntimeId,
+    { throughSeq: view.snapshot_event_seq, limit: HISTORY_PAGE_LIMIT },
+    { signal: input.signal }
+  )
+  throwIfAborted(input.signal)
+  assertHistoryPage(page, view.snapshot_event_seq)
+  return {
+    type: "snapshot_loaded",
+    view,
+    items: page.items,
+    historyBefore: page.next_before_event_seq,
+    historyHasMore: page.has_more,
   }
 }
 
-function isStreamEnvelope(value: unknown): value is StreamEnvelope {
-  if (typeof value !== "object" || value === null) return false
-
-  const envelope = value as Record<string, unknown>
-  if (
-    typeof envelope.session_id !== "string" ||
-    typeof envelope.timestamp !== "string"
-  )
-    return false
-
-  const event = envelope.event
-  if (typeof event !== "object" || event === null) return false
-  const runtimeEvent = event as Record<string, unknown>
-  if (
-    runtimeEvent.type !== "session" &&
-    runtimeEvent.type !== "node" &&
-    runtimeEvent.type !== "agent"
-  )
-    return false
-  const data = runtimeEvent.data
-  if (typeof data !== "object" || data === null) return false
-  if (runtimeEvent.type !== "agent") return true
-
-  const agent = data as Record<string, unknown>
-  if (
-    typeof agent.agent_id !== "string" ||
-    typeof agent.turn_id !== "string" ||
-    !isAgentLocation(agent.location) ||
-    typeof agent.event !== "object" ||
-    agent.event === null
-  )
-    return false
-
-  return typeof (agent.event as Record<string, unknown>).type === "string"
+export type ReconcileDependencies = {
+  api: Pick<StratumApi, "getAgentRuntime" | "getAgentRuntimeHistory">
+  getPgConfirmedEventSeq(): string | null
+  getPinnedAgentId(): string | null
+  isCurrent(): boolean
+  dispatch(action: ConversationAction): void
 }
 
-function isAgentLocation(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) return false
-  const location = value as Record<string, unknown>
-  if (location.type === "direct") return true
-  if (location.type !== "workflow_node") return false
-  if (typeof location.data !== "object" || location.data === null) return false
-  const data = location.data as Record<string, unknown>
-  return (
-    typeof data.workflow_version_id === "string" &&
-    typeof data.node_id === "string"
+/** Read the complete public product window `(B,T]` and atomically rebase. */
+export async function reconcileConversation(
+  dependencies: ReconcileDependencies,
+  input: { agentRuntimeId: string; signal?: AbortSignal }
+): Promise<void> {
+  const base = dependencies.getPgConfirmedEventSeq()
+  const pinnedAgentId = dependencies.getPinnedAgentId()
+  if (base === null || pinnedAgentId === null || !dependencies.isCurrent())
+    return
+
+  let view: AgentRuntimeView
+  try {
+    view = await withReconcileFetchDeadline(input.signal, (signal) =>
+      dependencies.api.getAgentRuntime(input.agentRuntimeId, { signal })
+    )
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      error.status === 404 &&
+      dependencies.isCurrent() &&
+      dependencies.getPgConfirmedEventSeq() === base
+    )
+      dependencies.dispatch({ type: "missing", error })
+    return
+  }
+  if (!dependencies.isCurrent()) return
+  try {
+    assertViewIdentity(view, input.agentRuntimeId, pinnedAgentId)
+  } catch (error) {
+    dependencies.dispatch({
+      type: "connection_error",
+      error: toConnectionError(error),
+    })
+    return
+  }
+  if (dependencies.getPgConfirmedEventSeq() !== base) return
+
+  const items: AgentRuntimeDurableRecordV1[] = []
+  if (compareEventSeq(view.snapshot_event_seq, base) > 0) {
+    let before: string | undefined
+    try {
+      for (;;) {
+        const page = await withReconcileFetchDeadline(input.signal, (signal) =>
+          dependencies.api.getAgentRuntimeHistory(
+            input.agentRuntimeId,
+            {
+              throughSeq: view.snapshot_event_seq,
+              beforeSeq: before,
+              limit: RECONCILE_PAGE_LIMIT,
+            },
+            { signal }
+          )
+        )
+        if (!dependencies.isCurrent()) return
+        assertHistoryPage(page, view.snapshot_event_seq, before)
+
+        const fresh = page.items.filter(
+          (item) => compareEventSeq(item.event_seq, base) > 0
+        )
+        items.unshift(...fresh)
+        const oldest = page.items[0]
+        if (
+          !page.has_more ||
+          oldest === undefined ||
+          compareEventSeq(oldest.event_seq, base) <= 0 ||
+          page.next_before_event_seq === null
+        )
+          break
+        before = page.next_before_event_seq
+      }
+    } catch {
+      return
+    }
+  }
+
+  if (
+    !dependencies.isCurrent() ||
+    dependencies.getPgConfirmedEventSeq() !== base
   )
+    return
+  dependencies.dispatch({
+    type: "view_reconciled",
+    basePgConfirmedEventSeq: base,
+    view,
+    items,
+  })
+}
+
+async function withReconcileFetchDeadline<T>(
+  outerSignal: AbortSignal | undefined,
+  operation: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  if (outerSignal?.aborted)
+    throw abortReason(outerSignal, "reconcile fetch aborted")
+
+  const controller = new AbortController()
+  const onOuterAbort = () => controller.abort(outerSignal?.reason)
+  outerSignal?.addEventListener("abort", onOuterAbort, { once: true })
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException("reconcile fetch timed out", "AbortError")
+      ),
+    RECONCILE_FETCH_TIMEOUT_MS
+  )
+
+  let rejectAbort!: (error: unknown) => void
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  const onAbort = () =>
+    rejectAbort(abortReason(controller.signal, "reconcile fetch aborted"))
+  controller.signal.addEventListener("abort", onAbort, { once: true })
+
+  try {
+    // The losing request remains observed by Promise.race. A client that
+    // ignores abort can therefore reject later without becoming unhandled.
+    const result = Promise.resolve().then(() => operation(controller.signal))
+    return await Promise.race([result, aborted])
+  } finally {
+    clearTimeout(timeout)
+    controller.signal.removeEventListener("abort", onAbort)
+    outerSignal?.removeEventListener("abort", onOuterAbort)
+  }
+}
+
+function abortReason(signal: AbortSignal, fallbackMessage: string): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException(fallbackMessage, "AbortError")
+}
+
+export type HistoryWindow = {
+  through: string
+  before: string | null
+  hasMore: boolean
+  loading: boolean
+}
+
+export type HistoryDependencies = {
+  api: Pick<StratumApi, "getAgentRuntimeHistory">
+  getWindow(): HistoryWindow | null
+  dispatch(action: ConversationAction): void
+}
+
+/** User-driven upward pagination at one fixed cold-bootstrap barrier. */
+export async function loadOlderHistoryPage(
+  dependencies: HistoryDependencies,
+  input: { agentRuntimeId: string; signal?: AbortSignal }
+): Promise<void> {
+  const window = dependencies.getWindow()
+  if (window === null || !window.hasMore || window.loading) return
+
+  dependencies.dispatch({ type: "history_page_started" })
+  if (window.before === null) {
+    dependencies.dispatch({ type: "history_page_failed" })
+    return
+  }
+  try {
+    const page = await dependencies.api.getAgentRuntimeHistory(
+      input.agentRuntimeId,
+      {
+        throughSeq: window.through,
+        beforeSeq: window.before,
+        limit: HISTORY_PAGE_LIMIT,
+      },
+      { signal: input.signal }
+    )
+    assertHistoryPage(page, window.through, window.before)
+    dependencies.dispatch({
+      type: "history_page_loaded",
+      items: page.items,
+      historyBefore: page.next_before_event_seq,
+      historyHasMore: page.has_more,
+    })
+  } catch (error) {
+    if (input.signal?.aborted) return
+    dependencies.dispatch({ type: "history_page_failed" })
+    if (error instanceof ApiError && error.status === 404)
+      dependencies.dispatch({ type: "missing", error })
+  }
+}
+
+function assertHistoryPage(
+  page: AgentRuntimeHistoryPage,
+  through: string,
+  before?: string
+): void {
+  if (page.through_event_seq !== through)
+    throw new ApiError(
+      "invalid_response",
+      0,
+      "history used a different snapshot barrier"
+    )
+  if (
+    before !== undefined &&
+    (page.items.some((item) => compareEventSeq(item.event_seq, before) >= 0) ||
+      (page.next_before_event_seq !== null &&
+        compareEventSeq(page.next_before_event_seq, before) >= 0))
+  )
+    throw new ApiError(
+      "invalid_response",
+      0,
+      "history pagination did not move backwards"
+    )
+}
+
+function assertFrameIdentity(
+  frame: { agent_runtime_id: string; agent_id: string },
+  expectedRuntimeId: string,
+  expectedAgentId?: string
+): void {
+  if (
+    frame.agent_runtime_id !== expectedRuntimeId ||
+    (expectedAgentId !== undefined && frame.agent_id !== expectedAgentId)
+  )
+    throw protocolIdentityError()
+}
+
+function assertViewIdentity(
+  view: AgentRuntimeView,
+  expectedRuntimeId: string,
+  expectedAgentId?: string
+): void {
+  if (
+    view.agent_runtime_id !== expectedRuntimeId ||
+    (expectedAgentId !== undefined && view.agent_id !== expectedAgentId)
+  )
+    throw protocolIdentityError()
+}
+
+function protocolIdentityError(): ApiError {
+  return new ApiError(
+    PROTOCOL_IDENTITY_CODE,
+    0,
+    "the stream and snapshot identities do not match"
+  )
+}
+
+function linkAbort(outer: AbortSignal, inner: AbortController): () => void {
+  if (outer.aborted) {
+    inner.abort(outer.reason)
+    return () => {}
+  }
+  const onAbort = () => inner.abort(outer.reason)
+  outer.addEventListener("abort", onAbort)
+  return () => outer.removeEventListener("abort", onAbort)
+}
+
+function abortDriven(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) resolve()
+    else signal.addEventListener("abort", () => resolve(), { once: true })
+  })
 }
 
 function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("recovery aborted", "AbortError")
+  if (signal.aborted)
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("recovery aborted", "AbortError")
 }
 
-function throwIfStreamCompleted(
-  completion: StreamCompletion | undefined
-): void {
-  if (completion) throw completion
+function isApiErrorCode(error: unknown, code: string): boolean {
+  return error instanceof ApiError && error.code === code
 }
 
-function isExpiredStreamCursor(error: unknown): boolean {
-  return (
-    isStreamCompletion(error) &&
-    error.type === "stream_failed" &&
-    error.error instanceof ApiError &&
-    error.error.code === "cursor_expired"
-  )
-}
-
-function connectionError(error: unknown): ApiError {
-  const sourceError =
-    isStreamCompletion(error) && error.type === "stream_failed"
-      ? error.error
-      : error
-  if (sourceError instanceof ApiError && sourceError.code !== "cursor_expired")
-    return sourceError
-
+function toConnectionError(error: unknown): ApiError {
+  if (error instanceof ApiError && error.code !== "cursor_expired") return error
   return new ApiError(
     "connection_error",
-    sourceError instanceof ApiError ? sourceError.status : 0,
-    sourceError instanceof Error ? sourceError.message : "connection failed"
-  )
-}
-
-function isStreamCompletion(value: unknown): value is StreamCompletion {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    ((value as { type?: unknown }).type === "stream_ended" ||
-      (value as { type?: unknown }).type === "stream_failed")
+    error instanceof ApiError ? error.status : 0,
+    error instanceof Error ? error.message : "connection failed"
   )
 }

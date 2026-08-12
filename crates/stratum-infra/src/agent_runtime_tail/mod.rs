@@ -1,0 +1,370 @@
+//! Narrow concrete AgentRuntime-scoped NATS tail transport.
+//!
+//! The tail publishes and subscribes short-retained per-runtime frame streams on
+//! one JetStream stream with discard-old limits retention. It is the only
+//! `async-nats` boundary in the workspace: payloads are opaque bytes owned by
+//! the caller (`AgentRuntimeStreamFrameV1` serialization lives in `stratum-api`), and
+//! JetStream guarantees per-subject ordering only. The tail is not a durable
+//! history and never replays across restarts; the Postgres durable ledger is
+//! the recovery truth.
+
+mod config;
+mod cursor;
+mod error;
+mod subject;
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_nats::jetstream::{
+    self,
+    consumer::{DeliverPolicy, push::OrderedConfig},
+};
+use bytes::Bytes;
+use futures_core::Stream;
+use futures_util::{StreamExt, future};
+use stratum_core::AgentRuntimeId;
+
+pub use config::AgentRuntimeTailConfig;
+pub use cursor::AgentRuntimeTailCursor;
+pub use error::{AgentRuntimeTailCursorParseError, AgentRuntimeTailError};
+
+/// Ordered stream of `(cursor, payload)` items from one AgentRuntime tail.
+///
+/// The first error item terminates the stream; undeliverable conditions
+/// surface as typed [`AgentRuntimeTailError`] values, never panics.
+pub type AgentRuntimeTailStream = Pin<
+    Box<
+        dyn Stream<Item = Result<(AgentRuntimeTailCursor, Bytes), AgentRuntimeTailError>>
+            + Send
+            + 'static,
+    >,
+>;
+
+/// Concrete AgentRuntime-scoped NATS tail transport over one JetStream stream.
+#[derive(Clone)]
+pub struct NatsAgentRuntimeTail {
+    jetstream: jetstream::Context,
+    config: AgentRuntimeTailConfig,
+    available: Arc<AtomicBool>,
+    stream_generation: i128,
+}
+
+impl NatsAgentRuntimeTail {
+    /// Connects to NATS and creates or updates the tail stream with
+    /// discard-old limits retention and the configured finite limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentRuntimeTailError::InvalidConfig`] if a retention limit or
+    /// replica count is invalid, or [`AgentRuntimeTailError::Nats`] if the broker
+    /// cannot be reached or rejects the stream configuration.
+    pub async fn connect(config: AgentRuntimeTailConfig) -> Result<Self, AgentRuntimeTailError> {
+        config.validate()?;
+        let client = async_nats::connect(&config.url)
+            .await
+            .map_err(AgentRuntimeTailError::nats)?;
+        let jetstream = jetstream::new(client);
+
+        let stream = jetstream
+            .create_or_update_stream(config.stream_config())
+            .await
+            .map_err(AgentRuntimeTailError::nats)?;
+        let stream_generation = stream.created.unix_timestamp_nanos();
+
+        Ok(Self {
+            jetstream,
+            config,
+            available: Arc::new(AtomicBool::new(true)),
+            stream_generation,
+        })
+    }
+
+    /// Reports whether the most recent runtime broker operation succeeded.
+    /// A later successful publish or subscription restores availability after
+    /// a transient failure.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
+
+    /// Publishes one opaque frame to one AgentRuntime's tail and returns its cursor.
+    ///
+    /// The payload is opaque bytes; the caller owns `AgentRuntimeStreamFrameV1`
+    /// serialization. Durable product and telemetry frames share the same
+    /// per-runtime tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentRuntimeTailError::Nats`] if the publish or its acknowledgement
+    /// fails. A publish failure after a Postgres commit never rolls back the
+    /// commit; callers log it once and rely on Postgres recovery.
+    pub async fn publish(
+        &self,
+        agent_runtime_id: &AgentRuntimeId,
+        payload: Bytes,
+    ) -> Result<AgentRuntimeTailCursor, AgentRuntimeTailError> {
+        let subject = subject::runtime_subject(&self.config.subject_prefix, agent_runtime_id);
+        let result = async {
+            self.jetstream
+                .publish(subject, payload)
+                .await
+                .map_err(AgentRuntimeTailError::nats)?
+                .await
+                .map_err(AgentRuntimeTailError::nats)
+                .map(|ack| {
+                    AgentRuntimeTailCursor::from_transport(
+                        *agent_runtime_id,
+                        self.stream_generation,
+                        ack.sequence,
+                    )
+                })
+        }
+        .await;
+        self.available.store(result.is_ok(), Ordering::Release);
+
+        // No logging here: the typed error travels to the handling boundary
+        // (the stratum-api dispatcher), which logs it exactly once.
+        result
+    }
+
+    /// Subscribes to one AgentRuntime's tail.
+    ///
+    /// Without a cursor only frames published after the subscription is
+    /// established are delivered ([`DeliverPolicy::New`]); retained history is
+    /// never replayed. With a cursor the tail resumes after that position while
+    /// it is still retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentRuntimeTailError::CursorExpired`] before any delivery if the
+    /// requested cursor position was discarded by retention (the API maps this
+    /// to HTTP 410 before the SSE stream starts), or [`AgentRuntimeTailError::Nats`]
+    /// if the subscription cannot be created.
+    pub async fn subscribe(
+        &self,
+        agent_runtime_id: &AgentRuntimeId,
+        after: Option<AgentRuntimeTailCursor>,
+    ) -> Result<AgentRuntimeTailStream, AgentRuntimeTailError> {
+        if let Some(cursor) = after
+            && let Err(error) = self.ensure_retained(*agent_runtime_id, cursor).await
+        {
+            // Cursor expiry proves the broker query itself succeeded and
+            // therefore must not degrade runtime readiness.
+            self.available.store(
+                !matches!(&error, AgentRuntimeTailError::Nats { .. }),
+                Ordering::Release,
+            );
+            return Err(error);
+        }
+        let deliver_subject = self.jetstream.client().new_inbox();
+        let consumer = self
+            .jetstream
+            .create_consumer_on_stream(
+                OrderedConfig {
+                    deliver_subject,
+                    filter_subject: subject::runtime_subject(
+                        &self.config.subject_prefix,
+                        agent_runtime_id,
+                    ),
+                    deliver_policy: deliver_policy(after),
+                    ..Default::default()
+                },
+                &self.config.stream_name,
+            )
+            .await
+            .map_err(|source| {
+                self.available.store(false, Ordering::Release);
+                AgentRuntimeTailError::nats(source)
+            })?;
+        let messages = consumer.messages().await.map_err(|source| {
+            self.available.store(false, Ordering::Release);
+            AgentRuntimeTailError::nats(source)
+        })?;
+        self.available.store(true, Ordering::Release);
+
+        let available = Arc::clone(&self.available);
+        let cursor_agent_runtime_id = *agent_runtime_id;
+        let stream_generation = self.stream_generation;
+        let items = messages.scan(false, move |terminated, message| {
+            if *terminated {
+                return future::ready(None);
+            }
+            let item = message
+                .map_err(AgentRuntimeTailError::nats)
+                .and_then(|message| {
+                    let sequence = message
+                        .info()
+                        .map_err(AgentRuntimeTailError::nats)?
+                        .stream_sequence;
+                    Ok((
+                        AgentRuntimeTailCursor::from_transport(
+                            cursor_agent_runtime_id,
+                            stream_generation,
+                            sequence,
+                        ),
+                        message.message.payload,
+                    ))
+                });
+            if item.is_err() {
+                // Terminate on the first error; the typed error travels to the
+                // handling boundary (stratum-api), which logs it exactly once.
+                *terminated = true;
+                available.store(false, Ordering::Release);
+            } else {
+                available.store(true, Ordering::Release);
+            }
+            future::ready(Some(item))
+        });
+
+        Ok(Box::pin(items) as AgentRuntimeTailStream)
+    }
+
+    async fn ensure_retained(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        cursor: AgentRuntimeTailCursor,
+    ) -> Result<(), AgentRuntimeTailError> {
+        let stream = self
+            .jetstream
+            .get_stream(&self.config.stream_name)
+            .await
+            .map_err(AgentRuntimeTailError::nats)?;
+        let info = stream.cached_info();
+        if !cursor.belongs_to(agent_runtime_id, info.created.unix_timestamp_nanos()) {
+            return Err(AgentRuntimeTailError::CursorExpired { cursor });
+        }
+        let state = &info.state;
+        check_retained(state.first_sequence, state.last_sequence, cursor)?;
+        let message = match stream.get_raw_message(cursor.transport_sequence()).await {
+            Ok(message) => message,
+            Err(error)
+                if error.kind()
+                    == async_nats::jetstream::stream::RawMessageErrorKind::NoMessageFound =>
+            {
+                return Err(AgentRuntimeTailError::CursorExpired { cursor });
+            }
+            Err(error) => return Err(AgentRuntimeTailError::nats(error)),
+        };
+        let expected_subject =
+            subject::runtime_subject(&self.config.subject_prefix, &agent_runtime_id);
+        if message.subject.as_str() != expected_subject {
+            return Err(AgentRuntimeTailError::CursorExpired { cursor });
+        }
+        Ok(())
+    }
+}
+
+fn deliver_policy(after: Option<AgentRuntimeTailCursor>) -> DeliverPolicy {
+    after
+        .and_then(|cursor| {
+            cursor
+                .transport_sequence()
+                .checked_add(1)
+                .map(|start_sequence| DeliverPolicy::ByStartSequence { start_sequence })
+        })
+        // No cursor starts at the current tail; a cursor at u64::MAX cannot be
+        // advanced and no retained message can follow it, so only new messages
+        // satisfy it.
+        .unwrap_or(DeliverPolicy::New)
+}
+
+/// A cursor is retained only while it addresses a position inside the live
+/// tail. An empty stream (`last_sequence == 0`, no message published yet)
+/// retains nothing, so every cursor is expired. A cursor ahead of
+/// `last_sequence` (forged, or issued by a since-recreated stream) would
+/// otherwise silently wait for future messages and skip the current tail, so
+/// it is expired as well; both cases force the caller's cold bootstrap.
+fn check_retained(
+    first_sequence: u64,
+    last_sequence: u64,
+    cursor: AgentRuntimeTailCursor,
+) -> Result<(), AgentRuntimeTailError> {
+    let sequence = cursor.transport_sequence();
+    if last_sequence == 0 || sequence > last_sequence || sequence < first_sequence {
+        Err(AgentRuntimeTailError::CursorExpired { cursor })
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_cursor(sequence: u64) -> AgentRuntimeTailCursor {
+        AgentRuntimeTailCursor::from_transport(AgentRuntimeId::new(), 1, sequence)
+    }
+
+    #[test]
+    fn no_cursor_delivers_only_new_messages() {
+        assert_eq!(deliver_policy(None), DeliverPolicy::New);
+    }
+
+    #[test]
+    fn cursor_resumes_after_its_transport_sequence() {
+        assert_eq!(
+            deliver_policy(Some(test_cursor(41))),
+            DeliverPolicy::ByStartSequence { start_sequence: 42 }
+        );
+    }
+
+    #[test]
+    fn unadvanceable_cursor_falls_back_to_new_only() {
+        assert_eq!(
+            deliver_policy(Some(test_cursor(u64::MAX))),
+            DeliverPolicy::New
+        );
+    }
+
+    #[test]
+    fn cursor_at_or_after_first_retained_position_is_valid() {
+        let cursor = test_cursor(10);
+
+        assert!(check_retained(10, 50, cursor).is_ok());
+        assert!(check_retained(10, 50, test_cursor(50)).is_ok());
+    }
+
+    #[test]
+    fn cursor_before_earliest_retained_position_is_expired() {
+        let cursor = test_cursor(9);
+
+        assert!(matches!(
+            check_retained(10, 50, cursor),
+            Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == cursor
+        ));
+        let forged_zero = test_cursor(0);
+        assert!(matches!(
+            check_retained(1, 3, forged_zero),
+            Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == forged_zero
+        ));
+    }
+
+    #[test]
+    fn cursor_beyond_last_sequence_is_expired() {
+        let cursor = test_cursor(51);
+
+        assert!(matches!(
+            check_retained(10, 50, cursor),
+            Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == cursor
+        ));
+        // A forged far-future cursor on a fresh stream is expired as well.
+        let forged = test_cursor(u64::MAX);
+        assert!(matches!(
+            check_retained(1, 3, forged),
+            Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == forged
+        ));
+    }
+
+    #[test]
+    fn empty_stream_expires_every_cursor() {
+        for sequence in [0, 1, 42] {
+            let cursor = test_cursor(sequence);
+            assert!(matches!(
+                check_retained(0, 0, cursor),
+                Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == cursor
+            ));
+        }
+    }
+}

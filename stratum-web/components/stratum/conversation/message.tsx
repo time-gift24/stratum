@@ -11,7 +11,6 @@ import {
   Pencil,
   RefreshCw,
   RotateCcw,
-  TriangleAlert,
 } from "lucide-react"
 import { Streamdown } from "streamdown"
 
@@ -277,28 +276,6 @@ export const AssistantMessage = memo(function AssistantMessage({
           {renderedBody}
         </Streamdown>
       </div>
-      {message.status === "error" ? (
-        <div className="mt-2 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-foreground">
-          <TriangleAlert
-            aria-hidden
-            className="size-4 shrink-0 text-destructive"
-          />
-          <p className="min-w-0 flex-1 text-muted-foreground">
-            生成中断，以上内容不完整。
-          </p>
-          {onReload ? (
-            <Button
-              variant="outline"
-              size="xs"
-              className="shrink-0 rounded-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              onClick={() => onReload(message)}
-            >
-              <RotateCcw aria-hidden />
-              重试
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
       <div className="mt-1.5 flex min-h-7 items-center gap-1">
         {versions ? (
           <BranchPicker
@@ -312,7 +289,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             message={message}
             body={body}
             visible={Boolean(isLast)}
-            onReload={message.status === "error" ? undefined : onReload}
+            onReload={onReload}
           />
         ) : null}
       </div>

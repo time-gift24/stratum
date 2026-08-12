@@ -1,5 +1,5 @@
 //! OpenAI-compatible protocol implementation.
-use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bon::Builder;
@@ -14,31 +14,49 @@ use stratum_core::{CallId, ModelConfig, ModelId, TokenUsage};
 
 use crate::{
     ApiKey, ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream,
-    ChatStreamEvent, ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider,
+    ChatStreamEvent, ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider, LlmTimeouts,
     ProviderStatusError, StructuredOutput, ToolCall, ToolCallDelta,
+    protocol::body::{ResponseBodyKind, read_response_body},
     protocol::sse::{SseEvent, SseParser, stream_eof_error},
 };
+
+/// Builds the default HTTP client with the explicit egress connect timeout.
+pub(crate) fn default_client(connect_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .build()
+        // Invariant: the builder only fails on TLS backend misconfiguration;
+        // setting a connect timeout cannot make it fail.
+        .expect("reqwest client with connect timeout builds")
+}
 
 /// OpenAI-compatible chat completions provider.
 #[derive(Debug, Clone, Builder)]
 pub struct OpenAICompatibleProvider {
-    #[builder(default = reqwest::Client::new())]
     client: reqwest::Client,
     #[builder(into)]
     base_url: String,
     api_key: ApiKey,
     model: ModelId,
+    timeouts: LlmTimeouts,
 }
 
 impl OpenAICompatibleProvider {
-    /// Creates a provider using a default reqwest client.
+    /// Creates a provider using the default reqwest client (explicit connect
+    /// timeout; see the module-level egress bounds).
     #[must_use]
-    pub fn new(base_url: impl Into<String>, api_key: ApiKey, model: ModelId) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: ApiKey,
+        model: ModelId,
+        timeouts: LlmTimeouts,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_client(timeouts.connect()),
             base_url: base_url.into(),
             api_key,
             model,
+            timeouts,
         }
     }
 
@@ -64,6 +82,7 @@ impl LlmProvider for OpenAICompatibleProvider {
         self.model.clone()
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -72,17 +91,28 @@ impl LlmProvider for OpenAICompatibleProvider {
         }
 
         let payload = to_chat_payload(&request, false)?;
-        let response = self
-            .client
-            .post(self.chat_completions_url()?)
-            .headers(self.headers()?)
-            .json(&payload)
-            .send()
+        let operation = async {
+            let response = self
+                .client
+                .post(self.chat_completions_url()?)
+                .headers(self.headers()?)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(LlmError::transport)?;
+            let status = response.status();
+            let request_id = request_id(response.headers());
+            let kind = if status.is_success() {
+                ResponseBodyKind::Success
+            } else {
+                ResponseBodyKind::Error
+            };
+            let body = read_response_body(response, self.timeouts.stream_idle(), kind).await?;
+            Ok::<_, LlmError>((status, request_id, body))
+        };
+        let (status, request_id, body) = tokio::time::timeout(self.timeouts.request(), operation)
             .await
-            .map_err(LlmError::transport)?;
-        let status = response.status();
-        let request_id = request_id(response.headers());
-        let body = response.bytes().await.map_err(LlmError::transport)?;
+            .map_err(LlmError::transport)??;
 
         if !status.is_success() {
             let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
@@ -98,6 +128,7 @@ impl LlmProvider for OpenAICompatibleProvider {
         chat_response_from_value(value)
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         if request.model != self.model {
             return Err(LlmError::InvalidRequest(
@@ -106,19 +137,36 @@ impl LlmProvider for OpenAICompatibleProvider {
         }
 
         let payload = to_chat_payload(&request, true)?;
-        let response = self
+        // Headers and subsequent body-chunk silence have separate configured
+        // bounds, so a healthy long stream is allowed while a stalled stream
+        // cannot pin a Turn forever.
+        let send = self
             .client
             .post(self.chat_completions_url()?)
             .headers(self.headers()?)
             .json(&payload)
-            .send()
+            .send();
+        let response = tokio::time::timeout(self.timeouts.first_response(), send)
             .await
+            .map_err(LlmError::transport)?
             .map_err(LlmError::transport)?;
         let status = response.status();
         let request_id = request_id(response.headers());
 
         if !status.is_success() {
-            let body = response.bytes().await.map_err(LlmError::transport)?;
+            // A non-success response is a finite error envelope, not a healthy
+            // long-lived stream. Bound both per-chunk silence and total wall
+            // time so a provider cannot drip-feed the capped body indefinitely.
+            let body = tokio::time::timeout(
+                self.timeouts.request(),
+                read_response_body(
+                    response,
+                    self.timeouts.stream_idle(),
+                    ResponseBodyKind::Error,
+                ),
+            )
+            .await
+            .map_err(LlmError::transport)??;
             let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
             return Err(LlmError::ProviderStatus(provider_status_error(
                 status.as_u16(),
@@ -128,7 +176,10 @@ impl LlmProvider for OpenAICompatibleProvider {
             )));
         }
 
-        Ok(openai_chat_stream(response.bytes_stream()))
+        Ok(openai_chat_stream(
+            response.bytes_stream(),
+            self.timeouts.stream_idle(),
+        ))
     }
 }
 
@@ -152,7 +203,7 @@ impl ConfigurableLlmProvider for OpenAICompatibleProvider {
     }
 }
 
-fn openai_chat_stream<S>(chunks: S) -> ChatStream
+fn openai_chat_stream<S>(chunks: S, idle_timeout: Duration) -> ChatStream
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 {
@@ -162,6 +213,7 @@ where
         pending: VecDeque<Result<ChatStreamEvent, LlmError>>,
         finished: bool,
         terminal_seen: bool,
+        idle_timeout: Duration,
     }
 
     let state = State {
@@ -170,6 +222,7 @@ where
         pending: VecDeque::new(),
         finished: false,
         terminal_seen: false,
+        idle_timeout,
     };
 
     Box::pin(stream::unfold(state, |mut state| async move {
@@ -182,7 +235,16 @@ where
                 return None;
             }
 
-            match state.chunks.as_mut().next().await {
+            let next = match tokio::time::timeout(state.idle_timeout, state.chunks.as_mut().next())
+                .await
+            {
+                Ok(next) => next,
+                Err(source) => {
+                    state.finished = true;
+                    return Some((Err(LlmError::transport(source)), state));
+                }
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     for event in state.parser.push(&chunk) {
                         if state.finished {
@@ -536,6 +598,19 @@ mod tests {
     use stratum_core::CallId;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stream_body_fails_at_the_configured_idle_bound() {
+        let idle_timeout = Duration::from_secs(7);
+        let chunks = stream::pending::<Result<bytes::Bytes, reqwest::Error>>();
+        let mut output = openai_chat_stream(chunks, idle_timeout);
+        let started = tokio::time::Instant::now();
+
+        let result = output.next().await.expect("idle timeout emits an error");
+
+        assert!(matches!(result, Err(LlmError::Transport(_))));
+        assert!(started.elapsed() >= idle_timeout);
+    }
     use crate::{
         ChatMessage, ChatRequest, ChatRole, FinishReason, LlmError, StructuredOutput, ToolCall,
         ToolSpec,
@@ -777,5 +852,91 @@ mod tests {
         assert_eq!(message["role"], "tool");
         assert_eq!(message["content"], "{\"ok\":true}");
         assert_eq!(message["tool_call_id"], "call-1");
+    }
+
+    /// A server that accepts the connection but never answers must fail the
+    /// streaming call at the first-response bound instead of hanging. Time is
+    /// paused, so the 30s bound is auto-advanced and the test runs fast.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_headers_fail_at_the_first_response_bound() {
+        let (addr, _hold) = never_responding_server().await;
+        let provider = stall_test_provider(addr);
+        let timeout = provider.timeouts.first_response();
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(ChatMessage::user("hello"));
+
+        let started = tokio::time::Instant::now();
+        let result = provider.chat_stream(request).await.map(|_| ());
+
+        assert!(
+            matches!(result, Err(LlmError::Transport(_))),
+            "got {result:?}"
+        );
+        assert!(
+            started.elapsed() >= timeout,
+            "elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The same stall fails the non-streaming call at its total request bound.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_response_fails_at_the_chat_request_bound() {
+        let (addr, _hold) = never_responding_server().await;
+        let provider = stall_test_provider(addr);
+        let timeout = provider.timeouts.request();
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .with_message(ChatMessage::user("hello"));
+
+        let started = tokio::time::Instant::now();
+        let result = provider.chat(request).await;
+
+        assert!(
+            matches!(result, Err(LlmError::Transport(_))),
+            "got {result:?}"
+        );
+        assert!(
+            started.elapsed() >= timeout,
+            "elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Provider pointed at the stalling server, with proxy env vars disabled
+    /// so the loopback request cannot be routed through a local HTTP proxy.
+    fn stall_test_provider(addr: std::net::SocketAddr) -> OpenAICompatibleProvider {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test client builds");
+        OpenAICompatibleProvider::builder()
+            .client(client)
+            .base_url(format!("http://{addr}"))
+            .api_key(ApiKey::new("test-key"))
+            .model("openai:gpt-4.1-mini".parse().expect("model id parses"))
+            .timeouts(LlmTimeouts::new(
+                Duration::from_secs(10),
+                Duration::from_secs(120),
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+            ))
+            .build()
+    }
+
+    /// Binds a loopback server that accepts connections and holds them open
+    /// without ever writing a response. The returned join handle keeps the
+    /// accept task (and the held sockets) alive for the test's duration.
+    async fn never_responding_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        let hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        (addr, hold)
     }
 }

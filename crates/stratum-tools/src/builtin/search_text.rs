@@ -207,8 +207,7 @@ mod tests {
     use async_trait::async_trait;
     use stratum_core::CallId;
     use stratum_filesystem::{
-        CasExpectation, DirEntry, Entry, FileMetadata, FilesystemError, LocalFilesystem,
-        LocalFilesystemConfig, RecordVersion, VersionedEntry,
+        DirEntry, FileMetadata, FilesystemError, LocalFilesystem, LocalFilesystemConfig,
     };
 
     use super::*;
@@ -221,19 +220,6 @@ mod tests {
 
     #[async_trait]
     impl Filesystem for CancellingFilesystem {
-        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-            self.inner.get(path).await
-        }
-
-        async fn put(
-            &self,
-            path: &VirtualPath,
-            entry: Entry,
-            cas: CasExpectation,
-        ) -> Result<RecordVersion, FilesystemError> {
-            self.inner.put(path, entry, cas).await
-        }
-
         async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
             self.inner.read_file(path).await
         }

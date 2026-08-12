@@ -51,21 +51,21 @@ flowchart TB
 
     subgraph Data["数据与事件"]
         Session["长期 Session<br/>图无关 · 多 Agent"]
-        State["运行状态与执行日志"]
-        History["Agent 对话历史"]
+        State["Postgres 执行真相<br/>定义 · 薄状态 · durable ledger · 压缩 companion"]
         Artifact["Skill / Extension / Workflow 制品"]
-        EventBus["事件流与重放"]
+        Tail["NATS 实时 tail<br/>短期 · 可丢失 · 非真相"]
     end
 
     Session --> State
     Workflow --> Session
-    Agent --> History
+    Agent --> State
     Hook --> State
     Definition --> Artifact
-    Workflow --> EventBus
-    Agent --> EventBus
+    Workflow --> Tail
+    Agent --> Tail
 
-    EventBus --> Observe["Web 实时呈现 / 审计 / 可观测性"]
+    Tail --> Observe["Web 实时呈现 / 审计 / 可观测性"]
+    State --> Observe
 ```
 
 ## 架构说明
@@ -74,7 +74,7 @@ flowchart TB
 
 `stratum-web` 和 `stratum-api` 对外提供对话、工作流编辑、运行控制、审批、历史查询和 SSE 事件流。
 
-控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。Agent 可以在没有活跃操作时修改当前模型及其 LLM 参数；新 Turn 接受后会把该 `ModelConfig` 保存为 Agent 后续默认值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
+控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。`AgentId` 标识 `agents` 中一个不可变 template 版本，`AgentRuntimeId` 标识 `agent_states` 中一个可跨多个 Turn 的长期运行聚合；多个 runtime 可以 pin 同一个 Agent。AgentRuntime 可以在没有活跃操作时修改自己的 `model_config`；新 Turn 接受后会把该完整 `ModelConfig` 保存为该 runtime 后续使用的值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
 
 Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
@@ -91,7 +91,7 @@ Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
 Agent 可以作为工作流中的一种节点，也可以直接在 Session 中运行。直接对话不是隐式工作流：Session 是长期、共享且与图结构无关的核心资产，Workflow 图及其版本可以变化，Session 身份保持不变。Agent 作为节点运行时使用 `AgentLocation::WorkflowNode` 保留 Workflow version 与 node 身份；直接运行时使用 `AgentLocation::Direct`。
 
-一期只允许每个 Session 同时存在一个活跃操作。这是一阶段的简化设计，不是永久产品限制；在真正引入并发前不增加 attempt 或 node-execution 身份。
+当前只在 AgentRuntime 边界内保证同一 Session 最多有一个 `agent_states.status='running'` 的运行聚合；这不协调 Workflow 或其他未来的调度 owner。跨 runtime 并发、ownership 与 fencing 由后续 scheduler 模块设计，在此之前不增加 attempt 或 node-execution 身份。
 
 ### 3. Agent ReAct Loop 与 Hook
 
@@ -106,16 +106,17 @@ Agent 内核只负责稳定的执行机制：
 → 继续或结束 Turn
 ```
 
-策略通过四个核心 Hook 进入循环：
+策略通过五个核心 Hook 进入循环：
 
 - `transform_context`
-- `before_tool_call`
+- `transform_tool_call`
+- `decide_tool_call`
 - `after_tool_call`
 - `prepare_next_turn`
 
-多个 Hook Handler 按固定版本和顺序执行。会影响 Resume 的参数修改、阻断、结果变换和下一轮决策必须写入独立的 Session/Turn Hook journal，恢复时按语义 invocation identity 复用。该 journal 与 Agent 对话历史、EventBus 观察流分离，存储实现推迟到 H3/P1。
+多个 Hook Handler 按固定版本和顺序执行。会影响 Resume 的参数修改、阻断、结果变换和下一轮决策以 journal 事件变体住在 Postgres durable ledger 内部（没有第二个耐久边界），恢复时按语义 invocation identity 复用。journal 与 NATS 观察流分离。
 
-Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 注册能力，Event 只用于观察，Port 用于替换外部实现。
+Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 注册能力，`DurableAgentEvent` 记录正确性事实与 resume 真相，`AgentTelemetryEvent` 只用于观察，Port 用于替换外部实现。
 
 ### 4. 三档 Agent DIY
 
@@ -134,12 +135,27 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 | 数据域 | Agent 是否可见 | 主要约束 |
 |---|---:|---|
 | Agent 工作区 | 是，通过 `VirtualPath` | 沙箱、权限、容量和路径安全 |
-| 运行时持久化 | 否 | CAS、一致性、幂等和恢复 |
+| 运行时持久化 | 否 | Postgres 四表 durable ledger、事务一致性、幂等和恢复 |
 | 制品存储 | 否 | 不可变版本、内容摘要和分发 |
 
-本地开发时三者可以使用同一物理文件系统，但接口、命名空间和 ACL 保持隔离。EventBus 提供实时事件和有限重放，不能替代运行状态、Agent 历史和 Hook 决策的持久化存储。
+本地开发时，Agent 工作区与制品可以使用同一物理文件系统，但接口、命名空间和 ACL 保持隔离；运行时执行事实即使在本地也只写入 Postgres。NATS 只提供短期、可丢失的实时 tail，永远不是运行状态、Agent 历史或 Hook 决策的持久化存储。
 
-### 6. 可观测性与安全
+### 6. Postgres 执行存储（唯一执行真相）
+
+执行持久化收敛为 concrete `stratum-postgres` 拥有四张表，无 projection 表：
+
+- `agents`：immutable Agent template 版本；`id: AgentId` 固定一条由作者 `name + version` 字符串 tag 命名的 canonical resolved definition（prompt、按序 tools、template default model），同一版本可被多个 runtime 复用。
+- `agent_states`：每个 `id: AgentRuntimeId` 一行薄状态，通过 `agent_id` 永久 pin definition，并拥有 create idempotency key、durable status、绑定的 Session/current Turn、唯一可变 `model_config` 与 `last_event_seq` high-water；不复制 outcome、usage、snapshot、approval 或 hosting。
+- `durable_events`：append-only ledger；AgentRuntime-wide、无空洞的 `event_seq` 是唯一 durable 顺序，由 exact `agent_states` 行锁（`FOR UPDATE`）在集中 append 事务中分配并串行化同 runtime writer。共享一个 AgentId 的不同 runtime 各自从 1 开始。
+- `transcript_compactions`：以同一 `(agent_runtime_id,event_seq)` 与 `TranscriptCompacted` discriminator 原子写入的 companion，只保存单一 typed summary、`upto`、`compacted_iteration` 与 `retained_from_event_seq` 保留指针；原始 durable messages 永久保留。
+
+其他不变量：
+
+- hosting 是进程内 exact `(AgentRuntimeId, TurnId)` registry 的易失观察，永不持久化；进程重启后 registry 为空，恢复靠显式 resume。
+- 持久化顺序固定为 Postgres commit 先于 NATS publish；NATS 只是 AgentRuntime-scoped 的短实时 tail，subject、dispatcher 与 cursor 都用 AgentRuntimeId 分区，发布丢失由 PG snapshot/history 收敛。
+- AgentLoop kernel（`stratum-agent`）只见 scope-free typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；它可以用 `AgentId` 固定 immutable definition，但 Postgres、`AgentRuntimeId`、HTTP、Session hosting、scheduler 与分页永不进入 AgentLoop。`stratum-core` 只提供共享领域身份和上下文类型，Postgres 编排全部放在装配层 `stratum-api`。
+
+### 7. 可观测性与安全
 
 当前统一运行层级为：
 
@@ -157,12 +173,11 @@ Session → 可选 Workflow Node → Agent Turn → LLM / Tool / Hook
 |---|---|
 | 公共身份与事件类型 | `stratum-core` |
 | Agent ReAct Loop | `stratum-agent` |
-| 通用 Agent | `stratum-agent-builtin` |
 | Tool | `stratum-tools` |
 | LLM Provider | `stratum-llm` |
 | Agent 虚拟工作区 | `stratum-filesystem` |
-| Agent 状态与历史 | `stratum-store` |
-| 事件基础设施 | `stratum-infra` |
+| Postgres 执行存储 | `stratum-postgres` |
+| 实时 tail 与 kernel sink 合同 | `stratum-infra` |
 | HTTP API 与运行时组合 | `stratum-api` |
 | Web 产品 | `stratum-web` |
 | 工作流引擎 | `stratum-workflow` 逻辑模块 |

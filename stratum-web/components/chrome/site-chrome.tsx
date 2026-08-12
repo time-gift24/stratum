@@ -6,6 +6,11 @@ import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
 import { SiteNav } from "@/components/react-bits/site-nav"
+import {
+  MOTION_DURATION,
+  MOTION_EASE,
+  prefersReducedMotion,
+} from "@/lib/motion"
 
 gsap.registerPlugin(useGSAP)
 
@@ -23,9 +28,6 @@ gsap.registerPlugin(useGSAP)
 const PEEK_MS = 1600
 const INTENT_MS = 150
 const LEAVE_MS = 200
-
-const prefersReduced = () =>
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches
 
 export function SiteNavChrome() {
   const pathname = usePathname()
@@ -61,8 +63,8 @@ export function SiteNavChrome() {
         gsap.to(nav, {
           y: 0,
           autoAlpha: 1,
-          duration: prefersReduced() ? 0 : 0.35,
-          ease: "power2.out",
+          duration: prefersReducedMotion() ? 0 : MOTION_DURATION.base,
+          ease: MOTION_EASE.enter,
           overwrite: "auto",
           onComplete: () => gsap.set(nav, { clearProps: "transform" }),
         })
@@ -70,8 +72,8 @@ export function SiteNavChrome() {
         gsap.to(nav, {
           y: "-110%",
           autoAlpha: 0,
-          duration: prefersReduced() ? 0 : 0.3,
-          ease: "power2.in",
+          duration: prefersReducedMotion() ? 0 : MOTION_DURATION.fast,
+          ease: MOTION_EASE.exit,
           overwrite: "auto",
         })
       }

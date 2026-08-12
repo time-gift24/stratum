@@ -28,6 +28,26 @@ export type ConversationThreadMeta = {
   title: string
 }
 
+/**
+ * 消息列条目：普通消息 + TranscriptCompacted 可折叠 marker + 安全
+ * terminal marker（failed/cancelled）。id = `${agentRuntimeId}:${eventSeq}`。
+ */
+export type ConversationItem =
+  | { kind: "message"; id: string; message: ConversationMessage }
+  | {
+      kind: "compaction"
+      id: string
+      /** 完整 summary（展开可见；原消息仍在更早分页中保留） */
+      summary: string
+      compactedIteration: number
+    }
+  | {
+      kind: "terminal"
+      id: string
+      terminal: "failed" | "cancelled"
+      errorText: string | null
+    }
+
 /** 工具审批视图（页面由 state.approvals + 本会话已决结果组装） */
 export type ToolCallApproval = {
   approvalId: string
@@ -48,7 +68,8 @@ export type ConversationToolCall = {
   /** result 的可显示文本；null 表示尚无结果 */
   result: string | null
   errorText: string | null
-  status: "streaming" | "finished" | "failed"
+  /** interrupted：Turn terminal 时仍无 durable result（不伪造结果） */
+  status: "streaming" | "finished" | "failed" | "interrupted"
   /** 挂接到该调用的审批（按 callId 配对） */
   approval?: ToolCallApproval
 }

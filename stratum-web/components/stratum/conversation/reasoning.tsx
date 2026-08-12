@@ -5,8 +5,9 @@ import { Brain, ChevronDown, ChevronsDownUp, ChevronsUpDown } from "lucide-react
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
-import { cn } from "@/lib/utils"
 import { useSmoothText } from "@/hooks/use-smooth-text"
+import { MOTION_DURATION, MOTION_EASE, motionDuration } from "@/lib/motion"
+import { cn } from "@/lib/utils"
 
 gsap.registerPlugin(useGSAP)
 
@@ -110,9 +111,6 @@ export const Reasoning = memo(function Reasoning({
       const prev = prevViewRef.current
       prevViewRef.current = view
 
-      const reduce = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
       const lineHeight = parseFloat(getComputedStyle(inner).lineHeight) || 24
       const rem =
         parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
@@ -136,7 +134,8 @@ export const Reasoning = memo(function Reasoning({
       const from = heightRef.current
       const fromAlpha =
         Number.parseFloat(getComputedStyle(container).opacity) || 0
-      const duration = reduce ? 0 : 0.4
+      const duration = motionDuration(MOTION_DURATION.base)
+      const ease = MOTION_EASE.enter
 
       gsap.killTweensOf(container)
 
@@ -150,7 +149,7 @@ export const Reasoning = memo(function Reasoning({
           height: target,
           autoAlpha: 1,
           duration,
-          ease: "power3.out",
+          ease,
           overwrite: "auto",
           onUpdate: () => {
             scroller.scrollTop = scroller.scrollHeight
@@ -175,7 +174,7 @@ export const Reasoning = memo(function Reasoning({
             height: target,
             autoAlpha: view === "collapsed" ? 0 : 1,
             duration,
-            ease: "power3.out",
+            ease,
             overwrite: "auto",
             onComplete: () => {
               gsap.set(scroller, { clearProps: "maxHeight" })

@@ -1,83 +1,50 @@
-# stratum-infra conventions
+# stratum-infra 约定
 
-## Scope
+## 职责范围
 
-- `stratum-infra` contains external infrastructure adapters. Keep interface definitions in
-  capability `definition.rs` files, errors in `error.rs`, and concrete backends/adapters in named
-  modules.
-- Do not move AgentStore projection into this crate. `StoreEventStreamBus` belongs to
-  `stratum-store`; this crate owns retained transport and the adapter from foundational loop events
-  to scoped runtime envelopes.
+- `stratum-infra` 包含外部基础设施适配器。接口定义保留在各能力的 `definition.rs` 文件中，
+  错误保留在 `error.rs` 中，具体后端和适配器保留在按名称划分的模块中。
+- 保留的职责面很窄：内核接收端契约（`DurableEventSink`、`TelemetryEventSink`）以及具体的
+  AgentRuntime 范围 NATS 短尾传输。旧的 `FilesystemAgentStore`、文件系统持久化接收端、
+  `compact.jsonl` 检查点、`StoreEventStreamBus` 装饰器以及通用的内存/NATS `EventStreamBus`
+  均已删除，不得重新引入。
 
-## EventStreamBus
+## 持久化与遥测接收端
 
-- `EventStreamBus` publishes complete `StreamEnvelope` values and subscribes by `SessionId` plus
-  `ReplayStart`. It is a retained delivery boundary, not the durable source of complete Agent
-  history.
-- `EventCursor` is an opaque transport position. JetStream uses its stream sequence internally;
-  callers may serialize/replay it but must not compare it with `message_seq` or loop `iteration`.
-- `ReplayStart::After(cursor)` means strictly after that cursor. Cursor expiry must be reported as
-  `CursorExpired`, not silently changed to `All` or `New`; overflow and backend failures remain
-  typed errors.
-- NATS subjects are derived from `StreamEnvelope.session_id` and the top-level runtime event type.
-  One Session stream may contain Session, Node, and multiple Agent event families.
-- JetStream is limits-retained and independent of AgentStore. Retention loss is expected and is
-  recovered through fixed-barrier AgentStore history plus a new subscription.
-- Subscription decoding/delivery failure terminates the stream after the typed error. Never skip a
-  malformed retained event and continue, because that would create an undetectable projection gap.
+- `DurableEventSink::append` 是正确性边界：只有已配置的消费方确认事件后才能返回，并且必须
+  保留原始错误链。不得把持久化失败降级为只记录日志。
+- `TelemetryEventSink::emit` 是同步的尽力而为操作，不得向循环返回失败，也不得因传输 I/O 阻塞循环。
+- 本 crate 只负责两个内核契约 trait 和 `DurableEventSinkError`；具体的持久化实现在
+  `stratum-postgres` 中，将已提交行转换为短尾帧的每 AgentRuntime 实时调度器位于
+  `stratum-api` 中。旧的限定范围文件系统/总线接收端流水线已删除，不得重新引入。
 
-## Durable and telemetry sinks
+## AgentRuntime 范围的 NATS 短尾流
 
-- `DurableEventSink::append` is a correctness boundary: return only after the configured consumer
-  acknowledges the event, and preserve the source error chain. Do not downgrade durable failure to
-  logging.
-- `TelemetryEventSink::emit` is synchronous best-effort and cannot fail or block the loop on
-  transport I/O. The scoped implementation uses `try_send` into a bounded telemetry queue of 256,
-  reports only the first loss/failure/timeout for a turn, and bounds each telemetry publish to 100ms. Durable events
-  use a separate bounded priority lane and wait for their publish acknowledgment; they never wait
-  behind a telemetry backlog. On durable arrival, discard older queued telemetry. Sequence assignment
-  and enqueue share one critical section, and the worker keeps a durable fence for defensive late
-  arrivals, so older telemetry cannot publish after a later durable message or terminal event.
-- `ScopedAgentEventSink` is bound to exactly one `(agent_id, session_id, turn_id, location)` and
-  agent name. It
-  performs scope/protocol projection only; it must not own recovery, history paging, tool policy, or
-  AgentStore state transitions.
-- Scoped envelopes carry identity through
-  `RuntimeEvent::Agent { agent_id, turn_id, location, event }`; there is no separate `EventSource`.
-- `FilesystemDurableEventSink` writes one run per directory (`<root>/<run_id>/events.jsonl`),
-  one JSON line per event, and acknowledges an append only after fsyncing both the file and the
-  run directory. Appends are serialized through an internal async lock, so concurrent writers
-  never interleave lines. `read_events(run_dir)` replays the log: a missing log is an empty event
-  stream, an unreadable/invalid run directory is a typed error, a malformed non-tail line is a
-  typed error, and a malformed tail line is ignored as crash truncation. The reader does blocking
-  IO; async callers with large logs should offload it with `spawn_blocking`. No retention or
-  cleanup policy exists yet; that decision belongs to the future sqlite backend.
-- A `TranscriptCompacted` append only records a pending compaction in memory; the following
-  `IterationCompleted` flushes one `CompactionCheckpoint` line to `<root>/<run_id>/compact.jsonl`
-  after the boundary is durable (write order is irreversible: boundary first, index second). The
-  index is a rebuildable derivative, never a second source of truth; it only accelerates resume.
-  `window_start_line` is the physical line of the first retained message — the committed-context
-  message at index `upto` — located by scanning the log and replaying committed-message ordinals
-  (earlier compactions shift ordinals by `upto - 1`; the summary has no `message_appended` line).
-  `read_events_from_checkpoint(run_dir)` validates the head `LoopStarted`, that the window starts
-  at a `message_appended`, and that the window contains a `TranscriptCompacted` matching the
-  checkpoint's iteration/upto/summary sha-256, then returns `LoopStarted` plus the self-contained
-  window (retained suffix, prepare journal records, compaction event, iteration boundary). A
-  missing, empty, truncated, corrupt, or mismatching index falls back to a full `read_events`
-  replay — index problems never fail closed; only event-log corruption itself is a typed error.
-- Durable projection includes loop start, complete messages, approvals, tool execution start,
-  iteration completion, and terminal events. Telemetry projection includes supported LLM start,
-  text/reasoning/tool-call deltas, and finish events. Adding a core variant requires an explicit
-  mapping decision and tests; do not rely on wildcard behavior accidentally.
-- Metadata is diagnostic only. The current `agent_name` and `turn_id` entries must not become
-  business truth; downstream projections use the typed nested fields.
+- NATS 传输是职责窄而具体的 `agent_runtime_tail::NatsAgentRuntimeTail`：它在一条 JetStream
+  流上发布和订阅按 AgentRuntime 划分的短期保留帧流，并使用可配置的有限时长、字节数和消息数
+  上限以及丢弃旧数据的保留策略。它不是持久化历史，也从不保证跨重启重放；Postgres 持久化
+  账本才是恢复时的事实来源。
+- 短尾流载荷是不透明的 `Bytes`；`AgentRuntimeStreamFrameV1` 的序列化，以及每个运行时内产品帧
+  与遥测帧的顺序，都由 `stratum-api` 负责。短尾流只保证每个主题内的 JetStream 顺序。
+- NATS 主题命名集中在 `agent_runtime_tail/subject.rs` 中；业务代码绝不能直接使用
+  `async-nats`。
+- 无游标订阅只传递从订阅时刻起产生的新帧（`DeliverPolicy::New`）；只要游标位置仍被保留，就从
+  该位置之后恢复；如果该位置已被丢弃，则必须在传递任何内容前返回类型化错误
+  `AgentRuntimeTailError::CursorExpired`——绝不能静默回退到完整重放。超前于当前短尾流、来自另一
+  AgentRuntime、来自旧的流重建代次，或应用于空流的游标，都必须在发送响应头前判定过期，并强制
+  执行冷启动引导。
+- `AgentRuntimeTailCursor` 是不透明且带版本的传输位置，绑定 `AgentRuntimeId`、JetStream 流创建
+  代次与流序号（编码为字符串以用作 SSE `id`）；绝不能将其
+  与 `event_seq`/遥测序号比较，也不得将其持久化为业务状态。
+- `NatsAgentRuntimeTail::is_available` 反映运行时操作状况，而不只是启动时的构造结果：发布、订阅
+  或传递失败会降低就绪状态，后续成功的消息代理操作会恢复就绪状态。游标过期校验是一次成功的
+  消息代理查询，不会将 NATS 标记为不可用。
 
-## Safety and observability
+## 安全与可观测性
 
-- Infrastructure errors must not contain payloads, prompts, reasoning, tool arguments/results,
-  credentials, NATS auth material, or secrets. Structured logs use IDs, event type, cursor, timeout,
-  and backend error only.
-- Keep publish and subscription work cancellation-safe. Do not hold mutex/RwLock guards across
-  `.await`; use bounded behavior wherever transport latency can otherwise block runtime progress.
-- Real NATS tests remain ignored integration tests under `tests/` and run through the crate
-  `Makefile`/`docker-compose.test.yml`. Unit tests must not require a live broker.
+- 基础设施错误不得包含载荷、提示词、推理内容、工具参数/结果、凭据、NATS 身份验证材料或
+  机密信息。结构化日志只能使用 ID、事件类型、游标、超时和后端错误。
+- 发布和订阅操作必须保持取消安全。不得跨 `.await` 持有互斥锁/`RwLock` 的锁守卫；凡是传输延迟可能
+  阻塞运行时推进的地方，都必须采用有界行为。
+- 真实 NATS 测试继续作为 `tests/` 下默认忽略的集成测试，并通过本 crate 的
+  `Makefile`/`docker-compose.test.yml` 运行。单元测试不得依赖实时消息代理。

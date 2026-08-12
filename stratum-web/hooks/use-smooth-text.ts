@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import gsap from "gsap"
 
+import { REDUCED_MOTION_QUERY } from "@/lib/motion"
+
 /**
  * useSmoothText —— 流式文本的水流式平滑呈现（纯渲染端，不动数据层）。
  *
@@ -22,8 +24,6 @@ import gsap from "gsap"
  * 驱动选型 gsap.ticker 而非自起 rAF：仓库约定动效统一 GSAP，ticker 与页面
  * 其它 GSAP 动画共享同一 rAF 循环（少一个循环），API 等价。
  */
-
-const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)"
 
 function subscribeReducedMotion(onChange: () => void) {
   const query = window.matchMedia(REDUCED_MOTION_QUERY)

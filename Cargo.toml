@@ -2,12 +2,11 @@
 members = [
     "crates/stratum-api",
     "crates/stratum-agent",
-    "crates/stratum-agent-builtin",
-    "crates/stratum-store",
     "crates/stratum-core",
     "crates/stratum-config",
     "crates/stratum-filesystem",
     "crates/stratum-infra",
+    "crates/stratum-postgres",
     "crates/stratum-llm",
     "crates/stratum-macros",
     "crates/stratum-tools",
@@ -32,9 +31,15 @@ futures-util = "0.3.32"
 http = "1.3.1"
 jsonschema = { version = "0.49.2", default-features = false }
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# LLM API keys in memory (CONSTITUTION §6): config and provider clients hold
+# keys as secrecy::SecretString so Debug/Display can never expose them; the
+# serde feature keeps TOML config deserialization transparent. MIT/Apache-2.0,
+# maintained by the RustCrypto org, no heavy transitive deps.
+secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 thiserror = "2.0.17"
 toml = "0.9.8"
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -46,12 +51,22 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
+# OTLP trace export (CONSTITUTION §4): activated only when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set; the reqwest-blocking HTTP transport
+# keeps the tree free of the tonic gRPC stack. The OpenTelemetry crates are
+# Apache-2.0 and tracing-opentelemetry is MIT; default features stay disabled
+# on the exporter to limit protocol/dependency surface, and it receives only
+# the already-redacted tracing spans emitted by this process.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.33"
 stratum-core = { path = "crates/stratum-core" }
 stratum-config = { path = "crates/stratum-config" }
 stratum-filesystem = { path = "crates/stratum-filesystem" }
 stratum-agent = { path = "crates/stratum-agent" }
-stratum-store = { path = "crates/stratum-store" }
 stratum-infra = { path = "crates/stratum-infra" }
+stratum-postgres = { path = "crates/stratum-postgres" }
 stratum-llm = { path = "crates/stratum-llm" }
 stratum-macros = { path = "crates/stratum-macros" }
 stratum-tools = { path = "crates/stratum-tools" }

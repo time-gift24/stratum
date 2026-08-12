@@ -1,6 +1,6 @@
 //! DeepSeek protocol implementation.
 
-use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bon::Builder;
@@ -16,9 +16,10 @@ use stratum_core::{ModelConfig, ModelId};
 
 use crate::{
     ApiKey, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamEvent,
-    ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider, StructuredOutput,
+    ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider, LlmTimeouts, StructuredOutput,
+    protocol::body::{ResponseBodyKind, read_response_body},
     protocol::openai_compatible::{
-        finish_reason, provider_status_error, request_id, to_chat_payload,
+        default_client, finish_reason, provider_status_error, request_id, to_chat_payload,
         tool_call_delta_from_value, tool_calls_from_message, usage_from_value,
     },
     protocol::sse::{SseEvent, SseParser, stream_eof_error},
@@ -27,30 +28,34 @@ use crate::{
 /// DeepSeek chat completions provider.
 #[derive(Debug, Clone, Builder)]
 pub struct DeepSeekProvider {
-    #[builder(default = reqwest::Client::new())]
     client: reqwest::Client,
     #[builder(into)]
     base_url: String,
     api_key: ApiKey,
     model: DeepSeekModel,
     thinking: DeepSeekThinking,
+    timeouts: LlmTimeouts,
 }
 
 impl DeepSeekProvider {
-    /// Creates a provider using an explicit base URL.
+    /// Creates a provider using an explicit base URL and the default reqwest
+    /// client (explicit connect timeout; see the module-level egress bounds
+    /// in [`crate::protocol::openai_compatible`]).
     #[must_use]
     pub fn new(
         base_url: impl Into<String>,
         api_key: ApiKey,
         model: DeepSeekModel,
         thinking: DeepSeekThinking,
+        timeouts: LlmTimeouts,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_client(timeouts.connect()),
             base_url: base_url.into(),
             api_key,
             model,
             thinking,
+            timeouts,
         }
     }
 
@@ -76,6 +81,7 @@ impl LlmProvider for DeepSeekProvider {
         self.model.model_id()
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if request.model != self.model.model_id() {
             return Err(LlmError::InvalidRequest(
@@ -84,17 +90,28 @@ impl LlmProvider for DeepSeekProvider {
         }
 
         let payload = to_deepseek_chat_payload(&request, self.thinking, false)?;
-        let response = self
-            .client
-            .post(self.chat_completions_url()?)
-            .headers(self.headers()?)
-            .json(&payload)
-            .send()
+        let operation = async {
+            let response = self
+                .client
+                .post(self.chat_completions_url()?)
+                .headers(self.headers()?)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(LlmError::transport)?;
+            let status = response.status();
+            let request_id = request_id(response.headers());
+            let kind = if status.is_success() {
+                ResponseBodyKind::Success
+            } else {
+                ResponseBodyKind::Error
+            };
+            let body = read_response_body(response, self.timeouts.stream_idle(), kind).await?;
+            Ok::<_, LlmError>((status, request_id, body))
+        };
+        let (status, request_id, body) = tokio::time::timeout(self.timeouts.request(), operation)
             .await
-            .map_err(LlmError::transport)?;
-        let status = response.status();
-        let request_id = request_id(response.headers());
-        let body = response.bytes().await.map_err(LlmError::transport)?;
+            .map_err(LlmError::transport)??;
 
         if !status.is_success() {
             let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
@@ -110,6 +127,7 @@ impl LlmProvider for DeepSeekProvider {
         deepseek_chat_response_from_value(value)
     }
 
+    #[tracing::instrument(skip_all, fields(model = %self.model_id()))]
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         if request.model != self.model.model_id() {
             return Err(LlmError::InvalidRequest(
@@ -118,19 +136,36 @@ impl LlmProvider for DeepSeekProvider {
         }
 
         let payload = to_deepseek_chat_payload(&request, self.thinking, true)?;
-        let response = self
+        // Headers and subsequent body-chunk silence have separate configured
+        // bounds, so a healthy long stream is allowed while a stalled stream
+        // cannot pin a Turn forever.
+        let send = self
             .client
             .post(self.chat_completions_url()?)
             .headers(self.headers()?)
             .json(&payload)
-            .send()
+            .send();
+        let response = tokio::time::timeout(self.timeouts.first_response(), send)
             .await
+            .map_err(LlmError::transport)?
             .map_err(LlmError::transport)?;
         let status = response.status();
         let request_id = request_id(response.headers());
 
         if !status.is_success() {
-            let body = response.bytes().await.map_err(LlmError::transport)?;
+            // A non-success response is a finite error envelope, not a healthy
+            // long-lived stream. Bound both per-chunk silence and total wall
+            // time so a provider cannot drip-feed the capped body indefinitely.
+            let body = tokio::time::timeout(
+                self.timeouts.request(),
+                read_response_body(
+                    response,
+                    self.timeouts.stream_idle(),
+                    ResponseBodyKind::Error,
+                ),
+            )
+            .await
+            .map_err(LlmError::transport)??;
             let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
             return Err(LlmError::ProviderStatus(provider_status_error(
                 status.as_u16(),
@@ -140,7 +175,10 @@ impl LlmProvider for DeepSeekProvider {
             )));
         }
 
-        Ok(deepseek_chat_stream(response.bytes_stream()))
+        Ok(deepseek_chat_stream(
+            response.bytes_stream(),
+            self.timeouts.stream_idle(),
+        ))
     }
 }
 
@@ -194,7 +232,7 @@ impl ConfigurableLlmProvider for DeepSeekProvider {
     }
 }
 
-fn deepseek_chat_stream<S>(chunks: S) -> ChatStream
+fn deepseek_chat_stream<S>(chunks: S, idle_timeout: Duration) -> ChatStream
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 {
@@ -205,6 +243,7 @@ where
         finished: bool,
         terminal_seen: bool,
         pending_finish_reason: Option<FinishReason>,
+        idle_timeout: Duration,
     }
 
     let state = State {
@@ -214,6 +253,7 @@ where
         finished: false,
         terminal_seen: false,
         pending_finish_reason: None,
+        idle_timeout,
     };
 
     Box::pin(stream::unfold(state, |mut state| async move {
@@ -226,7 +266,16 @@ where
                 return None;
             }
 
-            match state.chunks.as_mut().next().await {
+            let next = match tokio::time::timeout(state.idle_timeout, state.chunks.as_mut().next())
+                .await
+            {
+                Ok(next) => next,
+                Err(source) => {
+                    state.finished = true;
+                    return Some((Err(LlmError::transport(source)), state));
+                }
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     for event in state.parser.push(&chunk) {
                         if state.finished {

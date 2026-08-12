@@ -3,6 +3,22 @@ import type {
   ModelConfig,
   ModelDescriptor,
 } from "@/lib/stratum/model-config"
+import {
+  parseAgentRuntimeCreated,
+  parseAgentRuntimeHistoryPage,
+  parseAgentRuntimeTurnAccepted,
+  parseAgentRuntimeView,
+  parseAgentTemplatesResponse,
+  parseModelsResponse,
+} from "@/lib/stratum/protocol-codec"
+
+/**
+ * Stratum Agent Runtime API（Postgres-first 协议）的 REST client 与协议类型。
+ *
+ * `AgentRuntimeId` 标识长期运行聚合；`AgentId` 只标识它 pin 住的不可变
+ * template version。durable identity 是 `(agent_runtime_id,event_seq)`；SSE
+ * cursor 只是不透明、页面内存级的 NATS transport position。
+ */
 
 export const STRATUM_API_BASE_URL =
   process.env.NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"
@@ -18,18 +34,8 @@ export class ApiError extends Error {
   }
 }
 
-export type AgentView = {
-  agent_id: string
-  agent_name: string
-  status: "idle" | "running" | "finished" | "failed" | "cancelled"
-  model_config: ModelConfig
-  session_id: string | null
-  turn_id: string | null
-  usage: TokenUsage
-  location: AgentLocation | null
-  last_seq: number
-  updated_at: string
-}
+export type AgentRuntimeStatus =
+  "idle" | "running" | "finished" | "failed" | "cancelled"
 
 export type TokenUsage = {
   input_tokens: number
@@ -38,6 +44,7 @@ export type TokenUsage = {
 }
 
 export type ToolCall = { call_id: string; name: string; arguments: unknown }
+
 export type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system"
   content: { type: "text"; data: string } | { type: "json"; data: unknown }
@@ -45,123 +52,193 @@ export type ChatMessage = {
   reasoning_content?: string
   tool_call_id?: string
 }
-export type LlmEvent =
-  | {
-      type: "text_delta"
-      data: { role: "assistant" | "user" | "tool" | "system"; delta: string }
-    }
-  | { type: "reasoning_delta"; data: { delta: string } }
-  | {
-      type: "tool_call_started"
-      data: { call_id: string; name: string | null }
-    }
-  | {
-      type: "tool_call_delta"
-      data: { call_id: string; name: string | null; arguments_delta: string }
-    }
-  | { type: "tool_call_finished"; data: { call_id: string; result: unknown } }
-  | { type: "tool_call_failed"; data: { call_id: string; error_text: string } }
-  | { type: "started" }
-  | { type: "finished"; data: { finish_reason: string; usage: unknown } }
-  | { type: "failed"; data: { error_text: string } }
-export type AgentEvent =
-  | { type: "message"; data: { message_seq: number; message: ChatMessage } }
-  | { type: "started" }
-  | { type: "finished"; data: { finish_reason: string; usage: TokenUsage } }
-  | { type: "failed"; data: { error_text: string; usage: TokenUsage } }
-  | { type: "cancelled"; data: { usage: TokenUsage } }
+
+export type ApprovalDecision = "approve" | "reject"
+
+/** AgentRuntimeView.pending_approvals 与 product Requested 共享的安全视图。 */
+export type PendingApprovalView = {
+  /** Requested row 的 AgentRuntime-wide event sequence。 */
+  requested_event_seq: string
+  approval_id: string
+  call_id: string
+  tool_name: string
+  arguments: unknown
+  tool_kind: "read" | "write"
+  danger_level: "low" | "medium" | "high"
+}
+
+/** `GET /v1/agent-runtimes/{agent_runtime_id}` 的固定 PG 屏障视图。 */
+export type AgentRuntimeView = {
+  agent_runtime_id: string
+  /** Pinned immutable template-version identity (`agents.id`). */
+  agent_id: string
+  agent_name: string
+  agent_version: string
+  status: AgentRuntimeStatus
+  model_config: ModelConfig
+  session_id: string | null
+  current_turn_id: string | null
+  snapshot_event_seq: string
+  telemetry_floor_event_seq: string
+  pending_approvals: readonly PendingApprovalView[]
+  latest_usage: TokenUsage | null
+  /** Process-local advisory; it is not a durable state field. */
+  resume_required: boolean
+}
+
+/** History 与 SSE durable frame 共享的完整、安全 product union。 */
+export type AgentRuntimeProductEventV1 =
+  | { type: "loop_started" }
+  | { type: "message_appended"; data: { message: ChatMessage } }
   | {
       type: "tool_approval_requested"
-      data: {
-        approval_id: string
-        agent_name: string
-        call_id: string
-        tool_name: string
-        arguments: unknown
-        tool_kind: "read" | "write"
-        danger_level: "low" | "medium" | "high"
-      }
+      data: Omit<PendingApprovalView, "requested_event_seq">
     }
   | {
       type: "tool_approval_resolved"
-      data: { approval_id: string; decision: "approve" | "reject" }
+      data: { approval_id: string; decision: ApprovalDecision }
     }
   | {
-      type: "tool_execution_started"
-      data: { call_id: string; tool_name: string }
+      type: "transcript_compacted"
+      data: { summary: ChatMessage; compacted_iteration: number }
     }
   | {
       type: "iteration_completed"
       data: { iteration: number; usage: TokenUsage }
     }
-  | { type: "llm"; data: { llm_call_id: string; event: LlmEvent } }
-
-export type AgentLocation =
-  | { type: "direct" }
   | {
-      type: "workflow_node"
-      data: { workflow_version_id: string; node_id: string }
+      type: "loop_finished"
+      data: { finish_reason: string; usage: TokenUsage }
     }
+  | { type: "loop_failed"; data: { error_text: string; usage: TokenUsage } }
+  | { type: "loop_cancelled"; data: { usage: TokenUsage } }
 
-export type RuntimeEvent =
-  | { type: "session"; data: { event: { type: "created" } } }
-  | {
-      type: "node"
-      data: { workflow_version_id: string; node_id: string; event: unknown }
-    }
-  | {
-      type: "agent"
-      data: {
-        agent_id: string
-        turn_id: string
-        location: AgentLocation
-        event: AgentEvent
-      }
-    }
-
-export type StreamEnvelope = {
+/** One product-visible durable row returned by history. */
+export type AgentRuntimeDurableRecordV1 = {
+  event_seq: string
+  event_version: number
   session_id: string
-  timestamp: string
-  event: RuntimeEvent
+  turn_id: string
+  created_at: string
+  event: AgentRuntimeProductEventV1
 }
 
-export type HistoryPage = {
-  through_seq: number
-  events: readonly StreamEnvelope[]
-  next_front_seq: number
+export type AgentRuntimeHistoryPage = {
+  items: readonly AgentRuntimeDurableRecordV1[]
+  through_event_seq: string
+  next_before_event_seq: string | null
   has_more: boolean
 }
 
+/** Typed, volatile LLM telemetry; it never enters durable history. */
+export type LlmTelemetryEventV1 =
+  | { type: "llm_started" }
+  | { type: "text_delta"; data: { delta: string } }
+  | { type: "reasoning_delta"; data: { delta: string } }
+  | {
+      type: "tool_call_delta"
+      data: { call_id: string; name?: string | null; arguments_delta: string }
+    }
+  | {
+      type: "llm_finished"
+      data: { finish_reason: string; usage?: TokenUsage | null }
+    }
+
+type BaseFrameIdentity = {
+  agent_runtime_id: string
+  /** Pinned immutable template-version identity. */
+  agent_id: string
+  created_at: string
+}
+
+type ControlFrameIdentity = BaseFrameIdentity & {
+  session_id: string | null
+  turn_id: string | null
+}
+
+type TurnFrameIdentity = BaseFrameIdentity & {
+  session_id: string
+  turn_id: string
+}
+
+/** The only public frame of an AgentRuntime SSE tail. */
+export type AgentRuntimeStreamFrameV1 =
+  | (ControlFrameIdentity & {
+      protocol_version: 1
+      kind: "control"
+      event:
+        | { type: "stream_ready" }
+        | { type: "stream_reset"; reason: "buffer_overflow" }
+    })
+  | (TurnFrameIdentity & {
+      protocol_version: 1
+      kind: "durable"
+      event_seq: string
+      event_version: number
+      event: AgentRuntimeProductEventV1
+    })
+  | (TurnFrameIdentity & {
+      protocol_version: 1
+      kind: "telemetry"
+      llm_call_id: string
+      /** Call-local unsigned decimal sequence. */
+      telemetry_seq: string
+      durable_before_event_seq: string
+      event: LlmTelemetryEventV1
+    })
+
+/** Immutable result of key-only AgentRuntime creation. */
+export type AgentRuntimeCreated = {
+  agent_runtime_id: string
+  agent_id: string
+  agent_name: string
+  agent_version: string
+  created_at: string
+}
+
+export type AgentRuntimeTurnAccepted = {
+  agent_runtime_id: string
+  agent_id: string
+  session_id: string
+  turn_id: string
+}
+
 export type StratumApi = {
-  createAgent(input: {
+  createAgentRuntime(input: {
     agentName: string
-    text: string
-    sessionId?: string
     modelConfig?: ModelConfig
-  }): Promise<{
-    agent_id: string
-    agent_name: string
-    session_id: string
-    turn_id: string
-  }>
+    /** A pending create intent reuses this UUID until the outcome is known. */
+    idempotencyKey: string
+  }): Promise<AgentRuntimeCreated>
   getAgentTemplates(): Promise<readonly AgentTemplateView[]>
   getModels(): Promise<readonly ModelDescriptor[]>
-  getAgent(agentId: string): Promise<AgentView>
-  getHistory(
-    agentId: string,
-    query: { afterSeq: number; throughSeq: number; limit: number }
-  ): Promise<HistoryPage>
+  getAgentRuntime(
+    agentRuntimeId: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<AgentRuntimeView>
+  getAgentRuntimeHistory(
+    agentRuntimeId: string,
+    query: { throughSeq: string; beforeSeq?: string; limit?: number },
+    options?: { signal?: AbortSignal }
+  ): Promise<AgentRuntimeHistoryPage>
   sendMessage(
-    agentId: string,
-    text: string,
-    modelConfig?: ModelConfig
-  ): Promise<void>
-  resume(agentId: string): Promise<void>
-  cancel(agentId: string): Promise<void>
+    agentRuntimeId: string,
+    input: {
+      text: string
+      expectedCurrentTurnId: string | null
+      sessionId?: string
+      modelConfig?: ModelConfig
+    }
+  ): Promise<AgentRuntimeTurnAccepted>
+  resume(
+    agentRuntimeId: string,
+    turnId: string
+  ): Promise<AgentRuntimeTurnAccepted | null>
+  cancel(agentRuntimeId: string, turnId: string): Promise<void>
   resolveApproval(
-    agentId: string,
+    agentRuntimeId: string,
     approvalId: string,
-    decision: "approve" | "reject"
+    input: { turnId: string; decision: ApprovalDecision }
   ): Promise<void>
 }
 
@@ -189,6 +266,25 @@ export async function apiErrorFromResponse(
   return new ApiError("http_error", response.status, "request failed")
 }
 
+/** String-safe unsigned decimal sequence comparator. */
+export function compareEventSeq(left: string, right: string): number {
+  const a = BigInt(left)
+  const b = BigInt(right)
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+const EVENT_SEQ_PATTERN = /^(0|[1-9]\d*)$/
+
+export function isEventSeq(value: unknown): value is string {
+  return typeof value === "string" && EVENT_SEQ_PATTERN.test(value)
+}
+
+export function incrementEventSeq(value: string): string {
+  return (BigInt(value) + BigInt(1)).toString()
+}
+
+type Parser<T> = (value: unknown) => T | undefined
+
 export function createStratumApi(options: {
   baseUrl: string
   fetcher?: typeof fetch
@@ -196,66 +292,191 @@ export function createStratumApi(options: {
   const baseUrl = options.baseUrl.replace(/\/$/, "")
   const fetcher = options.fetcher ?? fetch
 
-  const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const request = async <T>(
+    path: string,
+    parser: Parser<T>,
+    init?: RequestInit,
+    expectedStatuses: readonly number[] = [200]
+  ): Promise<T> => {
     const response = await fetcher(`${baseUrl}${path}`, init)
     if (!response.ok) throw await apiErrorFromResponse(response)
-    return response.json() as Promise<T>
+    assertResponseStatus(response, expectedStatuses)
+    return parseSuccessResponse(response, parser)
   }
 
-  const command = async (path: string, body?: unknown): Promise<void> => {
+  const emptyCommand = async (
+    path: string,
+    body: unknown,
+    expectedStatuses: readonly number[]
+  ): Promise<void> => {
     const response = await fetcher(`${baseUrl}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      body: JSON.stringify(body),
     })
     if (!response.ok) throw await apiErrorFromResponse(response)
+    assertResponseStatus(response, expectedStatuses)
   }
 
   return {
-    createAgent: (input) =>
-      request("/v1/agents", {
+    createAgentRuntime: async (input) => {
+      const response = await fetcher(`${baseUrl}/v1/agent-runtimes`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": input.idempotencyKey,
+        },
         body: JSON.stringify({
           agent_name: input.agentName,
-          text: input.text,
-          ...(input.sessionId === undefined
-            ? {}
-            : { session_id: input.sessionId }),
           ...(input.modelConfig === undefined
             ? {}
             : { model_config: input.modelConfig }),
         }),
-      }),
+      })
+      if (!response.ok) throw await apiErrorFromResponse(response)
+      assertResponseStatus(response, [201])
+      return parseSuccessResponse(response, parseAgentRuntimeCreated)
+    },
     getAgentTemplates: async () => {
-      const response = await request<{ agents: readonly AgentTemplateView[] }>(
-        "/v1/agent/templates"
+      const response = await request(
+        "/v1/agent-templates",
+        parseAgentTemplatesResponse
       )
-      return response.agents
+      return response.templates
     },
     getModels: async () => {
-      const response = await request<{ models: readonly ModelDescriptor[] }>(
-        "/v1/models"
-      )
+      const response = await request("/v1/models", parseModelsResponse)
       return response.models
     },
-    getAgent: (agentId) => request(`/v1/agents/${agentId}`),
-    getHistory: (agentId, query) => {
+    getAgentRuntime: (agentRuntimeId, options) =>
+      request(
+        `/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}`,
+        parseAgentRuntimeView,
+        { signal: options?.signal }
+      ),
+    getAgentRuntimeHistory: (agentRuntimeId, query, options) => {
       const search = new URLSearchParams({
-        after_seq: String(query.afterSeq),
-        through_seq: String(query.throughSeq),
-        limit: String(query.limit),
+        through_event_seq: query.throughSeq,
+        limit: String(query.limit ?? 50),
       })
-      return request(`/v1/agents/${agentId}/messages?${search}`)
+      if (query.beforeSeq !== undefined)
+        search.set("before_event_seq", query.beforeSeq)
+      return request(
+        `/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}/history?${search}`,
+        parseAgentRuntimeHistoryPage,
+        { signal: options?.signal }
+      )
     },
-    sendMessage: (agentId, text, modelConfig) =>
-      command(`/v1/agents/${agentId}/messages`, {
-        text,
-        ...(modelConfig === undefined ? {} : { model_config: modelConfig }),
-      }),
-    resume: (agentId) => command(`/v1/agents/${agentId}/resume`),
-    cancel: (agentId) => command(`/v1/agents/${agentId}/cancel`),
-    resolveApproval: (agentId, approvalId, decision) =>
-      command(`/v1/agents/${agentId}/approvals/${approvalId}`, { decision }),
+    sendMessage: async (agentRuntimeId, input) => {
+      const response = await fetcher(
+        `${baseUrl}/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: input.text,
+            expected_current_turn_id: input.expectedCurrentTurnId,
+            ...(input.sessionId === undefined
+              ? {}
+              : { session_id: input.sessionId }),
+            ...(input.modelConfig === undefined
+              ? {}
+              : { model_config: input.modelConfig }),
+          }),
+        }
+      )
+      if (!response.ok) throw await apiErrorFromResponse(response)
+      assertResponseStatus(response, [202])
+      const accepted = await parseSuccessResponse(
+        response,
+        parseAgentRuntimeTurnAccepted
+      )
+      assertRuntimeIdentity(agentRuntimeId, accepted.agent_runtime_id)
+      return accepted
+    },
+    resume: async (agentRuntimeId, turnId) => {
+      const response = await fetcher(
+        `${baseUrl}/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}/resume`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ turn_id: turnId }),
+        }
+      )
+      if (!response.ok) throw await apiErrorFromResponse(response)
+      if (response.status === 204) return null
+      assertResponseStatus(response, [202])
+      const accepted = await parseSuccessResponse(
+        response,
+        parseAgentRuntimeTurnAccepted
+      )
+      assertRuntimeIdentity(agentRuntimeId, accepted.agent_runtime_id)
+      if (accepted.turn_id !== turnId)
+        throw new ApiError(
+          "protocol_identity_error",
+          0,
+          "the response belongs to a different turn"
+        )
+      return accepted
+    },
+    cancel: (agentRuntimeId, turnId) =>
+      emptyCommand(
+        `/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}/cancel`,
+        {
+          turn_id: turnId,
+        },
+        [202, 204]
+      ),
+    resolveApproval: (agentRuntimeId, approvalId, input) =>
+      emptyCommand(
+        `/v1/agent-runtimes/${encodeURIComponent(agentRuntimeId)}/approvals/${encodeURIComponent(approvalId)}`,
+        { turn_id: input.turnId, decision: input.decision },
+        [204]
+      ),
   }
+}
+
+async function parseSuccessResponse<T>(
+  response: Response,
+  parser: Parser<T>
+): Promise<T> {
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw new ApiError(
+      "invalid_response",
+      response.status,
+      "the server returned an invalid response"
+    )
+  }
+  const parsed = parser(value)
+  if (parsed === undefined)
+    throw new ApiError(
+      "invalid_response",
+      response.status,
+      "the server returned an unsupported response"
+    )
+  return parsed
+}
+
+function assertResponseStatus(
+  response: Response,
+  expectedStatuses: readonly number[]
+): void {
+  if (!expectedStatuses.includes(response.status))
+    throw new ApiError(
+      "invalid_response",
+      response.status,
+      "the server returned an unexpected success status"
+    )
+}
+
+function assertRuntimeIdentity(expected: string, actual: string): void {
+  if (expected !== actual)
+    throw new ApiError(
+      "protocol_identity_error",
+      0,
+      "the response belongs to a different agent runtime"
+    )
 }

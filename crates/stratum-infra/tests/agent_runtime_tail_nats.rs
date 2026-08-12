@@ -1,0 +1,378 @@
+//! Integration tests for the AgentRuntime-scoped NATS tail transport against a real
+//! JetStream broker (see `docker-compose.test.yml` and the crate `Makefile`).
+
+use std::{error::Error, time::Duration};
+
+use bytes::Bytes;
+use futures_util::StreamExt;
+use stratum_core::AgentRuntimeId;
+use stratum_infra::{
+    AgentRuntimeTailConfig, AgentRuntimeTailCursor, AgentRuntimeTailError, AgentRuntimeTailStream,
+    NatsAgentRuntimeTail,
+};
+use tokio::time::{Instant, sleep, timeout};
+
+const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:44227";
+const ORDER_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_ORDER";
+const NEW_ONLY_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_NEW_ONLY";
+const RESUME_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_RESUME";
+const EXPIRY_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_EXPIRY";
+const FUTURE_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_FUTURE";
+const EMPTY_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_EMPTY";
+const ISOLATION_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_ISOLATION";
+const CURSOR_SCOPE_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_CURSOR_SCOPE";
+const RECREATE_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_RECREATE";
+const RESTART_STREAM: &str = "AGENT_RUNTIME_TAIL_TEST_RESTART";
+const NO_DELIVERY_GRACE: Duration = Duration::from_millis(500);
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_publish_subscribe_preserves_order() -> Result<(), Box<dyn Error>> {
+    let tail = connect(&test_config(ORDER_STREAM, "events.agent.test.order")).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+    let mut stream = tail.subscribe(&agent_runtime_id, None).await?;
+
+    let payloads = [
+        Bytes::from_static(b"frame-1"),
+        Bytes::from_static(b"frame-2"),
+    ];
+    let mut cursors = Vec::with_capacity(payloads.len());
+    for payload in &payloads {
+        cursors.push(tail.publish(&agent_runtime_id, payload.clone()).await?);
+    }
+
+    for (expected_payload, expected_cursor) in payloads.iter().zip(cursors.iter()) {
+        let (cursor, payload) = receive(&mut stream).await?;
+        assert_eq!(&payload, expected_payload);
+        assert_eq!(cursor, *expected_cursor);
+    }
+    assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_no_cursor_subscription_receives_only_new_frames()
+-> Result<(), Box<dyn Error>> {
+    let tail = connect(&test_config(NEW_ONLY_STREAM, "events.agent.test.newonly")).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"history-1"))
+        .await?;
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"history-2"))
+        .await?;
+
+    let mut stream = tail.subscribe(&agent_runtime_id, None).await?;
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"live-1"))
+        .await?;
+
+    let (_, payload) = receive(&mut stream).await?;
+    assert_eq!(payload, Bytes::from_static(b"live-1"));
+    assert_no_delivery(&mut stream).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_cursor_subscription_resumes_after_cursor() -> Result<(), Box<dyn Error>>
+{
+    let tail = connect(&test_config(RESUME_STREAM, "events.agent.test.resume")).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+
+    let first = tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"frame-1"))
+        .await?;
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"frame-2"))
+        .await?;
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"frame-3"))
+        .await?;
+
+    let mut stream = tail.subscribe(&agent_runtime_id, Some(first)).await?;
+
+    let (_, payload) = receive(&mut stream).await?;
+    assert_eq!(payload, Bytes::from_static(b"frame-2"));
+    let (_, payload) = receive(&mut stream).await?;
+    assert_eq!(payload, Bytes::from_static(b"frame-3"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_reports_expired_cursor_after_retention_eviction()
+-> Result<(), Box<dyn Error>> {
+    let mut config = test_config(EXPIRY_STREAM, "events.agent.test.expiry");
+    config.max_messages = 4;
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+
+    let evicted = tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"frame-1"))
+        .await?;
+    for index in 0..8 {
+        tail.publish(&agent_runtime_id, Bytes::from(format!("evictor-{index}")))
+            .await?;
+    }
+
+    let result = tail.subscribe(&agent_runtime_id, Some(evicted)).await;
+    assert!(
+        matches!(result, Err(AgentRuntimeTailError::CursorExpired { cursor }) if cursor == evicted),
+        "evicted cursor must fail with the typed CursorExpired error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_reports_future_cursor_as_expired() -> Result<(), Box<dyn Error>> {
+    let config = test_config(FUTURE_STREAM, "events.agent.test.future");
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+
+    let current = tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"frame-1"))
+        .await?;
+
+    // A cursor ahead of the tail (forged, or from a recreated stream) must
+    // expire instead of silently waiting for future messages.
+    let encoded = current.to_string();
+    let (prefix, _) = encoded
+        .rsplit_once('.')
+        .ok_or_else(|| std::io::Error::other("cursor has sequence"))?;
+    let forged: AgentRuntimeTailCursor = format!("{prefix}.999999").parse()?;
+    let result = tail.subscribe(&agent_runtime_id, Some(forged)).await;
+    assert!(
+        matches!(result, Err(AgentRuntimeTailError::CursorExpired { cursor }) if cursor == forged),
+        "future cursor must fail with the typed CursorExpired error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_reports_any_cursor_as_expired_on_empty_stream()
+-> Result<(), Box<dyn Error>> {
+    let config = test_config(EMPTY_STREAM, "events.agent.test.empty");
+    reset_stream(&config).await?;
+    let old_tail = connect(&config).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+
+    let cursor = old_tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"old-generation"))
+        .await?;
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    // The recreated stream is empty and cannot retain the old generation.
+    let result = tail.subscribe(&agent_runtime_id, Some(cursor)).await;
+    assert!(
+        matches!(result, Err(AgentRuntimeTailError::CursorExpired { cursor: expired }) if expired == cursor),
+        "an empty stream must expire every cursor"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_rejects_cursor_from_another_runtime() -> Result<(), Box<dyn Error>> {
+    let config = test_config(CURSOR_SCOPE_STREAM, "events.agent.test.cursor_scope");
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let runtime_a = AgentRuntimeId::new();
+    let runtime_b = AgentRuntimeId::new();
+    let cursor_b = tail
+        .publish(&runtime_b, Bytes::from_static(b"runtime-b"))
+        .await?;
+
+    let result = tail.subscribe(&runtime_a, Some(cursor_b)).await;
+
+    assert!(matches!(
+        result,
+        Err(AgentRuntimeTailError::CursorExpired { cursor }) if cursor == cursor_b
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_rejects_forged_cross_runtime_sequence() -> Result<(), Box<dyn Error>> {
+    let config = test_config(
+        "AGENT_RUNTIME_TAIL_TEST_CURSOR_SUBJECT",
+        "events.agent.test.cursor_subject",
+    );
+    reset_stream(&config).await?;
+    let tail = connect(&config).await?;
+    let runtime_a = AgentRuntimeId::new();
+    let runtime_b = AgentRuntimeId::new();
+    let cursor_b = tail
+        .publish(&runtime_b, Bytes::from_static(b"runtime-b"))
+        .await?;
+    let encoded = cursor_b.to_string();
+    let mut parts = encoded.split('.');
+    let _version = parts.next();
+    let _runtime = parts.next();
+    let generation = parts
+        .next()
+        .ok_or_else(|| std::io::Error::other("cursor has generation"))?;
+    let sequence = parts
+        .next()
+        .ok_or_else(|| std::io::Error::other("cursor has sequence"))?;
+    let forged: AgentRuntimeTailCursor =
+        format!("v1.{runtime_a}.{generation}.{sequence}").parse()?;
+
+    let result = tail.subscribe(&runtime_a, Some(forged)).await;
+
+    assert!(matches!(
+        result,
+        Err(AgentRuntimeTailError::CursorExpired { cursor }) if cursor == forged
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_rejects_old_generation_after_sequence_overlap()
+-> Result<(), Box<dyn Error>> {
+    let config = test_config(RECREATE_STREAM, "events.agent.test.recreate");
+    reset_stream(&config).await?;
+    let old_tail = connect(&config).await?;
+    let agent_runtime_id = AgentRuntimeId::new();
+    let old_cursor = old_tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"old-1"))
+        .await?;
+
+    reset_stream(&config).await?;
+    let new_tail = connect(&config).await?;
+    new_tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"new-1"))
+        .await?;
+    new_tail
+        .publish(&agent_runtime_id, Bytes::from_static(b"new-2"))
+        .await?;
+
+    let result = new_tail
+        .subscribe(&agent_runtime_id, Some(old_cursor))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentRuntimeTailError::CursorExpired { cursor }) if cursor == old_cursor
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_isolates_frames_per_runtime() -> Result<(), Box<dyn Error>> {
+    let tail = connect(&test_config(
+        ISOLATION_STREAM,
+        "events.agent.test.isolation",
+    ))
+    .await?;
+    let runtime_a = AgentRuntimeId::new();
+    let runtime_b = AgentRuntimeId::new();
+
+    let mut stream_a = tail.subscribe(&runtime_a, None).await?;
+    tail.publish(&runtime_b, Bytes::from_static(b"runtime-b-frame"))
+        .await?;
+
+    assert_no_delivery(&mut stream_a).await;
+
+    tail.publish(&runtime_a, Bytes::from_static(b"runtime-a-frame"))
+        .await?;
+    let (_, payload) = receive(&mut stream_a).await?;
+    assert_eq!(payload, Bytes::from_static(b"runtime-a-frame"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_seed_frames_before_restart() -> Result<(), Box<dyn Error>> {
+    let tail = connect(&test_config(RESTART_STREAM, "events.agent.test.restart")).await?;
+    let agent_runtime_id = restart_agent_runtime_id();
+
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"pre-restart-1"))
+        .await?;
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"pre-restart-2"))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires NATS JetStream"]
+async fn agent_runtime_tail_restart_does_not_redeliver_history_to_new_subscription()
+-> Result<(), Box<dyn Error>> {
+    let tail = connect(&test_config(RESTART_STREAM, "events.agent.test.restart")).await?;
+    let agent_runtime_id = restart_agent_runtime_id();
+
+    let mut stream = tail.subscribe(&agent_runtime_id, None).await?;
+    assert_no_delivery(&mut stream).await;
+
+    tail.publish(&agent_runtime_id, Bytes::from_static(b"post-restart"))
+        .await?;
+    let (_, payload) = receive(&mut stream).await?;
+    assert_eq!(payload, Bytes::from_static(b"post-restart"));
+    Ok(())
+}
+
+fn nats_url() -> String {
+    std::env::var("STRATUM_INFRA_TEST_NATS_URL").unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned())
+}
+
+fn test_config(stream_name: &str, subject_prefix: &str) -> AgentRuntimeTailConfig {
+    let mut config = AgentRuntimeTailConfig::default();
+    config.url = nats_url();
+    config.stream_name = stream_name.to_owned();
+    config.subject_prefix = subject_prefix.to_owned();
+    config.replicas = 1;
+    config.max_age = Duration::from_secs(300);
+    config.max_bytes = 16 * 1024 * 1024;
+    config.max_messages = 1_000;
+    config
+}
+
+/// Fixed identity shared by the seed/restart test pair; the seed phase runs
+/// before the broker restart (see the crate `Makefile`), and retained frames
+/// from earlier runs are never delivered to a no-cursor subscription anyway.
+fn restart_agent_runtime_id() -> AgentRuntimeId {
+    "018f3c2a-7b1d-7e4f-9a2b-3c4d5e6f7a8b"
+        .parse()
+        .expect("fixed restart agent id is a valid uuid")
+}
+
+async fn connect(config: &AgentRuntimeTailConfig) -> Result<NatsAgentRuntimeTail, Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match NatsAgentRuntimeTail::connect(config.clone()).await {
+            Ok(tail) => return Ok(tail),
+            Err(error) if Instant::now() < deadline => {
+                sleep(Duration::from_millis(200)).await;
+                drop(error);
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+}
+
+async fn reset_stream(config: &AgentRuntimeTailConfig) -> Result<(), Box<dyn Error>> {
+    let client = async_nats::connect(&config.url).await?;
+    let jetstream = async_nats::jetstream::new(client);
+    let _ = jetstream.delete_stream(&config.stream_name).await;
+    Ok(())
+}
+
+async fn receive(
+    stream: &mut AgentRuntimeTailStream,
+) -> Result<(AgentRuntimeTailCursor, Bytes), Box<dyn Error>> {
+    let item = timeout(RECEIVE_TIMEOUT, stream.next()).await?;
+    Ok(item.expect("tail stream ended before the expected frame")?)
+}
+
+async fn assert_no_delivery(stream: &mut AgentRuntimeTailStream) {
+    let result = timeout(NO_DELIVERY_GRACE, stream.next()).await;
+    assert!(
+        result.is_err(),
+        "subscription delivered frames it must not deliver: {result:?}"
+    );
+}

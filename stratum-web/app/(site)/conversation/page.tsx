@@ -1,26 +1,16 @@
 "use client"
 
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 
-import { ApprovalDock } from "@/components/stratum/conversation/approval-dock"
+import { ConversationComposer } from "@/components/stratum/conversation/conversation-composer"
+import {
+  buildSettledItems,
+  composeLiveItems,
+} from "@/components/stratum/conversation/conversation-items"
 import { ConversationThread } from "@/components/stratum/conversation/conversation-thread"
 import { ThreadListRail } from "@/components/stratum/conversation/thread-list-rail"
-import type {
-  ConversationMessage,
-  ConversationToolCall,
-  ToolCallApproval,
-} from "@/components/stratum/conversation/types"
-import { ModelSelector } from "@/components/stratum/model-selector"
-import { PromptInput } from "@/components/stratum/prompt-input"
-import type {
-  ApprovalRequest,
-  StableMessage,
-} from "@/features/agent-conversation/types"
+import { useApprovalViews } from "@/components/stratum/conversation/use-approval-views"
 import { useAgentConversation } from "@/hooks/use-agent-conversation"
-import {
-  currentThinkingLevel,
-  thinkingLevels,
-} from "@/lib/stratum/model-config"
 
 /**
  * DIRECTION CONTRACT —— /conversation 展示页
@@ -32,22 +22,15 @@ import {
  * FIRST VIEWPORT: 左侧会话列表 + 右侧消息流 + 底部 PromptInput（模型选择 + 电弧激活）。
  * FORM: 整屏 Operate 界面（assistant-ui 底稿的展示层 fork），非 section 展示页。
  *
- * 数据来自 Stratum 后端（REST + SSE）：reasoning 与 tool calls 在正文上方
- * 渐进式透明展示（默认折叠，待决审批强制展开可操作）。
+ * 数据来自 Stratum 后端（Postgres-first REST + AgentRuntime-scoped SSE）：durable
+ * identity 是 (agentRuntimeId, eventSeq 十进制字符串)；reasoning 与 tool calls 在
+ * 正文上方渐进式透明展示（默认折叠，待决审批强制展开可操作）；
+ * TranscriptCompacted 渲染为可折叠"上下文已压缩" marker；failed/cancelled
+ * 渲染为安全 terminal marker；向上滚动按固定 through barrier 分页更旧历史。
+ *
+ * 本页只是编排层：state → 视图条目的映射在 conversation-items.ts（纯函数），
+ * 审批状态派生在 use-approval-views.ts，composer 区在 conversation-composer.tsx。
  */
-
-/** 工具 result/arguments（unknown）→ 可显示文本 */
-function stringifyToolData(value: unknown): string | null {
-  if (value === null || value === undefined) return null
-  if (typeof value === "string") return value
-  try {
-    return JSON.stringify(value, null, 2) ?? null
-  } catch {
-    return String(value)
-  }
-}
-
-type ApprovalEntry = { view: ToolCallApproval; argumentsText: string }
 
 const WELCOME = (
   <h1 className="text-center font-heading text-2xl tracking-tight">
@@ -55,350 +38,105 @@ const WELCOME = (
   </h1>
 )
 
-type SettledViewCacheEntry = {
-  inputs: readonly unknown[]
-  view: ConversationMessage
-}
-
-// StableMessage 对象在 reducer 不可变更新中保持引用；视图构建的输入
-// （历史标记、工具 progress、审批视图）逐项 === 校验，命中即复用视图对象——
-// 流式 token 与消息落成都不改变未变消息的引用，下游 memo 才能命中
-const settledViewCache = new WeakMap<StableMessage, SettledViewCacheEntry>()
-
 export default function ConversationPage() {
   const {
     state,
-    recentAgents,
+    recentAgentRuntimes,
     composerConfiguration,
-    selectAgent,
+    selectAgentRuntime,
     createConversation,
     sendMessage,
+    cancel,
+    resume,
+    reconnect,
     resolveApproval,
+    loadOlderHistory,
   } = useAgentConversation()
 
   const threads = useMemo(
     () =>
-      recentAgents.map((agent) => ({
-        id: agent.agentId,
-        title: agent.title,
+      recentAgentRuntimes.map((runtime) => ({
+        id: runtime.agentRuntimeId,
+        title: runtime.title,
       })),
-    [recentAgents]
+    [recentAgentRuntimes]
   )
 
-  // 历史/新消息区分：recovery 完成（ready）时快照已有消息 id 为历史
-  // （reasoning 默认折叠），之后出现的 id 为本轮新消息（默认简略预览）。
+  // 历史/新消息区分：recovery 完成（ready）时快照当时的 barrier；seq ≤ 该
+  // barrier 的消息为历史（reasoning 默认折叠，含之后向上分页加载的旧页），
+  // 之后到达的为本轮新消息（默认简略预览）。
   // derive-state-during-render 模式：渲染期条件 setState，立即重渲染提交。
   const [historical, setHistorical] = useState<{
-    agentId: string | null
-    ids: Set<string>
-  }>({ agentId: null, ids: new Set() })
-  if (state.phase === "ready" && historical.agentId !== state.agentId) {
+    agentRuntimeId: string | null
+    historyThrough: string | null
+    pgConfirmedEventSeq: string
+  }>({
+    agentRuntimeId: null,
+    historyThrough: null,
+    pgConfirmedEventSeq: "0",
+  })
+  if (
+    state.phase === "ready" &&
+    (historical.agentRuntimeId !== state.agentRuntimeId ||
+      historical.historyThrough !== state.historyThrough)
+  ) {
     setHistorical({
-      agentId: state.agentId,
-      ids: new Set(
-        state.messages.map(
-          (message) => `${message.agentId}:${message.messageSeq}`
-        )
-      ),
+      agentRuntimeId: state.agentRuntimeId,
+      historyThrough: state.historyThrough,
+      pgConfirmedEventSeq: state.pgConfirmedEventSeq,
     })
   }
 
-  // 审批提交状态：submitting = 已点击等后端确认；outcomes = 本会话已决终态。
-  // agent 切换时一并重置（同为 derive-state-during-render）。
-  const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(
-    new Set()
+  const approvals = useApprovalViews(
+    state.approvals,
+    state.agentRuntimeId,
+    resolveApproval
   )
-  // 双击竞态的同步守卫（state 闭包读不到同帧最新值）。agent 切换无需重置：
-  // 旧 id 必然不在新会话的 state.approvals 里，前置 guard 已挡
-  const submittingRef = useRef<Set<string>>(new Set())
-  const [approvalOutcomes, setApprovalOutcomes] = useState<
-    Record<string, { approval: ApprovalRequest; decision: "approve" | "reject" }>
-  >({})
-  const [approvalAgentId, setApprovalAgentId] = useState(state.agentId)
-  if (approvalAgentId !== state.agentId) {
-    setApprovalAgentId(state.agentId)
-    setSubmittingApprovals(new Set())
-    setApprovalOutcomes({})
-  }
 
-  // 审批视图（按 callId 索引）：已决兜底展示，待决覆盖已决
-  // —— 若 resolve 失败审批仍在 state.approvals 中，自动回退为待决。
-  const approvalEntries = useMemo(() => {
-    const entries = new Map<string, ApprovalEntry>()
-    for (const outcome of Object.values(approvalOutcomes)) {
-      entries.set(outcome.approval.callId, {
-        view: {
-          approvalId: outcome.approval.approvalId,
-          callId: outcome.approval.callId,
-          toolName: outcome.approval.toolName,
-          toolKind: outcome.approval.toolKind,
-          dangerLevel: outcome.approval.dangerLevel,
-          status: outcome.decision === "approve" ? "approved" : "rejected",
-        },
-        argumentsText: stringifyToolData(outcome.approval.arguments) ?? "",
-      })
-    }
-    for (const approval of Object.values(state.approvals)) {
-      entries.set(approval.callId, {
-        view: {
-          approvalId: approval.approvalId,
-          callId: approval.callId,
-          toolName: approval.toolName,
-          toolKind: approval.toolKind,
-          dangerLevel: approval.dangerLevel,
-          status: submittingApprovals.has(approval.approvalId)
-            ? "submitting"
-            : "pending",
-        },
-        argumentsText: stringifyToolData(approval.arguments) ?? "",
-      })
-    }
-    return entries
-  }, [approvalOutcomes, state.approvals, submittingApprovals])
-
-  // 待决/提交中的审批（浮层数据源）：已决的退场后由内联块展示终态
-  const pendingApprovals = useMemo(
+  // 冷段（timeline 落成部分）+ 热段（draft/实时 tools）；运行错误统一在
+  // composer 上方的 Notice 展示，绝不伪装成 assistant 消息污染正文。
+  // 流式 token 每帧只重跑热段，settled 视图经 WeakMap 缓存复用引用
+  const settled = useMemo(
     () =>
-      [...approvalEntries.values()].filter(
-        (entry) =>
-          entry.view.status === "pending" || entry.view.status === "submitting"
+      buildSettledItems(
+        state.timeline,
+        state.tools,
+        approvals.entries,
+        historical.pgConfirmedEventSeq
       ),
-    [approvalEntries]
+    [state.timeline, state.tools, approvals.entries, historical]
   )
-
-  const handleResolveApproval = useCallback(
-    (approvalId: string, decision: "approve" | "reject") => {
-      const approval = state.approvals[approvalId]
-      // ref 同步 check-and-add：同帧双击必被挡（state 闭包读不到最新值）
-      if (!approval || submittingRef.current.has(approvalId)) return
-      submittingRef.current.add(approvalId)
-      setSubmittingApprovals((prev) => new Set(prev).add(approvalId))
-      // hook 返回 boolean：失败不记 outcome，审批留在 state.approvals 回退待决
-      void resolveApproval(approvalId, decision).then((ok) => {
-        submittingRef.current.delete(approvalId)
-        setSubmittingApprovals((prev) => {
-          const next = new Set(prev)
-          next.delete(approvalId)
-          return next
-        })
-        if (ok)
-          setApprovalOutcomes((prev) => ({
-            ...prev,
-            [approvalId]: { approval, decision },
-          }))
-      })
-    },
-    [resolveApproval, state.approvals]
-  )
-
-  // 冷段：已落成消息 → 视图对象（只在消息落成/工具结果/审批/历史标记变化时
-  // 重跑；WeakMap 缓存保证未变消息复用旧对象引用）
-  const settled = useMemo(() => {
-    const views: ConversationMessage[] = state.messages
-      .filter(
-        (message) => message.role === "user" || message.role === "assistant"
-      )
-      .map((message) => {
-        const id = `${message.agentId}:${message.messageSeq}`
-        const isHistorical = historical.ids.has(id)
-        const inputs: readonly unknown[] = [
-          isHistorical,
-          ...message.toolCalls.map(
-            (toolCall) => state.tools[toolCall.callId] ?? null
-          ),
-          ...message.toolCalls.map(
-            (toolCall) => approvalEntries.get(toolCall.callId)?.view ?? null
-          ),
-        ]
-        const cached = settledViewCache.get(message)
-        if (
-          cached &&
-          cached.inputs.length === inputs.length &&
-          cached.inputs.every((input, index) => input === inputs[index])
-        )
-          return cached.view
-
-        const view: ConversationMessage = {
-          id,
-          role: message.role as "user" | "assistant",
-          content: message.text ?? "",
-          status: "done",
-          ...(message.reasoning
-            ? {
-                reasoning: message.reasoning,
-                reasoningDefaultView: isHistorical
-                  ? ("collapsed" as const)
-                  : ("preview" as const),
-              }
-            : {}),
-          ...(message.toolCalls.length > 0
-            ? {
-                toolCalls: message.toolCalls.map((toolCall) => {
-                  // 结果/状态从实时 tools 配对（含 tool 角色消息带回的 result）；
-                  // 配不上就只做 name + arguments
-                  const progress = state.tools[toolCall.callId]
-                  const approval = approvalEntries.get(toolCall.callId)?.view
-                  return {
-                    callId: toolCall.callId,
-                    name: toolCall.name,
-                    argumentsText:
-                      progress?.argumentsText ||
-                      (stringifyToolData(toolCall.arguments) ?? ""),
-                    result: stringifyToolData(progress?.result),
-                    errorText: progress?.errorText ?? null,
-                    status: progress?.status ?? ("finished" as const),
-                    ...(approval ? { approval } : {}),
-                  }
-                }),
-              }
-            : {}),
-        }
-        settledViewCache.set(message, { inputs, view })
-        return view
-      })
-    // 已落成消息里的工具 callId（用于把已提交的调用从实时 tools 中排除）
-    const callIds = new Set(
-      views.flatMap((message) =>
-        (message.toolCalls ?? []).map((toolCall) => toolCall.callId)
-      )
-    )
-    return { messages: views, callIds }
-  }, [state.messages, state.tools, approvalEntries, historical])
-
-  // 热段：draft/实时 tools/连接错误（流式 token 每帧重跑，但只追加新对象，
-  // settled 部分整体复用）
-  const messages = useMemo<ConversationMessage[]>(() => {
-    const result: ConversationMessage[] = [...settled.messages]
-    const stableCallIds = settled.callIds
-    const attachApproval = (call: ConversationToolCall): ConversationToolCall => {
-      const entry = approvalEntries.get(call.callId)
-      return entry ? { ...call, approval: entry.view } : call
-    }
-
-    // 实时工具调用（draft 消息展示）：state.tools 中尚未落成到消息的
-    const liveToolCalls: ConversationToolCall[] = Object.values(state.tools)
-      .filter((tool) => !stableCallIds.has(tool.callId))
-      .map((tool) =>
-        attachApproval({
-          callId: tool.callId,
-          name: tool.name,
-          argumentsText: tool.argumentsText,
-          result: stringifyToolData(tool.result),
-          errorText: tool.errorText,
-          status: tool.status,
-        })
-      )
-    // 无工具块匹配的审批：以伪工具块渲染（审批必须直接可见可操作）
-    for (const entry of approvalEntries.values()) {
-      if (
-        !stableCallIds.has(entry.view.callId) &&
-        !liveToolCalls.some((call) => call.callId === entry.view.callId)
-      ) {
-        liveToolCalls.push({
-          callId: entry.view.callId,
-          name: entry.view.toolName,
-          argumentsText: entry.argumentsText,
-          result: null,
-          errorText: null,
-          status: "streaming",
-          approval: entry.view,
-        })
-      }
-    }
-
-    // 流式 text/reasoning：各 draft 按到达顺序拼接（不分段，单趟循环）
-    let draftText = ""
-    let draftReasoning = ""
-    for (const draft of Object.values(state.drafts)) {
-      draftText += draft.text
-      draftReasoning += draft.reasoning
-    }
-    const status = state.view?.status
-    if (status === "running") {
-      result.push({
-        id: "draft",
-        role: "assistant",
-        content: draftText,
-        status: "streaming",
-        ...(draftReasoning
-          ? { reasoning: draftReasoning, reasoningDefaultView: "preview" as const }
-          : {}),
-        ...(liveToolCalls.length > 0 ? { toolCalls: liveToolCalls } : {}),
-      })
-    } else if (status === "failed") {
-      result.push({
-        id: "draft",
-        role: "assistant",
-        content: draftText || (state.error?.message ?? "生成失败"),
-        status: "error",
-        ...(draftReasoning
-          ? { reasoning: draftReasoning, reasoningDefaultView: "preview" as const }
-          : {}),
-        ...(liveToolCalls.length > 0 ? { toolCalls: liveToolCalls } : {}),
-      })
-    } else if (liveToolCalls.length > 0) {
-      // 回合结束但工具未落成到消息（含等待审批的空闲态）：挂到最后一条 assistant 消息
-      for (let index = result.length - 1; index >= 0; index -= 1) {
-        if (result[index].role !== "assistant") continue
-        result[index] = {
-          ...result[index],
-          toolCalls: [...(result[index].toolCalls ?? []), ...liveToolCalls],
-        }
-        break
-      }
-    }
-
-    if (state.phase === "connection_error" || state.phase === "missing") {
-      result.push({
-        id: "connection-error",
-        role: "assistant",
-        content:
-          state.phase === "missing"
-            ? "会话不存在或已被删除（404）。"
-            : `连接出错：${state.error?.message ?? "无法连接到 Stratum 后端"}`,
-        status: "error",
-      })
-    }
-
-    return result
-  }, [
-    settled,
-    state.drafts,
-    state.tools,
-    state.view?.status,
-    state.phase,
-    state.error,
-    approvalEntries,
-  ])
-
-  const selectedModelConfig = composerConfiguration.selectedModelConfig
-  const selectedDescriptor = useMemo(
+  const items = useMemo(
     () =>
-      composerConfiguration.models.find(
-        (descriptor) => descriptor.model === selectedModelConfig?.model
+      composeLiveItems(
+        settled,
+        state.drafts,
+        state.tools,
+        state.view?.status,
+        approvals.entries
       ),
-    [composerConfiguration.models, selectedModelConfig?.model]
+    [settled, state.drafts, state.tools, state.view?.status, approvals.entries]
   )
-  const levels = useMemo(
-    () => thinkingLevels(selectedDescriptor?.parameters_schema),
-    [selectedDescriptor]
-  )
-  const selectedLevel =
-    selectedModelConfig === null
-      ? null
-      : currentThinkingLevel(selectedModelConfig.parameters)
 
   const [sendVersion, setSendVersion] = useState(0)
+  // 受控 composer：发送成功才清空；首条消息失败等场景保留用户原文
+  const [composerValue, setComposerValue] = useState("")
   const handleSubmit = (value: string) => {
-    // 发送信号：让 thread 把随后的 null → 新 agentId 识别为同一对话的首发
+    // 发送信号：让 thread 把随后的 null → 新 runtime id 识别为同一对话的首发
     setSendVersion((version) => version + 1)
-    if (state.agentId === null) void createConversation(value)
-    else void sendMessage(value)
+    const sent =
+      state.agentRuntimeId === null
+        ? createConversation(value)
+        : sendMessage(value)
+    void sent.then((ok) => {
+      // 请求期间用户可能已经继续输入；只清掉本次实际发送的原值。
+      if (ok) setComposerValue((current) => (current === value ? "" : current))
+    })
   }
 
   const handleNewConversation = useCallback(
-    () => selectAgent(null),
-    [selectAgent]
+    () => selectAgentRuntime(null),
+    [selectAgentRuntime]
   )
 
   return (
@@ -406,40 +144,37 @@ export default function ConversationPage() {
       <main className="relative min-w-0 flex-1">
         <ThreadListRail
           threads={threads}
-          activeId={state.agentId ?? undefined}
-          onSelect={selectAgent}
+          activeId={state.agentRuntimeId ?? undefined}
+          onSelect={selectAgentRuntime}
           onNew={handleNewConversation}
         />
 
         <ConversationThread
-          messages={messages}
-          conversationId={state.agentId}
+          items={items}
+          conversationId={state.agentRuntimeId}
           sendVersion={sendVersion}
           recovering={state.phase === "recovering"}
+          hasOlder={state.historyHasMore}
+          olderLoading={state.historyLoading}
+          onLoadOlder={loadOlderHistory}
           welcome={WELCOME}
           composer={
-            <div className="relative">
-              <ApprovalDock
-                approvals={pendingApprovals}
-                onResolve={handleResolveApproval}
-              />
-              <PromptInput
-                placeholder="问问 Stratum"
-                onSubmit={handleSubmit}
-                trailing={
-                  <ModelSelector
-                    models={composerConfiguration.models}
-                    selectedModelId={selectedModelConfig?.model ?? null}
-                    onSelectModel={composerConfiguration.selectModel}
-                    thinkingLevels={levels}
-                    selectedThinkingLevel={selectedLevel}
-                    onSelectThinkingLevel={composerConfiguration.setThinkingLevel}
-                    loading={composerConfiguration.metadataLoading}
-                    error={composerConfiguration.metadataError !== null}
-                  />
-                }
-              />
-            </div>
+            <ConversationComposer
+              configuration={composerConfiguration}
+              pendingApprovals={approvals.pending}
+              onResolveApproval={approvals.resolve}
+              resumeRequired={state.view?.resume_required === true}
+              realtimeDegraded={state.realtimeDegraded}
+              cancelRequested={state.cancelRequested}
+              phase={state.phase}
+              error={state.error}
+              onResume={() => void resume()}
+              onReconnect={reconnect}
+              onCancel={() => void cancel()}
+              value={composerValue}
+              onChange={setComposerValue}
+              onSubmit={handleSubmit}
+            />
           }
         />
       </main>

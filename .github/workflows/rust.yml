@@ -14,6 +14,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  web:
+    name: web (lint, typecheck, test, build)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: stratum-web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: stratum-web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
   check:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
@@ -177,6 +216,14 @@ jobs:
       - name: Run stratum-infra integration tests
         if: steps.workspace.outputs.present == 'true'
         run: make -C crates/stratum-infra test-integration COMPOSE="docker compose"
+
+      - name: Run stratum-postgres integration tests
+        if: steps.workspace.outputs.present == 'true'
+        run: make -C crates/stratum-postgres test-integration COMPOSE="docker compose"
+
+      - name: Run stratum-api integration tests
+        if: steps.workspace.outputs.present == 'true'
+        run: make -C crates/stratum-api test-integration COMPOSE="docker compose"
 
       - name: Start stratum-tools test stack
         if: steps.workspace.outputs.present == 'true'

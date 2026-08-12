@@ -1,12 +1,10 @@
 //! Stratum API process entry point.
 
-use tracing_subscriber::EnvFilter;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init()?;
-    stratum_api::run_from_path("config.toml").await?;
-    Ok(())
+    let telemetry = stratum_api::init_telemetry()?;
+    let result = stratum_api::run_from_path("config.toml").await;
+    // Graceful shutdown ends here: flush and end the OTLP tracer provider.
+    telemetry.shutdown();
+    result.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
 }

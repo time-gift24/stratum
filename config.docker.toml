@@ -1,5 +1,5 @@
 [agent]
-storage_root = "/var/lib/stratum/agents"
+templates_root = "/etc/stratum/templates"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"
@@ -8,6 +8,9 @@ default = "deepseek:deepseek-v4-flash"
 # Replace this placeholder before sending real agent requests.
 api_key = "replace-with-deepseek-api-key"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# Optional endpoint override (e.g. an LLM gateway); when omitted the
+# provider's well-known public endpoint is used. Blank is rejected.
+# base_url = "https://api.deepseek.com"
 
 [api]
 bind = "0.0.0.0:8080"
@@ -20,9 +23,12 @@ allowed_origins = [
 
 [nats]
 url = "nats://nats:4222"
-stream_name = "SESSION_EVENTS"
-subject_prefix = "events.session"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
 replicas = 1
-max_age_seconds = 604800
-max_bytes = 1073741824
-max_messages = 1000000
+max_age_seconds = 3600
+max_bytes = 268435456
+max_messages = 100000
+
+[postgres]
+url = "postgres://stratum:stratum@postgres:5432/stratum"

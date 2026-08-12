@@ -1,0 +1,35 @@
+name: stratum-api-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum
+      POSTGRES_DB: stratum_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum -d stratum_test"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:${STRATUM_API_TEST_PG_HOST_PORT-45433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  nats:
+    image: nats:2-alpine
+    command: ["-js"]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4222"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:${STRATUM_API_TEST_NATS_HOST_PORT-44228}:4222"
+    volumes:
+      - nats-data:/data
+
+volumes:
+  postgres-data:
+  nats-data:

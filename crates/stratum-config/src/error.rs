@@ -1,6 +1,6 @@
 //! Configuration errors.
 
-use stratum_core::ModelId;
+use stratum_core::{AgentVersionTagParseError, ModelId};
 use thiserror::Error;
 
 /// Error returned while parsing or validating Stratum configuration.
@@ -10,21 +10,27 @@ pub enum ConfigError {
     /// TOML input could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[source] toml::de::Error),
-    /// A resolved definition could not be encoded as TOML.
-    #[error("could not encode TOML definition")]
-    TomlEncode(#[source] toml::ser::Error),
     /// An agent name did not match the required ASCII pattern.
     #[error("invalid agent name `{value}`")]
     InvalidAgentName { value: String },
-    /// The agent storage root was empty.
-    #[error("agent storage root must not be empty")]
-    InvalidStorageRoot,
+    /// The agent templates root was empty.
+    #[error("agent templates root must not be empty")]
+    InvalidTemplatesRoot,
     /// A configured CORS origin was a wildcard or invalid HTTP header value.
     #[error("api allowed origin is invalid")]
     InvalidAllowedOrigin,
+    /// An API operational timeout was zero.
+    #[error("invalid api configuration field `{field}`")]
+    InvalidApiConfig { field: &'static str },
     /// A template prompt was empty after trimming.
     #[error("agent prompt must not be empty")]
     EmptyPrompt,
+    /// A template omitted its author-provided version tag.
+    #[error("agent version tag is required")]
+    MissingAgentVersion,
+    /// A template version tag violated its validated string boundary.
+    #[error("invalid agent version tag")]
+    InvalidAgentVersion(#[source] AgentVersionTagParseError),
     /// A template listed the same tool more than once.
     #[error("duplicate tool `{tool}`")]
     DuplicateTool { tool: String },
@@ -34,6 +40,15 @@ pub enum ConfigError {
     /// A provider had no configured models.
     #[error("provider `{provider}` must configure at least one model")]
     EmptyModels { provider: &'static str },
+    /// A provider base URL override was blank.
+    #[error("base url for provider `{provider}` must not be blank")]
+    InvalidProviderBaseUrl { provider: &'static str },
+    /// A provider operational timeout was zero.
+    #[error("invalid `{field}` for provider `{provider}`")]
+    InvalidProviderTimeout {
+        provider: &'static str,
+        field: &'static str,
+    },
     /// A provider listed the same model more than once.
     #[error("duplicate model `{model}` for provider `{provider}`")]
     DuplicateModel {
@@ -46,20 +61,17 @@ pub enum ConfigError {
     /// A caller required an optional section that was not configured.
     #[error("missing required configuration section `{section}`")]
     MissingSection { section: &'static str },
-    /// A NATS field was not valid for the event stream bus.
+    /// A NATS field was not valid for the short AgentRuntime-scoped tail.
     #[error("invalid nats configuration field `{field}`")]
     InvalidNatsConfig { field: &'static str },
+    /// A Postgres field was not valid.
+    #[error("invalid postgres configuration field `{field}`")]
+    InvalidPostgresConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {
     fn from(mut source: toml::de::Error) -> Self {
         source.set_input(None);
         Self::Toml(source)
-    }
-}
-
-impl From<toml::ser::Error> for ConfigError {
-    fn from(source: toml::ser::Error) -> Self {
-        Self::TomlEncode(source)
     }
 }

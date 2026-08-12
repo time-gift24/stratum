@@ -11,16 +11,17 @@
 //! preceding assistant `tool_calls`, and reconstructs the hook invocation
 //! journal.
 //!
-//! A replay window from a derived checkpoint index starts at the first
-//! retained message's line — `LoopStarted`, then the retained suffix, the
-//! compacted iteration's prepare journal records, the `TranscriptCompacted`
-//! line, and its iteration boundary. Replay applies compactions dual-mode:
+//! A retained-suffix replay window materialized from a compaction companion
+//! starts at the companion's retained event position — `LoopStarted`, then the
+//! retained suffix, the compacted iteration's prepare journal records, the
+//! `TranscriptCompacted` event, and its iteration boundary. Replay applies
+//! compactions dual-mode:
 //! an `upto` within the rebuilt context is an absolute full-stream cut,
-//! while an overshooting `upto` marks a checkpoint window whose rebuilt
+//! while an overshooting `upto` marks a retained-suffix window whose rebuilt
 //! messages are already the retained suffix, so the summary marker is
 //! prepended at index 0. Window legitimacy is the composing side's contract
-//! (checkpoint iteration/upto/digest verification at the storage boundary);
-//! replay accepts both modes uniformly.
+//! (the companion and its retained durable event range are validated before
+//! replay); replay accepts both modes uniformly.
 //!
 //! Tool execution stays at-least-once: a call whose `ToolExecutionStarted`
 //! committed without a result has an unknown outcome and simply re-executes as
@@ -92,17 +93,17 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
     // The kernel commits every prompt right after `LoopStarted`, before any
     // hook, tool, or model activity: in a full stream the leading
     // `MessageAppended` run is exactly the prompt block, which belongs to the
-    // first iteration and seeds its start index. A checkpoint window has no
-    // prompt block — its leading messages are the retained suffix — so the
-    // seed is polluted there; the window-mode compaction branch discards it
-    // and derives the start from the window structure instead.
+    // first iteration and seeds its start index. A retained-suffix window has
+    // no prompt block — its leading messages are the retained suffix — so the
+    // seed is not meaningful there; the retained-window compaction branch
+    // discards it and derives the start from the window structure instead.
     let mut prompts_open = true;
     let mut compacted_iterations = HashSet::new();
     let mut seen_loop_started = false;
     let mut activity_after_frontier = false;
     let mut journal = HookJournal::default();
     let mut extension_set_version_id = None;
-    for (event_index, event) in events.into_iter().enumerate() {
+    for event in events {
         let event_type = event.event_type();
         if !matches!(
             event,
@@ -115,11 +116,6 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 extension_set_version_id: recorded,
             } => {
                 if seen_loop_started {
-                    tracing::warn!(
-                        event_index,
-                        event_type,
-                        "refusing resume: duplicate loop_started"
-                    );
                     return Err(ResumeError::UnexpectedLoopStarted);
                 }
                 seen_loop_started = true;
@@ -151,37 +147,32 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                     messages.splice(..upto, std::iter::once(summary));
                     iteration_start = iteration_start.saturating_sub(upto.saturating_sub(1));
                 } else if upto > 0 {
-                    // Checkpoint window mode: the composing side started the
-                    // window at the first retained message's line, so the
-                    // rebuilt messages are exactly the retained suffix and
-                    // `upto` — an absolute coordinate of the pre-compaction
-                    // stream — overshoots it. The summary marker takes index
-                    // 0 and the retained suffix shifts right behind it; the
-                    // in-flight iteration then starts at index 1. The window
-                    // always carries its iteration boundary (checkpoints are
-                    // written only after it), which refreshes
+                    // Retained-suffix window mode: the composing side started
+                    // replay at the compaction companion's retained event
+                    // position, so the rebuilt messages are exactly the
+                    // retained suffix and `upto` — an absolute coordinate of
+                    // the pre-compaction context — overshoots it. The summary
+                    // marker takes index 0 and the retained suffix shifts
+                    // right behind it; the in-flight iteration then starts at
+                    // index 1. The window carries the compacted iteration's
+                    // later boundary, which refreshes
                     // `iteration_start` to `messages.len()` below; before
                     // that the value is never consumed, because this
                     // iteration's journaled compact decision skips the cut
                     // check via `compacted_iterations`.
                     //
-                    // Contract: window legitimacy is verified at the
-                    // composing side's storage boundary (the checkpoint's
-                    // iteration/upto/digest checks) before the window reaches
-                    // replay, so replay accepts both modes uniformly. A
-                    // corrupt full stream whose `upto` overshoots the rebuilt
-                    // context is indistinguishable from a window here; only a
-                    // zero cut remains detectably corrupt.
+                    // Contract: the composing side validates the compaction
+                    // companion and its retained durable event range before
+                    // the window reaches replay, so replay accepts both modes
+                    // uniformly. A corrupt full stream whose `upto`
+                    // overshoots the rebuilt context is indistinguishable from
+                    // a window here; only a zero cut remains detectably
+                    // corrupt.
                     messages.insert(0, summary);
                     iteration_start = 1;
                 } else {
                     // A zero cut with a non-empty rebuilt context is
                     // corruption the kernel never writes.
-                    tracing::warn!(
-                        event_index,
-                        event_type,
-                        "refusing resume: compaction cut exceeds the rebuilt context"
-                    );
                     return Err(ResumeError::CorruptedCompaction);
                 }
                 compacted_iterations.insert(compacted_iteration);
@@ -190,11 +181,6 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
             DurableAgentEvent::LoopFinished { .. }
             | DurableAgentEvent::LoopFailed { .. }
             | DurableAgentEvent::LoopCancelled { .. } => {
-                tracing::warn!(
-                    event_index,
-                    event_type,
-                    "refusing resume: stream contains a terminal event"
-                );
                 return Err(ResumeError::TerminalEvent);
             }
             DurableAgentEvent::HookInvocationPending {
@@ -204,55 +190,25 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 call_id,
                 input_digest,
             } => {
-                journal
-                    .record_pending(
-                        HookAddress::new(iteration, point, call_id),
-                        invocation_id,
-                        input_digest,
-                    )
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_pending(
+                    HookAddress::new(iteration, point, call_id),
+                    invocation_id,
+                    input_digest,
+                )?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::HookInvocationCompleted {
                 invocation_id,
                 decision,
             } => {
-                journal
-                    .record_completed(&invocation_id, decision)
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_completed(&invocation_id, decision)?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::HookInvocationFailed {
                 invocation_id,
                 failure,
             } => {
-                journal
-                    .record_failed(&invocation_id, failure)
-                    .map_err(|error| {
-                        tracing::warn!(
-                            event_index,
-                            event_type,
-                            error = %error,
-                            "refusing resume: corrupted hook journal"
-                        );
-                        error
-                    })?;
+                journal.record_failed(&invocation_id, failure)?;
                 activity_after_frontier = true;
             }
             DurableAgentEvent::ToolExecutionStarted { .. } => {
@@ -261,25 +217,19 @@ pub(crate) fn replay_events(events: Vec<DurableAgentEvent>) -> Result<ReplayStat
                 // missing result suffix; no replay state is needed.
                 activity_after_frontier = true;
             }
-            // Approval events are legacy-only and carry no kernel resume
-            // state, so they are safe to skip.
+            // Approval fact events are composition-owned and carry no kernel
+            // resume state, so they are safe to skip.
             DurableAgentEvent::ToolApprovalRequested { .. }
             | DurableAgentEvent::ToolApprovalResolved { .. } => {}
             // An unknown future variant may carry resume state this kernel
             // cannot rebuild; refuse the resume closed instead of silently
             // dropping it.
             _ => {
-                tracing::warn!(
-                    event_index,
-                    event_type,
-                    "refusing resume: stream contains an unsupported event type"
-                );
                 return Err(ResumeError::UnsupportedEvent { event_type });
             }
         }
     }
     if !seen_loop_started {
-        tracing::warn!("refusing resume: stream has no loop_started event");
         return Err(ResumeError::MissingLoopStarted);
     }
     let continuation = if activity_after_frontier {
@@ -309,10 +259,6 @@ fn reconcile_tool_results(
         let message = &messages[index];
         if message.role == ChatRole::Tool {
             // A tool result outside an assistant tool-call group.
-            tracing::warn!(
-                message_index = index,
-                "refusing resume: tool result outside its assistant tool-call group"
-            );
             return Err(ResumeError::ToolResultMismatch);
         }
         if message.role == ChatRole::Assistant && !message.tool_calls.is_empty() {
@@ -327,11 +273,6 @@ fn reconcile_tool_results(
                 }
                 if result.tool_call_id.as_ref() != Some(&tool_calls[committed].call_id) {
                     // Unknown, duplicated, or out-of-order result.
-                    tracing::warn!(
-                        message_index = index + 1 + committed,
-                        expected_call_id = %tool_calls[committed].call_id,
-                        "refusing resume: tool result does not match the expected call"
-                    );
                     return Err(ResumeError::ToolResultMismatch);
                 }
                 committed += 1;
@@ -339,10 +280,6 @@ fn reconcile_tool_results(
             if committed < tool_calls.len() {
                 if index + 1 + committed != messages.len() {
                     // A sparse group: results missing in the middle of history.
-                    tracing::warn!(
-                        message_index = index + 1 + committed,
-                        "refusing resume: tool results missing in the middle of history"
-                    );
                     return Err(ResumeError::ToolResultMismatch);
                 }
                 return Ok(Some(ResumeContinuation::ToolSuffix(
@@ -468,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_approval_events_are_skipped_without_resume_state() {
+    fn composition_owned_approval_facts_are_skipped_without_resume_state() {
         let mut events = stream(vec![ChatMessage::user("question")]);
         events.push(DurableAgentEvent::ToolApprovalRequested {
             approval_id: ApprovalId::new(),
@@ -483,7 +420,7 @@ mod tests {
             decision: ApprovalDecision::Approve,
         });
 
-        let replay = replay_events(events).expect("legacy approval events should replay");
+        let replay = replay_events(events).expect("approval fact events should replay");
 
         assert_eq!(replay.messages, vec![ChatMessage::user("question")]);
         assert!(replay.continuation.is_none());
@@ -620,10 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn replay_checkpoint_window_prepends_the_summary_marker() {
-        // The window starts at the first retained message's line: the rebuilt
-        // messages are the retained suffix when the compaction line arrives,
-        // so its absolute `upto` overshoots and the marker prepends.
+    fn replay_compaction_companion_window_prepends_the_summary_marker() {
+        // The window starts at the compaction companion's retained event
+        // position: the rebuilt messages are the retained suffix when the
+        // compaction event arrives, so its absolute `upto` overshoots and the
+        // marker prepends.
         let events = vec![
             DurableAgentEvent::LoopStarted {
                 extension_set_version_id: None,
@@ -644,7 +582,7 @@ mod tests {
             },
         ];
 
-        let replay = replay_events(events).expect("a checkpoint window should replay");
+        let replay = replay_events(events).expect("a retained-suffix window should replay");
 
         assert_eq!(
             replay.messages,
@@ -661,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_window_replays_byte_identically_to_the_full_stream() {
+    fn compaction_companion_window_replays_byte_identically_to_the_full_stream() {
         // Full stream: four prompts, one assistant answer, the prepare
         // journal records, the compaction, and the boundary.
         let invocation_id = HookInvocationId::new();
@@ -700,9 +638,9 @@ mod tests {
         full.push(marker.clone());
         full.push(boundary.clone());
 
-        // Window: LoopStarted plus everything from the first retained
-        // message's line — the retained suffix, the prepare journal records,
-        // the compaction, and the boundary.
+        // Retained-suffix window: LoopStarted plus everything from the
+        // companion's retained event position — the retained suffix, the
+        // prepare journal records, the compaction, and the boundary.
         let window = vec![
             DurableAgentEvent::LoopStarted {
                 extension_set_version_id: None,

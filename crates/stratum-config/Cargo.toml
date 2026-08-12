@@ -7,11 +7,11 @@ license.workspace = true
 
 [dependencies]
 http.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 stratum-core.workspace = true
-stratum-infra.workspace = true
 
 [lints]
 workspace = true
