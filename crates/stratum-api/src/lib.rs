@@ -38,6 +38,7 @@ use stratum_llm::{
     ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager, LlmTimeouts,
     OpenAICompatibleProvider,
 };
+use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
 
 pub use dto::{
@@ -67,8 +68,19 @@ const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 /// listener, or server fails.
 pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
     let contents = tokio::fs::read_to_string(path).await?;
-    let config = Config::parse(&contents)?;
+    let mut config = Config::parse(&contents)?;
+    apply_deepseek_api_key_environment(&mut config)?;
     serve(config).await
+}
+
+fn apply_deepseek_api_key_environment(config: &mut Config) -> Result<(), HostError> {
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(api_key) => config
+            .override_deepseek_api_key(api_key.into())
+            .map_err(Into::into),
+        Err(std::env::VarError::NotPresent) => Ok(()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidDeepSeekApiKeyEnvironment),
+    }
 }
 
 /// Composes providers, Postgres, the NATS tail, the shared state, and the
@@ -81,11 +93,14 @@ pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
 /// not fatal.
 pub async fn serve(config: Config) -> Result<(), HostError> {
     let api = config.require_api()?.clone();
+    let postgres_url = config.require_postgres()?.url.as_str();
+    let ontology_url = config.require_ontology()?.database_url.as_str();
     let shutdown_drain_bound = Duration::from_secs(api.shutdown_drain_timeout_seconds);
-    let pg = PostgresBackend::connect(&config.require_postgres()?.url).await?;
+    let pg = PostgresBackend::connect(postgres_url).await?;
+    let ontology = OntologyStore::connect(ontology_url).await?;
     let tail = connect_tail(&config).await;
     let providers = providers(&config)?;
-    let state = Arc::new(AppState::new(pg, tail, providers, config).await?);
+    let state = Arc::new(AppState::new(pg, tail, providers, ontology, config).await?);
 
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
     let shutdown = state.shutdown_token();

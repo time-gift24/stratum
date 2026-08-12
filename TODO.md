@@ -428,6 +428,15 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 
 ## 9. 延后事项
 
+- Ontology Metadata 独立系统的 MVP 只实现 Ontology、Object Type、Property 与 Link Type；对象实例与 Memory 集成留待独立 change。
+- 在核心元模型与画布编辑闭环稳定后，再引入跨 Object Type 复用的 Shared Property Type。
+- 出现真实多态查询或契约复用需求后，再引入 Interface 与多继承语义。
+- 出现由 Ontology 驱动事务性业务操作的真实需求后，再引入 Action Type。
+- 出现大规模类型分类与导航需求后，再引入 Object Type Group。
+- 出现可审计演进或协作需求后，再设计 schema history、snapshot、branch、实时协作、OT/CRDT 或离线自动合并；MVP 不保留这些记录。
+- 出现对象数据层的明确需求后，再设计物理数据源、外键或 join binding；当前 Link Type 只表达语义端点和双向 cardinality。
+- 认证、授权与多租户沿用平台基础工作线的统一设计，不随 Ontology Metadata MVP 提前实现。
+- 已冻结的 Ontology HTTP 契约可由并行前端工作消费，但前端实现不是此后端 change 的交付或验收依赖。
 ### 由 `complete-postgres-agent-runtime` 明确延期（本 change 不实现）
 
 以下能力已确认需要，但**明确延期**，不属于 Postgres 执行真相切换的范围，届时以独立 change 提出：

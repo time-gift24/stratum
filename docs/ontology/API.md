@@ -74,8 +74,8 @@ Required rules:
 - Every Link Type endpoint and canvas position references an Object Type in the same document.
 - At most one canvas position exists for an Object Type. Coordinates are finite JSON numbers.
 - Object Type names and Link Type names have separate Ontology-local namespaces. Property names are unique within their owning Object Type.
-- Object Type, Property, and Link Type IDs are each globally unique across **all existing Ontologies**, not only within one document. A Candidate whose child entity ID already belongs to another existing Ontology is rejected with `409 ontology_entity_id_conflict`, and neither Ontology changes.
-- Deletion is hard: removed entities leave no tombstone, and the client is responsible for never intentionally reusing a deleted ID (the editor always generates fresh UUIDv7 IDs for new entities).
+- Object Type, Property, and Link Type IDs are each globally unique across all currently existing Ontologies within their typed ID namespace, not only within one document. A Candidate whose child entity ID already belongs to another live Ontology is rejected with `409 ontology_entity_id_conflict`, not a Candidate-internal `422` violation, and neither Ontology changes.
+- Deletion is hard: removed entities leave no tombstone. The client is responsible for never intentionally reusing a deleted ID (the editor always generates fresh UUIDv7 IDs for new entities); because MVP has no identity registry, the service does not promise to detect a deliberately resubmitted historical ID.
 - An empty Ontology and an Object Type without properties are valid.
 
 The document is the complete desired state. A successful replacement permanently deletes prior child entities omitted from it. Removing an Object Type also requires removing every incident Link Type and its canvas position.
@@ -253,7 +253,7 @@ All other errors use:
 | 404 | `ontology_not_found` | The path Ontology does not exist |
 | 404 | `object_type_not_found` | The neighborhood origin does not exist in the path Ontology |
 | 409 | `ontology_name_conflict` | Create or replacement would violate deployment-wide Ontology name uniqueness |
-| 409 | `ontology_entity_id_conflict` | An Object Type, Property, or Link Type ID in the Candidate already belongs to another existing Ontology |
+| 409 | `ontology_entity_id_conflict` | A submitted Object Type, Property, or Link Type ID already belongs to another live Ontology |
 | 412 | `ontology_precondition_failed` | The supplied ETag is no longer current |
 | 413 | `ontology_payload_too_large` | The Ontology request exceeds the route body limit |
 | 422 | `invalid_ontology_schema` | A well-formed complete candidate violates schema or canvas invariants |

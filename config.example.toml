@@ -24,6 +24,13 @@ allowed_origins = ["http://localhost:5173"]
 shutdown_drain_timeout_seconds = 10
 sse_keep_alive_seconds = 15
 dispatcher_idle_timeout_seconds = 60
+readiness_timeout_ms = 1000
+
+[ontology]
+# Canonical Ontology metadata. It may use the same Postgres server as execution
+# storage, but needs a separate database because each bounded store owns an
+# independent SQLx migration history.
+database_url = "postgres://stratum:stratum@127.0.0.1:5432/stratum_ontology"
 
 [nats]
 # Connection and short AgentRuntime-scoped realtime tail limits. The tail is

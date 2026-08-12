@@ -1570,8 +1570,17 @@ url = "postgres://unused:unused@127.0.0.1:1/unused"
     let pg = PostgresBackend::connect(&common::pg_url())
         .await
         .expect("postgres connects");
-    let result =
-        stratum_api::AppState::new(pg, None, stratum_llm::LlmProviderManager::new(), config).await;
+    let ontology = stratum_ontology::OntologyStore::connect(&common::ontology_pg_url())
+        .await
+        .expect("ontology store connects");
+    let result = stratum_api::AppState::new(
+        pg,
+        None,
+        stratum_llm::LlmProviderManager::new(),
+        ontology,
+        config,
+    )
+    .await;
     assert!(
         matches!(result, Err(stratum_api::HostError::TemplatesRoot(_))),
         "a missing template root fails startup"

@@ -67,6 +67,9 @@ pub enum ConfigError {
     /// A Postgres field was not valid.
     #[error("invalid postgres configuration field `{field}`")]
     InvalidPostgresConfig { field: &'static str },
+    /// An Ontology persistence setting was invalid.
+    #[error("invalid ontology configuration field `{field}`")]
+    InvalidOntologyConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {

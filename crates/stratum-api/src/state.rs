@@ -8,6 +8,7 @@ use std::time::Duration;
 use stratum_config::Config;
 use stratum_infra::NatsAgentRuntimeTail;
 use stratum_llm::LlmProviderManager;
+use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -32,6 +33,7 @@ pub struct AppState {
     registry: TurnRegistry,
     dispatchers: DispatcherHub,
     providers: LlmProviderManager,
+    ontology: OntologyStore,
     waiters: Arc<ApprovalWaiters>,
     templates: TemplateCatalog,
     allowed_origins: Vec<String>,
@@ -39,6 +41,7 @@ pub struct AppState {
     admission: AdmissionGate,
     runtime_tasks: RuntimeTasks,
     sse_keep_alive: Duration,
+    readiness_timeout: Duration,
 }
 
 impl AppState {
@@ -52,6 +55,7 @@ impl AppState {
         pg: PostgresBackend,
         tail: Option<NatsAgentRuntimeTail>,
         providers: LlmProviderManager,
+        ontology: OntologyStore,
         config: Config,
     ) -> Result<Self, HostError> {
         let shutdown = CancellationToken::new();
@@ -74,6 +78,7 @@ impl AppState {
             tail,
             registry: TurnRegistry::default(),
             providers,
+            ontology,
             waiters: Arc::new(ApprovalWaiters::default()),
             templates,
             allowed_origins,
@@ -81,6 +86,7 @@ impl AppState {
             admission: AdmissionGate::default(),
             runtime_tasks,
             sse_keep_alive: Duration::from_secs(api.sse_keep_alive_seconds),
+            readiness_timeout: Duration::from_millis(api.readiness_timeout_ms),
         })
     }
 
@@ -107,6 +113,11 @@ impl AppState {
     /// Registered LLM providers.
     pub(crate) fn providers(&self) -> &LlmProviderManager {
         &self.providers
+    }
+
+    /// Canonical Ontology metadata store.
+    pub(crate) fn ontology(&self) -> &OntologyStore {
+        &self.ontology
     }
 
     /// Process-local approval waiters.
@@ -137,6 +148,11 @@ impl AppState {
     /// Configured SSE keep-alive interval.
     pub(crate) const fn sse_keep_alive(&self) -> Duration {
         self.sse_keep_alive
+    }
+
+    /// Maximum time for one complete readiness probe.
+    pub(crate) const fn readiness_timeout(&self) -> Duration {
+        self.readiness_timeout
     }
 
     /// Spawns one process-owned background task and opportunistically joins

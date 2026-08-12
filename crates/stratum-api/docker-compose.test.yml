@@ -16,6 +16,7 @@ services:
       - "127.0.0.1:${STRATUM_API_TEST_PG_HOST_PORT-45433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./create-ontology-test-database.sql:/docker-entrypoint-initdb.d/10-create-ontology-test-database.sql:ro
 
   nats:
     image: nats:2-alpine
