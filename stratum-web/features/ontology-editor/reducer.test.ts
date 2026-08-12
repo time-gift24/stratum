@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { ApiError } from "@/lib/stratum/api"
 import {
+  canClearOntologyDraft,
   initialOntologyEditorState,
   isOntologyEditorDirty,
   ontologyDocumentsEqual,
@@ -155,7 +156,11 @@ describe("editing actions", () => {
 
   it("cascades object type removal to link types and canvas positions", () => {
     const document = makeDocument({
-      object_types: [makeObjectType("ot-1"), makeObjectType("ot-2"), makeObjectType("ot-3")],
+      object_types: [
+        makeObjectType("ot-1"),
+        makeObjectType("ot-2"),
+        makeObjectType("ot-3"),
+      ],
       link_types: [
         makeLinkType("lt-1", "ot-1", "ot-2"),
         makeLinkType("lt-2", "ot-3", "ot-2"),
@@ -204,7 +209,9 @@ describe("editing actions", () => {
       objectTypeId: "ot-1",
       property: { ...makeProperty("p-1"), required: false },
     })
-    expect(state.candidate?.object_types[0]?.properties[0]?.required).toBe(false)
+    expect(state.candidate?.object_types[0]?.properties[0]?.required).toBe(
+      false
+    )
 
     state = ontologyEditorReducer(state, {
       type: "property_removed",
@@ -329,7 +336,9 @@ describe("save lifecycle", () => {
   })
 
   it("ignores save_started while a save is already in flight", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     const inFlight = state.inFlight
     state = ontologyEditorReducer(state, {
@@ -341,7 +350,9 @@ describe("save lifecycle", () => {
   })
 
   it("save success with no concurrent edits leaves a clean editor", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     state = ontologyEditorReducer(state, {
       type: "save_succeeded",
@@ -355,7 +366,9 @@ describe("save lifecycle", () => {
   })
 
   it("save success with concurrent edits acknowledges only the in-flight snapshot", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     // 飞行期间继续编辑 candidate
     state = ontologyEditorReducer(state, {
@@ -368,9 +381,9 @@ describe("save lifecycle", () => {
     })
 
     expect(state.acknowledged?.etag).toBe('"rev-2"')
-    expect(state.acknowledged?.document.object_types.map((ot) => ot.id)).toEqual([
-      "ot-1",
-    ])
+    expect(
+      state.acknowledged?.document.object_types.map((ot) => ot.id)
+    ).toEqual(["ot-1"])
     expect(state.candidate?.object_types.map((ot) => ot.id)).toEqual([
       "ot-1",
       "ot-2",
@@ -397,7 +410,9 @@ describe("save lifecycle", () => {
   })
 
   it("reconcile local keeps candidate and re-bases acknowledged on the remote", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     const remote = {
       document: makeDocument({ object_types: [makeObjectType("ot-remote")] }),
@@ -417,7 +432,9 @@ describe("save lifecycle", () => {
   })
 
   it("reconcile remote replaces candidate with a deep copy of the remote", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     const remote = {
       document: makeDocument({ object_types: [makeObjectType("ot-remote")] }),
@@ -452,11 +469,60 @@ describe("save lifecycle", () => {
     expect(state.candidate).toBe(candidateBefore)
     expect(state.inFlight).toBeNull()
     expect(state.violations).toEqual(violations)
+    expect(state.violationDocument).toBe(candidateBefore)
     expect(isOntologyEditorDirty(state)).toBe(true)
   })
 
+  it("422 keeps the exact in-flight snapshot while concurrent edits continue", () => {
+    let state = dirtyState()
+    state = ontologyEditorReducer(state, { type: "save_started" })
+    const submitted = state.inFlight?.document
+    expect(submitted).not.toBeNull()
+
+    state = ontologyEditorReducer(state, {
+      type: "object_type_added",
+      objectType: makeObjectType("ot-2"),
+    })
+    expect(state.candidate?.object_types.map(({ id }) => id)).toEqual([
+      "ot-1",
+      "ot-2",
+    ])
+
+    state = ontologyEditorReducer(state, {
+      type: "save_invalid",
+      violations: [
+        {
+          code: "invalid_name",
+          path: "/object_types/0/name",
+          message: "invalid submitted name",
+        },
+      ],
+    })
+
+    expect(state.violationDocument).toBe(submitted)
+    expect(state.violationDocument?.object_types.map(({ id }) => id)).toEqual([
+      "ot-1",
+    ])
+    expect(state.candidate?.object_types.map(({ id }) => id)).toEqual([
+      "ot-1",
+      "ot-2",
+    ])
+    expect(state.inFlight).toBeNull()
+
+    state = ontologyEditorReducer(state, {
+      type: "object_type_added",
+      objectType: makeObjectType("ot-3"),
+    })
+    expect(state.violations).toBeNull()
+    expect(state.violationDocument).toBeNull()
+    state = ontologyEditorReducer(state, { type: "save_started" })
+    expect(state.inFlight?.document).toBe(state.candidate)
+  })
+
   it("a new save attempt clears previous violations and conflict", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     state = ontologyEditorReducer(state, {
       type: "save_invalid",
@@ -483,10 +549,13 @@ describe("save lifecycle", () => {
       objectType: makeObjectType("ot-1", "renamed"),
     })
     expect(state.violations).toBeNull()
+    expect(state.violationDocument).toBeNull()
   })
 
   it("timeout re-read: remote equals in_flight resolves as success", () => {
-    let state = readyState(makeDocument({ object_types: [makeObjectType("ot-1")] }))
+    let state = readyState(
+      makeDocument({ object_types: [makeObjectType("ot-1")] })
+    )
     state = ontologyEditorReducer(state, { type: "save_started" })
     const inFlight = state.inFlight
     expect(inFlight).not.toBeNull()
@@ -494,7 +563,9 @@ describe("save lifecycle", () => {
 
     // hook 重读后确认远端已提交：按成功处理并采用远端 ETag
     const remote = { document: inFlight.document, etag: '"rev-2"' }
-    expect(ontologyDocumentsEqual(remote.document, inFlight.document)).toBe(true)
+    expect(ontologyDocumentsEqual(remote.document, inFlight.document)).toBe(
+      true
+    )
     state = ontologyEditorReducer(state, {
       type: "save_succeeded",
       etag: remote.etag,
@@ -515,7 +586,9 @@ describe("save lifecycle", () => {
     const inFlight = state.inFlight
     expect(inFlight).not.toBeNull()
     if (inFlight === null) return
-    expect(ontologyDocumentsEqual(remoteDocument, inFlight.document)).toBe(false)
+    expect(ontologyDocumentsEqual(remoteDocument, inFlight.document)).toBe(
+      false
+    )
     state = ontologyEditorReducer(state, {
       type: "save_failed",
       error: new ApiError("save_unconfirmed", 0, "save result is unknown"),
@@ -551,12 +624,60 @@ describe("crash recovery drafts", () => {
       draft: draftFor(makeDocument()),
     })
     expect(matched.draftAvailable).not.toBeNull()
+    expect(matched.draftChecked).toBe(true)
+    expect(canClearOntologyDraft(matched)).toBe(false)
 
     const other = ontologyEditorReducer(state, {
       type: "draft_found",
       draft: { ...draftFor(makeDocument()), ontology_id: "other" },
     })
     expect(other.draftAvailable).toBeNull()
+  })
+
+  it("never clears a differing draft before recover or discard", () => {
+    let state = readyState()
+    const draft = draftFor(
+      makeDocument({ object_types: [makeObjectType("ot-draft")] })
+    )
+
+    state = ontologyEditorReducer(state, { type: "draft_found", draft })
+
+    expect(isOntologyEditorDirty(state)).toBe(false)
+    expect(state.draftAvailable).toBe(draft)
+    expect(canClearOntologyDraft(state)).toBe(false)
+
+    state = ontologyEditorReducer(state, { type: "draft_discarded" })
+    expect(canClearOntologyDraft(state)).toBe(true)
+  })
+
+  it("resets the draft check when the same ontology reloads", () => {
+    let state = readyState()
+    state = ontologyEditorReducer(state, { type: "draft_checked" })
+    expect(canClearOntologyDraft(state)).toBe(true)
+
+    state = ontologyEditorReducer(state, {
+      type: "load_started",
+      ontologyId: ONTOLOGY_ID,
+    })
+    state = ontologyEditorReducer(state, {
+      type: "load_succeeded",
+      ontologyId: ONTOLOGY_ID,
+      document: makeDocument(),
+      etag: '"rev-2"',
+    })
+
+    expect(state.draftChecked).toBe(false)
+    expect(canClearOntologyDraft(state)).toBe(false)
+  })
+
+  it("allows cleanup only after a check finds no recovery candidate", () => {
+    let state = readyState()
+    expect(canClearOntologyDraft(state)).toBe(false)
+
+    state = ontologyEditorReducer(state, { type: "draft_checked" })
+
+    expect(state.draftChecked).toBe(true)
+    expect(canClearOntologyDraft(state)).toBe(true)
   })
 
   it("restores the draft candidate and clears the offer", () => {
@@ -574,6 +695,7 @@ describe("crash recovery drafts", () => {
     expect(state.candidate).not.toBe(draftCandidate)
     expect(state.draftAvailable).toBeNull()
     expect(isOntologyEditorDirty(state)).toBe(true)
+    expect(canClearOntologyDraft(state)).toBe(false)
   })
 
   it("discards the draft without touching candidate", () => {

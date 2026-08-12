@@ -139,7 +139,10 @@ export function OntologyCanvas({
   // （derive-during-render，与 site-chrome 同约定，避免 effect 内同步 setState）
   const [nodes, setNodes] = useState(baseNodes)
   const [edges, setEdges] = useState(baseEdges)
-  const [prevBase, setPrevBase] = useState({ nodes: baseNodes, edges: baseEdges })
+  const [prevBase, setPrevBase] = useState({
+    nodes: baseNodes,
+    edges: baseEdges,
+  })
 
   if (baseNodes !== prevBase.nodes) {
     setPrevBase({ nodes: baseNodes, edges: baseEdges })
@@ -172,7 +175,11 @@ export function OntologyCanvas({
         const before = beforeById.get(edge.id)
         const beforeData = before?.data
         const data = edge.data
-        if (before === undefined || beforeData === undefined || data === undefined)
+        if (
+          before === undefined ||
+          beforeData === undefined ||
+          data === undefined
+        )
           return edge
         if (
           beforeData.linkType === data.linkType &&
@@ -228,6 +235,7 @@ export function OntologyCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        onlyRenderVisibleElements
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
         onSelectionChange={handleSelectionChange}
@@ -292,6 +300,7 @@ export function NeighborhoodCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        onlyRenderVisibleElements
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}

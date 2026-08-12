@@ -1,8 +1,19 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react"
 
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
+import {
+  finishCreatedOntologyHandoff,
+  readCreatedOntologyHandoff,
+} from "@/lib/stratum/ontology-navigation-handoff"
 import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 import { createUuidV7 } from "@/features/ontology-editor/ids"
 import {
@@ -10,6 +21,7 @@ import {
   type OntologyDraftStore,
 } from "@/features/ontology-editor/recovery"
 import {
+  canClearOntologyDraft,
   initialOntologyEditorState,
   isOntologyEditorDirty,
   ontologyDocumentsEqual,
@@ -83,8 +95,6 @@ export function useOntologyEditor(
     initialOntologyEditorState
   )
   const [reloadVersion, setReloadVersion] = useState(0)
-  // 草稿检查完成后才允许「干净即清草稿」副作用，避免加载时误清待恢复草稿
-  const [draftCheckedId, setDraftCheckedId] = useState<string | null>(null)
 
   const apiOption = options?.api
   const draftStoreOption = options?.draftStore
@@ -109,36 +119,55 @@ export function useOntologyEditor(
 
     dispatch({ type: "load_started", ontologyId })
     void (async () => {
+      // create 成功后的紧接客户端导航直接消费 POST 返回的文档与 ETag；
+      // 无 handoff（包括完整刷新）才发 GET。
+      const createdResource = readCreatedOntologyHandoff(ontologyId)
+      const resourcePromise =
+        createdResource === null
+          ? api.getOntology(ontologyId)
+          : Promise.resolve(createdResource)
       // 草稿读取与 GET 同时发出；先挂 noop catch，避免 GET 先失败时草稿
       // Promise 成为 unhandled rejection（真正 await 时仍会抛错）
       const draftPromise = draftStore?.loadDraft(ontologyId) ?? null
       draftPromise?.catch(() => {})
+      let resource
       try {
-        const resource = await api.getOntology(ontologyId)
-        if (cancelled) return
-        dispatch({
-          type: "load_succeeded",
-          ontologyId,
-          document: resource.document,
-          etag: resource.etag,
-        })
-
-        if (draftPromise === null) return
-        const draft = await draftPromise
-        if (cancelled) return
-        setDraftCheckedId(ontologyId)
-        if (draft === null) return
-        if (ontologyDocumentsEqual(draft.candidate, resource.document)) {
-          // 草稿与 acknowledged 一致：无需提示，直接清掉
-          void draftStore?.clearDraft(ontologyId).catch(() => {})
-          return
-        }
-        dispatch({ type: "draft_found", draft })
+        resource = await resourcePromise
       } catch (error) {
         if (cancelled) return
-        setDraftCheckedId(ontologyId)
         dispatch({ type: "load_failed", ontologyId, error: toApiError(error) })
+        return
       }
+
+      if (cancelled) return
+      dispatch({
+        type: "load_succeeded",
+        ontologyId,
+        document: resource.document,
+        etag: resource.etag,
+      })
+      if (createdResource !== null) finishCreatedOntologyHandoff(ontologyId)
+
+      if (draftPromise === null) return
+      let draft
+      try {
+        draft = await draftPromise
+      } catch {
+        // 草稿是可选的崩溃恢复通道：IndexedDB 故障不得覆盖已成功的 GET。
+        // 不标记 checked，因此也不会删除这条未能读取的草稿；重载时可重试。
+        return
+      }
+      if (cancelled) return
+      if (draft === null) {
+        dispatch({ type: "draft_checked" })
+        return
+      }
+      if (ontologyDocumentsEqual(draft.candidate, resource.document)) {
+        // 草稿与 acknowledged 一致：无需提示，交由统一清理副作用删除
+        dispatch({ type: "draft_checked" })
+        return
+      }
+      dispatch({ type: "draft_found", draft })
     })()
 
     return () => {
@@ -147,6 +176,7 @@ export function useOntologyEditor(
   }, [api, draftStore, ontologyId, reloadVersion])
 
   const dirty = isOntologyEditorDirty(state)
+  const canClearDraft = canClearOntologyDraft(state)
 
   // 草稿持久化：candidate 变化（dirty）时防抖写入；干净时清除。
   // 依赖收窄到实际读取的原语，避免无关 dispatch 重置防抖计时器。
@@ -172,19 +202,11 @@ export function useOntologyEditor(
       return () => clearTimeout(timer)
     }
 
-    if (draftCheckedId === ontologyId)
+    if (canClearDraft)
       // 有意吞掉错误：草稿持久化失败不影响编辑主流程，草稿仅用于崩溃恢复
       void draftStore.clearDraft(ontologyId).catch(() => {})
     return undefined
-  }, [
-    draftStore,
-    ontologyId,
-    phase,
-    candidate,
-    baseEtag,
-    dirty,
-    draftCheckedId,
-  ])
+  }, [draftStore, ontologyId, phase, candidate, baseEtag, dirty, canClearDraft])
 
   const reload = useCallback(() => {
     setReloadVersion((version) => version + 1)

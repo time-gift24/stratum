@@ -22,11 +22,7 @@ export type InFlightSave = {
 }
 
 export type OntologyEditorPhase =
-  | "idle"
-  | "loading"
-  | "ready"
-  | "missing"
-  | "error"
+  "idle" | "loading" | "ready" | "missing" | "error"
 
 export type OntologyEditorState = {
   ontologyId: string | null
@@ -39,8 +35,12 @@ export type OntologyEditorState = {
   conflict: { remote: AcknowledgedOntology } | null
   // 422：按响应原序保留（path、code 排序由服务端保证）
   violations: readonly OntologyViolation[] | null
+  // 422 path 必须按实际提交的快照解析，不能按已继续编辑的 candidate 解析
+  violationDocument: OntologyDocument | null
   // 超时/响应丢失且重读确认未提交、或其它保存失败
   saveError: ApiError | null
+  // 当前加载轮次的本地草稿已读取完毕；load_started 会将其重置
+  draftChecked: boolean
   draftAvailable: OntologyDraft | null
 }
 
@@ -53,6 +53,7 @@ export type OntologyEditorAction =
       etag: string
     }
   | { type: "load_failed"; ontologyId: string; error: ApiError }
+  | { type: "draft_checked" }
   | { type: "draft_found"; draft: OntologyDraft }
   | { type: "draft_restored" }
   | { type: "draft_discarded" }
@@ -90,7 +91,9 @@ export const initialOntologyEditorState: OntologyEditorState = {
   inFlight: null,
   conflict: null,
   violations: null,
+  violationDocument: null,
   saveError: null,
+  draftChecked: false,
   draftAvailable: null,
 }
 
@@ -117,7 +120,10 @@ function canonicalize(value: unknown): string {
       .filter(([, entryValue]) => entryValue !== undefined)
       .sort(([leftKey], [rightKey]) => (leftKey < rightKey ? -1 : 1))
     const body = entries
-      .map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalize(entryValue)}`)
+      .map(
+        ([key, entryValue]) =>
+          `${JSON.stringify(key)}:${canonicalize(entryValue)}`
+      )
       .join(",")
     return `{${body}}`
   }
@@ -129,6 +135,17 @@ export function isOntologyEditorDirty(state: OntologyEditorState): boolean {
     state.candidate !== null &&
     state.acknowledged !== null &&
     !ontologyDocumentsEqual(state.candidate, state.acknowledged.document)
+  )
+}
+
+// 只有当前加载轮次已检查草稿、没有待用户处置的候选且编辑器干净时，
+// 才可删除 IndexedDB 记录。这同时避免同 ontology 重载沿用上轮检查结果。
+export function canClearOntologyDraft(state: OntologyEditorState): boolean {
+  return (
+    state.phase === "ready" &&
+    state.draftChecked &&
+    state.draftAvailable === null &&
+    !isOntologyEditorDirty(state)
   )
 }
 
@@ -159,13 +176,16 @@ export function ontologyEditorReducer(
         phase: action.error.status === 404 ? "missing" : "error",
         error: action.error,
       }
+    case "draft_checked":
+      if (state.phase !== "ready") return state
+      return { ...state, draftChecked: true }
     case "draft_found":
       if (
         state.phase !== "ready" ||
         action.draft.ontology_id !== state.ontologyId
       )
         return state
-      return { ...state, draftAvailable: action.draft }
+      return { ...state, draftChecked: true, draftAvailable: action.draft }
     case "draft_restored":
       if (state.draftAvailable === null) return state
       return {
@@ -173,6 +193,7 @@ export function ontologyEditorReducer(
         candidate: structuredClone(state.draftAvailable.candidate),
         draftAvailable: null,
         violations: null,
+        violationDocument: null,
       }
     case "draft_discarded":
       return { ...state, draftAvailable: null }
@@ -186,7 +207,9 @@ export function ontologyEditorReducer(
       return updateCandidate(state, (document) => ({
         ...document,
         object_types: document.object_types.map((objectType) =>
-          objectType.id === action.objectType.id ? action.objectType : objectType
+          objectType.id === action.objectType.id
+            ? action.objectType
+            : objectType
         ),
       }))
     case "object_type_removed":
@@ -254,7 +277,11 @@ export function ontologyEditorReducer(
           )
         )
           return document
-        const next = { object_type_id: action.objectTypeId, x: action.x, y: action.y }
+        const next = {
+          object_type_id: action.objectTypeId,
+          x: action.x,
+          y: action.y,
+        }
         const exists = document.canvas.positions.some(
           (position) => position.object_type_id === action.objectTypeId
         )
@@ -288,6 +315,7 @@ export function ontologyEditorReducer(
         },
         conflict: null,
         violations: null,
+        violationDocument: null,
         saveError: null,
       }
     case "save_succeeded":
@@ -299,6 +327,7 @@ export function ontologyEditorReducer(
         inFlight: null,
         conflict: null,
         violations: null,
+        violationDocument: null,
         saveError: null,
       }
     case "save_conflict":
@@ -309,8 +338,14 @@ export function ontologyEditorReducer(
         conflict: { remote: action.remote },
       }
     case "save_invalid":
-      // 422：candidate 保持原样，violations 交给 pointer 映射展示
-      return { ...state, inFlight: null, violations: action.violations }
+      // 422：candidate 保持原样，path 始终以这次实际提交的快照映射。
+      if (state.inFlight === null) return state
+      return {
+        ...state,
+        inFlight: null,
+        violations: action.violations,
+        violationDocument: state.inFlight.document,
+      }
     case "save_failed":
       return { ...state, inFlight: null, saveError: action.error }
     case "conflict_resolved":
@@ -325,6 +360,7 @@ export function ontologyEditorReducer(
         inFlight: null,
         conflict: null,
         violations: null,
+        violationDocument: null,
         saveError: null,
       }
   }
@@ -339,7 +375,7 @@ function updateCandidate(
   // 编辑使旧的 422 violations 定位失效，随 candidate 变化一并清除
   return candidate === state.candidate
     ? state
-    : { ...state, candidate, violations: null }
+    : { ...state, candidate, violations: null, violationDocument: null }
 }
 
 function updateObjectType(
@@ -348,7 +384,11 @@ function updateObjectType(
   update: (objectType: OntologyObjectType) => OntologyObjectType
 ): OntologyEditorState {
   return updateCandidate(state, (document) => {
-    if (!document.object_types.some((objectType) => objectType.id === objectTypeId))
+    if (
+      !document.object_types.some(
+        (objectType) => objectType.id === objectTypeId
+      )
+    )
       return document
     return {
       ...document,

@@ -23,12 +23,12 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 - 消息列条目（`ConversationItem`）由普通消息、`compaction-marker.tsx`（`TranscriptCompacted` 的可折叠“上下文已压缩”标记，展开显示完整摘要，不伪装为系统消息）和 `terminal-marker.tsx`（安全的失败/取消标记）组成。连接、命令、缺失资源等运行错误绝不能伪装成 assistant 消息或写入正文；它们统一由 `notices.tsx` 在输入区上方展示，成功命令或 PG reconcile 证明恢复后用 GSAP 退场再卸载。`notices.tsx` 还承载恢复提示（`resume_required` 只是建议状态，必须显式点击，绝不自动恢复）与实时降级提示。
 - 模型/Thinking 选择器为 `components/stratum/model-selector.tsx`（基于 assistant-ui model-selector 底稿的数据驱动分支，不接入其 runtime/ModelContext）：搜索、provider 筛选项、分组列表和 Thinking 分段行经 `composerConfiguration` 与 hook 接线，并通过 `PromptInput` 的 `trailing` 插槽挂载。
 
-## Ontology 管理（前端按契约实现，后端联调待落地）
+## Ontology 管理（前端按契约实现，后端联调不属于本 change）
 
 - 契约：`docs/ontology/API.md`。`lib/stratum/api.ts` 的 ontology 方法组：`listOntologies` / `createOntology` / `getOntology` / `replaceOntology`（ETag 整文档替换）/ `deleteOntology` / `getObjectTypeNeighborhood`；ETag 经响应头读取，缺失视为契约破坏；`ApiError` 携带 422 `violations`。
 - `features/ontology-editor/{types,reducer,save,violations,validation,pointer,ids,recovery,layout,neighborhood}.ts` — UI 无关内核：编辑器状态 reducer、保存副作用编排（`save.ts`）、422 violations 到节点/边的映射、命名校验、指针路径、id 生成、IndexedDB 崩溃恢复草稿、布局与只读邻域计算。
-- 保存状态机不变量：`acknowledged`（服务端确认的最近文档 + ETag）/ `candidate`（画布展示的可变本地文档）/ `in_flight`（已发出的保存快照）。412 时重读远端交用户显式调和，绝不静默换新 ETag 重试；422 时 candidate 原样保留、violations 交给 pointer 映射展示。
-- `hooks/use-ontology-editor.ts` / `hooks/use-ontology-list.ts` — 编辑器与列表的自包含 hook，api 经依赖注入。
+- 保存状态机不变量：`acknowledged`（服务端确认的最近文档 + ETag）/ `candidate`（画布展示的可变本地文档）/ `in_flight`（已发出的保存快照）。412 时重读远端交用户显式调和，绝不静默换新 ETag 重试；422 时 candidate 原样保留，violations 必须按实际提交的 in-flight 快照定位。
+- `hooks/use-ontology-editor.ts` / `hooks/use-ontology-list.ts` — 编辑器与列表的自包含 hook，api 经依赖注入。创建成功时以一次性 client-navigation handoff 把 POST 返回的文档与 ETag 交给编辑器，完整刷新才回退 GET；运行时始终连接真实后端，mock 只允许通过测试注入。
 - 路由 `/ontologies`（列表）与 `/ontologies/[id]`（编辑器）位于 `app/(site)/ontologies/`，组件集中在 `components/stratum/ontology/`；SiteNav 挂「本体」入口。
 - 已接受依赖：`@xyflow/react`（画布）与 `vitest`（`features/` 纯逻辑单测，`pnpm test`）（均为 MIT 许可证）。
 
@@ -55,7 +55,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 ## 设计上下文
 
 - 修改界面前必须阅读本目录 `PRODUCT.md` 与 `DESIGN.md`（均来自 front-playground）。
-- 产品当前有三组页面：对话 `/conversation`（`/` 经 `app/(site)/page.tsx` 调 `redirect` 进入）、本体管理 `/ontologies` + `/ontologies/[id]`、白板 `/excalidraw`；showcase 页面（首页、canvas、markdown）及其专用组件已全部删除。本体页前端按 `docs/ontology/API.md` 契约实现，后端联调待落地。
+- 产品当前有三组页面：对话 `/conversation`（`/` 经 `app/(site)/page.tsx` 调 `redirect` 进入）、本体管理 `/ontologies` + `/ontologies/[id]`、白板 `/excalidraw`；showcase 页面（首页、canvas、markdown）及其专用组件已全部删除。本体页前端按 `docs/ontology/API.md` 契约实现；真实后端属于独立 change，不计入此前前端 change 的交付范围。
 - 禁止用主题化文案、无功能小字、伪技术参数制造产品感。
 
 ## 动效

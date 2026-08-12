@@ -45,7 +45,9 @@ export function OntologyList({
     <div className="flex flex-col gap-6">
       <header className="flex items-center justify-between gap-4">
         <h1 className="font-heading text-xl tracking-tight">本体</h1>
-        <Button onClick={onRequestCreate}>新建本体</Button>
+        <Button className="min-h-11" onClick={onRequestCreate}>
+          新建本体
+        </Button>
       </header>
 
       {state.phase === "loading" ? (
@@ -73,7 +75,11 @@ export function OntologyList({
           <p className="text-sm text-muted-foreground">
             还没有本体。新建一个本体，开始定义对象类型与关系。
           </p>
-          <Button variant="outline" onClick={onRequestCreate}>
+          <Button
+            variant="outline"
+            className="min-h-11"
+            onClick={onRequestCreate}
+          >
             新建本体
           </Button>
         </div>

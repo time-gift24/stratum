@@ -27,10 +27,14 @@ import type {
  */
 
 type ViewStatus =
-  | { kind: "idle" }
-  | { kind: "loading" }
+  | { kind: "idle"; result: null }
+  | { kind: "loading"; result: OntologyNeighborhood | null }
   | { kind: "ready"; result: OntologyNeighborhood }
-  | { kind: "error"; error: ApiError }
+  | {
+      kind: "error"
+      error: ApiError
+      result: OntologyNeighborhood | null
+    }
 
 export function NeighborhoodView({
   ontologyId,
@@ -42,11 +46,14 @@ export function NeighborhoodView({
   const api = useMemo(() => resolveOntologyApi(undefined), [])
   const [originId, setOriginId] = useState("")
   const [depth, setDepth] = useState(1)
-  const [status, setStatus] = useState<ViewStatus>({ kind: "idle" })
+  const [status, setStatus] = useState<ViewStatus>({
+    kind: "idle",
+    result: null,
+  })
 
   const run = async () => {
     if (originId === "") return
-    setStatus({ kind: "loading" })
+    setStatus((current) => ({ kind: "loading", result: current.result }))
     try {
       const result = await api.getObjectTypeNeighborhood(
         ontologyId,
@@ -55,13 +62,14 @@ export function NeighborhoodView({
       )
       setStatus({ kind: "ready", result })
     } catch (error) {
-      setStatus({
+      setStatus((current) => ({
         kind: "error",
         error:
           error instanceof ApiError
             ? error
             : new ApiError("connection_error", 0, "connection failed"),
-      })
+        result: current.result,
+      }))
     }
   }
 
@@ -86,10 +94,7 @@ export function NeighborhoodView({
             ))}
           </SelectContent>
         </Select>
-        <Select
-          value={depth}
-          onValueChange={(next) => setDepth(next ?? 1)}
-        >
+        <Select value={depth} onValueChange={(next) => setDepth(next ?? 1)}>
           <SelectTrigger aria-label="邻域深度" className="w-24">
             <SelectValue />
           </SelectTrigger>
@@ -108,7 +113,13 @@ export function NeighborhoodView({
         >
           {status.kind === "loading" ? (
             <>
-              <Loader2 data-icon="inline-start" className="animate-spin" />
+              <span
+                aria-hidden
+                data-icon="inline-start"
+                className="inline-flex motion-safe:animate-spin"
+              >
+                <Loader2 />
+              </span>
               查询中…
             </>
           ) : (
@@ -117,37 +128,41 @@ export function NeighborhoodView({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
-        {status.kind === "idle" && (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            选择起点与深度后查看持久化图的邻域。
-          </div>
-        )}
-        {status.kind === "loading" && (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            正在加载邻域…
-          </div>
-        )}
+      <div className="flex min-h-0 flex-1 flex-col">
         {status.kind === "error" && (
-          <div className="flex h-full flex-col items-center justify-center gap-2">
-            <p role="alert" className="text-sm text-destructive">
+          <div
+            role="alert"
+            className="flex items-center justify-center gap-2 border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+          >
+            <span>
               {status.error.code === "object_type_not_found"
-                ? "该 Object Type 在远端不存在（可能已被他人删除），请选择其他起点。"
+                ? "该 Object Type 在远端不存在（可能已被他人删除），当前邻域保持不变。"
                 : `邻域加载失败：${status.error.message}`}
-            </p>
+            </span>
             {status.error.code !== "object_type_not_found" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void run()}
-              >
+              <Button variant="outline" size="sm" onClick={() => void run()}>
                 重试
               </Button>
             )}
           </div>
         )}
-        {status.kind === "ready" && (
-          <div className="flex h-full min-h-0 flex-col">
+        {status.result === null && status.kind === "idle" && (
+          <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+            选择起点与深度后查看持久化图的邻域。
+          </div>
+        )}
+        {status.result === null && status.kind === "loading" && (
+          <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+            正在加载邻域…
+          </div>
+        )}
+        {status.result === null && status.kind === "error" && (
+          <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+            请选择其他起点后重试。
+          </div>
+        )}
+        {status.result !== null && (
+          <div className="flex min-h-0 flex-1 flex-col">
             <p className="border-b border-border px-4 py-1.5 text-xs text-muted-foreground">
               命中 {status.result.object_types.length} 个 Object Type、
               {status.result.link_types.length} 条 Link Type（深度{" "}

@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from "react"
 import Link from "next/link"
 import { ArrowLeft, CircleAlert, Loader2, Plus } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import {
   OntologyCanvas,
   type CanvasSelection,
@@ -56,20 +56,21 @@ export function OntologyEditor({ ontologyId }: { ontologyId: string }) {
     <div className="flex h-full min-h-0 flex-col bg-background">
       {state.phase === "loading" || state.phase === "idle" ? (
         <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Loader2 aria-hidden className="size-4 animate-spin" />
+          <span className="animate-spin motion-reduce:animate-none">
+            <Loader2 aria-hidden className="size-4" />
+          </span>
           正在加载 Ontology…
         </div>
       ) : state.phase === "missing" ? (
         <div className="flex h-full flex-col items-center justify-center gap-3">
           <p className="text-sm">该 Ontology 不存在或已被删除。</p>
-          <Button
-            variant="outline"
-            size="sm"
-            render={<Link href="/ontologies" />}
+          <Link
+            href="/ontologies"
+            className={buttonVariants({ variant: "outline", size: "sm" })}
           >
             <ArrowLeft data-icon="inline-start" />
             返回列表
-          </Button>
+          </Link>
         </div>
       ) : state.phase === "error" ? (
         <div className="flex h-full flex-col items-center justify-center gap-3">
@@ -121,35 +122,73 @@ const SAVE_ERROR_TEXT: Readonly<Record<string, string>> = {
 }
 
 function groupViolations(
-  document: OntologyEditor["state"]["candidate"],
+  pointerDocument: OntologyEditor["state"]["candidate"],
+  displayedDocument: OntologyEditor["state"]["candidate"],
   violations: readonly OntologyViolation[] | null
 ): GroupedViolations {
-  if (document === null || violations === null || violations.length === 0)
+  if (
+    pointerDocument === null ||
+    displayedDocument === null ||
+    violations === null ||
+    violations.length === 0
+  )
     return EMPTY_GROUPED_VIOLATIONS
   const objectViolations = new Map<string, string[]>()
   const propertyViolations = new Map<string, string[]>()
   const linkViolations = new Map<string, string[]>()
   const globalViolations: OntologyViolation[] = []
-  for (const { violation, target } of mapViolations(document, violations)) {
+  const displayedObjectIds = new Set(
+    displayedDocument.object_types.map(({ id }) => id)
+  )
+  const displayedPropertyIds = new Set(
+    displayedDocument.object_types.flatMap((objectType) =>
+      objectType.properties.map((property) => `${objectType.id}/${property.id}`)
+    )
+  )
+  const displayedLinkIds = new Set(
+    displayedDocument.link_types.map(({ id }) => id)
+  )
+  for (const { violation, target } of mapViolations(
+    pointerDocument,
+    violations
+  )) {
     const push = (map: Map<string, string[]>, key: string) => {
       const bucket = map.get(key)
       if (bucket === undefined) map.set(key, [violation.message])
       else bucket.push(violation.message)
     }
-    if (target.kind === "property" && target.objectTypeId && target.propertyId) {
-      push(propertyViolations, `${target.objectTypeId}/${target.propertyId}`)
+    const propertyKey =
+      target.objectTypeId && target.propertyId
+        ? `${target.objectTypeId}/${target.propertyId}`
+        : null
+    if (
+      target.kind === "property" &&
+      propertyKey !== null &&
+      displayedPropertyIds.has(propertyKey)
+    ) {
+      push(propertyViolations, propertyKey)
     } else if (
       (target.kind === "objectType" || target.kind === "canvas") &&
-      target.objectTypeId
+      target.objectTypeId &&
+      displayedObjectIds.has(target.objectTypeId)
     ) {
       push(objectViolations, target.objectTypeId)
-    } else if (target.kind === "linkType" && target.linkTypeId) {
+    } else if (
+      target.kind === "linkType" &&
+      target.linkTypeId &&
+      displayedLinkIds.has(target.linkTypeId)
+    ) {
       push(linkViolations, target.linkTypeId)
     } else {
       globalViolations.push(violation)
     }
   }
-  return { objectViolations, propertyViolations, linkViolations, globalViolations }
+  return {
+    objectViolations,
+    propertyViolations,
+    linkViolations,
+    globalViolations,
+  }
 }
 
 function propertyMessagesFor(
@@ -170,9 +209,10 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
 
   const [selection, setSelection] = useState<CanvasSelection>(null)
   const [view, setView] = useState<"edit" | "neighborhood">("edit")
-  const [focus, setFocus] = useState<{ originId: string; depth: number } | null>(
-    null
-  )
+  const [focus, setFocus] = useState<{
+    originId: string
+    depth: number
+  } | null>(null)
   const [focusDepth, setFocusDepth] = useState(1)
   const [addOpen, setAddOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{
@@ -184,8 +224,9 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
     targetId: string
   } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [clientViolations, setClientViolations] =
-    useState<readonly OntologyViolation[] | null>(null)
+  const [clientViolations, setClientViolations] = useState<
+    readonly OntologyViolation[] | null
+  >(null)
 
   const limits = ONTOLOGY_MVP_LIMITS
   const totalProperties = useMemo(
@@ -208,19 +249,36 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
   const activeFocus = focusNeighborhood !== null ? focus : null
 
   const violations = useMemo(
-    () => groupViolations(candidate, state.violations),
-    [candidate, state.violations]
+    () =>
+      groupViolations(
+        state.violationDocument ?? candidate,
+        candidate,
+        state.violations
+      ),
+    [candidate, state.violationDocument, state.violations]
   )
 
   // 节点属性行内增删改：hook 方法本身引用稳定，聚合对象借此保持稳定，
   // 避免画布 toNodes 的 useMemo 每轮重建
   const propertyActions = useMemo<ObjectTypePropertyActions>(
     () => ({
+      getAddPropertyDisabledReason: (objectType) =>
+        objectType.properties.length >=
+        ONTOLOGY_MVP_LIMITS.maxPropertiesPerObjectType
+          ? `每个 Object Type 的属性数量已达上限（${ONTOLOGY_MVP_LIMITS.maxPropertiesPerObjectType}）`
+          : totalProperties >= ONTOLOGY_MVP_LIMITS.maxTotalProperties
+            ? `Ontology 总属性数量已达上限（${ONTOLOGY_MVP_LIMITS.maxTotalProperties}）`
+            : null,
       onAddProperty: editor.addProperty,
       onUpdateProperty: editor.updateProperty,
       onRemoveProperty: editor.removeProperty,
     }),
-    [editor.addProperty, editor.updateProperty, editor.removeProperty]
+    [
+      editor.addProperty,
+      editor.updateProperty,
+      editor.removeProperty,
+      totalProperties,
+    ]
   )
 
   const selectedObjectType =
@@ -300,14 +358,13 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
     <>
       {/* 工具栏：返回、标题、视图切换、保存状态与动作 */}
       <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          render={<Link href="/ontologies" />}
+        <Link
+          href="/ontologies"
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
         >
           <ArrowLeft data-icon="inline-start" />
           返回列表
-        </Button>
+        </Link>
         <div className="min-w-0">
           <h1 className="truncate text-sm font-medium">
             {candidate.display_name}
@@ -379,11 +436,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
         {state.draftAvailable !== null && (
           <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/50 px-4 py-2 text-xs">
             <span>发现未保存的草稿（上次编辑未完成保存）。</span>
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={editor.restoreDraft}
-            >
+            <Button variant="outline" size="xs" onClick={editor.restoreDraft}>
               恢复草稿
             </Button>
             <Button variant="ghost" size="xs" onClick={editor.discardDraft}>
@@ -500,56 +553,53 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
             {selectedObjectType !== undefined && (
               <div className="absolute top-3 right-3 bottom-3 z-10 w-[30rem]">
                 <ObjectTypePanel
-                    objectType={selectedObjectType}
-                    messages={
-                      violations.objectViolations.get(selectedObjectType.id) ??
-                      []
-                    }
-                    propertyMessages={propertyMessagesFor(
-                      violations.propertyViolations,
-                      selectedObjectType.id
-                    )}
-                    canAddProperty={
-                      selectedObjectType.properties.length <
-                        limits.maxPropertiesPerObjectType &&
-                      totalProperties < limits.maxTotalProperties
-                    }
-                    propertyLimitMessage={
-                      selectedObjectType.properties.length >=
-                      limits.maxPropertiesPerObjectType
-                        ? `每个 Object Type 的属性数量已达上限（${limits.maxPropertiesPerObjectType}）`
-                        : totalProperties >= limits.maxTotalProperties
-                          ? `Ontology 总属性数量已达上限（${limits.maxTotalProperties}）`
-                          : null
-                    }
-                    focusDepth={focusDepth}
-                    onFocusDepthChange={setFocusDepth}
-                    onFocus={() =>
-                      setFocus({
-                        originId: selectedObjectType.id,
-                        depth: focusDepth,
-                      })
-                    }
-                    onUpdate={editor.updateObjectType}
-                    onDelete={() =>
-                      requestDeleteObjectType(selectedObjectType)
-                    }
-                    onAddProperty={(input: PropertyInput) =>
-                      editor.addProperty(selectedObjectType.id, input)
-                    }
-                    onUpdateProperty={(property) =>
-                      editor.updateProperty(selectedObjectType.id, property)
-                    }
-                    onRemoveProperty={(propertyId) =>
-                      editor.removeProperty(selectedObjectType.id, propertyId)
-                    }
-                    onClose={() => setSelection(null)}
-                  />
+                  objectType={selectedObjectType}
+                  messages={
+                    violations.objectViolations.get(selectedObjectType.id) ?? []
+                  }
+                  propertyMessages={propertyMessagesFor(
+                    violations.propertyViolations,
+                    selectedObjectType.id
+                  )}
+                  canAddProperty={
+                    selectedObjectType.properties.length <
+                      limits.maxPropertiesPerObjectType &&
+                    totalProperties < limits.maxTotalProperties
+                  }
+                  propertyLimitMessage={
+                    selectedObjectType.properties.length >=
+                    limits.maxPropertiesPerObjectType
+                      ? `每个 Object Type 的属性数量已达上限（${limits.maxPropertiesPerObjectType}）`
+                      : totalProperties >= limits.maxTotalProperties
+                        ? `Ontology 总属性数量已达上限（${limits.maxTotalProperties}）`
+                        : null
+                  }
+                  focusDepth={focusDepth}
+                  onFocusDepthChange={setFocusDepth}
+                  onFocus={() =>
+                    setFocus({
+                      originId: selectedObjectType.id,
+                      depth: focusDepth,
+                    })
+                  }
+                  onUpdate={editor.updateObjectType}
+                  onDelete={() => requestDeleteObjectType(selectedObjectType)}
+                  onAddProperty={(input: PropertyInput) =>
+                    editor.addProperty(selectedObjectType.id, input)
+                  }
+                  onUpdateProperty={(property) =>
+                    editor.updateProperty(selectedObjectType.id, property)
+                  }
+                  onRemoveProperty={(propertyId) =>
+                    editor.removeProperty(selectedObjectType.id, propertyId)
+                  }
+                  onClose={() => setSelection(null)}
+                />
               </div>
             )}
             {selectedObjectType === undefined &&
               selectedLinkType !== undefined && (
-              <div className="absolute top-3 right-3 bottom-3 w-80">
+                <div className="absolute top-3 right-3 bottom-3 w-80">
                   <LinkTypePanel
                     linkType={selectedLinkType}
                     source={findObjectType(
@@ -568,8 +618,8 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
                     }}
                     onClose={() => setSelection(null)}
                   />
-              </div>
-            )}
+                </div>
+              )}
           </>
         )}
       </div>
@@ -597,10 +647,14 @@ function ReadyEditor({ editor }: { editor: OntologyEditor }) {
       <LinkTypeDialog
         pending={pendingLink}
         source={
-          pendingLink !== null ? findObjectType(pendingLink.sourceId) : undefined
+          pendingLink !== null
+            ? findObjectType(pendingLink.sourceId)
+            : undefined
         }
         target={
-          pendingLink !== null ? findObjectType(pendingLink.targetId) : undefined
+          pendingLink !== null
+            ? findObjectType(pendingLink.targetId)
+            : undefined
         }
         onCancel={() => setPendingLink(null)}
         onSubmit={(input) => {

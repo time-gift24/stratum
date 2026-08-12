@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 
 import { isValidOntologyName } from "@/features/ontology-editor/validation"
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
+import { stageCreatedOntology } from "@/lib/stratum/ontology-navigation-handoff"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -20,7 +21,7 @@ import { Textarea } from "@/components/ui/textarea"
 /**
  * 新建本体对话框。name 客户端先行校验（不匹配正则不发请求）；
  * 409 ontology_name_conflict 内联到名称字段，表单内容保留；
- * 201 成功后跳转编辑器页 /ontologies/[id]（编辑器自行加载资源与 ETag）。
+ * 201 成功后把响应文档与 ETag 交给目标编辑器，再跳转 /ontologies/[id]。
  */
 
 export type OntologyCreateDialogProps = {
@@ -91,6 +92,7 @@ export function OntologyCreateDialog({
           : { description: trimmedDescription }),
       })
       .then((resource) => {
+        stageCreatedOntology(resource)
         handleOpenChange(false)
         router.push(`/ontologies/${resource.document.id}`)
       })

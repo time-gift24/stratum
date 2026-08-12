@@ -49,6 +49,7 @@ export type ObjectTypePropertyDraft = {
 
 /** 属性增删改回调，与 use-ontology-editor 的对应方法同签名 */
 export type ObjectTypePropertyActions = {
+  getAddPropertyDisabledReason(objectType: OntologyObjectType): string | null
   onAddProperty(objectTypeId: string, input: ObjectTypePropertyDraft): string
   onUpdateProperty(objectTypeId: string, property: OntologyProperty): void
   onRemoveProperty(objectTypeId: string, propertyId: string): void
@@ -70,10 +71,13 @@ export function OntologyObjectTypeNode({
 }: NodeProps<ObjectTypeNode>) {
   const { objectType, violations, dimmed, propertyActions } = data
   const hasViolations = violations.length > 0
+  const addPropertyDisabledReason =
+    propertyActions?.getAddPropertyDisabledReason(objectType) ?? null
   const [renamingId, setRenamingId] = useState<string | null>(null)
 
   const addProperty = () => {
-    if (propertyActions === undefined) return
+    if (propertyActions === undefined || addPropertyDisabledReason !== null)
+      return
     const name = nextPropertyName(objectType.properties)
     const id = propertyActions.onAddProperty(objectType.id, {
       name,
@@ -105,7 +109,9 @@ export function OntologyObjectTypeNode({
         )}
       />
       <header className="relative px-1.5 pt-0.5 pb-1.5">
-        <p className="truncate text-sm font-medium">{objectType.display_name}</p>
+        <p className="truncate text-sm font-medium">
+          {objectType.display_name}
+        </p>
         <p className="truncate font-mono text-[0.6875rem] text-muted-foreground">
           {objectType.name}
         </p>
@@ -146,8 +152,10 @@ export function OntologyObjectTypeNode({
         {propertyActions !== undefined && (
           <button
             type="button"
+            disabled={addPropertyDisabledReason !== null}
+            title={addPropertyDisabledReason ?? undefined}
             onClick={addProperty}
-            className="mt-0.5 flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border px-2 py-1 text-[0.6875rem] text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+            className="mt-0.5 flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border px-2 py-1 text-[0.6875rem] text-muted-foreground hover:border-foreground/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border disabled:hover:text-muted-foreground"
           >
             <Plus aria-hidden className="size-3" />
             添加属性

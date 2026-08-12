@@ -102,6 +102,7 @@ export function ObjectTypePanel({
   }
 
   const addProperty = () => {
+    if (!canAddProperty) return
     const name = nextPropertyName(objectType.properties)
     onAddProperty({
       name,
@@ -213,10 +214,7 @@ export function ObjectTypePanel({
       </div>
 
       {/* 属性规格表：sticky 表头 + # 序号栅格；默认只读，双击行进入编辑 */}
-      <section
-        aria-label="属性列表"
-        className="flex min-h-0 flex-1 flex-col"
-      >
+      <section aria-label="属性列表" className="flex min-h-0 flex-1 flex-col">
         <h3 className="px-4 pt-3 pb-1 text-[0.6875rem] font-medium text-muted-foreground">
           属性（{objectType.properties.length}）
           <span className="ml-1.5 font-normal">· 双击行进入编辑</span>
@@ -295,6 +293,7 @@ export function ObjectTypePanel({
           <button
             type="button"
             disabled={!canAddProperty}
+            title={propertyLimitMessage ?? undefined}
             onClick={addProperty}
             className="flex w-full items-center gap-1.5 px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
           >
@@ -399,8 +398,10 @@ function PropertyRow({
           if (!editing && event.key === "Enter") onStartEdit()
         }}
         className={cn(
-          "outline-none transition-colors",
-          editing ? "bg-muted/50" : "hover:bg-muted/30 focus-visible:bg-muted/30",
+          "transition-colors outline-none",
+          editing
+            ? "bg-muted/50"
+            : "hover:bg-muted/30 focus-visible:bg-muted/30",
           hasViolations && "bg-destructive/5"
         )}
       >
