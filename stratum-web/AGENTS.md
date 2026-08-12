@@ -20,7 +20,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 - `hooks/use-agent-conversation.ts`——自包含 hook（不依赖任何外壳）：拉取模板和模型、管理最近 AgentRuntime 与页面内存 cursor、驱动 reducer/recovery，并暴露 `state`、`createConversation`、`sendMessage`、`cancel`、`resume`、`resolveApproval`、`reconnect`、`loadOlderHistory`。
 - `/conversation` 是唯一连接真实后端的页面：状态到 `ConversationItem[]` 的映射在该页完成，会话组件保持数据驱动且不接入运行时。
 - 推理过程与 Tool call/approval 在消息正文上方渲染：`components/stratum/conversation/reasoning.tsx`（三态折叠 + GSAP 手风琴）、`tool-call.tsx` / `tool-group.tsx`（默认折叠）。审批操作入口是输入区上方的浮层 `approval-dock.tsx`（GSAP 进出场，按钮调用 hook 的 `resolveApproval`，页面负责提交中和已决终态）；内联审批区只读，卡片内容与浮层共享 `approval-card.tsx`。历史消息中的 Tool 结果从 `state.tools[callId]` 配对，无法配对时只渲染名称和参数。
-- 消息列条目（`ConversationItem`）由普通消息、`compaction-marker.tsx`（`TranscriptCompacted` 的可折叠“上下文已压缩”标记，展开显示完整摘要，不伪装为系统消息）和 `terminal-marker.tsx`（安全的失败/取消标记）组成。`notices.tsx` 承载输入区上方的恢复提示（`resume_required` 只是建议状态，必须显式点击，绝不自动恢复）与实时降级提示。
+- 消息列条目（`ConversationItem`）由普通消息、`compaction-marker.tsx`（`TranscriptCompacted` 的可折叠“上下文已压缩”标记，展开显示完整摘要，不伪装为系统消息）和 `terminal-marker.tsx`（安全的失败/取消标记）组成。连接、命令、缺失资源等运行错误绝不能伪装成 assistant 消息或写入正文；它们统一由 `notices.tsx` 在输入区上方展示，成功命令或 PG reconcile 证明恢复后用 GSAP 退场再卸载。`notices.tsx` 还承载恢复提示（`resume_required` 只是建议状态，必须显式点击，绝不自动恢复）与实时降级提示。
 - 模型/Thinking 选择器为 `components/stratum/model-selector.tsx`（基于 assistant-ui model-selector 底稿的数据驱动分支，不接入其 runtime/ModelContext）：搜索、provider 筛选项、分组列表和 Thinking 分段行经 `composerConfiguration` 与 hook 接线，并通过 `PromptInput` 的 `trailing` 插槽挂载。
 
 ## 运行时协议投影

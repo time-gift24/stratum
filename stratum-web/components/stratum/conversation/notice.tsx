@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils"
  * 结构恒定（图标 + 左对齐正文 + 可选尾部动作），只换色调。
  *
  * tone 语义：
- * - error：destructive 红——失败/中断（生成中断、执行失败、连接错误）
+ * - error：destructive 红——操作、执行或连接错误
  * - warning：warning 黄——需要知晓的进行中/降级状态（恢复执行、实时降级）
  * - neutral：muted——取消类终态与纯信息（已取消、取消请求已发送）
  */

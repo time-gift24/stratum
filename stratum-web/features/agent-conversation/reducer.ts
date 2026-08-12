@@ -107,30 +107,47 @@ export function conversationReducer(
       )
         return state
       return state.view?.current_turn_id === action.turnId
-        ? { ...state, agentId: action.agentId }
+        ? {
+            ...state,
+            agentId: action.agentId,
+            phase: "ready",
+            error: null,
+          }
         : {
             ...state,
             agentId: action.agentId,
             acceptedTurnId: action.turnId,
+            phase: "ready",
+            error: null,
           }
     case "view_reconciled":
       return rebaseOnPgView(state, action)
     case "approval_resolved": {
-      if (!(action.approvalId in state.approvals)) return state
+      if (!(action.approvalId in state.approvals))
+        return clearOperationError(state)
       const approvals = { ...state.approvals }
       delete approvals[action.approvalId]
-      return { ...state, approvals }
+      return clearOperationError({ ...state, approvals })
     }
     case "cancel_requested":
-      return { ...state, cancelRequested: true }
+      return clearOperationError({ ...state, cancelRequested: true })
     case "realtime_degraded":
       return { ...state, realtimeDegraded: action.degraded }
     case "recovery_ready":
-      return { ...state, phase: "ready" }
+      return { ...state, phase: "ready", error: null }
+    case "operation_error":
+      return { ...state, error: action.error }
+    case "operation_succeeded":
+      return clearOperationError(state)
     case "connection_error":
       return { ...state, phase: "connection_error", error: action.error }
     case "missing":
-      return { ...state, phase: "missing", error: action.error }
+      return {
+        ...initialConversationState,
+        agentRuntimeId: state.agentRuntimeId,
+        phase: "missing",
+        error: action.error,
+      }
   }
 }
 
@@ -230,6 +247,8 @@ function rebaseOnPgView(
       TERMINAL_STATUSES.has(action.view.status) && acceptedTurnId === null
         ? false
         : next.cancelRequested,
+    phase: "ready",
+    error: null,
   }
 
   // Force the `>T` control effects to replay over view@T. Timeline insertion
@@ -244,6 +263,14 @@ function rebaseOnPgView(
   }
 
   return reconcileTransientState(next)
+}
+
+function clearOperationError(state: ConversationState): ConversationState {
+  return {
+    ...state,
+    phase: state.view === null ? state.phase : "ready",
+    error: null,
+  }
 }
 
 function approvalsFromView(

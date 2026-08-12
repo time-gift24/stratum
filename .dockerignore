@@ -10,4 +10,5 @@ stratum-web/.react-router
 .env
 .env.*
 !.env.example
+.stratum
 .superpowers

@@ -18,7 +18,7 @@ import { compareEventSeq } from "@/lib/stratum/api"
  * 以 StableMessage 引用为键（reducer 不可变更新保持引用），输入逐项 ===
  * 校验，命中即复用视图对象——流式 token 与消息落成都不改变未变消息的
  * 引用，下游 memo 才能命中。
- * 热段（composeLiveItems）：draft/实时 tools/连接错误，流式期间每帧重跑，
+ * 热段（composeLiveItems）：draft/实时 tools，流式期间每帧重跑，
  * 但只追加新对象，settled 部分整体复用。
  */
 
@@ -153,8 +153,6 @@ export function composeLiveItems(
   drafts: ConversationState["drafts"],
   tools: ConversationState["tools"],
   status: string | undefined,
-  phase: ConversationState["phase"],
-  error: ConversationState["error"],
   approvalEntries: ApprovalEntries
 ): ConversationItem[] {
   const result: ConversationItem[] = [...settled.items]
@@ -224,8 +222,7 @@ export function composeLiveItems(
     // 回合结束但工具未落成到消息（含等待审批的空闲态）：挂到最后一条 assistant 消息
     for (let index = result.length - 1; index >= 0; index -= 1) {
       const item = result[index]
-      if (item.kind !== "message" || item.message.role !== "assistant")
-        continue
+      if (item.kind !== "message" || item.message.role !== "assistant") continue
       result[index] = {
         ...item,
         message: {
@@ -235,22 +232,6 @@ export function composeLiveItems(
       }
       break
     }
-  }
-
-  if (phase === "connection_error" || phase === "missing") {
-    result.push({
-      kind: "message",
-      id: "connection-error",
-      message: {
-        id: "connection-error",
-        role: "assistant",
-        content:
-          phase === "missing"
-            ? "会话不存在或已被删除（404）。"
-            : `连接出错：${error?.message ?? "无法连接到 Stratum 后端"}`,
-        status: "error",
-      },
-    })
   }
 
   return result

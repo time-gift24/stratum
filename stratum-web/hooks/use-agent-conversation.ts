@@ -23,7 +23,10 @@ import {
   sameModelConfig,
   type PendingMessageIntent,
 } from "@/features/agent-conversation/message-intent"
-import type { ConversationState } from "@/features/agent-conversation/types"
+import type {
+  ConversationAction,
+  ConversationState,
+} from "@/features/agent-conversation/types"
 import {
   loadRecentAgentRuntimes,
   rememberRecentAgentRuntime as rememberStoredRecentAgentRuntime,
@@ -203,6 +206,19 @@ export function useAgentConversation(): AgentConversation {
     }
   }, [])
 
+  const dispatchRuntimeAction = useCallback(
+    (action: ConversationAction) => {
+      if (
+        action.type === "missing" &&
+        action.error?.code === "agent_runtime_not_found" &&
+        selectedAgentRuntimeRef.current !== null
+      )
+        removeRecentAgentRuntime(selectedAgentRuntimeRef.current)
+      dispatch(action)
+    },
+    [removeRecentAgentRuntime]
+  )
+
   const selectAgentRuntime = useCallback((agentRuntimeId: string | null) => {
     reconcileRerunRef.current = false
     reconcileAbortRef.current?.abort()
@@ -273,7 +289,7 @@ export function useAgentConversation(): AgentConversation {
         historyAbortRef.current?.abort()
         historyAbortRef.current = null
       }
-      dispatch(action)
+      dispatchRuntimeAction(action)
     }
 
     void runConversationSession(
@@ -296,16 +312,22 @@ export function useAgentConversation(): AgentConversation {
     )
 
     return () => controller.abort()
-  }, [reconnectVersion, selectedAgentRuntimeId])
+  }, [dispatchRuntimeAction, reconnectVersion, selectedAgentRuntimeId])
 
-  const reportError = useCallback((error: unknown) => {
-    const apiError = toApiError(error)
-    dispatch(
-      apiError.status === 404
-        ? { type: "missing", error: apiError }
-        : { type: "connection_error", error: apiError }
-    )
-  }, [])
+  const reportError = useCallback(
+    (error: unknown) => {
+      const apiError = toApiError(error)
+      dispatchRuntimeAction(
+        apiError.code === "agent_runtime_not_found"
+          ? { type: "missing", error: apiError }
+          : apiError.code === "protocol_identity_error" ||
+              apiError.code === "invalid_response"
+            ? { type: "connection_error", error: apiError }
+            : { type: "operation_error", error: apiError }
+      )
+    },
+    [dispatchRuntimeAction]
+  )
 
   const reconnect = useCallback(() => {
     if (selectedAgentRuntimeRef.current === null) return
@@ -368,7 +390,7 @@ export function useAgentConversation(): AgentConversation {
           },
           isCurrent,
           dispatch: (action) => {
-            if (isCurrent()) dispatch(action)
+            if (isCurrent()) dispatchRuntimeAction(action)
           },
         },
         { agentRuntimeId, signal: controller.signal }
@@ -384,7 +406,7 @@ export function useAgentConversation(): AgentConversation {
     }
 
     run()
-  }, [])
+  }, [dispatchRuntimeAction])
 
   // 窗口重新获得焦点立即 reconcile
   useEffect(() => {
@@ -400,9 +422,11 @@ export function useAgentConversation(): AgentConversation {
       state.acceptedTurnId !== null ||
       state.cancelRequested ||
       state.realtimeDegraded ||
+      isBackendAvailabilityError(state.error) ||
       Object.keys(state.approvals).length > 0)
 
-  // 进入需要 PG 收敛的状态时立即跑一次，之后才低频轮询。首创 Agent 的
+  // 进入需要 PG 收敛的状态（含可恢复的后端故障）时立即跑一次，之后才
+  // 低频轮询。首创 Agent 的
   // message 202 可能早于 cold bootstrap ready；acceptedTurnId 会把这次
   // immediate reconcile 延迟到 barrier 可读时，而不是等第一个 interval。
   useEffect(() => {
@@ -740,6 +764,7 @@ export function useAgentConversation(): AgentConversation {
           return
         }
       }
+      dispatch({ type: "operation_succeeded" })
     } catch (error) {
       if (client.generation !== selectionGeneration.current) return
       // stale_turn / turn_not_running：view 已过期，reconcile 收敛
@@ -938,6 +963,10 @@ function browserStorage(): StorageLike | undefined {
 
 function isApiErrorCode(error: unknown, code: string): boolean {
   return error instanceof ApiError && error.code === code
+}
+
+function isBackendAvailabilityError(error: ApiError | null): boolean {
+  return error !== null && (error.status === 0 || error.status >= 500)
 }
 
 function protocolIdentityError(): ApiError {

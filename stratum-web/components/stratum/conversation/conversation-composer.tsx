@@ -7,6 +7,7 @@ import { ApprovalDock } from "@/components/stratum/conversation/approval-dock"
 import type { ApprovalEntry } from "@/components/stratum/conversation/conversation-items"
 import { Notice } from "@/components/stratum/conversation/notice"
 import {
+  AnimatedConversationErrorNotice,
   RealtimeDegradedNotice,
   ResumeNotice,
 } from "@/components/stratum/conversation/notices"
@@ -14,6 +15,8 @@ import { AgentSelector } from "@/components/stratum/agent-selector"
 import { ModelSelector } from "@/components/stratum/model-selector"
 import { PromptInput } from "@/components/stratum/prompt-input"
 import type { ComposerConfiguration } from "@/hooks/use-agent-conversation"
+import type { ConversationState } from "@/features/agent-conversation/types"
+import type { ApiError } from "@/lib/stratum/api"
 import {
   currentThinkingLevel,
   thinkingLevels,
@@ -32,7 +35,10 @@ export function ConversationComposer({
   resumeRequired,
   realtimeDegraded,
   cancelRequested,
+  phase,
+  error,
   onResume,
+  onReconnect,
   onCancel,
   value,
   onChange,
@@ -48,7 +54,10 @@ export function ConversationComposer({
   resumeRequired: boolean
   realtimeDegraded: boolean
   cancelRequested: boolean
+  phase: ConversationState["phase"]
+  error: ApiError | null
   onResume: () => void
+  onReconnect: () => void
   onCancel: () => void
   /** 受控输入：发送成功才由调用方清空 */
   value: string
@@ -75,8 +84,18 @@ export function ConversationComposer({
 
   return (
     <div className="relative">
-      <ApprovalDock approvals={pendingApprovals} onResolve={onResolveApproval} />
-      {resumeRequired || realtimeDegraded || (cancelRequested && turnRunning) ? (
+      <ApprovalDock
+        approvals={pendingApprovals}
+        onResolve={onResolveApproval}
+      />
+      <AnimatedConversationErrorNotice
+        phase={phase}
+        error={error}
+        onReconnect={onReconnect}
+      />
+      {resumeRequired ||
+      realtimeDegraded ||
+      (cancelRequested && turnRunning) ? (
         <div className="mb-2 flex flex-col gap-1.5">
           {resumeRequired ? <ResumeNotice onResume={onResume} /> : null}
           {cancelRequested && turnRunning ? (

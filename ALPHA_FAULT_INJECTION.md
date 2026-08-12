@@ -2,32 +2,32 @@
 
 ## 目的与范围
 
-本文只记录当前 stock Compose 环境无需生产 failpoint 即可执行的三个 Alpha 外部故障。仓库默认使用 `podman compose`；使用 Docker 时，把下文命令中的 `podman` 替换为 `docker`，其余参数保持不变。
+本文只记录当前 stock Compose 环境无需生产 failpoint 即可执行的两个 Alpha 外部故障。仓库默认使用 `podman compose`；使用 Docker 时，把下文命令中的 `podman` 替换为 `docker`，其余参数保持不变。
 
 | ID | 唯一故障 | Compose project |
 |---|---|---|
 | F01 | 停止并恢复 NATS | `stratum-alpha-fi-nats` |
 | F02 | 停止并恢复 Postgres | `stratum-alpha-fi-postgres` |
-| F03 | 向 API 发送 SIGTERM 并重启 | `stratum-alpha-fi-api` |
 
-三例必须顺序执行并各自使用新的 Compose project、数据库 volume、NATS volume、AgentRuntime 和合成测试数据。每例完成后先保存证据，再执行该例的 cleanup；不得复用已经受过故障影响的 fixture。
+两例必须顺序执行并各自使用新的 Compose project、数据库 volume、NATS volume、AgentRuntime 和合成测试数据。每例完成后先保存证据，再执行该例的 cleanup；不得复用已经受过故障影响的 fixture。
 
 本文不是完整故障注入计划，也不是协议定义。以下场景明确不在本轮执行范围内：
 
 - 数据库 COMMIT acknowledgement 不确定；
 - Tool 外部副作用前后崩溃；
+- hosted Turn 精确暂停后的 API SIGTERM、drain 与重启；
 - NATS slow/full、retention expiry、cursor expiry、dispatcher/SSE buffer overflow；
 - 直接 SQL corruption、非法持久化 shape 或 identity 注入；
 - 真实 compaction producer、阈值策略、摘要 Hook 与 producer crash window。
 
-前四类由 `TODO.md` 的 P4a 后续测试基础设施负责；production compaction 策略/Hook 由 H5b 设计，producer 与 consumer 的产品/故障验收由 H5c 负责。本文件不得据此把这些场景记为通过，也不得为执行它们增加公开 debug endpoint、生产 failpoint、特殊协议字段或第二套状态。
+前五类由 `TODO.md` 的 P4a 后续测试基础设施负责；其中 API SIGTERM 必须等 scripted LLM/可观察 Tool 能稳定制造 hosted slow/pending Turn、process controller 能锁定精确进程与边界后再执行，不能继续依赖真实 provider 的偶然时序。production compaction 策略/Hook 由 H5b 设计，producer 与 consumer 的产品/故障验收由 H5c 负责。本文件不得据此把这些场景记为通过，也不得为执行它们增加公开 debug endpoint、生产 failpoint、特殊协议字段或第二套状态。
 
 执行任一 fixture 前，必须先按 [ALPHA_TEST.md](ALPHA_TEST.md) 的“本地 provider secret 配置”生成 Git 忽略的 `.stratum/alpha/config.toml` 与 Compose override。下文每条 Compose 命令都显式传入该 override；缺失文件或空 credential 时不得开始故障注入。
 
 ## 共同安全边界
 
-1. 只允许使用本文给出的三个精确 Compose project name。执行 `down -v` 前必须先用同一 project name 运行 `podman compose ... ps`，确认目标是本例 fixture。
-2. 同一时刻只启动一个 fixture，避免三个 project 争用 `5173`、`18080`、`4222` 和 `8222` 端口。
+1. 只允许使用本文给出的两个精确 Compose project name。执行 `down -v` 前必须先用同一 project name 运行 `podman compose ... ps`，确认目标是本例 fixture。
+2. 同一时刻只启动一个 fixture，避免两个 project 争用 `5173`、`18080`、`4222` 和 `8222` 端口。
 3. 使用合成 prompt、低权限限额测试 provider key 和可丢弃资源。真实 key 只从安全环境变量生成前述本地未跟踪配置，不写入本文、日志或 Git；API 不会直接读取 `DEEPSEEK_API_KEY`。
 4. 故障注入前必须记录 Git commit、容器 ID、AgentRuntimeId、AgentId、SessionId、TurnId、当前状态和 `last_event_seq`。
 5. 证据不得包含 prompt、message content、summary、Tool arguments/result、provider body、API key、token、连接字符串或其他凭据。
@@ -184,74 +184,7 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml down -v --remove-orphans
 ```
 
-确认该 project 已完全清理，再开始 F03。
-
-## F03 — API SIGTERM / restart
-
-### 独立 fixture
-
-```sh
-podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml up -d --build
-podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
-```
-
-等待全部服务健康。在 Web 创建本例专用 AgentRuntime并完成一个安全基线 Turn。随后提交一个足够长的新 Turn，并立即记录其 AgentRuntimeId、SessionId、TurnId、command status 和 SIGTERM 前的 durable oracle。发送 SIGTERM 前必须确认 exact Turn 仍为 durable `running`，且页面/command 时间线证明它仍由当前 API hosting；若已经 terminal，本次记为未执行并使用 fresh AgentRuntime 重试。由于 stock provider 的完成时序不可强制，信号发出后仍接受“Turn 在 drain 内完成”和“重启后保持 running/unhosted”两种 durable 线性化结果。
-
-### 唯一故障
-
-只向 `stratum-api` 主进程发送 SIGTERM：
-
-```sh
-podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml kill --signal SIGTERM stratum-api
-```
-
-不得使用 SIGKILL，不得同时停止 Postgres、NATS 或 Web，也不得缩短 drain timeout、暂停 provider 或增加 shutdown failpoint。
-
-### 操作
-
-1. 发送 SIGTERM，记录发送时间、API 容器退出时间和退出状态；确认 Postgres 与 NATS 全程保持健康。
-2. API 不可用期间刷新或观察 Web，记录连接中断表现；不要提交第二种故障。
-3. 使用同一 Compose project 重启 API，并等待 health 恢复：
-
-   ```sh
-   podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml up -d stratum-api
-   podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
-   ```
-
-4. 硬刷新 Web，从 recent conversation 列表显式重选同一 AgentRuntime，再读取 view、fixed-barrier history 和安全 SQL oracle。
-5. 若 exact Turn 已有 durable terminal，只验证该结果且不得 resume；若仍为 `running + unhosted`，确认页面要求显式 Resume，再对同一 Turn执行一次 resume。
-6. 两个分支都再次读取 view/history/SQL；只有实际执行了 resume 的分支才检查 resume 后没有第二个 `LoopStarted` 或重复 terminal。
-
-### Durable oracle
-
-- 进程 shutdown 不等于业务 cancellation；仅因 SIGTERM 不得写入 `LoopCancelled` 或持久化 cancel intent。
-- drain deadline 内已经提交的 transaction永久保留；未提交 transaction整体回滚且不消耗 `event_seq`。
-- 合法结果只能是：原 Turn 已提交唯一 terminal，或同一 Turn 保持 durable `running` 并在重启后成为 unhosted、等待显式 resume。
-- 重启和 resume 沿用原 AgentRuntimeId、AgentId、SessionId、TurnId 与 runtime snapshot，不追加第二个 `LoopStarted`，event sequence保持连续。
-
-### 用户可见 oracle
-
-- 页面不得仅因 SIGTERM 或连接中断推断 cancelled、failed 或 finished；若 drain 期间 Postgres 已提交真实 terminal，页面可以并应显示该 durable 终态，否则保持 running/暂不可用。
-- 重启后仍进入同一对话；若 durable terminal已存在则显示该终态，若仍在运行则明确显示 Resume，而不是自动接管。
-- 最终没有重复 assistant message、ghost draft、重复 terminal 或新建的替代 AgentRuntime。
-
-### 证据
-
-- SIGTERM 前后和重启后的 `podman compose ... ps`、API 容器 ID、退出状态与时间线；
-- Postgres/NATS 全程健康的记录，以及 API live/ready 从不可用到恢复的记录；
-- SIGTERM 前后安全 SQL 查询、barrier 和完整 event type 序列；
-- 是否存在 terminal、是否需要 explicit resume及 resume HTTP status；
-- 连接中断、重启后同一对话和最终状态的页面截图；
-- 只含安全 metadata 的 shutdown/drain/API 日志片段。
-
-### Cleanup
-
-```sh
-podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
-podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/compose.override.yml down -v --remove-orphans
-```
-
-确认该 project 的容器、network 和数据 volume 已清理。
+确认该 project 已完全清理，本轮 stock Compose 外部故障即执行完毕。API SIGTERM/drain/restart 的确定性场景由 `TODO.md` P4a 接管。
 
 ## 本轮完成判定
 
@@ -259,8 +192,7 @@ podman compose -p stratum-alpha-fi-api -f docker-compose.yml -f .stratum/alpha/c
 
 1. F01 证明 NATS 故障只降级 realtime，durable truth最终从 PG 收敛；
 2. F02 证明 Postgres 故障使核心读写 fail closed，恢复后 sequence 与 identity连续；
-3. F03 证明 SIGTERM/restart不伪造业务 cancellation，并保留 exact Turn恢复语义；
-4. 三例均使用独立 fixture、单一故障并完成 cleanup；
-5. 所有证据满足本文的脱敏边界。
+3. 两例均使用独立 fixture、单一故障并完成 cleanup；
+4. 所有证据满足本文的脱敏边界。
 
 执行结果还必须回填 `ALPHA_TEST.md` 的中央结果表。该结论不覆盖 P4a、H5b 或 H5c 延期的任何场景。

@@ -146,5 +146,7 @@ export type ConversationAction =
   | { type: "cancel_requested" }
   | { type: "realtime_degraded"; degraded: boolean }
   | { type: "recovery_ready" }
+  | { type: "operation_error"; error: ApiError }
+  | { type: "operation_succeeded" }
   | { type: "connection_error"; error: ApiError }
   | { type: "missing"; error: ApiError | null }

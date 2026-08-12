@@ -11,12 +11,10 @@ import {
   Pencil,
   RefreshCw,
   RotateCcw,
-  TriangleAlert,
 } from "lucide-react"
 import { Streamdown } from "streamdown"
 
 import type { ConversationMessage } from "@/components/stratum/conversation/types"
-import { Notice } from "@/components/stratum/conversation/notice"
 import { Reasoning } from "@/components/stratum/conversation/reasoning"
 import { ToolGroup } from "@/components/stratum/conversation/tool-group"
 import { useSmoothText } from "@/hooks/use-smooth-text"
@@ -278,28 +276,6 @@ export const AssistantMessage = memo(function AssistantMessage({
           {renderedBody}
         </Streamdown>
       </div>
-      {message.status === "error" ? (
-        <Notice
-          tone="error"
-          icon={TriangleAlert}
-          className="mt-2"
-          action={
-            onReload ? (
-              <Button
-                variant="outline"
-                size="xs"
-                className="shrink-0 rounded-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                onClick={() => onReload(message)}
-              >
-                <RotateCcw aria-hidden />
-                重试
-              </Button>
-            ) : undefined
-          }
-        >
-          生成中断，以上内容不完整。
-        </Notice>
-      ) : null}
       <div className="mt-1.5 flex min-h-7 items-center gap-1">
         {versions ? (
           <BranchPicker
@@ -313,7 +289,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             message={message}
             body={body}
             visible={Boolean(isLast)}
-            onReload={message.status === "error" ? undefined : onReload}
+            onReload={onReload}
           />
         ) : null}
       </div>

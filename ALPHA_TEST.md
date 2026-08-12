@@ -25,7 +25,7 @@
 - SQL corruption、非法 durable shape、compaction pointer 损坏；
 - compaction 线上触发与 summary Hook。当前 production composition 尚未注册 compaction Hook。
 
-当前 stock Compose 可执行的三个外部故障——F01 NATS stop/recover、F02 Postgres stop/recover、F03 API SIGTERM/restart——见 [ALPHA_FAULT_INJECTION.md](ALPHA_FAULT_INJECTION.md)。上面列出的精确 COMMIT、Tool crash、slow/full/expiry/overflow 与 SQL corruption 场景延期到 [TODO.md](TODO.md) 的 P4a；production compaction 策略与 Hook 延期到 H5b，对应产品/故障验收延期到 H5c。完成本文档不会自动完成 OpenSpec `10.4` 或 `10.12`。
+当前 stock Compose 可执行的两个外部故障——F01 NATS stop/recover、F02 Postgres stop/recover——见 [ALPHA_FAULT_INJECTION.md](ALPHA_FAULT_INJECTION.md)。上面列出的精确 COMMIT、Tool crash、hosted slow/pending Turn 上的 API SIGTERM、slow/full/expiry/overflow 与 SQL corruption 场景延期到 [TODO.md](TODO.md) 的 P4a；production compaction 策略与 Hook 延期到 H5b，对应产品/故障验收延期到 H5c。完成本文档不会自动完成 OpenSpec `10.4` 或 `10.12`。
 
 已经能由单元测试或 crate-local ignored integration test 确定性覆盖的行为，不在这里重复手工模拟。本文档只补真实 Compose 进程、真实浏览器和真实 provider 边界的证据。
 
@@ -36,7 +36,7 @@
 3. 只使用合成测试数据。prompt、Echo arguments/result、approval 和完整 conversation 会持久化；当前没有 delete API。真实 LLM 会外发上下文并产生费用，只能使用低权限、限额测试 key。
 4. 真实 provider key、token、数据库连接凭据和本地 secret 配置不得加入 Git。证据中不得出现它们的值。
 5. 证据不得保存原始 prompt、assistant 正文、reasoning、Echo arguments/result、provider body、SQL connection string 或 credential。截图必须裁切或遮盖正文，只保留状态、控件和安全 identity。
-6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `TODO.md` 的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F03 扩大范围。
+6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `TODO.md` 的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F02 扩大范围。
 7. 每条 journey 都创建自己的 fresh AgentRuntime；不得复用其他 journey 的 AgentRuntime、Session、Turn、Approval 或浏览器恢复状态。某条 journey 的结果不得作为另一条的 fixture。
 8. J04 的 approve 与 reject 分别使用两个 fresh AgentRuntime，避免第一条路径留下的 Turn/history 影响第二条。
 9. journey 之间可以复用同一健康的 disposable Compose stack，但开始前必须重新确认服务身份与 health；任何被手工篡改或发生未知状态的 stack 都必须丢弃重建。
@@ -188,14 +188,14 @@ WHERE actual.event_seq IS NULL;
 
 | ID | Journey | Fresh runtime 数 | 主要验证面 | 结果 |
 |---|---|---:|---|---|
-| J01 | Compose health、catalog 与 Web | 1 | 部署入口与创建 | [ ] |
-| J02 | 普通 LLM Turn | 1 | message、SSE、durable terminal | [ ] |
-| J03 | 硬刷新后的 Postgres 恢复 | 1 | cold bootstrap 与去重 | [ ] |
-| J04 | Echo approval approve/reject | 2 | 两种审批决定 | [ ] |
-| J05 | Pending approval 跨 API 重启恢复 | 1 | refresh、resolve、explicit resume | [ ] |
-| J06 | Pending cancel 等待 durable terminal | 1 | 内存级 cancel 语义 | [ ] |
-| J07 | 超过一页的 history | 1 | 向上分页 | [ ] |
-| J08 | 同 AgentId 多 AgentRuntime 隔离 | 2 | identity、ledger、realtime 隔离 | [ ] |
+| J01 | Compose health、catalog 与 Web | 1 | 部署入口与创建 | [x] |
+| J02 | 普通 LLM Turn | 1 | message、SSE、durable terminal | [x] |
+| J03 | 硬刷新后的 Postgres 恢复 | 1 | cold bootstrap 与去重 | [x] |
+| J04 | Echo approval approve/reject | 2 | 两种审批决定 | [x] |
+| J05 | Pending approval 跨 API 重启恢复 | 1 | refresh、resolve、explicit resume | [x] |
+| J06 | Pending cancel 等待 durable terminal | 1 | 内存级 cancel 语义 | [x] |
+| J07 | 超过一页的 history | 1 | 向上分页 | [x] |
+| J08 | 同 AgentId 多 AgentRuntime 隔离 | 2 | identity、ledger、realtime 隔离 | [x] |
 
 ## J01 — Compose health、catalog 与 Web
 
@@ -395,25 +395,24 @@ WHERE actual.event_seq IS NULL;
 
 | ID | Commit | AgentRuntimeId | 结果（PASS/FAIL/BLOCKED） | Evidence | Issue / 备注 |
 |---|---|---|---|---|---|
-| J01 |  |  |  |  |  |
-| J02 |  |  |  |  |  |
-| J03 |  |  |  |  |  |
-| J04-A |  |  |  |  |  |
-| J04-R |  |  |  |  |  |
-| J05 |  |  |  |  |  |
-| J06 |  |  |  |  |  |
-| J07 |  |  |  |  |  |
-| J08-A |  |  |  |  |  |
-| J08-B |  |  |  |  |  |
-| F01 |  |  |  |  |  |
-| F02 |  |  |  |  |  |
-| F03 |  |  |  |  |  |
+| J01 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M01 |
+| J02 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M02 |
+| J03 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M03 |
+| J04-A | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M04 approve |
+| J04-R | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M04 reject |
+| J05 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M05 |
+| J06 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M06 |
+| J07 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M07 |
+| J08-A | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M08 runtime A |
+| J08-B | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M08 runtime B |
+| F01 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | NATS stop/recover |
+| F02 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | Postgres stop/recover |
 
 ## 本清单结束条件
 
 只有以下条件同时成立，本文档所代表的当前 Alpha 人工端到端验收才算完成：
 
-1. J01—J08 与 F01—F03 全部在同一目标 Git commit 上 PASS；F01—F03 的步骤与详细证据保存在 `ALPHA_FAULT_INJECTION.md`，本表只汇总结果。
+1. J01—J08 与 F01—F02 全部在同一 PR head 对应的工作树上 PASS；F01—F02 的步骤与详细证据保存在 `ALPHA_FAULT_INJECTION.md`，本表只汇总结果。
 2. 每条 journey 使用自己的 fresh AgentRuntime；J04 approve/reject 与 J08 两个 runtime 的证据分别可追踪。
 3. J02 证明普通 LLM Turn 从 Web command、realtime 到 durable terminal 完整收敛。
 4. J03 证明硬刷新从 Postgres 恢复且没有重复 message 或 ghost draft。
@@ -426,4 +425,4 @@ WHERE actual.event_seq IS NULL;
 11. 相关 Rust、real Postgres/NATS/API integration、Web test/typecheck/lint/build 与 OpenSpec strict validation 仍保持通过。
 12. 证据满足脱敏规则，未提交 provider key、本地 secret 配置或用户/Tool 敏感正文。
 
-本文档的 J01—J08 只对应当前 production-like 人工 journey；F01—F03 是否完成，以 `ALPHA_FAULT_INJECTION.md` 为准，本文件中央表只汇总结果。P4a 精确故障测试基建、H5b production compaction 策略/Hook 与 H5c 产品/故障验收仍以 `TODO.md` 为准。在当前独立 gate 满足前，不得仅凭 J01—J08 把 OpenSpec `10.4` 或 `10.12` 标记完成。
+本文档的 J01—J08 只对应当前 production-like 人工 journey；F01—F02 是否完成，以 `ALPHA_FAULT_INJECTION.md` 为准，本文件中央表只汇总结果。P4a 精确故障测试基建（含确定性 API SIGTERM/drain/restart）、H5b production compaction 策略/Hook 与 H5c 产品/故障验收仍以 `TODO.md` 为准。在当前独立 gate 满足前，不得仅凭 J01—J08 把 OpenSpec `10.4` 或 `10.12` 标记完成。

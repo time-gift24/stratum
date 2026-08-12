@@ -48,6 +48,7 @@ export default function ConversationPage() {
     sendMessage,
     cancel,
     resume,
+    reconnect,
     resolveApproval,
     loadOlderHistory,
   } = useAgentConversation()
@@ -92,7 +93,8 @@ export default function ConversationPage() {
     resolveApproval
   )
 
-  // 冷段（timeline 落成部分）+ 热段（draft/实时 tools/连接错误）；
+  // 冷段（timeline 落成部分）+ 热段（draft/实时 tools）；运行错误统一在
+  // composer 上方的 Notice 展示，绝不伪装成 assistant 消息污染正文。
   // 流式 token 每帧只重跑热段，settled 视图经 WeakMap 缓存复用引用
   const settled = useMemo(
     () =>
@@ -111,19 +113,9 @@ export default function ConversationPage() {
         state.drafts,
         state.tools,
         state.view?.status,
-        state.phase,
-        state.error,
         approvals.entries
       ),
-    [
-      settled,
-      state.drafts,
-      state.tools,
-      state.view?.status,
-      state.phase,
-      state.error,
-      approvals.entries,
-    ]
+    [settled, state.drafts, state.tools, state.view?.status, approvals.entries]
   )
 
   const [sendVersion, setSendVersion] = useState(0)
@@ -174,7 +166,10 @@ export default function ConversationPage() {
               resumeRequired={state.view?.resume_required === true}
               realtimeDegraded={state.realtimeDegraded}
               cancelRequested={state.cancelRequested}
+              phase={state.phase}
+              error={state.error}
               onResume={() => void resume()}
+              onReconnect={reconnect}
               onCancel={() => void cancel()}
               value={composerValue}
               onChange={setComposerValue}

@@ -400,6 +400,7 @@ session 查询、server 语境并发调优和三引擎碎片被否决。后续�
 - [ ] 实现 disposable Postgres malformed-fixture builder：只面向带明确测试标记的独立 database，以 fresh AgentRuntime 一次构造一种 missing/malformed companion、非法 retained pointer、unsupported event version/payload、foreign identity 或 high-water/ledger inconsistency；每例保存安全只读 oracle 后重建 database，禁止连接共享/生产地址，也禁止把该入口编进 production binary。
 - [ ] 实现 NATS fault/retention fixture：覆盖不可用、慢 publish、publish loss、有界队列压力、retention eviction、cursor expiry 与 stream generation 重建，且每次使用独立 stream。
 - [ ] 实现 process controller：只操作精确 PID/容器身份，支持启动、等待安全边界、暂停、终止、SIGTERM 和使用同一 PG/NATS 重启，不使用宽泛进程匹配。
+- [ ] 在 scripted LLM/可观察 Tool 能确定性维持 hosted slow/pending Turn 后，执行 API SIGTERM/drain/restart 矩阵：分别固定 drain 内唯一 terminal 与重启后 `running + unhosted` 两条线性化结果，验证不伪造 cancellation、explicit resume 沿用原 identity、无第二个 `LoopStarted`/terminal；不得再用真实 provider 的偶然慢响应充当前置。
 - [ ] 实现统一证据采集：只记录安全 identity、event type/version/sequence、state high-water、HTTP status/error code、cursor 行为和用户可见结果；输出可对比、可关联 CI，禁止 payload、prompt、Tool arguments/result、summary、provider body 与 secret。
 - [ ] 所有精确暂停与故障开关必须留在 test binary、proxy 或容器 fixture 中；禁止向 production binary 加入 failpoint、debug endpoint、绕过安全边界的管理入口或第二套状态/真相源。
 

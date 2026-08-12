@@ -15,6 +15,7 @@ import type {
   AgentRuntimeView,
   LlmTelemetryEventV1,
 } from "@/lib/stratum/api"
+import { ApiError } from "@/lib/stratum/api"
 
 const RUNTIME_ID = "runtime-1"
 const AGENT_ID = "agent-definition-1"
@@ -427,6 +428,101 @@ describe("conversationReducer volatile telemetry", () => {
 })
 
 describe("conversationReducer history and approvals", () => {
+  it("keeps an operation error out of lifecycle state and clears it after a message is accepted", () => {
+    let state = readyState(
+      runtimeView({ status: "finished", snapshot_event_seq: "8" })
+    )
+    state = conversationReducer(state, {
+      type: "operation_error",
+      error: new ApiError(
+        "store_unavailable",
+        503,
+        "unable to connect to the Stratum backend"
+      ),
+    })
+    expect(state.phase).toBe("ready")
+    expect(state.error?.code).toBe("store_unavailable")
+
+    const next = conversationReducer(state, {
+      type: "turn_accepted",
+      agentRuntimeId: RUNTIME_ID,
+      agentId: AGENT_ID,
+      turnId: "turn-2",
+    })
+
+    expect(next.phase).toBe("ready")
+    expect(next.error).toBeNull()
+    expect(next.acceptedTurnId).toBe("turn-2")
+  })
+
+  it("clears an operation error after a successful PG reconcile", () => {
+    let state = readyState(runtimeView({ snapshot_event_seq: "7" }))
+    state = conversationReducer(state, {
+      type: "operation_error",
+      error: new ApiError(
+        "store_unavailable",
+        503,
+        "unable to connect to the Stratum backend"
+      ),
+    })
+
+    const next = conversationReducer(state, {
+      type: "view_reconciled",
+      basePgConfirmedEventSeq: "7",
+      view: runtimeView({ snapshot_event_seq: "8" }),
+      items: [],
+    })
+
+    expect(next.phase).toBe("ready")
+    expect(next.error).toBeNull()
+    expect(next.pgConfirmedEventSeq).toBe("8")
+  })
+
+  it("clears a cold connection error when recovery becomes ready", () => {
+    let state = readyState()
+    state = conversationReducer(state, {
+      type: "connection_error",
+      error: new ApiError("connection_error", 0, "connection failed"),
+    })
+
+    const next = conversationReducer(state, { type: "recovery_ready" })
+
+    expect(next.phase).toBe("ready")
+    expect(next.error).toBeNull()
+  })
+
+  it("clears an operation error after a successful idempotent command", () => {
+    let state = readyState()
+    state = conversationReducer(state, {
+      type: "operation_error",
+      error: new ApiError("store_unavailable", 503, "database unavailable"),
+    })
+
+    const next = conversationReducer(state, { type: "operation_succeeded" })
+
+    expect(next.phase).toBe("ready")
+    expect(next.error).toBeNull()
+  })
+
+  it("clears server-derived conversation state when the runtime is missing", () => {
+    let state = readyState(runtimeView({ snapshot_event_seq: "8" }), [
+      record("8", userMessage("stale message")),
+    ])
+    state = conversationReducer(state, {
+      type: "telemetry_frame",
+      frame: telemetryFrame("0", { type: "llm_started" }),
+    })
+
+    const next = conversationReducer(state, { type: "missing", error: null })
+
+    expect(next).toEqual({
+      ...initialConversationState,
+      agentRuntimeId: RUNTIME_ID,
+      phase: "missing",
+      error: null,
+    })
+  })
+
   it("strict history consumption only renders message, compaction, and safe terminal markers", () => {
     const state = readyState(
       runtimeView({ snapshot_event_seq: "20", status: "running" }),
