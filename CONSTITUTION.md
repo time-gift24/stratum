@@ -1,8 +1,8 @@
 # CONSTITUTION.md — Stratum 项目宪法
 
 > 本文件为项目级 AI 编码与审查规范，是 `constitution-review` skill 的审查依据。
-> 技术栈：Rust workspace（edition 2024, rust 1.88）+ Axum（仅 stratum-api）+ Tokio + tracing + Postgres（唯一执行真相）+ NATS（仅短期实时 tail）。
-> 前端（stratum-web）规范不在本文件范围，见 `PRODUCT.md` 与 `stratum-web/DESIGN.md`。
+> 技术栈：Rust workspace（edition 2024, rust 1.88）+ Axum（仅 stratum-api）+ Tokio + tracing + Postgres（唯一执行真相）+ NATS（仅短期实时 tail）；前端为 Next.js + React。
+> 前端产品与视觉约束见 `PRODUCT.md`、`stratum-web/DESIGN.md`；React / Next.js 实现与审查同时使用 `$vercel-react-best-practices`（`.agents/skills/vercel-react-best-practices/SKILL.md`）。本宪法 §14 收录必须执行的前端子集。
 > Rust 编码的深度规则（265 条）以 `.agents/skills/rust-skills/` 为参考；本宪法收录其中必须强制执行的子集。
 > 审查时遇到本文件未覆盖的 Rust 细节问题，参照 rust-skills 检视并归入 `suggestion` 或 `constitution-gap`。
 
@@ -182,6 +182,17 @@
 
 ---
 
+## 14. 前端架构与性能（强制）
+
+- 编写、审查或重构 React / Next.js 代码时，必须使用 `$vercel-react-best-practices`（`.agents/skills/vercel-react-best-practices/SKILL.md`）；依次优先检查请求瀑布、bundle 与动态加载、Server / Client 边界、数据获取、重渲染和渲染热路径。
+- 页面与 route component 必须保持薄，只负责路由参数、页面级编排和稳定边界。复杂界面按职责拆成命名清晰的组件；可复用的状态与副作用编排下沉到 Hook，纯业务转换与状态机下沉到 feature 模块，禁止把数据请求、业务状态机、复杂转换和大段 JSX 堆进同一组件形成面条代码。
+- 组件化以职责边界、复用价值或隔离重渲染为依据；禁止只为缩短文件而制造无语义的 wrapper。禁止在组件内部定义子组件；交互副作用放事件处理器，可派生状态在 render 阶段计算，Effect 只用于与外部系统同步。
+- 独立异步工作必须尽早启动并并行等待，禁止无依赖的串行 `await`；重型且非首屏必需的客户端模块使用静态可分析的动态 import，避免无收益的 barrel import 与整包加载。
+- `stratum-web/app/globals.css` 必须保持简洁，只允许全局 reset / base、设计 token 与主题、真正跨页面的基础规则，以及无法局部化的第三方样式入口。功能专属选择器、单页布局、组件细节和一次性动画必须放在使用方、CSS Module 或局部样式中；新增全局规则时必须能说明其全局作用域，并同步删除失效规则。
+- 前端逻辑改动必须通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与 `pnpm build`；性能修复应以可复现的关键路径、bundle 或渲染证据为依据，禁止无测量的投机性 memo / cache / abstraction。
+
+---
+
 ## 附录：禁止清单（Red Flags）
 
 以下代码在 Review 中必须一票否决：
@@ -199,3 +210,4 @@
 - [ ] 生产环境 `allow_any_origin()`
 - [ ] 真实密钥 / 凭据提交入库
 - [ ] 生产环境 `RUST_LOG=debug` 或 `trace`
+- [ ] 功能专属或单页样式无正当理由堆入 `stratum-web/app/globals.css`

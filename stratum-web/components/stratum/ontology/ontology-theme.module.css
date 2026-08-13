@@ -1,0 +1,86 @@
+/**
+ * xyflow 主题映射：把 @xyflow/react 的 CSS 变量改接到产品语义 token
+ * （globals.css 唯一来源），亮暗两态共用一套规则、随 .dark 自动切换。
+ * 不写死任何色值；不复用 legacy canvas tokens（--canvas-grid / --edge / --port-* /
+ * --node-aurora）。规则不进 @layer（与 excalidraw-theme.module.css 同约定），
+ * 保证压过三方样式。
+ *
+ * 自定义节点/边本体（ontology-node.tsx / ontology-edge.tsx）直接用 Tailwind
+ * 语义类；本模块只负责 xyflow 壳层：背景图案、连线、句柄、Controls、MiniMap、
+ * 框选与 attribution。
+ */
+
+.theme :global(.react-flow) {
+  /* 画布底色透出容器（--background），与 Excalidraw 透明画布同策略 */
+  --xy-background-color: transparent;
+
+  /* 连线与连接过程线 */
+  --xy-edge-stroke: var(--muted-foreground);
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: var(--primary);
+  --xy-connectionline-stroke: var(--primary);
+
+  /* 连接句柄 */
+  --xy-handle-background-color: var(--muted-foreground);
+  --xy-handle-border-color: var(--card);
+
+  /* 框选 */
+  --xy-selection-background-color: color-mix(
+    in oklch,
+    var(--primary) 10%,
+    transparent
+  );
+  --xy-selection-border: 1px solid var(--primary);
+
+  /* Controls / MiniMap / Panel 浮岛表面 */
+  --xy-controls-button-background-color: var(--popover);
+  --xy-controls-button-background-color-hover: var(--muted);
+  --xy-controls-button-color: var(--popover-foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-minimap-background-color: var(--popover);
+  --xy-minimap-mask-background-color: color-mix(
+    in oklch,
+    var(--foreground) 12%,
+    transparent
+  );
+  --xy-minimap-node-background-color: color-mix(
+    in oklch,
+    var(--foreground) 28%,
+    var(--popover)
+  );
+  --xy-minimap-node-stroke: var(--border);
+  --xy-panel-background-color: var(--popover);
+  --xy-panel-color: var(--popover-foreground);
+  --xy-panel-border-color: var(--border);
+  --xy-attribution-background-color: transparent;
+}
+
+.theme :global(.react-flow__attribution) {
+  color: var(--muted-foreground);
+}
+
+.theme :global(.react-flow__controls) {
+  overflow: hidden;
+  border-radius: var(--radius);
+  box-shadow: 0 8px 30px color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+.theme :global(.react-flow__minimap) {
+  overflow: hidden;
+  border-radius: var(--radius);
+  box-shadow: 0 8px 30px color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+/* 422 违例边的描边（压在默认/选中规则之上由 BaseEdge className 触发） */
+.theme :global(.react-flow__edge-path.edgeViolation) {
+  stroke: var(--destructive);
+}
+
+/* 聚焦模式下淡出非邻域元素（节点透明度在组件内处理，边走这里） */
+.theme :global(.react-flow__edge.edgeDimmed) {
+  opacity: 0.25;
+}
+
+.theme :global(.react-flow__handle.connectingto) {
+  background: var(--primary);
+}

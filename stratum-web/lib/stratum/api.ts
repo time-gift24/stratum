@@ -19,6 +19,12 @@ import {
  * template version。durable identity 是 `(agent_runtime_id,event_seq)`；SSE
  * cursor 只是不透明、页面内存级的 NATS transport position。
  */
+import type {
+  OntologyDocument,
+  OntologyListPage,
+  OntologyNeighborhood,
+  OntologyViolation,
+} from "@/features/ontology-editor/types"
 
 export const STRATUM_API_BASE_URL =
   process.env.NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"
@@ -27,7 +33,8 @@ export class ApiError extends Error {
   constructor(
     readonly code: string,
     readonly status: number,
-    message: string
+    message: string,
+    readonly violations?: readonly OntologyViolation[]
   ) {
     super(message)
     this.name = "ApiError"
@@ -240,12 +247,53 @@ export type StratumApi = {
     approvalId: string,
     input: { turnId: string; decision: ApprovalDecision }
   ): Promise<void>
+  listOntologies(query?: {
+    page?: number
+    perPage?: number
+    sort?: string
+  }): Promise<OntologyListPage>
+  createOntology(input: {
+    name: string
+    displayName: string
+    description?: string
+  }): Promise<OntologyResource>
+  getOntology(ontologyId: string): Promise<OntologyResource>
+  replaceOntology(
+    ontologyId: string,
+    document: OntologyDocument,
+    etag: string
+  ): Promise<{ etag: string }>
+  deleteOntology(ontologyId: string, etag: string): Promise<void>
+  getObjectTypeNeighborhood(
+    ontologyId: string,
+    objectTypeId: string,
+    depth?: number
+  ): Promise<OntologyNeighborhood>
 }
 
-type ApiErrorBody = { error?: { code?: unknown; message?: unknown } }
+// 携带强 ETag 的 Ontology 资源读取结果（GET / POST 201）。
+export type OntologyResource = {
+  document: OntologyDocument
+  etag: string
+  location: string | null
+}
+
+type ApiErrorBody = {
+  error?: { code?: unknown; message?: unknown; violations?: unknown }
+}
 
 const isApiErrorBody = (value: unknown): value is ApiErrorBody =>
   typeof value === "object" && value !== null
+
+const isOntologyViolation = (value: unknown): value is OntologyViolation => {
+  if (typeof value !== "object" || value === null) return false
+  const violation = value as Record<string, unknown>
+  return (
+    typeof violation.code === "string" &&
+    typeof violation.path === "string" &&
+    typeof violation.message === "string"
+  )
+}
 
 export async function apiErrorFromResponse(
   response: Response
@@ -257,7 +305,19 @@ export async function apiErrorFromResponse(
       typeof body.error?.code === "string" &&
       typeof body.error.message === "string"
     ) {
-      return new ApiError(body.error.code, response.status, body.error.message)
+      const rawViolations = body.error.violations
+      // 过滤后为空时归一为 undefined：消费方以 `!== undefined` 判断是否存在 violations
+      const filtered = Array.isArray(rawViolations)
+        ? rawViolations.filter(isOntologyViolation)
+        : undefined
+      const violations =
+        filtered !== undefined && filtered.length > 0 ? filtered : undefined
+      return new ApiError(
+        body.error.code,
+        response.status,
+        body.error.message,
+        violations
+      )
     }
   } catch {
     // Invalid or missing error JSON intentionally receives the safe fallback.
@@ -316,6 +376,27 @@ export function createStratumApi(options: {
     })
     if (!response.ok) throw await apiErrorFromResponse(response)
     assertResponseStatus(response, expectedStatuses)
+  }
+
+  // Ontology 契约通过 ETag 头暴露强验证器；缺失即视为契约破坏。
+  const readEtag = (response: Response): string => {
+    const etag = response.headers.get("etag")
+    if (etag === null || etag === "")
+      throw new ApiError(
+        "invalid_response",
+        response.status,
+        "response is missing the etag header"
+      )
+    return etag
+  }
+
+  const readOntologyResource = async (
+    response: Response
+  ): Promise<OntologyResource> => {
+    if (!response.ok) throw await apiErrorFromResponse(response)
+    const etag = readEtag(response)
+    const document = (await response.json()) as OntologyDocument
+    return { document, etag, location: response.headers.get("location") }
   }
 
   return {
@@ -433,6 +514,60 @@ export function createStratumApi(options: {
         { turn_id: input.turnId, decision: input.decision },
         [204]
       ),
+    listOntologies: (query) => {
+      const search = new URLSearchParams()
+      if (query?.page !== undefined) search.set("page", String(query.page))
+      if (query?.perPage !== undefined)
+        search.set("per_page", String(query.perPage))
+      if (query?.sort !== undefined) search.set("sort", query.sort)
+      const suffix = search.size === 0 ? "" : `?${search}`
+      return request(
+        `/v1/ontologies${suffix}`,
+        (value) => value as OntologyListPage
+      )
+    },
+    createOntology: async (input) => {
+      const response = await fetcher(`${baseUrl}/v1/ontologies`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: input.name,
+          display_name: input.displayName,
+          ...(input.description === undefined
+            ? {}
+            : { description: input.description }),
+        }),
+      })
+      return readOntologyResource(response)
+    },
+    getOntology: async (ontologyId) => {
+      const response = await fetcher(`${baseUrl}/v1/ontologies/${ontologyId}`)
+      return readOntologyResource(response)
+    },
+    replaceOntology: async (ontologyId, document, etag) => {
+      const response = await fetcher(`${baseUrl}/v1/ontologies/${ontologyId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", "if-match": etag },
+        body: JSON.stringify(document),
+      })
+      if (!response.ok) throw await apiErrorFromResponse(response)
+      return { etag: readEtag(response) }
+    },
+    deleteOntology: async (ontologyId, etag) => {
+      const response = await fetcher(`${baseUrl}/v1/ontologies/${ontologyId}`, {
+        method: "DELETE",
+        headers: { "if-match": etag },
+      })
+      if (!response.ok) throw await apiErrorFromResponse(response)
+    },
+    getObjectTypeNeighborhood: (ontologyId, objectTypeId, depth) => {
+      const suffix =
+        depth === undefined ? "" : `?${new URLSearchParams({ depth: String(depth) })}`
+      return request(
+        `/v1/ontologies/${ontologyId}/object-types/${objectTypeId}/neighborhood${suffix}`,
+        (value) => value as OntologyNeighborhood
+      )
+    },
   }
 }
 

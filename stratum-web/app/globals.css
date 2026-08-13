@@ -87,12 +87,6 @@
     --port-positive: oklch(0.8 0.17 155);
     --port-negative: oklch(0.68 0.2 20);
     --port-image: oklch(0.72 0.13 240);
-    --node-aurora: linear-gradient(
-      90deg,
-      oklch(0.72 0.13 240 / 30%),
-      oklch(0.7 0.15 320 / 25%),
-      oklch(0.75 0.15 350 / 30%)
-    );
 }
 
 @theme inline {
