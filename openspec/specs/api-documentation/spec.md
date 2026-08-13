@@ -8,7 +8,7 @@
 
 The project SHALL generate its HTTP/event protocol documentation from utoipa annotations. `docs/PROTOCOL.md` 已随本 change 删除，不再存在任何手写协议文档；OpenAPI 输出是唯一权威。所有 HTTP 端点 MUST 有 `#[utoipa::path]` 注解，所有穿越边界的请求、响应、错误、SSE frame 与 product event 类型 MUST 有 `ToSchema` schema。
 
-OpenAPI 必须（SHALL）只把运行态资源记录为 AgentRuntime：`POST /v1/agent-runtimes`、`GET /v1/agent-runtimes/{agent_runtime_id}`、`POST /v1/agent-runtimes/{agent_runtime_id}/messages`、`GET /v1/agent-runtimes/{agent_runtime_id}/history`、`GET /v1/agent-runtimes/{agent_runtime_id}/events`、`POST /v1/agent-runtimes/{agent_runtime_id}/resume`、`POST /v1/agent-runtimes/{agent_runtime_id}/cancel` 与 `POST /v1/agent-runtimes/{agent_runtime_id}/approvals/{approval_id}`。连同 `GET /v1/agent-templates`、`GET /v1/models`、`GET /health/live` 与 `GET /health/ready`，文档必须（SHALL）覆盖全部 12 个端点。`/v1/agents/{agent_id}` 只保留给未来 immutable template-definition resource，本 change 不得（SHALL NOT）把它文档化为已实现 endpoint。
+OpenAPI 必须（SHALL）只把运行态资源记录为 AgentRuntime：`POST /v1/agent-runtimes`、`GET /v1/agent-runtimes/{agent_runtime_id}`、`POST /v1/agent-runtimes/{agent_runtime_id}/messages`、`GET /v1/agent-runtimes/{agent_runtime_id}/history`、`GET /v1/agent-runtimes/{agent_runtime_id}/events`、`POST /v1/agent-runtimes/{agent_runtime_id}/resume`、`POST /v1/agent-runtimes/{agent_runtime_id}/cancel` 与 `POST /v1/agent-runtimes/{agent_runtime_id}/approvals/{approval_id}`。连同 `GET /v1/agent-templates`、`GET /v1/models`、`GET /health/live` 与 `GET /health/ready`，文档必须（SHALL）至少覆盖上述 12 个 AgentRuntime/health 端点及 router 中全部已挂载的其他 HTTP operation。`/v1/agents/{agent_id}` 只保留给未来 immutable template-definition resource，本 change 不得（SHALL NOT）把它文档化为已实现 endpoint。
 
 create 的 `201 Created` schema 必须（SHALL）是不可变 `AgentRuntimeCreated`，只包含 `agent_runtime_id`、pinned `agent_id`、`agent_name`、`agent_version` 与 runtime `created_at`，并声明 `Location: /v1/agent-runtimes/{agent_runtime_id}`。view 的 `200 OK` schema 必须（SHALL）是 `AgentRuntimeView`，显式包含 runtime identity、pinned definition identity/metadata、status、`model_config`、nullable Session/current Turn、`snapshot_event_seq`、`telemetry_floor_event_seq`、pending approvals、latest usage 与 advisory `resume_required`。message 与 new resume 的 `202 Accepted` response 必须（SHALL）包含 exact `agent_runtime_id`、pinned `agent_id`、`session_id` 与 `turn_id`；cancel signal 的 `202` 以及 already-hosted/starting resume、exact already-cancelled 和 approval first/same retry 的 `204` 必须（SHALL）显式声明空 body `()`。所有公开 event sequence 字段必须（SHALL）以十进制字符串记录在 schema 中。
 
@@ -34,7 +34,7 @@ The service SHALL expose the generated OpenAPI document at `/api-docs/openapi.js
 #### Scenario: 获取 OpenAPI JSON
 
 - **WHEN** 服务运行中请求 `GET /api-docs/openapi.json`
-- **THEN** 返回覆盖上述全部 12 个端点及其 AgentRuntime request、success 与 error schemas 的 OpenAPI 3.x JSON
+- **THEN** 返回覆盖 router 中全部已挂载 HTTP operation 的 OpenAPI 3.x JSON
 
 #### Scenario: AgentRuntime 事件 Frame 可查阅
 
