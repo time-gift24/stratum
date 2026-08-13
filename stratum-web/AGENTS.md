@@ -13,7 +13,7 @@
 
 - `context-site/` 是独立的静态说明站点源码，不是 Next.js route，也不属于实际产品前端。它只生成根目录 `../CONTEXT.html`，供人和 Agent 离线阅读。
 - 人工维护内容只在 `context-site/content/context.ts` 与 `context-site/content/todo.ts`；生成的 `CONTEXT.html` 禁止手改。旧 `CONTEXT.md` / `TODO.md` 不得恢复。
-- context-site 可以单向读取 `app/globals.css` 的暗色语义 token 与本 workspace 已安装的 GSAP；正文使用系统中文字体栈，避免把产品字体完整内联进单文件制品。Next.js 产品代码不得反向导入 `context-site`。
+- context-site 可以单向读取 `app/globals.css` 的暗色语义 token 与本 workspace 已安装的 GSAP；正文使用系统中文字体栈，避免把产品字体完整内联进单文件制品。复杂关系图可以由 typed content 在构建期经 Mermaid CLI 编译为内联 SVG；仅使用系统 Chrome/Chromium，不下载或嵌入浏览器及 Mermaid runtime。Next.js 产品代码不得反向导入 `context-site`。
 - context-site 不得发起后端请求、不得读取真实运行数据、不得进入 `next build` 输出或 Web Docker 镜像。`.dockerignore` 必须持续排除该目录。
 - 更新内容或样式后运行 `pnpm build:context-site`；提交前运行 `pnpm check:context-site`。CI 对根制品做 byte-for-byte 校验。
 - 经 grilling 产生的内容只有在用户明确确认后才写入 typed source。领域结论写 `context.ts`，待办写 `todo.ts`；探索草稿、未确认推理与审查猜测不落盘。

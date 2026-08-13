@@ -39,6 +39,8 @@ jobs:
           cache-dependency-path: stratum-web/pnpm-lock.yaml
 
       - name: Install dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
         run: pnpm install --frozen-lockfile
 
       - name: Lint

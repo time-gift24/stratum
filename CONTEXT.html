@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0f0e">
   <title>Stratum 运行时现场手册</title>
-  <meta name="description" content="面向人与 Agent 协同开发的静态领域地图：沿一次 AgentRuntime 的运行路线解释事实、不变量、失败、恢复与尚未解决的风险。所有 ID 与事件均为合成示例。">
+  <meta name="description" content="给需要和 Agent 一起开发的人看的静态手册。先沿一条普通消息的运行路径认清名词，再继续看不变量、失败和恢复。所有 ID 与事件都是合成示例。">
   <style>:root {
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
@@ -728,6 +728,7 @@ main {
 }
 
 .route-visual,
+.kernel-map,
 .identity-map,
 .event-ledger,
 .journal-flow,
@@ -738,6 +739,536 @@ main {
   border-radius: var(--radius);
   background: var(--manual-surface-panel);
   box-shadow: 0 24px 70px var(--manual-shadow);
+}
+
+.kernel-map {
+  display: grid;
+  gap: 26px;
+  margin-bottom: 34px;
+  padding: clamp(22px, 3vw, 42px);
+}
+
+.kernel-map figcaption {
+  max-width: 72ch;
+  color: var(--manual-copy);
+  font-family: var(--font-reading);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.kernel-map__lane {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr) 88px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.kernel-map__lane--execute {
+  grid-template-columns: minmax(0, 1fr) 1fr minmax(0, 1fr);
+}
+
+.kernel-stage {
+  display: grid;
+  min-height: 172px;
+  align-content: start;
+  gap: 10px;
+  border: 1px solid var(--border-strong);
+  padding: 20px;
+}
+
+.kernel-stage > span,
+.kernel-map__cycle > span:first-child,
+.kernel-glossary header > span,
+.kernel-primer__invariant > span {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.kernel-stage strong {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.kernel-stage p {
+  margin: 0;
+  color: var(--manual-copy-muted);
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.kernel-stage[data-tone="fact"] {
+  border-color: var(--manual-fact-border);
+  background: var(--manual-fact-wash);
+}
+
+.kernel-stage[data-tone="internal"] {
+  border-color: color-mix(in srgb, var(--internal) 48%, var(--border));
+  background: var(--manual-internal-wash);
+}
+
+.kernel-stage[data-tone="recovery"] {
+  border-color: var(--manual-recovery-border);
+  background: color-mix(in srgb, var(--recovery) 7%, transparent);
+}
+
+.kernel-map__arrow {
+  position: relative;
+  align-self: center;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+.kernel-map__arrow::after {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--primary);
+  border-right: 1px solid var(--primary);
+  transform: rotate(45deg);
+  content: "";
+}
+
+.kernel-map__arrow span {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.kernel-map__cycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 0 auto;
+  border-bottom: 1px solid var(--manual-fact-border);
+  padding: 0 0 9px;
+  color: var(--primary);
+  font-size: 12px;
+}
+
+.kernel-map__cycle > span:last-child {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
+.kernel-map__tail {
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+}
+
+.kernel-map__tail strong {
+  color: var(--manual-copy-soft);
+  font-size: 13px;
+}
+
+.kernel-map__tail p {
+  max-width: 75ch;
+  margin: 7px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.react-loop {
+  margin: 0 0 38px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
+  padding: 32px 0;
+}
+
+.react-loop__heading,
+.react-loop__hooks > header,
+.react-loop__persistence > header {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.58fr) minmax(0, 1.42fr);
+  column-gap: 42px;
+  align-items: start;
+}
+
+.react-loop__heading > span,
+.react-loop__hooks > header > span,
+.react-loop__persistence > header > span,
+.react-loop__note > span {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.react-loop__heading h3,
+.react-loop__hooks h3,
+.react-loop__persistence h3 {
+  grid-column: 1;
+  margin: 10px 0 0;
+  font-size: clamp(1.45rem, 2.3vw, 2.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+.react-loop__heading p,
+.react-loop__hooks > header p,
+.react-loop__persistence > header p {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  max-width: 65ch;
+  margin: 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagram-intro {
+  max-width: 75ch;
+  margin: 28px 0 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagrams {
+  display: grid;
+  gap: 30px;
+  margin: 30px 0 34px;
+}
+
+.react-loop__diagram-panel {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 18px;
+}
+
+.react-loop__diagram-panel > header {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.58fr) minmax(0, 1.42fr);
+  gap: 18px 42px;
+  align-items: baseline;
+}
+
+.react-loop__diagram-panel > header > span {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.react-loop__diagram-panel h4 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: clamp(1.12rem, 1.8vw, 1.5rem);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.react-loop__diagram {
+  display: grid;
+  gap: 16px;
+  margin: 16px 0 0;
+  border: 1px solid var(--border-strong);
+  background: var(--manual-surface-panel);
+  padding: clamp(20px, 3vw, 38px);
+}
+
+.react-loop__diagram figcaption {
+  max-width: 74ch;
+  color: var(--manual-copy);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagram-scroll-hint {
+  display: none;
+  color: var(--manual-copy-muted);
+}
+
+.react-loop__hook dl dt {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.react-loop__mermaid {
+  overflow: auto;
+  overscroll-behavior-inline: contain;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #0d0f0e;
+  padding: 16px 0;
+}
+
+.react-loop__mermaid:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+
+.react-loop__mermaid svg {
+  display: block !important;
+  width: max(100%, 880px) !important;
+  min-width: 880px;
+  max-width: none !important;
+  height: auto;
+  margin: 0 auto;
+}
+
+.react-loop__mermaid .label,
+.react-loop__mermaid .nodeLabel,
+.react-loop__mermaid .edgeLabel {
+  color: var(--foreground) !important;
+  font-family: var(--font-sans) !important;
+}
+
+.react-loop__hook {
+  display: grid;
+  gap: 7px;
+}
+
+.react-loop__hook > strong {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__hook > p,
+.react-loop__hook dd {
+  margin: 0;
+  color: var(--manual-copy-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__hook dl {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+
+.react-loop__hook dl > div {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.react-loop__hook dt,
+.react-loop__hook dd {
+  margin: 0;
+}
+
+.react-loop__hooks,
+.react-loop__persistence {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 28px;
+}
+
+.react-loop__hooks > div {
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.react-loop__hooks .react-loop__hook {
+  grid-template-columns: minmax(160px, 0.65fr) minmax(0, 1.25fr) minmax(
+      210px,
+      0.9fr
+    );
+  align-items: start;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+}
+
+.react-loop__hooks .react-loop__hook > p {
+  color: var(--manual-copy);
+  font-size: 13px;
+}
+
+.react-loop__hooks .react-loop__hook dl {
+  margin: 0;
+}
+
+.react-loop__hooks .react-loop__hook dl > div {
+  grid-template-columns: 62px minmax(0, 1fr);
+}
+
+.react-loop__persistence {
+  margin-top: 32px;
+}
+
+.react-loop__ledger {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  margin-top: 24px;
+}
+
+.react-loop__ledger table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.react-loop__ledger th,
+.react-loop__ledger td {
+  border-top: 1px solid var(--border);
+  padding: 14px 16px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__ledger thead th {
+  border-top: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.react-loop__ledger tbody th {
+  width: 21%;
+  color: var(--manual-copy-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.react-loop__ledger td {
+  color: var(--manual-copy);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.react-loop__ledger td:nth-child(2) {
+  width: 35%;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.react-loop__note {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 24px;
+  border-top: 1px solid var(--manual-risk-border);
+  background: var(--manual-risk-wash);
+  padding: 17px 20px;
+}
+
+.react-loop__note > span {
+  color: var(--manual-risk-text);
+}
+
+.react-loop__note p {
+  margin: 0;
+  color: var(--manual-reading-strong);
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.kernel-glossary {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.5fr);
+  gap: 42px;
+  margin: 0 0 34px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
+  padding: 28px 0;
+}
+
+.kernel-glossary header h3 {
+  margin: 10px 0 0;
+  font-size: clamp(1.45rem, 2.3vw, 2.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.kernel-glossary header p {
+  margin: 14px 0 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.kernel-glossary dl {
+  margin: 0;
+}
+
+.kernel-glossary dl > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.52fr) minmax(0, 1fr) minmax(
+      150px,
+      0.78fr
+    );
+  gap: 18px;
+  border-top: 1px solid var(--border);
+  padding: 14px 0;
+}
+
+.kernel-glossary dl > div:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.kernel-glossary dt,
+.kernel-glossary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.kernel-glossary dt {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.kernel-glossary dd {
+  color: var(--manual-copy);
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.kernel-glossary dd:last-child {
+  color: var(--muted-foreground);
+}
+
+.kernel-glossary dd:last-child span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--manual-risk-text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.kernel-primer__invariant {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  margin: 0 0 24px;
+  border-top: 1px solid var(--manual-fact-border-invariant);
+  border-bottom: 1px solid var(--manual-fact-border-invariant-soft);
+  background: var(--manual-fact-invariant-surface);
+  padding: 18px 20px;
+}
+
+.kernel-primer__invariant > span {
+  color: var(--primary);
+}
+
+.kernel-primer__invariant p {
+  margin: 0;
+  color: var(--manual-reading-strong);
+  line-height: 1.6;
 }
 
 .route-visual {
@@ -1865,6 +2396,11 @@ main {
     height: 34px;
     justify-self: center;
   }
+
+  .kernel-glossary {
+    grid-template-columns: 1fr;
+    gap: 26px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -1957,15 +2493,90 @@ main {
   }
 
   .chapter-heading,
+  .react-loop__heading,
+  .react-loop__hooks > header,
+  .react-loop__persistence > header,
+  .react-loop__diagram-panel > header,
   .todo-hero,
   .deferred-boundaries {
     grid-template-columns: 1fr;
   }
 
   .route-visual,
+  .kernel-map,
   .identity-map,
   .compaction-modes {
     grid-template-columns: 1fr;
+  }
+
+  .kernel-map__lane,
+  .kernel-map__lane--execute {
+    grid-template-columns: 1fr;
+    gap: 0;
+    margin: 0;
+  }
+
+  .react-loop__heading p,
+  .react-loop__hooks > header p,
+  .react-loop__persistence > header p {
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 16px;
+  }
+
+  .kernel-map__arrow,
+  .route-arrow {
+    width: 1px;
+    height: 38px;
+    justify-self: center;
+    background: var(--manual-fact-border);
+  }
+
+  .kernel-map__arrow::after,
+  .route-arrow::after {
+    top: auto;
+    right: -3px;
+    bottom: 0;
+    left: auto;
+    transform: rotate(135deg);
+  }
+
+  .kernel-map__arrow span,
+  .route-arrow span {
+    right: auto;
+    bottom: auto;
+    left: 12px;
+    transform: translateY(-50%);
+  }
+
+  .kernel-map__cycle {
+    margin-left: 0;
+  }
+
+  .kernel-glossary dl > div {
+    grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1fr);
+  }
+
+  .kernel-glossary dd:last-child {
+    grid-column: 2;
+  }
+
+  .kernel-primer__invariant {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .react-loop__hooks .react-loop__hook {
+    grid-template-columns: minmax(160px, 0.6fr) minmax(0, 1fr);
+  }
+
+  .react-loop__hooks .react-loop__hook dl {
+    grid-column: 2;
+  }
+
+  .react-loop__note {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .route-visual {
@@ -2107,11 +2718,70 @@ main {
   }
 
   .route-visual,
+  .kernel-map,
   .identity-map,
   .journal-flow,
   .state-machine,
   .compaction-modes section {
     padding: 24px;
+  }
+
+  .kernel-map {
+    gap: 20px;
+  }
+
+  .react-loop {
+    padding: 26px 0;
+  }
+
+  .react-loop__diagram {
+    gap: 20px;
+    padding: 24px;
+  }
+
+  .react-loop__diagram-scroll-hint {
+    display: block;
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .react-loop__diagram-panel > header {
+    gap: 7px;
+  }
+
+  .react-loop__hooks .react-loop__hook {
+    grid-template-columns: 1fr;
+    gap: 9px;
+  }
+
+  .react-loop__hooks .react-loop__hook dl {
+    grid-column: auto;
+  }
+
+  .react-loop__hook dl > div,
+  .react-loop__hooks .react-loop__hook dl > div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .react-loop__ledger th,
+  .react-loop__ledger td {
+    padding: 13px 14px;
+  }
+
+  .kernel-stage {
+    min-height: 0;
+    padding: 18px;
+  }
+
+  .kernel-glossary dl > div {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .kernel-glossary dd:last-child {
+    grid-column: auto;
   }
 
   .event-ledger {
@@ -2196,7 +2866,7 @@ main {
   <a class="skip-link" href="#main-content">跳到正文</a>
   <div class="ambient-route" aria-hidden="true"><span></span><span></span><span></span></div>
   <header class="site-header">
-    <a class="brand" href="#context/first-principles"><span class="brand-mark" translate="no">S</span><span><strong translate="no">Stratum</strong><small>运行时现场手册</small></span></a>
+    <a class="brand" href="#context/kernel-map"><span class="brand-mark" translate="no">S</span><span><strong translate="no">Stratum</strong><small>运行时现场手册</small></span></a>
     <div class="surface-tabs" role="tablist" aria-label="知识视图">
       <button id="tab-context" type="button" role="tab" aria-controls="surface-context" aria-selected="true" data-surface-tab="context">领域手册</button>
       <button id="tab-todo" type="button" role="tab" aria-controls="surface-todo" aria-selected="false" data-surface-tab="todo">工程待办</button>
@@ -2204,7 +2874,7 @@ main {
     <div class="build-stamp"><span>只读制品</span><code translate="no">3995205</code></div>
   </header>
   <nav class="side-dock" aria-label="当前视图章节">
-    <div data-dock-panel="context"><a href="#context/first-principles" data-nav-target="first-principles" aria-label="第一性模型"><span class="dock-glyph" aria-hidden="true">第</span><span class="dock-tooltip">第一性模型</span></a><a href="#context/identity-runtime" data-nav-target="identity-runtime" aria-label="身份与运行"><span class="dock-glyph" aria-hidden="true">身</span><span class="dock-tooltip">身份与运行</span></a><a href="#context/context-iteration" data-nav-target="context-iteration" aria-label="上下文与迭代"><span class="dock-glyph" aria-hidden="true">上</span><span class="dock-tooltip">上下文与迭代</span></a><a href="#context/hooks-journal" data-nav-target="hooks-journal" aria-label="Hook 与 Journal"><span class="dock-glyph" aria-hidden="true">H</span><span class="dock-tooltip"><span translate="no">Hook</span> 与 Journal</span></a><a href="#context/crash-recovery" data-nav-target="crash-recovery" aria-label="崩溃与恢复"><span class="dock-glyph" aria-hidden="true">崩</span><span class="dock-tooltip">崩溃与恢复</span></a><a href="#context/compaction-risk" data-nav-target="compaction-risk" aria-label="压缩与风险"><span class="dock-glyph" aria-hidden="true">压</span><span class="dock-tooltip">压缩与风险</span></a></div>
+    <div data-dock-panel="context"><a href="#context/kernel-map" data-nav-target="kernel-map" aria-label="核心结构"><span class="dock-glyph" aria-hidden="true">核</span><span class="dock-tooltip">核心结构</span></a><a href="#context/first-principles" data-nav-target="first-principles" aria-label="第一性模型"><span class="dock-glyph" aria-hidden="true">第</span><span class="dock-tooltip">第一性模型</span></a><a href="#context/identity-runtime" data-nav-target="identity-runtime" aria-label="身份与运行"><span class="dock-glyph" aria-hidden="true">身</span><span class="dock-tooltip">身份与运行</span></a><a href="#context/context-iteration" data-nav-target="context-iteration" aria-label="上下文与迭代"><span class="dock-glyph" aria-hidden="true">上</span><span class="dock-tooltip">上下文与迭代</span></a><a href="#context/hooks-journal" data-nav-target="hooks-journal" aria-label="Hook 与 Journal"><span class="dock-glyph" aria-hidden="true">H</span><span class="dock-tooltip"><span translate="no">Hook</span> 与 Journal</span></a><a href="#context/crash-recovery" data-nav-target="crash-recovery" aria-label="崩溃与恢复"><span class="dock-glyph" aria-hidden="true">崩</span><span class="dock-tooltip">崩溃与恢复</span></a><a href="#context/compaction-risk" data-nav-target="compaction-risk" aria-label="压缩与风险"><span class="dock-glyph" aria-hidden="true">压</span><span class="dock-tooltip">压缩与风险</span></a></div>
     <div data-dock-panel="todo" hidden><a href="#todo/current" data-nav-target="current" aria-label="当前工作"><span class="dock-glyph" aria-hidden="true">当</span><span class="dock-tooltip">当前工作</span></a><a href="#todo/blocked" data-nav-target="blocked" aria-label="受阻"><span class="dock-glyph" aria-hidden="true">受</span><span class="dock-tooltip">受阻</span></a><a href="#todo/deferred" data-nav-target="deferred" aria-label="明确延期"><span class="dock-glyph" aria-hidden="true">明</span><span class="dock-tooltip">明确延期</span></a><a href="#todo/completed" data-nav-target="completed" aria-label="已完成"><span class="dock-glyph" aria-hidden="true">已</span><span class="dock-tooltip">已完成</span></a></div>
   </nav>
   <main id="main-content">
@@ -2213,14 +2883,14 @@ main {
         <div class="hero-copy">
           <div class="hero-kicker"><span></span>工程师与 <span translate="no">Agent</span> 的共同运行地图</div>
           <h1>沿着事实，<br><em>恢复下一步。</em></h1>
-          <p>面向人与 <span translate="no">Agent</span> 协同开发的静态领域地图：沿一次 <span translate="no">AgentRuntime</span> 的运行路线解释事实、不变量、失败、恢复与尚未解决的风险。所有 ID 与事件均为合成示例。</p>
-          <div class="hero-actions"><a href="#context/first-principles">开始阅读</a><button type="button" aria-expanded="false" data-open-depth>展开全部证据</button></div>
+          <p>给需要和 <span translate="no">Agent</span> 一起开发的人看的静态手册。先沿一条普通消息的运行路径认清名词，再继续看不变量、失败和恢复。所有 ID 与事件都是合成示例。</p>
+          <div class="hero-actions"><a href="#context/kernel-map">先看核心结构</a><button type="button" aria-expanded="false" data-open-depth>展开全部证据</button></div>
         </div>
         <div class="hero-route" aria-label="一次 AgentRuntime 从定义到恢复的路线">
           <div class="hero-route__line"></div>
           <div class="hero-station" data-tone="fact"><span></span><div><small>定义固定</small><strong translate="no">AgentId</strong><code translate="no">019fd245-de54-7533-87bf-cc33628c6c69</code></div></div>
           <div class="hero-station" data-tone="fact"><span></span><div><small>运行聚合</small><strong translate="no">AgentRuntimeId</strong><code translate="no">019fd245-de54-7533-87bf-cc33628c6c6a</code></div></div>
-          <div class="hero-station" data-tone="internal"><span></span><div><small>有序事实权威</small><strong translate="no">Durable ledger</strong><code translate="no">event_seq 1…70</code></div></div>
+          <div class="hero-station" data-tone="internal"><span></span><div><small>有序事实权威</small><strong>事件账本</strong><code translate="no">event stream · event_seq 1…70</code></div></div>
           <div class="hero-station" data-tone="failure"><span></span><div><small>故障边界</small><strong translate="no">process lost</strong><code translate="no">running + unhosted</code></div></div>
           <div class="hero-station" data-tone="recovery"><span></span><div><small>显式恢复</small><strong translate="no">strict replay</strong><code translate="no">resume exact Turn</code></div></div>
         </div>
@@ -2229,7 +2899,150 @@ main {
           <dl><div><dt>内容状态</dt><dd>中文标签区分事实、风险与延期</dd></div><div><dt>示例数据</dt><dd>全部为合成 <span translate="no">identity</span>，不对应真实运行</dd></div><div><dt>代码定位</dt><dd>路径 + <span translate="no">symbol</span>，不固定易漂移行号</dd></div><div><dt>核对基准</dt><dd><code translate="no">3995205</code></dd></div></dl>
         </aside>
       </section>
-      <div class="manual-route"><div class="manual-route__rail" aria-hidden="true"></div><section class="manual-chapter" id="context-first-principles" data-nav-section="first-principles">
+      <div class="manual-route"><div class="manual-route__rail" aria-hidden="true"></div><section class="manual-chapter kernel-primer" id="context-kernel-map" data-nav-section="kernel-map">
+    <header class="chapter-heading">
+      <div><span>核心结构</span><h2>一条消息在 <span translate="no">kernel</span> 里怎么走</h2></div>
+      <p>先看一轮最普通的对话。用户消息写入数据库后，<span translate="no">kernel</span> 据此决定要调用模型；模型给出正式答复后，答复也写回数据库。中途进程退出没关系，新进程把已经提交的记录重新读一遍，就知道做到哪了。下面的名词都放在这条路上解释。</p>
+    </header>
+    <figure class="kernel-map" aria-labelledby="kernel-map-caption">
+      <figcaption id="kernel-map-caption">一次运行的事实循环：执行发生在组合层；确认后的结果回到 durable <span translate="no">event stream</span>；恢复只从已确认事实开始。</figcaption>
+      <div class="kernel-map__lane kernel-map__lane--boot">
+        <article class="kernel-stage" data-stage="runtime" data-tone="fact">
+      <span>运行档案</span>
+      <strong><span translate="no">AgentRuntime</span></strong>
+      <p>一份实际运行的长期档案。它固定使用一份 <span translate="no">Agent</span> 定义，也保存自己的状态、事件编号和历史。</p>
+    </article>
+        <div class="kernel-map__arrow" aria-hidden="true"><span>读取边界</span></div>
+        <article class="kernel-stage" data-stage="replay" data-tone="recovery">
+      <span>重新对账</span>
+      <strong><span translate="no">strict replay</span></strong>
+      <p>启动或恢复前，逐项读回运行状态、固定的 <span translate="no">Agent</span> 定义、当时固化的 snapshot 和已提交的 <span translate="no">event stream</span>。资料对不上，就停下来报错。</p>
+    </article>
+        <div class="kernel-map__arrow" aria-hidden="true"><span>构造</span></div>
+        <article class="kernel-stage" data-stage="kernel" data-tone="internal">
+      <span>决定下一步</span>
+      <strong><span translate="no">AgentLoop</span> / <span translate="no">kernel</span></strong>
+      <p>进程里的状态机。它只看已重建的记录、固定身份和装配好的组件，然后决定接下来该做什么；它不直接碰 <span translate="no">Postgres</span>、<span translate="no">HTTP</span> 或 <span translate="no">NATS</span>。</p>
+    </article>
+      </div>
+      <div class="kernel-map__lane kernel-map__lane--execute">
+        <article class="kernel-stage" data-stage="operation" data-tone="internal">
+      <span>要做的事</span>
+      <strong><span translate="no">Operation</span></strong>
+      <p><span translate="no">kernel</span> 交给外层的一项明确待办：请求 <span translate="no">LLM</span>、执行 <span translate="no">Tool</span>、调用 <span translate="no">Hook</span>，或者写入终态结果。</p>
+    </article>
+        <div class="kernel-map__arrow" aria-hidden="true"><span>提交事实</span></div>
+        <article class="kernel-stage" data-stage="facts" data-tone="fact">
+      <span>写进流水账</span>
+      <strong><span translate="no">DurableEventSink</span> → <span translate="no">event stream</span></strong>
+      <p>外层把需要系统承认的结果写进 <span translate="no">Postgres</span>。事务提交成功后，它才是一条 <span translate="no">durable fact</span>；这些记录按 <span translate="no">event_seq</span> 排开，就是这个 <span translate="no">runtime</span> 的 <span translate="no">event stream</span>。</p>
+    </article>
+      </div>
+      <p class="kernel-map__cycle"><span>重启时</span><span translate="no">event stream → strict replay → AgentLoop</span></p>
+      <aside class="kernel-map__tail"><strong translate="no">NATS short tail</strong><p>只把近期变化推给在线界面；它丢失时由 <span translate="no">PG view/history</span> 对账，不进入恢复输入。</p></aside>
+    </figure>
+    <section class="react-loop" aria-labelledby="react-loop-title">
+      <header class="react-loop__heading"><span translate="no">ReAct</span><h3 id="react-loop-title">把 ReAct 循环拆开看</h3><p>ReAct 是 Reason + Act：<span translate="no">Agent</span> 先看清当前记录，再行动，再读取行动结果。它和 React 前端无关。一轮没有 <span translate="no">Tool</span> 的对话走到正式答复就结束；有 <span translate="no">Tool</span> 时，会把每个 <span translate="no">Tool</span> 的处理结果写回流水账，再开始下一轮。</p></header>
+      <p class="react-loop__diagram-intro">三张图合起来描述同一件事：<span translate="no">kernel</span> 怎么推进、哪些结果成为 <span translate="no">durable facts</span>、以及进程丢失后为什么只能从这些事实继续。它们由 typed ReAct 内容在构建时编译为内联 <span translate="no">SVG</span>；实线是正常推进，虚线表示写入、等待或恢复边界。</p>
+      <div class="react-loop__diagrams">
+        <section class="react-loop__diagram-panel" aria-labelledby="react-loop-execution-title">
+      <header><span translate="no">Mermaid · execution</span><h4 id="react-loop-execution-title">① 运行主线：ReAct 怎么推进</h4></header>
+      <figure class="react-loop__diagram" aria-labelledby="react-loop-execution-caption">
+        <figcaption id="react-loop-execution-caption">从新 Turn 到终态的正常路径。琥珀色是五个 <span translate="no">Hook</span>；绿色是迭代边界或继续判断；红色是失败、取消等终止分支。<span class="react-loop__diagram-scroll-hint">窄屏可在图内横向拖动查看全图。</span></figcaption>
+        <div class="react-loop__mermaid" tabindex="0" translate="no" aria-label="① 运行主线：ReAct 怎么推进">
+          <svg id="react-loop-execution" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 999.996px; background-color: transparent;" viewBox="0 0 999.99609375 2189.9375" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#react-loop-execution{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;fill:#e7eceb;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#react-loop-execution .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#react-loop-execution .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#react-loop-execution .error-icon{fill:#17212a;}#react-loop-execution .error-text{fill:#d6e9f6;stroke:#d6e9f6;}#react-loop-execution .edge-thickness-normal{stroke-width:1px;}#react-loop-execution .edge-thickness-thick{stroke-width:3.5px;}#react-loop-execution .edge-pattern-solid{stroke-dasharray:0;}#react-loop-execution .edge-thickness-invisible{stroke-width:0;fill:none;}#react-loop-execution .edge-pattern-dashed{stroke-dasharray:3;}#react-loop-execution .edge-pattern-dotted{stroke-dasharray:2;}#react-loop-execution .marker{fill:#788788;stroke:#788788;}#react-loop-execution .marker.cross{stroke:#788788;}#react-loop-execution svg{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;}#react-loop-execution p{margin:0;}#react-loop-execution .label{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e7eceb;}#react-loop-execution .cluster-label text{fill:#d6e9f6;}#react-loop-execution .cluster-label span{color:#d6e9f6;}#react-loop-execution .cluster-label span p{background-color:transparent;}#react-loop-execution .label text,#react-loop-execution span{fill:#e7eceb;color:#e7eceb;}#react-loop-execution .node rect,#react-loop-execution .node circle,#react-loop-execution .node ellipse,#react-loop-execution .node polygon,#react-loop-execution .node path{fill:#16191d;stroke:#526887;stroke-width:1px;}#react-loop-execution .rough-node .label text,#react-loop-execution .node .label text,#react-loop-execution .image-shape .label,#react-loop-execution .icon-shape .label{text-anchor:middle;}#react-loop-execution .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#react-loop-execution .rough-node .label,#react-loop-execution .node .label,#react-loop-execution .image-shape .label,#react-loop-execution .icon-shape .label{text-align:center;}#react-loop-execution .node.clickable{cursor:pointer;}#react-loop-execution .root .anchor path{fill:#788788!important;stroke-width:0;stroke:#788788;}#react-loop-execution .arrowheadPath{fill:rgba(255, 255, 255, 0);}#react-loop-execution .edgePath .path{stroke:#788788;stroke-width:1px;}#react-loop-execution .flowchart-link{stroke:#788788;fill:none;}#react-loop-execution .edgeLabel{background-color:#14231c;text-align:center;}#react-loop-execution .edgeLabel p{background-color:#14231c;}#react-loop-execution .edgeLabel rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-execution .labelBkg{background-color:rgba(20, 35, 28, 0.5);}#react-loop-execution .cluster rect{fill:#17212a;stroke:#6696b9;stroke-width:1px;}#react-loop-execution .cluster text{fill:#d6e9f6;}#react-loop-execution .cluster span{color:#d6e9f6;}#react-loop-execution div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;background:#17212a;border:1px solid #6696b9;border-radius:2px;pointer-events:none;z-index:100;}#react-loop-execution .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#e7eceb;}#react-loop-execution rect.text{fill:none;stroke-width:0;}#react-loop-execution .icon-shape,#react-loop-execution .image-shape{background-color:#14231c;text-align:center;}#react-loop-execution .icon-shape p,#react-loop-execution .image-shape p{background-color:#14231c;padding:2px;}#react-loop-execution .icon-shape .label rect,#react-loop-execution .image-shape .label rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-execution .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#react-loop-execution .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#react-loop-execution .node .neo-node{stroke:#526887;}#react-loop-execution [data-look="neo"].node rect,#react-loop-execution [data-look="neo"].cluster rect,#react-loop-execution [data-look="neo"].node polygon{stroke:url(#react-loop-execution-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-execution [data-look="neo"].swimlane.cluster rect{filter:none;}#react-loop-execution [data-look="neo"].node path{stroke:url(#react-loop-execution-gradient);stroke-width:1px;}#react-loop-execution [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-execution [data-look="neo"].node .neo-line path{stroke:#526887;filter:none;}#react-loop-execution [data-look="neo"].node circle{stroke:url(#react-loop-execution-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-execution [data-look="neo"].node circle .state-start{fill:#000000;}#react-loop-execution [data-look="neo"].icon-shape .icon{fill:url(#react-loop-execution-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-execution [data-look="neo"].icon-shape .icon-neo path{stroke:url(#react-loop-execution-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-execution :root{--mermaid-font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}#react-loop-execution .input&gt;*{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-execution .input span{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-execution .input tspan{fill:rgb(231, 236, 235)!important;}#react-loop-execution .runtime&gt;*{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-execution .runtime span{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-execution .runtime tspan{fill:rgb(231, 236, 235)!important;}#react-loop-execution .hook&gt;*{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-execution .hook span{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-execution .hook tspan{fill:rgb(244, 231, 200)!important;}#react-loop-execution .decision&gt;*{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-execution .decision span{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-execution .decision tspan{fill:rgb(228, 239, 213)!important;}#react-loop-execution .fact&gt;*{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-execution .fact span{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-execution .fact tspan{fill:rgb(225, 240, 225)!important;}#react-loop-execution .failure&gt;*{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-execution .failure span{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-execution .failure tspan{fill:rgb(247, 217, 221)!important;}#react-loop-execution .recovery&gt;*{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-execution .recovery span{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-execution .recovery tspan{fill:rgb(214, 233, 246)!important;}#react-loop-execution .tail&gt;*{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-execution .tail span{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-execution .tail tspan{fill:rgb(234, 220, 247)!important;}</style><g><marker id="react-loop-execution_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-execution_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="react-loop-execution_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"><g class="cluster" id="react-loop-execution-kernel" data-look="classic"><rect style="" x="8" y="175" width="983.99609375" height="2006.9375"/><g class="cluster-label" transform="translate(365.130859375, 175)"><foreignObject width="269.734375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5;"><span class="nodeLabel"><p>ReAct kernel：AgentLoop 的内存状态机</p></span></div></foreignObject></g></g><g class="cluster" id="react-loop-execution-composition" data-look="classic"><rect style="" x="348.95703125" y="8" width="596" height="121"/><g class="cluster-label" transform="translate(503.87890625, 8)"><foreignObject width="286.15625" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5;"><span class="nodeLabel"><p>组合层：每次 fresh / resume 都要重新提供</p></span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M502.957,106L502.957,129L502.957,152L502.957,175L502.957,194" id="react-loop-execution-L_definition_entry_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_definition_entry_0" data-points="W3sieCI6NTAyLjk1NzAzMTI1LCJ5IjoxMDZ9LHsieCI6NTAyLjk1NzAzMTI1LCJ5IjoxMjl9LHsieCI6NTAyLjk1NzAzMTI1LCJ5IjoxNTJ9LHsieCI6NTAyLjk1NzAzMTI1LCJ5IjoxNzV9LHsieCI6NTAyLjk1NzAzMTI1LCJ5IjoxOTh9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M790.957,106L790.957,129L790.957,152L790.957,175L790.957,246.75L790.957,318.5L790.957,337.5" id="react-loop-execution-L_components_context_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_components_context_0" data-points="W3sieCI6NzkwLjk1NzAzMTI1LCJ5IjoxMDZ9LHsieCI6NzkwLjk1NzAzMTI1LCJ5IjoxMjl9LHsieCI6NzkwLjk1NzAzMTI1LCJ5IjoxNTJ9LHsieCI6NzkwLjk1NzAzMTI1LCJ5IjoxNzV9LHsieCI6NzkwLjk1NzAzMTI1LCJ5IjoyNDYuNzV9LHsieCI6NzkwLjk1NzAzMTI1LCJ5IjozMTguNX0seyJ4Ijo3OTAuOTU3MDMxMjUsInkiOjM0MS41fV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M502.957,295.5L502.957,318.5L693.921,351.156" id="react-loop-execution-L_entry_context_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_entry_context_0" data-points="W3sieCI6NTAyLjk1NzAzMTI1LCJ5IjoyOTUuNX0seyJ4Ijo1MDIuOTU3MDMxMjUsInkiOjMxOC41fSx7IngiOjY5Ny44NjMyODEyNSwieSI6MzUxLjgzMDMyMjI2NTYyNX1d" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M697.863,379.549L402.391,417L402.391,436" id="react-loop-execution-L_context_request_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_context_request_0" data-points="W3sieCI6Njk3Ljg2MzI4MTI1LCJ5IjozNzkuNTQ5NDQzMDY0OTUyM30seyJ4Ijo0MDIuMzkwNjI1LCJ5Ijo0MTd9LHsieCI6NDAyLjM5MDYyNSwieSI6NDQwfV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M402.391,515L402.391,538L402.391,557" id="react-loop-execution-L_request_model_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_request_model_0" data-points="W3sieCI6NDAyLjM5MDYyNSwieSI6NTE1fSx7IngiOjQwMi4zOTA2MjUsInkiOjUzOH0seyJ4Ijo0MDIuMzkwNjI1LCJ5Ijo1NjF9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M333.56,636L291.344,659L291.344,678" id="react-loop-execution-L_model_assistant_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_model_assistant_0" data-points="W3sieCI6MzMzLjU1OTkxNzM1NTM3MTksInkiOjYzNn0seyJ4IjoyOTEuMzQzNzUsInkiOjY1OX0seyJ4IjoyOTEuMzQzNzUsInkiOjY4Mn1d" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M291.344,757L291.344,780L291.344,799" id="react-loop-execution-L_assistant_hasTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_assistant_hasTool_0" data-points="W3sieCI6MjkxLjM0Mzc1LCJ5Ijo3NTd9LHsieCI6MjkxLjM0Mzc1LCJ5Ijo3ODB9LHsieCI6MjkxLjM0Mzc1LCJ5Ijo4MDN9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M254.063,889.157L144.941,960.688L144.941,1021.188L144.941,1081.688L144.941,1142.188L144.941,1202.688L144.941,1263.188L144.941,1312.438L144.941,1361.688L144.941,1422.188L144.941,1482.688L144.941,1531.938L144.941,1581.188L144.941,1630.438L144.941,1679.688L144.941,1728.938L144.941,1800.688L144.941,1872.438L144.941,1936.438" id="react-loop-execution-L_hasTool_noToolBoundary_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_hasTool_noToolBoundary_0" data-points="W3sieCI6MjU0LjA2MzAyNjgxODM3OTYzLCJ5Ijo4ODkuMTU2Nzc2ODE4Mzc5Nn0seyJ4IjoxNDQuOTQxNDA2MjUsInkiOjk2MC42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTAyMS4xODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTA4MS42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTE0Mi4xODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTIwMi42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTI2My4xODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTMxMi40Mzc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTM2MS42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTQyMi4xODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTQ4Mi42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTUzMS45Mzc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTU4MS4xODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTYzMC40Mzc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTY3OS42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTcyOC45Mzc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTgwMC42ODc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTg3Mi40Mzc1fSx7IngiOjE0NC45NDE0MDYyNSwieSI6MTk0MC40Mzc1fV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M144.941,1992.938L144.941,2072.188L455.727,2120.343" id="react-loop-execution-L_noToolBoundary_finished_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_noToolBoundary_finished_0" data-points="W3sieCI6MTQ0Ljk0MTQwNjI1LCJ5IjoxOTkyLjkzNzV9LHsieCI6MTQ0Ljk0MTQwNjI1LCJ5IjoyMDcyLjE4NzV9LHsieCI6NDU5LjY3OTY4NzUsInkiOjIxMjAuOTU1MTM1MDgzMDg1N31d" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M327.114,890.667L423.637,960.688L423.637,990.938" id="react-loop-execution-L_hasTool_transformTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_hasTool_transformTool_0" data-points="W3sieCI6MzI3LjExMzkwMzI2ODU4OSwieSI6ODkwLjY2NzM0NjczMTQxMDl9LHsieCI6NDIzLjYzNjcxODc1LCJ5Ijo5NjAuNjg3NX0seyJ4Ijo0MjMuNjM2NzE4NzUsInkiOjk5NC45Mzc1fV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M423.637,1047.438L423.637,1081.688L423.637,1111.938" id="react-loop-execution-L_transformTool_decideTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_transformTool_decideTool_0" data-points="W3sieCI6NDIzLjYzNjcxODc1LCJ5IjoxMDQ3LjQzNzV9LHsieCI6NDIzLjYzNjcxODc1LCJ5IjoxMDgxLjY4NzV9LHsieCI6NDIzLjYzNjcxODc1LCJ5IjoxMTE1LjkzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M394.468,1168.438L356.41,1202.688L356.41,1232.938" id="react-loop-execution-L_decideTool_toolStarted_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_decideTool_toolStarted_0" data-points="W3sieCI6Mzk0LjQ2ODE2ODkwNDk1ODcsInkiOjExNjguNDM3NX0seyJ4IjozNTYuNDEwMTU2MjUsInkiOjEyMDIuNjg3NX0seyJ4IjozNTYuNDEwMTU2MjUsInkiOjEyMzYuOTM3NX1d" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M356.41,1289.438L356.41,1312.438L356.41,1331.438" id="react-loop-execution-L_toolStarted_externalTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_toolStarted_externalTool_0" data-points="W3sieCI6MzU2LjQxMDE1NjI1LCJ5IjoxMjg5LjQzNzV9LHsieCI6MzU2LjQxMDE1NjI1LCJ5IjoxMzEyLjQzNzV9LHsieCI6MzU2LjQxMDE1NjI1LCJ5IjoxMzM1LjQzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M340.399,1387.938L319.508,1422.188L319.508,1452.438" id="react-loop-execution-L_externalTool_afterTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_externalTool_afterTool_0" data-points="W3sieCI6MzQwLjM5ODgwODc1NTE2NTMsInkiOjEzODcuOTM3NX0seyJ4IjozMTkuNTA3ODEyNSwieSI6MTQyMi4xODc1fSx7IngiOjMxOS41MDc4MTI1LCJ5IjoxNDU2LjQzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M319.508,1508.938L319.508,1531.938L319.508,1550.938" id="react-loop-execution-L_afterTool_toolResult_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_afterTool_toolResult_0" data-points="W3sieCI6MzE5LjUwNzgxMjUsInkiOjE1MDguOTM3NX0seyJ4IjozMTkuNTA3ODEyNSwieSI6MTUzMS45Mzc1fSx7IngiOjMxOS41MDc4MTI1LCJ5IjoxNTU0LjkzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M319.508,1607.438L319.508,1630.438L319.508,1649.438" id="react-loop-execution-L_toolResult_prepareNext_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_toolResult_prepareNext_0" data-points="W3sieCI6MzE5LjUwNzgxMjUsInkiOjE2MDcuNDM3NX0seyJ4IjozMTkuNTA3ODEyNSwieSI6MTYzMC40Mzc1fSx7IngiOjMxOS41MDc4MTI1LCJ5IjoxNjUzLjQzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M319.508,1705.938L319.508,1728.938L319.508,1747.938" id="react-loop-execution-L_prepareNext_toolBoundary_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_prepareNext_toolBoundary_0" data-points="W3sieCI6MzE5LjUwNzgxMjUsInkiOjE3MDUuOTM3NX0seyJ4IjozMTkuNTA3ODEyNSwieSI6MTcyOC45Mzc1fSx7IngiOjMxOS41MDc4MTI1LCJ5IjoxNzUxLjkzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M319.508,1849.438L319.508,1872.438L574.355,1949.065" id="react-loop-execution-L_toolBoundary_continueTurn_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_toolBoundary_continueTurn_0" data-points="W3sieCI6MzE5LjUwNzgxMjUsInkiOjE4NDkuNDM3NX0seyJ4IjozMTkuNTA3ODEyNSwieSI6MTg3Mi40Mzc1fSx7IngiOjU3OC4xODU3NzAxMzkwMDg3LCJ5IjoxOTUwLjIxNjU3MzYxMDk5MTR9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M453.266,1168.438L491.926,1202.688L528.81,1234.333" id="react-loop-execution-L_decideTool_approval_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_decideTool_approval_0" data-points="W3sieCI6NDUzLjI2NjI3MDY2MTE1NywieSI6MTE2OC40Mzc1fSx7IngiOjQ5MS45MjU3ODEyNSwieSI6MTIwMi42ODc1fSx7IngiOjUzMS44NDU3ODM4MzI2NDQ3LCJ5IjoxMjM2LjkzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M579.58,1236.938L601.941,1202.688L504.788,1169.723" id="react-loop-execution-L_approval_decideTool_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_approval_decideTool_0" data-points="W3sieCI6NTc5LjU3OTgzNjAwMjA2NjEsInkiOjEyMzYuOTM3NX0seyJ4Ijo2MDEuOTQxNDA2MjUsInkiOjEyMDIuNjg3NX0seyJ4Ijo1MDEuMDAwMzIyODMwNTc4NSwieSI6MTE2OC40Mzc1fV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M686.814,1949.287L924.637,1872.438L924.637,1800.688L924.637,1728.938L924.637,1679.688L924.637,1630.438L924.637,1581.188L924.637,1531.938L924.637,1482.688L924.637,1422.188L924.637,1361.688L924.637,1312.438L924.637,1263.188L924.637,1202.688L924.637,1142.188L924.637,1081.688L924.637,1021.188L924.637,960.688L924.637,864.719L924.637,780L924.637,719.5L924.637,659L924.637,598.5L924.637,538L924.637,477.5L924.637,417L865.961,395.383" id="react-loop-execution-L_continueTurn_context_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_continueTurn_context_0" data-points="W3sieCI6Njg2LjgxNDEzOTI2ODAzNzEsInkiOjE5NDkuMjg2Nzk1NTE4MDM3M30seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE4NzIuNDM3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE4MDAuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE3MjguOTM3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE2NzkuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE2MzAuNDM3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE1ODEuMTg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE1MzEuOTM3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE0ODIuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjE0MjIuMTg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEzNjEuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEzMTIuNDM3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEyNjMuMTg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEyMDIuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjExNDIuMTg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEwODEuNjg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjEwMjEuMTg3NX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjk2MC42ODc1fSx7IngiOjkyNC42MzY3MTg3NSwieSI6ODY0LjcxODc1fSx7IngiOjkyNC42MzY3MTg3NSwieSI6NzgwfSx7IngiOjkyNC42MzY3MTg3NSwieSI6NzE5LjV9LHsieCI6OTI0LjYzNjcxODc1LCJ5Ijo2NTl9LHsieCI6OTI0LjYzNjcxODc1LCJ5Ijo1OTguNX0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjUzOH0seyJ4Ijo5MjQuNjM2NzE4NzUsInkiOjQ3Ny41fSx7IngiOjkyNC42MzY3MTg3NSwieSI6NDE3fSx7IngiOjg2Mi4yMDc2MjYxMTA0MDYxLCJ5IjozOTR9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M632.965,2037.938L632.965,2072.188L581.13,2104.33" id="react-loop-execution-L_continueTurn_finished_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_continueTurn_finished_0" data-points="W3sieCI6NjMyLjk2NDg0Mzc1LCJ5IjoyMDM3LjkzNzV9LHsieCI6NjMyLjk2NDg0Mzc1LCJ5IjoyMDcyLjE4NzV9LHsieCI6NTc3LjczMDk2OTEzNzM5NjYsInkiOjIxMDYuNDM3NX1d" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M792.818,394L794.449,417L794.449,477.5L794.449,538L794.449,598.5L794.449,659L794.449,719.5L794.449,780L794.449,864.719L794.449,960.688L794.449,1021.188L794.449,1081.688L794.449,1142.188L794.449,1202.688L794.449,1263.188L794.449,1312.438L794.449,1361.688L794.449,1422.188L748.081,1454.167" id="react-loop-execution-L_context_stopped_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_context_stopped_0" data-points="W3sieCI6NzkyLjgxODM0OTQ2MDY1OTksInkiOjM5NH0seyJ4Ijo3OTQuNDQ5MjE4NzUsInkiOjQxN30seyJ4Ijo3OTQuNDQ5MjE4NzUsInkiOjQ3Ny41fSx7IngiOjc5NC40NDkyMTg3NSwieSI6NTM4fSx7IngiOjc5NC40NDkyMTg3NSwieSI6NTk4LjV9LHsieCI6Nzk0LjQ0OTIxODc1LCJ5Ijo2NTl9LHsieCI6Nzk0LjQ0OTIxODc1LCJ5Ijo3MTkuNX0seyJ4Ijo3OTQuNDQ5MjE4NzUsInkiOjc4MH0seyJ4Ijo3OTQuNDQ5MjE4NzUsInkiOjg2NC43MTg3NX0seyJ4Ijo3OTQuNDQ5MjE4NzUsInkiOjk2MC42ODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTAyMS4xODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTA4MS42ODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTE0Mi4xODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTIwMi42ODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTI2My4xODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTMxMi40Mzc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTM2MS42ODc1fSx7IngiOjc5NC40NDkyMTg3NSwieSI6MTQyMi4xODc1fSx7IngiOjc0NC43ODgwNDU1ODM2Nzc3LCJ5IjoxNDU2LjQzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M472.711,614.923L661.441,659L661.441,719.5L661.441,780L661.441,864.719L661.441,960.688L661.441,1021.188L661.441,1081.688L661.441,1142.188L661.441,1202.688L661.441,1263.188L661.441,1312.438L661.441,1361.688L661.441,1422.188L684.681,1453.235" id="react-loop-execution-L_model_stopped_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_model_stopped_0" data-points="W3sieCI6NDcyLjcxMDkzNzUsInkiOjYxNC45MjI5NTMzOTA1MzM0fSx7IngiOjY2MS40NDE0MDYyNSwieSI6NjU5fSx7IngiOjY2MS40NDE0MDYyNSwieSI6NzE5LjV9LHsieCI6NjYxLjQ0MTQwNjI1LCJ5Ijo3ODB9LHsieCI6NjYxLjQ0MTQwNjI1LCJ5Ijo4NjQuNzE4NzV9LHsieCI6NjYxLjQ0MTQwNjI1LCJ5Ijo5NjAuNjg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEwMjEuMTg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEwODEuNjg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjExNDIuMTg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEyMDIuNjg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEyNjMuMTg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEzMTIuNDM3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjEzNjEuNjg3NX0seyJ4Ijo2NjEuNDQxNDA2MjUsInkiOjE0MjIuMTg3NX0seyJ4Ijo2ODcuMDc4MDQ0MjkyMzU1MywieSI6MTQ1Ni40Mzc1fV0=" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/><path d="M406.573,1387.938L472.023,1422.188L601.019,1455.439" id="react-loop-execution-L_externalTool_stopped_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_externalTool_stopped_0" data-points="W3sieCI6NDA2LjU3Mjk0MzU2OTIxNDksInkiOjEzODcuOTM3NX0seyJ4Ijo0NzIuMDIzNDM3NSwieSI6MTQyMi4xODc1fSx7IngiOjYwNC44OTI1NjE5ODM0NzExLCJ5IjoxNDU2LjQzNzV9XQ==" data-look="classic" marker-end="url(#react-loop-execution_flowchart-v2-pointEnd__788788)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_definition_entry_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_components_context_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_entry_context_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_context_request_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_request_model_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_model_assistant_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_assistant_hasTool_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(144.94140625, 1422.1875)"><g class="label" data-id="L_hasTool_noToolBoundary_0" transform="translate(-31.3046875, -11.25)"><foreignObject width="62.609375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>没有 Tool</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_noToolBoundary_finished_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(423.63671875, 960.6875)"><g class="label" data-id="L_hasTool_transformTool_0" transform="translate(-23.8046875, -11.25)"><foreignObject width="47.609375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>有 Tool</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_transformTool_decideTool_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_decideTool_toolStarted_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_toolStarted_externalTool_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_externalTool_afterTool_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_afterTool_toolResult_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_toolResult_prepareNext_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_prepareNext_toolBoundary_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_toolBoundary_continueTurn_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(491.92578125, 1202.6875)"><g class="label" data-id="L_decideTool_approval_0" transform="translate(-45, -11.25)"><foreignObject width="90" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>需要人工决定</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_approval_decideTool_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(924.63671875, 1202.6875)"><g class="label" data-id="L_continueTurn_context_0" transform="translate(-15, -11.25)"><foreignObject width="30" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>继续</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(632.96484375, 2072.1875)"><g class="label" data-id="L_continueTurn_finished_0" transform="translate(-15.9921875, -11.25)"><foreignObject width="31.984375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>Stop</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(794.44921875, 960.6875)"><g class="label" data-id="L_context_stopped_0" transform="translate(-92.015625, -11.25)"><foreignObject width="184.03125" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>Hook / provider 失败或取消</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(661.44140625, 1081.6875)"><g class="label" data-id="L_model_stopped_0" transform="translate(-52.5, -11.25)"><foreignObject width="105" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>模型失败或取消</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(472.0234375, 1422.1875)"><g class="label" data-id="L_externalTool_stopped_0" transform="translate(-53.8046875, -11.25)"><foreignObject width="107.609375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>Tool 失败或取消</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default input" id="react-loop-execution-flowchart-definition-0" data-look="classic" transform="translate(502.95703125, 68.5)"><rect class="basic label-container" style="fill:#171c1d !important;stroke:#5a6a6d !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>Agent definition + TurnRuntimeSnapshot</p></span></div></foreignObject></g></g><g class="node default input" id="react-loop-execution-flowchart-components-1" data-look="classic" transform="translate(790.95703125, 68.5)"><rect class="basic label-container" style="fill:#171c1d !important;stroke:#5a6a6d !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>LLM provider · Tool registry · Hook chain · LoopLimits</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-execution-flowchart-entry-2" data-look="classic" transform="translate(502.95703125, 246.75)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-130" y="-48.75" width="260" height="97.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -33.75)"><rect/><foreignObject width="200" height="67.5"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>新 Turn 入场<br />LoopStarted + 用户 MessageAppended</p></span></div></foreignObject></g></g><g class="node default hook" id="react-loop-execution-flowchart-context-3" data-look="classic" transform="translate(790.95703125, 367.75)"><rect class="basic label-container" style="fill:#252118 !important;stroke:#c69a57 !important;stroke-width:1px !important" x="-93.09375" y="-26.25" width="186.1875" height="52.5"/><g class="label" style="color:#f4e7c8 !important" transform="translate(-63.09375, -11.25)"><rect/><foreignObject width="126.1875" height="22.5"><div style="color: rgb(244, 231, 200) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f4e7c8 !important" class="nodeLabel"><p>transform_context</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-execution-flowchart-request-4" data-look="classic" transform="translate(402.390625, 477.5)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>request view：只供本次模型请求</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-execution-flowchart-model-5" data-look="classic" transform="translate(402.390625, 598.5)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-70.3203125" y="-37.5" width="140.640625" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-40.3203125, -22.5)"><rect/><foreignObject width="80.640625" height="45"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>请求模型<br />LLM stream</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-execution-flowchart-assistant-6" data-look="classic" transform="translate(291.34375, 719.5)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-128.640625" y="-37.5" width="257.28125" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-98.640625, -22.5)"><rect/><foreignObject width="197.28125" height="45"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>确认正式答复<br />assistant MessageAppended</p></span></div></foreignObject></g></g><g class="node default decision" id="react-loop-execution-flowchart-hasTool-7" data-look="classic" transform="translate(291.34375, 864.71875)"><polygon points="61.71875,0 123.4375,-61.71875 61.71875,-123.4375 0,-61.71875" class="label-container" transform="translate(-61.21875, 61.71875)" style="fill:#20231b !important;stroke:#8dac64 !important;stroke-width:1px !important"/><g class="label" style="color:#e4efd5 !important" transform="translate(-35.46875, -11.25)"><rect/><foreignObject width="70.9375" height="22.5"><div style="color: rgb(228, 239, 213) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e4efd5 !important" class="nodeLabel"><p>Tool call？</p></span></div></foreignObject></g></g><g class="node default decision" id="react-loop-execution-flowchart-noToolBoundary-8" data-look="classic" transform="translate(144.94140625, 1966.6875)"><rect class="basic label-container" style="fill:#20231b !important;stroke:#8dac64 !important;stroke-width:1px !important" x="-95.8828125" y="-26.25" width="191.765625" height="52.5"/><g class="label" style="color:#e4efd5 !important" transform="translate(-65.8828125, -11.25)"><rect/><foreignObject width="131.765625" height="22.5"><div style="color: rgb(228, 239, 213) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e4efd5 !important" class="nodeLabel"><p>IterationCompleted</p></span></div></foreignObject></g></g><g class="node default hook" id="react-loop-execution-flowchart-transformTool-9" data-look="classic" transform="translate(423.63671875, 1021.1875)"><rect class="basic label-container" style="fill:#252118 !important;stroke:#c69a57 !important;stroke-width:1px !important" x="-96.328125" y="-26.25" width="192.65625" height="52.5"/><g class="label" style="color:#f4e7c8 !important" transform="translate(-66.328125, -11.25)"><rect/><foreignObject width="132.65625" height="22.5"><div style="color: rgb(244, 231, 200) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f4e7c8 !important" class="nodeLabel"><p>transform_tool_call</p></span></div></foreignObject></g></g><g class="node default hook" id="react-loop-execution-flowchart-decideTool-10" data-look="classic" transform="translate(423.63671875, 1142.1875)"><rect class="basic label-container" style="fill:#252118 !important;stroke:#c69a57 !important;stroke-width:1px !important" x="-85.90625" y="-26.25" width="171.8125" height="52.5"/><g class="label" style="color:#f4e7c8 !important" transform="translate(-55.90625, -11.25)"><rect/><foreignObject width="111.8125" height="22.5"><div style="color: rgb(244, 231, 200) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f4e7c8 !important" class="nodeLabel"><p>decide_tool_call</p></span></div></foreignObject></g></g><g class="node default" id="react-loop-execution-flowchart-approval-11" data-look="classic" transform="translate(562.44140625, 1263.1875)"><rect class="basic label-container" style="" x="-75" y="-26.25" width="150" height="52.5"/><g class="label" style="" transform="translate(-45, -11.25)"><rect/><foreignObject width="90" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>人工审批等待</p></span></div></foreignObject></g></g><g class="node default" id="react-loop-execution-flowchart-toolStarted-12" data-look="classic" transform="translate(356.41015625, 1263.1875)"><rect class="basic label-container" style="" x="-103.03125" y="-26.25" width="206.0625" height="52.5"/><g class="label" style="" transform="translate(-73.03125, -11.25)"><rect/><foreignObject width="146.0625" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>ToolExecutionStarted</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-execution-flowchart-externalTool-13" data-look="classic" transform="translate(356.41015625, 1361.6875)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-78.296875" y="-26.25" width="156.59375" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-48.296875, -11.25)"><rect/><foreignObject width="96.59375" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>外部 Tool 调用</p></span></div></foreignObject></g></g><g class="node default hook" id="react-loop-execution-flowchart-afterTool-14" data-look="classic" transform="translate(319.5078125, 1482.6875)"><rect class="basic label-container" style="fill:#252118 !important;stroke:#c69a57 !important;stroke-width:1px !important" x="-78.7421875" y="-26.25" width="157.484375" height="52.5"/><g class="label" style="color:#f4e7c8 !important" transform="translate(-48.7421875, -11.25)"><rect/><foreignObject width="97.484375" height="22.5"><div style="color: rgb(244, 231, 200) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f4e7c8 !important" class="nodeLabel"><p>after_tool_call</p></span></div></foreignObject></g></g><g class="node default" id="react-loop-execution-flowchart-toolResult-15" data-look="classic" transform="translate(319.5078125, 1581.1875)"><rect class="basic label-container" style="" x="-128.53125" y="-26.25" width="257.0625" height="52.5"/><g class="label" style="" transform="translate(-98.53125, -11.25)"><rect/><foreignObject width="197.0625" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>role=tool MessageAppended</p></span></div></foreignObject></g></g><g class="node default hook" id="react-loop-execution-flowchart-prepareNext-16" data-look="classic" transform="translate(319.5078125, 1679.6875)"><rect class="basic label-container" style="fill:#252118 !important;stroke:#c69a57 !important;stroke-width:1px !important" x="-93.5546875" y="-26.25" width="187.109375" height="52.5"/><g class="label" style="color:#f4e7c8 !important" transform="translate(-63.5546875, -11.25)"><rect/><foreignObject width="127.109375" height="22.5"><div style="color: rgb(244, 231, 200) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f4e7c8 !important" class="nodeLabel"><p>prepare_next_turn</p></span></div></foreignObject></g></g><g class="node default decision" id="react-loop-execution-flowchart-toolBoundary-17" data-look="classic" transform="translate(319.5078125, 1800.6875)"><rect class="basic label-container" style="fill:#20231b !important;stroke:#8dac64 !important;stroke-width:1px !important" x="-130" y="-48.75" width="260" height="97.5"/><g class="label" style="color:#e4efd5 !important" transform="translate(-100, -33.75)"><rect/><foreignObject width="200" height="67.5"><div style="color: rgb(228, 239, 213) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e4efd5 !important" class="nodeLabel"><p>收束 Tool cycle<br />prepare_next_turn → IterationCompleted</p></span></div></foreignObject></g></g><g class="node default decision" id="react-loop-execution-flowchart-continueTurn-18" data-look="classic" transform="translate(632.96484375, 1966.6875)"><polygon points="71.25,0 142.5,-71.25 71.25,-142.5 0,-71.25" class="label-container" transform="translate(-70.75, 71.25)" style="fill:#20231b !important;stroke:#8dac64 !important;stroke-width:1px !important"/><g class="label" style="color:#e4efd5 !important" transform="translate(-45, -11.25)"><rect/><foreignObject width="90" height="22.5"><div style="color: rgb(228, 239, 213) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e4efd5 !important" class="nodeLabel"><p>继续下一轮？</p></span></div></foreignObject></g></g><g class="node default failure" id="react-loop-execution-flowchart-finished-19" data-look="classic" transform="translate(535.3984375, 2132.6875)"><rect class="basic label-container" style="fill:#29191b !important;stroke:#b65f67 !important;stroke-width:1px !important" x="-75.71875" y="-26.25" width="151.4375" height="52.5"/><g class="label" style="color:#f7d9dd !important" transform="translate(-45.71875, -11.25)"><rect/><foreignObject width="91.4375" height="22.5"><div style="color: rgb(247, 217, 221) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f7d9dd !important" class="nodeLabel"><p>LoopFinished</p></span></div></foreignObject></g></g><g class="node default failure" id="react-loop-execution-flowchart-stopped-20" data-look="classic" transform="translate(706.7265625, 1482.6875)"><rect class="basic label-container" style="fill:#29191b !important;stroke:#b65f67 !important;stroke-width:1px !important" x="-124.359375" y="-26.25" width="248.71875" height="52.5"/><g class="label" style="color:#f7d9dd !important" transform="translate(-94.359375, -11.25)"><rect/><foreignObject width="188.71875" height="22.5"><div style="color: rgb(247, 217, 221) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#f7d9dd !important" class="nodeLabel"><p>LoopFailed / LoopCancelled</p></span></div></foreignObject></g></g></g></g><marker id="react-loop-execution_flowchart-v2-pointEnd__788788" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;" stroke="#788788" fill="#788788"/></marker></g><defs><filter id="react-loop-execution-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="react-loop-execution-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="react-loop-execution-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#526887" stop-opacity="1"/><stop offset="100%" stop-color="#6ca777" stop-opacity="1"/></linearGradient></svg>
+        </div>
+      </figure>
+    </section>
+        <section class="react-loop__diagram-panel" aria-labelledby="react-loop-durable-title">
+      <header><span translate="no">Mermaid · durable</span><h4 id="react-loop-durable-title">② 持久化边界：什么真正进入流水账</h4></header>
+      <figure class="react-loop__diagram" aria-labelledby="react-loop-durable-caption">
+        <figcaption id="react-loop-durable-caption">绿色节点是事务提交后才成立的 <span translate="no">durable fact</span>s。紫色节点只帮助在线界面更快显示，它们可丢，不能拿来恢复。<span class="react-loop__diagram-scroll-hint">窄屏可在图内横向拖动查看全图。</span></figcaption>
+        <div class="react-loop__mermaid" tabindex="0" translate="no" aria-label="② 持久化边界：什么真正进入流水账">
+          <svg id="react-loop-durable" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 1713.28px; background-color: transparent;" viewBox="0 0 1713.28125 567.5" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#react-loop-durable{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;fill:#e7eceb;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#react-loop-durable .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#react-loop-durable .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#react-loop-durable .error-icon{fill:#17212a;}#react-loop-durable .error-text{fill:#d6e9f6;stroke:#d6e9f6;}#react-loop-durable .edge-thickness-normal{stroke-width:1px;}#react-loop-durable .edge-thickness-thick{stroke-width:3.5px;}#react-loop-durable .edge-pattern-solid{stroke-dasharray:0;}#react-loop-durable .edge-thickness-invisible{stroke-width:0;fill:none;}#react-loop-durable .edge-pattern-dashed{stroke-dasharray:3;}#react-loop-durable .edge-pattern-dotted{stroke-dasharray:2;}#react-loop-durable .marker{fill:#788788;stroke:#788788;}#react-loop-durable .marker.cross{stroke:#788788;}#react-loop-durable svg{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;}#react-loop-durable p{margin:0;}#react-loop-durable .label{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e7eceb;}#react-loop-durable .cluster-label text{fill:#d6e9f6;}#react-loop-durable .cluster-label span{color:#d6e9f6;}#react-loop-durable .cluster-label span p{background-color:transparent;}#react-loop-durable .label text,#react-loop-durable span{fill:#e7eceb;color:#e7eceb;}#react-loop-durable .node rect,#react-loop-durable .node circle,#react-loop-durable .node ellipse,#react-loop-durable .node polygon,#react-loop-durable .node path{fill:#16191d;stroke:#526887;stroke-width:1px;}#react-loop-durable .rough-node .label text,#react-loop-durable .node .label text,#react-loop-durable .image-shape .label,#react-loop-durable .icon-shape .label{text-anchor:middle;}#react-loop-durable .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#react-loop-durable .rough-node .label,#react-loop-durable .node .label,#react-loop-durable .image-shape .label,#react-loop-durable .icon-shape .label{text-align:center;}#react-loop-durable .node.clickable{cursor:pointer;}#react-loop-durable .root .anchor path{fill:#788788!important;stroke-width:0;stroke:#788788;}#react-loop-durable .arrowheadPath{fill:rgba(255, 255, 255, 0);}#react-loop-durable .edgePath .path{stroke:#788788;stroke-width:1px;}#react-loop-durable .flowchart-link{stroke:#788788;fill:none;}#react-loop-durable .edgeLabel{background-color:#14231c;text-align:center;}#react-loop-durable .edgeLabel p{background-color:#14231c;}#react-loop-durable .edgeLabel rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-durable .labelBkg{background-color:rgba(20, 35, 28, 0.5);}#react-loop-durable .cluster rect{fill:#17212a;stroke:#6696b9;stroke-width:1px;}#react-loop-durable .cluster text{fill:#d6e9f6;}#react-loop-durable .cluster span{color:#d6e9f6;}#react-loop-durable div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;background:#17212a;border:1px solid #6696b9;border-radius:2px;pointer-events:none;z-index:100;}#react-loop-durable .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#e7eceb;}#react-loop-durable rect.text{fill:none;stroke-width:0;}#react-loop-durable .icon-shape,#react-loop-durable .image-shape{background-color:#14231c;text-align:center;}#react-loop-durable .icon-shape p,#react-loop-durable .image-shape p{background-color:#14231c;padding:2px;}#react-loop-durable .icon-shape .label rect,#react-loop-durable .image-shape .label rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-durable .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#react-loop-durable .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#react-loop-durable .node .neo-node{stroke:#526887;}#react-loop-durable [data-look="neo"].node rect,#react-loop-durable [data-look="neo"].cluster rect,#react-loop-durable [data-look="neo"].node polygon{stroke:url(#react-loop-durable-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-durable [data-look="neo"].swimlane.cluster rect{filter:none;}#react-loop-durable [data-look="neo"].node path{stroke:url(#react-loop-durable-gradient);stroke-width:1px;}#react-loop-durable [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-durable [data-look="neo"].node .neo-line path{stroke:#526887;filter:none;}#react-loop-durable [data-look="neo"].node circle{stroke:url(#react-loop-durable-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-durable [data-look="neo"].node circle .state-start{fill:#000000;}#react-loop-durable [data-look="neo"].icon-shape .icon{fill:url(#react-loop-durable-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-durable [data-look="neo"].icon-shape .icon-neo path{stroke:url(#react-loop-durable-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-durable :root{--mermaid-font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}#react-loop-durable .input&gt;*{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-durable .input span{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-durable .input tspan{fill:rgb(231, 236, 235)!important;}#react-loop-durable .runtime&gt;*{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-durable .runtime span{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-durable .runtime tspan{fill:rgb(231, 236, 235)!important;}#react-loop-durable .hook&gt;*{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-durable .hook span{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-durable .hook tspan{fill:rgb(244, 231, 200)!important;}#react-loop-durable .decision&gt;*{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-durable .decision span{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-durable .decision tspan{fill:rgb(228, 239, 213)!important;}#react-loop-durable .fact&gt;*{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-durable .fact span{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-durable .fact tspan{fill:rgb(225, 240, 225)!important;}#react-loop-durable .failure&gt;*{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-durable .failure span{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-durable .failure tspan{fill:rgb(247, 217, 221)!important;}#react-loop-durable .recovery&gt;*{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-durable .recovery span{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-durable .recovery tspan{fill:rgb(214, 233, 246)!important;}#react-loop-durable .tail&gt;*{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-durable .tail span{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-durable .tail tspan{fill:rgb(234, 220, 247)!important;}</style><g><marker id="react-loop-durable_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-durable_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="react-loop-durable_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"><g class="cluster" id="react-loop-durable-volatile" data-look="classic"><rect style="" x="458.078125" y="438.5" width="507.765625" height="121"/><g class="cluster-label" transform="translate(642.5234375, 438.5)"><foreignObject width="138.875" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5;"><span class="nodeLabel"><p>不属于 durable facts</p></span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M138,60.5L138,83.5L138,125" id="react-loop-durable-L_turnStart_startFact_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_turnStart_startFact_0" data-points="W3sieCI6MTM4LCJ5Ijo2MC41fSx7IngiOjEzOCwieSI6ODMuNX0seyJ4IjoxMzgsInkiOjEyOX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M138,204L138,249.5L721.981,307.861" id="react-loop-durable-L_startFact_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_startFact_ledger_0" data-points="W3sieCI6MTM4LCJ5IjoyMDR9LHsieCI6MTM4LCJ5IjoyNDkuNX0seyJ4Ijo3MjUuOTYwOTM3NSwieSI6MzA4LjI1ODM0NjExOTEwOTA0fV0=" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M426,60.5L426,83.5L426,125" id="react-loop-durable-L_hookCall_hookJournal_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_hookCall_hookJournal_0" data-points="W3sieCI6NDI2LCJ5Ijo2MC41fSx7IngiOjQyNiwieSI6ODMuNX0seyJ4Ijo0MjYsInkiOjEyOX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M426,204L426,249.5L722.015,298.898" id="react-loop-durable-L_hookJournal_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_hookJournal_ledger_0" data-points="W3sieCI6NDI2LCJ5IjoyMDR9LHsieCI6NDI2LCJ5IjoyNDkuNX0seyJ4Ijo3MjUuOTYwOTM3NSwieSI6Mjk5LjU1NjE2ODgwMTY3MTd9XQ==" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M712.641,60.5L712.641,83.5L712.641,136.25" id="react-loop-durable-L_modelDone_assistantFact_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_modelDone_assistantFact_0" data-points="W3sieCI6NzEyLjY0MDYyNSwieSI6NjAuNX0seyJ4Ijo3MTIuNjQwNjI1LCJ5Ijo4My41fSx7IngiOjcxMi42NDA2MjUsInkiOjE0MC4yNX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M712.641,192.75L712.641,249.5L755.006,270.709" id="react-loop-durable-L_assistantFact_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_assistantFact_ledger_0" data-points="W3sieCI6NzEyLjY0MDYyNSwieSI6MTkyLjc1fSx7IngiOjcxMi42NDA2MjUsInkiOjI0OS41fSx7IngiOjc1OC41ODMwMjQ4MjU3ODM5LCJ5IjoyNzIuNX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M999.281,60.5L999.281,83.5L999.281,113.75" id="react-loop-durable-L_approvalOrStart_approvalFact_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_approvalOrStart_approvalFact_0" data-points="W3sieCI6OTk5LjI4MTI1LCJ5Ijo2MC41fSx7IngiOjk5OS4yODEyNSwieSI6ODMuNX0seyJ4Ijo5OTkuMjgxMjUsInkiOjExNy43NX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M999.281,215.25L999.281,249.5L956.916,270.709" id="react-loop-durable-L_approvalFact_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_approvalFact_ledger_0" data-points="W3sieCI6OTk5LjI4MTI1LCJ5IjoyMTUuMjV9LHsieCI6OTk5LjI4MTI1LCJ5IjoyNDkuNX0seyJ4Ijo5NTMuMzM4ODUwMTc0MjE2MSwieSI6MjcyLjV9XQ==" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M1287.281,60.5L1287.281,83.5L1287.281,102.5" id="react-loop-durable-L_toolCycleEnd_boundaryFact_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_toolCycleEnd_boundaryFact_0" data-points="W3sieCI6MTI4Ny4yODEyNSwieSI6NjAuNX0seyJ4IjoxMjg3LjI4MTI1LCJ5Ijo4My41fSx7IngiOjEyODcuMjgxMjUsInkiOjEwNi41fV0=" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M1287.281,226.5L1287.281,249.5L989.907,298.968" id="react-loop-durable-L_boundaryFact_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_boundaryFact_ledger_0" data-points="W3sieCI6MTI4Ny4yODEyNSwieSI6MjI2LjV9LHsieCI6MTI4Ny4yODEyNSwieSI6MjQ5LjV9LHsieCI6OTg1Ljk2MDkzNzUsInkiOjI5OS42MjQ1NDAzODI5MDg2fV0=" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M1575.281,60.5L1575.281,83.5L1575.281,125" id="react-loop-durable-L_terminal_terminalFact_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_terminal_terminalFact_0" data-points="W3sieCI6MTU3NS4yODEyNSwieSI6NjAuNX0seyJ4IjoxNTc1LjI4MTI1LCJ5Ijo4My41fSx7IngiOjE1NzUuMjgxMjUsInkiOjEyOX1d" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M1575.281,204L1575.281,249.5L989.941,307.886" id="react-loop-durable-L_terminalFact_ledger_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_terminalFact_ledger_0" data-points="W3sieCI6MTU3NS4yODEyNSwieSI6MjA0fSx7IngiOjE1NzUuMjgxMjUsInkiOjI0OS41fSx7IngiOjk4NS45NjA5Mzc1LCJ5IjozMDguMjgyODk3ODA5MzQ2OTN9XQ==" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/><path d="M855.961,370L855.961,404.25L855.961,438.5L855.961,468.75" id="react-loop-durable-L_ledger_tail_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_ledger_tail_0" data-points="W3sieCI6ODU1Ljk2MDkzNzUsInkiOjM3MH0seyJ4Ijo4NTUuOTYwOTM3NSwieSI6NDA0LjI1fSx7IngiOjg1NS45NjA5Mzc1LCJ5Ijo0MzguNX0seyJ4Ijo4NTUuOTYwOTM3NSwieSI6NDcyLjc1fV0=" data-look="classic" marker-end="url(#react-loop-durable_flowchart-v2-pointEnd__788788)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_turnStart_startFact_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_startFact_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_hookCall_hookJournal_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_hookJournal_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_modelDone_assistantFact_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_assistantFact_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_approvalOrStart_approvalFact_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_approvalFact_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_toolCycleEnd_boundaryFact_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_boundaryFact_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_terminal_terminalFact_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_terminalFact_ledger_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(855.9609375, 404.25)"><g class="label" data-id="L_ledger_tail_0" transform="translate(-50.046875, -11.25)"><foreignObject width="100.09375" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>commit 后发布</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default runtime" id="react-loop-durable-flowchart-turnStart-0" data-look="classic" transform="translate(138, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-54.9140625" y="-26.25" width="109.828125" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-24.9140625, -11.25)"><rect/><foreignObject width="49.828125" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>新 Turn</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-startFact-1" data-look="classic" transform="translate(138, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>LoopStarted → 用户 MessageAppended</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-ledger-2" data-look="classic" transform="translate(855.9609375, 321.25)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-48.75" width="260" height="97.5"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -33.75)"><rect/><foreignObject width="200" height="67.5"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>event stream：同一 AgentRuntime 按 event_seq 排列</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-durable-flowchart-hookCall-3" data-look="classic" transform="translate(426, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-82.0234375" y="-26.25" width="164.046875" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-52.0234375, -11.25)"><rect/><foreignObject width="104.046875" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>每次 Hook 调用</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-hookJournal-4" data-look="classic" transform="translate(426, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>HookInvocationPending → Completed / Failed</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-durable-flowchart-modelDone-6" data-look="classic" transform="translate(712.640625, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-91.71875" y="-26.25" width="183.4375" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-61.71875, -11.25)"><rect/><foreignObject width="123.4375" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>LLM 产生完整答复</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-assistantFact-7" data-look="classic" transform="translate(712.640625, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-128.640625" y="-26.25" width="257.28125" height="52.5"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-98.640625, -11.25)"><rect/><foreignObject width="197.28125" height="22.5"><div style="color: rgb(225, 240, 225) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>assistant MessageAppended</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-durable-flowchart-approvalOrStart-9" data-look="classic" transform="translate(999.28125, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-108.296875" y="-26.25" width="216.59375" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-78.296875, -11.25)"><rect/><foreignObject width="156.59375" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>人工审批或外部 Tool 前</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-approvalFact-10" data-look="classic" transform="translate(999.28125, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-48.75" width="260" height="97.5"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -33.75)"><rect/><foreignObject width="200" height="67.5"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>ToolApprovalRequested / Resolved；ToolExecutionStarted</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-durable-flowchart-toolCycleEnd-12" data-look="classic" transform="translate(1287.28125, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-121.3046875" y="-26.25" width="242.609375" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-91.3046875, -11.25)"><rect/><foreignObject width="182.609375" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>Tool 返回、准备进入下一轮</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-boundaryFact-13" data-look="classic" transform="translate(1287.28125, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-60" width="260" height="120"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -45)"><rect/><foreignObject width="200" height="90"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>Tool result MessageAppended；可选 TranscriptCompacted；IterationCompleted</p></span></div></foreignObject></g></g><g class="node default runtime" id="react-loop-durable-flowchart-terminal-15" data-look="classic" transform="translate(1575.28125, 34.25)"><rect class="basic label-container" style="fill:#16191d !important;stroke:#526887 !important;stroke-width:1px !important" x="-60" y="-26.25" width="120" height="52.5"/><g class="label" style="color:#e7eceb !important" transform="translate(-30, -11.25)"><rect/><foreignObject width="60" height="22.5"><div style="color: rgb(231, 236, 235) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>运行终止</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-durable-flowchart-terminalFact-16" data-look="classic" transform="translate(1575.28125, 166.5)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(225, 240, 225) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>LoopFinished / LoopFailed / LoopCancelled</p></span></div></foreignObject></g></g><g class="node default tail" id="react-loop-durable-flowchart-delta-18" data-look="classic" transform="translate(612.078125, 499)"><rect class="basic label-container" style="fill:#211927 !important;stroke:#8d6aa9 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#eadcf7 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(234, 220, 247) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#eadcf7 !important" class="nodeLabel"><p>LLM 开始、token delta、浏览器草稿</p></span></div></foreignObject></g></g><g class="node default tail" id="react-loop-durable-flowchart-tail-19" data-look="classic" transform="translate(855.9609375, 499)"><rect class="basic label-container" style="fill:#211927 !important;stroke:#8d6aa9 !important;stroke-width:1px !important" x="-85.8828125" y="-26.25" width="171.765625" height="52.5"/><g class="label" style="color:#eadcf7 !important" transform="translate(-55.8828125, -11.25)"><rect/><foreignObject width="111.765625" height="22.5"><div style="color: rgb(234, 220, 247) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#eadcf7 !important" class="nodeLabel"><p>NATS / SSE 短尾</p></span></div></foreignObject></g></g></g></g><marker id="react-loop-durable_flowchart-v2-pointEnd__788788" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;" stroke="#788788" fill="#788788"/></marker></g><defs><filter id="react-loop-durable-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="react-loop-durable-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="react-loop-durable-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#526887" stop-opacity="1"/><stop offset="100%" stop-color="#6ca777" stop-opacity="1"/></linearGradient></svg>
+        </div>
+      </figure>
+    </section>
+        <section class="react-loop__diagram-panel" aria-labelledby="react-loop-recovery-title">
+      <header><span translate="no">Mermaid · recovery</span><h4 id="react-loop-recovery-title">③ 恢复边界：进程丢失后怎么继续</h4></header>
+      <figure class="react-loop__diagram" aria-labelledby="react-loop-recovery-caption">
+        <figcaption id="react-loop-recovery-caption">恢复不是重放浏览器或 <span translate="no">NATS</span>。API 先同时验证 <span translate="no">runtime</span> 状态、固定 definition 与 snapshot，再严格读取同一条 <span translate="no">durable ledger</span>，最后重新装配 <span translate="no">kernel</span>。<span class="react-loop__diagram-scroll-hint">窄屏可在图内横向拖动查看全图。</span></figcaption>
+        <div class="react-loop__mermaid" tabindex="0" translate="no" aria-label="③ 恢复边界：进程丢失后怎么继续">
+          <svg id="react-loop-recovery" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 1517.66px; background-color: transparent;" viewBox="0 0 1517.65625 458" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#react-loop-recovery{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;fill:#e7eceb;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#react-loop-recovery .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#react-loop-recovery .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#react-loop-recovery .error-icon{fill:#17212a;}#react-loop-recovery .error-text{fill:#d6e9f6;stroke:#d6e9f6;}#react-loop-recovery .edge-thickness-normal{stroke-width:1px;}#react-loop-recovery .edge-thickness-thick{stroke-width:3.5px;}#react-loop-recovery .edge-pattern-solid{stroke-dasharray:0;}#react-loop-recovery .edge-thickness-invisible{stroke-width:0;fill:none;}#react-loop-recovery .edge-pattern-dashed{stroke-dasharray:3;}#react-loop-recovery .edge-pattern-dotted{stroke-dasharray:2;}#react-loop-recovery .marker{fill:#788788;stroke:#788788;}#react-loop-recovery .marker.cross{stroke:#788788;}#react-loop-recovery svg{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;}#react-loop-recovery p{margin:0;}#react-loop-recovery .label{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e7eceb;}#react-loop-recovery .cluster-label text{fill:#d6e9f6;}#react-loop-recovery .cluster-label span{color:#d6e9f6;}#react-loop-recovery .cluster-label span p{background-color:transparent;}#react-loop-recovery .label text,#react-loop-recovery span{fill:#e7eceb;color:#e7eceb;}#react-loop-recovery .node rect,#react-loop-recovery .node circle,#react-loop-recovery .node ellipse,#react-loop-recovery .node polygon,#react-loop-recovery .node path{fill:#16191d;stroke:#526887;stroke-width:1px;}#react-loop-recovery .rough-node .label text,#react-loop-recovery .node .label text,#react-loop-recovery .image-shape .label,#react-loop-recovery .icon-shape .label{text-anchor:middle;}#react-loop-recovery .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#react-loop-recovery .rough-node .label,#react-loop-recovery .node .label,#react-loop-recovery .image-shape .label,#react-loop-recovery .icon-shape .label{text-align:center;}#react-loop-recovery .node.clickable{cursor:pointer;}#react-loop-recovery .root .anchor path{fill:#788788!important;stroke-width:0;stroke:#788788;}#react-loop-recovery .arrowheadPath{fill:rgba(255, 255, 255, 0);}#react-loop-recovery .edgePath .path{stroke:#788788;stroke-width:1px;}#react-loop-recovery .flowchart-link{stroke:#788788;fill:none;}#react-loop-recovery .edgeLabel{background-color:#14231c;text-align:center;}#react-loop-recovery .edgeLabel p{background-color:#14231c;}#react-loop-recovery .edgeLabel rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-recovery .labelBkg{background-color:rgba(20, 35, 28, 0.5);}#react-loop-recovery .cluster rect{fill:#17212a;stroke:#6696b9;stroke-width:1px;}#react-loop-recovery .cluster text{fill:#d6e9f6;}#react-loop-recovery .cluster span{color:#d6e9f6;}#react-loop-recovery div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;background:#17212a;border:1px solid #6696b9;border-radius:2px;pointer-events:none;z-index:100;}#react-loop-recovery .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#e7eceb;}#react-loop-recovery rect.text{fill:none;stroke-width:0;}#react-loop-recovery .icon-shape,#react-loop-recovery .image-shape{background-color:#14231c;text-align:center;}#react-loop-recovery .icon-shape p,#react-loop-recovery .image-shape p{background-color:#14231c;padding:2px;}#react-loop-recovery .icon-shape .label rect,#react-loop-recovery .image-shape .label rect{opacity:0.5;background-color:#14231c;fill:#14231c;}#react-loop-recovery .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#react-loop-recovery .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#react-loop-recovery .node .neo-node{stroke:#526887;}#react-loop-recovery [data-look="neo"].node rect,#react-loop-recovery [data-look="neo"].cluster rect,#react-loop-recovery [data-look="neo"].node polygon{stroke:url(#react-loop-recovery-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-recovery [data-look="neo"].swimlane.cluster rect{filter:none;}#react-loop-recovery [data-look="neo"].node path{stroke:url(#react-loop-recovery-gradient);stroke-width:1px;}#react-loop-recovery [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-recovery [data-look="neo"].node .neo-line path{stroke:#526887;filter:none;}#react-loop-recovery [data-look="neo"].node circle{stroke:url(#react-loop-recovery-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-recovery [data-look="neo"].node circle .state-start{fill:#000000;}#react-loop-recovery [data-look="neo"].icon-shape .icon{fill:url(#react-loop-recovery-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-recovery [data-look="neo"].icon-shape .icon-neo path{stroke:url(#react-loop-recovery-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#react-loop-recovery :root{--mermaid-font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}#react-loop-recovery .input&gt;*{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-recovery .input span{fill:rgb(23, 28, 29)!important;stroke:rgb(90, 106, 109)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-recovery .input tspan{fill:rgb(231, 236, 235)!important;}#react-loop-recovery .runtime&gt;*{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-recovery .runtime span{fill:rgb(22, 25, 29)!important;stroke:rgb(82, 104, 135)!important;color:rgb(231, 236, 235)!important;stroke-width:1px!important;}#react-loop-recovery .runtime tspan{fill:rgb(231, 236, 235)!important;}#react-loop-recovery .hook&gt;*{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-recovery .hook span{fill:rgb(37, 33, 24)!important;stroke:rgb(198, 154, 87)!important;color:rgb(244, 231, 200)!important;stroke-width:1px!important;}#react-loop-recovery .hook tspan{fill:rgb(244, 231, 200)!important;}#react-loop-recovery .decision&gt;*{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-recovery .decision span{fill:rgb(32, 35, 27)!important;stroke:rgb(141, 172, 100)!important;color:rgb(228, 239, 213)!important;stroke-width:1px!important;}#react-loop-recovery .decision tspan{fill:rgb(228, 239, 213)!important;}#react-loop-recovery .fact&gt;*{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-recovery .fact span{fill:rgb(20, 35, 28)!important;stroke:rgb(108, 167, 119)!important;color:rgb(225, 240, 225)!important;stroke-width:1px!important;}#react-loop-recovery .fact tspan{fill:rgb(225, 240, 225)!important;}#react-loop-recovery .failure&gt;*{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-recovery .failure span{fill:rgb(41, 25, 27)!important;stroke:rgb(182, 95, 103)!important;color:rgb(247, 217, 221)!important;stroke-width:1px!important;}#react-loop-recovery .failure tspan{fill:rgb(247, 217, 221)!important;}#react-loop-recovery .recovery&gt;*{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-recovery .recovery span{fill:rgb(23, 33, 42)!important;stroke:rgb(102, 150, 185)!important;color:rgb(214, 233, 246)!important;stroke-width:1px!important;}#react-loop-recovery .recovery tspan{fill:rgb(214, 233, 246)!important;}#react-loop-recovery .tail&gt;*{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-recovery .tail span{fill:rgb(33, 25, 39)!important;stroke:rgb(141, 106, 169)!important;color:rgb(234, 220, 247)!important;stroke-width:1px!important;}#react-loop-recovery .tail tspan{fill:rgb(234, 220, 247)!important;}</style><g><marker id="react-loop-recovery_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="react-loop-recovery_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="react-loop-recovery_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M268,45.5L343.5,45.5L493.051,120.458" id="react-loop-recovery-L_state_fence_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_state_fence_0" data-points="W3sieCI6MjY4LCJ5Ijo0NS41fSx7IngiOjM0My41LCJ5Ijo0NS41fSx7IngiOjQ5Ni42Mjc0MjcxODQ0NjYsInkiOjEyMi4yNX1d" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M268,148.5L343.5,148.5L470.555,148.5" id="react-loop-recovery-L_definition_fence_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_definition_fence_0" data-points="W3sieCI6MjY4LCJ5IjoxNDguNX0seyJ4IjozNDMuNSwieSI6MTQ4LjV9LHsieCI6NDc0LjU1NDY4NzUsInkiOjE0OC41fV0=" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M268,251.5L343.5,251.5L493.051,176.542" id="react-loop-recovery-L_snapshot_fence_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_snapshot_fence_0" data-points="W3sieCI6MjY4LCJ5IjoyNTEuNX0seyJ4IjozNDMuNSwieSI6MjUxLjV9LHsieCI6NDk2LjYyNzQyNzE4NDQ2NiwieSI6MTc0Ljc1fV0=" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M264.977,343.25L343.5,343.25L415.075,357.269" id="react-loop-recovery-L_ledger_strictRead_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_ledger_strictRead_0" data-points="W3sieCI6MjY0Ljk3NjU2MjUsInkiOjM0My4yNX0seyJ4IjozNDMuNSwieSI6MzQzLjI1fSx7IngiOjQxOSwieSI6MzU4LjAzNzcxMjg5NTM3NzF9XQ==" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M623.445,148.5L702,148.5L797.168,256.869" id="react-loop-recovery-L_fence_replay_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_fence_replay_0" data-points="W3sieCI6NjIzLjQ0NTMxMjUsInkiOjE0OC41fSx7IngiOjcwMiwieSI6MTQ4LjV9LHsieCI6Nzk5LjgwNzE3ODEzMzUxNSwieSI6MjU5Ljg3NX1d" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M679,383.5L702,383.5L787.164,314.885" id="react-loop-recovery-L_strictRead_replay_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_strictRead_replay_0" data-points="W3sieCI6Njc5LCJ5IjozODMuNX0seyJ4Ijo3MDIsInkiOjM4My41fSx7IngiOjc5MC4yNzg1NDIyMDE1NDA0LCJ5IjozMTIuMzc1fV0=" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M920.719,286.125L943.719,286.125L962.719,286.125" id="react-loop-recovery-L_replay_reassemble_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_replay_reassemble_0" data-points="W3sieCI6OTIwLjcxODc1LCJ5IjoyODYuMTI1fSx7IngiOjk0My43MTg3NSwieSI6Mjg2LjEyNX0seyJ4Ijo5NjYuNzE4NzUsInkiOjI4Ni4xMjV9XQ==" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M1203.656,286.125L1226.656,286.125L1245.656,286.125" id="react-loop-recovery-L_reassemble_next_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_reassemble_next_0" data-points="W3sieCI6MTIwMy42NTYyNSwieSI6Mjg2LjEyNX0seyJ4IjoxMjI2LjY1NjI1LCJ5IjoyODYuMTI1fSx7IngiOjEyNDkuNjU2MjUsInkiOjI4Ni4xMjV9XQ==" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/><path d="M250.547,423.75L343.5,423.75L415.075,409.731" id="react-loop-recovery-L_tail_strictRead_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style="stroke:#788788;stroke-width:1.25px;fill:none;;;stroke:#788788;stroke-width:1.25px;fill:none" data-edge="true" data-et="edge" data-id="L_tail_strictRead_0" data-points="W3sieCI6MjUwLjU0Njg3NSwieSI6NDIzLjc1fSx7IngiOjM0My41LCJ5Ijo0MjMuNzV9LHsieCI6NDE5LCJ5Ijo0MDguOTYyMjg3MTA0NjIyOX1d" data-look="classic" marker-end="url(#react-loop-recovery_flowchart-v2-pointEnd__788788)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_state_fence_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_definition_fence_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_snapshot_fence_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_ledger_strictRead_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_fence_replay_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_strictRead_replay_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_replay_reassemble_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_reassemble_next_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(343.5, 423.75)"><g class="label" data-id="L_tail_strictRead_0" transform="translate(-52.5, -11.25)"><foreignObject width="105" height="22.5"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>不作为恢复输入</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default input" id="react-loop-recovery-flowchart-state-0" data-look="classic" transform="translate(138, 45.5)"><rect class="basic label-container" style="fill:#171c1d !important;stroke:#5a6a6d !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>agent_states：当前 runtime / session / Turn fence</p></span></div></foreignObject></g></g><g class="node default recovery" id="react-loop-recovery-flowchart-fence-1" data-look="classic" transform="translate(549, 148.5)"><rect class="basic label-container" style="fill:#17212a !important;stroke:#6696b9 !important;stroke-width:1px !important" x="-74.4453125" y="-26.25" width="148.890625" height="52.5"/><g class="label" style="color:#d6e9f6 !important" transform="translate(-44.4453125, -11.25)"><rect/><foreignObject width="88.890625" height="22.5"><div style="color: rgb(214, 233, 246) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#d6e9f6 !important" class="nodeLabel"><p>三方 pin 校验</p></span></div></foreignObject></g></g><g class="node default input" id="react-loop-recovery-flowchart-definition-2" data-look="classic" transform="translate(138, 148.5)"><rect class="basic label-container" style="fill:#171c1d !important;stroke:#5a6a6d !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>agents：不可变 Agent definition</p></span></div></foreignObject></g></g><g class="node default input" id="react-loop-recovery-flowchart-snapshot-4" data-look="classic" transform="translate(138, 251.5)"><rect class="basic label-container" style="fill:#171c1d !important;stroke:#5a6a6d !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#e7eceb !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(231, 236, 235) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e7eceb !important" class="nodeLabel"><p>LoopStarted：TurnRuntimeSnapshot</p></span></div></foreignObject></g></g><g class="node default fact" id="react-loop-recovery-flowchart-ledger-6" data-look="classic" transform="translate(138, 343.25)"><rect class="basic label-container" style="fill:#14231c !important;stroke:#6ca777 !important;stroke-width:1px !important" x="-126.9765625" y="-26.25" width="253.953125" height="52.5"/><g class="label" style="color:#e1f0e1 !important" transform="translate(-96.9765625, -11.25)"><rect/><foreignObject width="193.953125" height="22.5"><div style="color: rgb(225, 240, 225) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#e1f0e1 !important" class="nodeLabel"><p>event stream：durable facts</p></span></div></foreignObject></g></g><g class="node default recovery" id="react-loop-recovery-flowchart-strictRead-7" data-look="classic" transform="translate(549, 383.5)"><rect class="basic label-container" style="fill:#17212a !important;stroke:#6696b9 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#d6e9f6 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(214, 233, 246) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#d6e9f6 !important" class="nodeLabel"><p>strict read：version / shape / identity 连续性</p></span></div></foreignObject></g></g><g class="node default recovery" id="react-loop-recovery-flowchart-replay-9" data-look="classic" transform="translate(822.859375, 286.125)"><rect class="basic label-container" style="fill:#17212a !important;stroke:#6696b9 !important;stroke-width:1px !important" x="-97.859375" y="-26.25" width="195.71875" height="52.5"/><g class="label" style="color:#d6e9f6 !important" transform="translate(-67.859375, -11.25)"><rect/><foreignObject width="135.71875" height="22.5"><div style="color: rgb(214, 233, 246) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#d6e9f6 !important" class="nodeLabel"><p>replay 已确认的事实</p></span></div></foreignObject></g></g><g class="node default recovery" id="react-loop-recovery-flowchart-reassemble-13" data-look="classic" transform="translate(1085.1875, 286.125)"><rect class="basic label-container" style="fill:#17212a !important;stroke:#6696b9 !important;stroke-width:1px !important" x="-118.46875" y="-37.5" width="236.9375" height="75"/><g class="label" style="color:#d6e9f6 !important" transform="translate(-88.46875, -22.5)"><rect/><foreignObject width="176.9375" height="45"><div style="color: rgb(214, 233, 246) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#d6e9f6 !important" class="nodeLabel"><p>重新装配 AgentLoop<br />得到下一件合法 Operation</p></span></div></foreignObject></g></g><g class="node default recovery" id="react-loop-recovery-flowchart-next-15" data-look="classic" transform="translate(1379.65625, 286.125)"><rect class="basic label-container" style="fill:#17212a !important;stroke:#6696b9 !important;stroke-width:1px !important" x="-130" y="-37.5" width="260" height="75"/><g class="label" style="color:#d6e9f6 !important" transform="translate(-100, -22.5)"><rect/><foreignObject width="200" height="45"><div style="color: rgb(214, 233, 246) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#d6e9f6 !important" class="nodeLabel"><p>继续执行，新的事实再写回 ledger</p></span></div></foreignObject></g></g><g class="node default tail" id="react-loop-recovery-flowchart-tail-16" data-look="classic" transform="translate(138, 423.75)"><rect class="basic label-container" style="fill:#211927 !important;stroke:#8d6aa9 !important;stroke-width:1px !important" x="-112.546875" y="-26.25" width="225.09375" height="52.5"/><g class="label" style="color:#eadcf7 !important" transform="translate(-82.546875, -11.25)"><rect/><foreignObject width="165.09375" height="22.5"><div style="color: rgb(234, 220, 247) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#eadcf7 !important" class="nodeLabel"><p>NATS / SSE / 浏览器草稿</p></span></div></foreignObject></g></g></g></g><marker id="react-loop-recovery_flowchart-v2-pointEnd__788788" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;" stroke="#788788" fill="#788788"/></marker></g><defs><filter id="react-loop-recovery-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="react-loop-recovery-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="react-loop-recovery-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#526887" stop-opacity="1"/><stop offset="100%" stop-color="#6ca777" stop-opacity="1"/></linearGradient></svg>
+        </div>
+      </figure>
+    </section>
+      </div>
+      <section class="react-loop__hooks" aria-labelledby="react-loop-hooks-title">
+        <header><span>五个 <span translate="no">Hook</span></span><h3 id="react-loop-hooks-title">它们不是随处可插的回调</h3><p>每个 <span translate="no">Hook</span> 都有固定位置、只读 snapshot 和受限的 decision。调用过程本身会进 <span translate="no">journal</span>。</p></header>
+        <div><article class="react-loop__hook">
+      <strong><span translate="no">transform_context</span></strong>
+      <p>临时整理这次发给模型的 <span translate="no">request view</span>，例如裁掉一段历史；不改 <span translate="no">committed context</span>。</p>
+      <dl><div><dt>何时调用</dt><dd>每次请求 <span translate="no">LLM</span> 前</dd></div><div><dt>会写入</dt><dd><span translate="no">HookInvocationPending</span> → <span translate="no">HookInvocationCompleted</span> / <span translate="no">HookInvocationFailed</span></dd></div></dl>
+    </article><article class="react-loop__hook">
+      <strong><span translate="no">transform_tool_call</span></strong>
+      <p>可以改 <span translate="no">Tool</span> 参数，也可以改变后续要用的授权方式；改完还会再校验一次。</p>
+      <dl><div><dt>何时调用</dt><dd>一个 <span translate="no">Tool</span> call 通过原始参数校验后</dd></div><div><dt>会写入</dt><dd><span translate="no">HookInvocationPending</span> → <span translate="no">HookInvocationCompleted</span> / <span translate="no">HookInvocationFailed</span></dd></div></dl>
+    </article><article class="react-loop__hook">
+      <strong><span translate="no">decide_tool_call</span></strong>
+      <p>决定执行还是拦下。当前人工审批在这里等待并返回批准或拒绝。</p>
+      <dl><div><dt>何时调用</dt><dd><span translate="no">Tool</span> 参数最终校验后、真正执行前</dd></div><div><dt>会写入</dt><dd><span translate="no">Hook</span> <span translate="no">journal</span>；需要人工决定时另写 <span translate="no">ToolApprovalRequested</span> / <span translate="no">ToolApprovalResolved</span></dd></div></dl>
+    </article><article class="react-loop__hook">
+      <strong><span translate="no">after_tool_call</span></strong>
+      <p>检查或替换模型将要看到的 <span translate="no">Tool</span> result；当前 stock 组合只保留安全的 Echo 结果。</p>
+      <dl><div><dt>何时调用</dt><dd><span translate="no">Tool</span> 返回结果后、结果进入历史前</dd></div><div><dt>会写入</dt><dd><span translate="no">HookInvocationPending</span> → <span translate="no">HookInvocationCompleted</span> / <span translate="no">HookInvocationFailed</span>；通过后才写 <span translate="no">Tool</span> result 的 <span translate="no">MessageAppended</span></dd></div></dl>
+    </article><article class="react-loop__hook">
+      <strong><span translate="no">prepare_next_turn</span></strong>
+      <p>决定下一轮是继续、停止、注入一条临时消息，还是执行一次已定义的压缩机制。</p>
+      <dl><div><dt>何时调用</dt><dd>完整 <span translate="no">Tool</span> cycle 收尾时；普通无 <span translate="no">Tool</span> 答复不会调用它</dd></div><div><dt>会写入</dt><dd><span translate="no">Hook</span> <span translate="no">journal</span>；若选择压缩，<span translate="no">TranscriptCompacted</span> 在 <span translate="no">IterationCompleted</span> 前写入</dd></div></dl>
+    </article></div>
+      </section>
+      <section class="react-loop__persistence" aria-labelledby="react-loop-persistence-title">
+        <header><span>持久化点</span><h3 id="react-loop-persistence-title">哪些东西真的写进 <i translate="no">event stream</i></h3><p>这些是恢复会读取的记录。网络推送和浏览器草稿不在这里。</p></header>
+        <div class="react-loop__ledger"><table><caption class="visually-hidden">ReAct 循环中的 durable event 写入点</caption><thead><tr><th scope="col">发生在什么时候</th><th scope="col">写入的事件</th><th scope="col">为什么要写</th></tr></thead><tbody><tr id="react-persistence-turn-start"><th scope="row">新 Turn 开始</th><td><span translate="no">LoopStarted</span> → 用户 <span translate="no">MessageAppended</span></td><td>固定本轮 snapshot，并让用户消息成为可恢复的起点。</td></tr><tr id="react-persistence-hook-journal"><th scope="row">每次 <span translate="no">Hook</span></th><td><span translate="no">HookInvocationPending</span> → <span translate="no">Completed</span> / <span translate="no">Failed</span></td><td>先留 <span translate="no">Pending</span>，再调用 handler；有决定先写 <span translate="no">Completed</span>，才应用决定影响的动作。</td></tr><tr id="react-persistence-assistant-result"><th scope="row"><span translate="no">LLM</span> 完成一条正式答复</th><td>assistant <span translate="no">MessageAppended</span></td><td>流式 token 不是事实；完整消息成功提交后才进入历史和 <span translate="no">committed context</span>。</td></tr><tr id="react-persistence-approval-tool-start"><th scope="row">需要审批或调用外部 <span translate="no">Tool</span></th><td><span translate="no">ToolApprovalRequested</span> / Resolved；<span translate="no">ToolExecutionStarted</span></td><td>审批事实单独落库；真正碰外部 <span translate="no">Tool</span> 前，先写 <span translate="no">ToolExecutionStarted</span>。崩溃后这意味着调用可能已经发生，恢复按 at-least-once 处理。</td></tr><tr id="react-persistence-tool-result-boundary"><th scope="row"><span translate="no">Tool</span> 返回、准备进入下一轮</th><td><span translate="no">Tool</span> result <span translate="no">MessageAppended</span>；可选 <span translate="no">TranscriptCompacted</span>；<span translate="no">IterationCompleted</span></td><td><span translate="no">Tool</span> result 经过 <span translate="no">after_tool_call</span> 后才写入。压缩存在时必须先提交，再提交迭代边界。</td></tr><tr id="react-persistence-terminal"><th scope="row">运行结束、失败或取消</th><td><span translate="no">LoopFinished</span> / <span translate="no">LoopFailed</span> / <span translate="no">LoopCancelled</span></td><td>终态写进流水账。失败和取消可能直接结束，不保证有 <span translate="no">IterationCompleted</span>。</td></tr></tbody></table></div>
+      </section>
+      <aside class="react-loop__note"><span>别混在一起</span><p><span translate="no">LLM</span> 的开始事件、token delta、浏览器草稿和 <span translate="no">NATS</span> 推送都不是 <span translate="no">durable fact</span>。它们让人更快看到进展，但恢复时一律以 <span translate="no">Postgres</span> 的 <span translate="no">event stream</span> 为准。</p></aside>
+    </section>
+    <section class="kernel-glossary" aria-labelledby="kernel-glossary-title">
+      <header><span>沿图认词</span><h3 id="kernel-glossary-title">每个名词都先回答：它在哪一层？</h3><p>先区分“已发生的事实”和“正在运行的进程”，再阅读后面的状态机、<span translate="no">Hook</span> 与恢复细节。</p></header>
+      <dl><div><dt><span translate="no">Agent</span></dt><dd>一份固定的行为说明：prompt、允许使用的 <span translate="no">Tool</span> 和模板默认模型都在这里。</dd><dd><span>不是</span>不是一次对话，也不是正在运行的进程。</dd></div><div><dt><span translate="no">AgentRuntime</span></dt><dd>一次实际运行留下的长期档案。它使用某个 <span translate="no">Agent</span> 定义，事件、历史和恢复都以它为范围。</dd><dd><span>不是</span>不是 <span translate="no">Agent</span> 模板本身；多个 <span translate="no">runtime</span> 可以固定使用同一个 <span translate="no">Agent</span>。</dd></div><div><dt><span translate="no">kernel</span> / <span translate="no">AgentLoop</span></dt><dd>运行中的状态机。它读已确认的记录，再给出接下来唯一允许做的一件事。</dd><dd><span>不是</span>不是数据库、<span translate="no">HTTP</span> 服务或 <span translate="no">NATS</span> 消费者。</dd></div><div><dt><span translate="no">Operation</span></dt><dd>接下来要做的一件事，比如请求 <span translate="no">LLM</span>、运行 <span translate="no">Tool</span> 或调用 <span translate="no">Hook</span>。</dd><dd><span>不是</span>不是已经发生的事实；真正发生后必须先写成 durable event。</dd></div><div><dt><span translate="no">durable fact</span></dt><dd>已经写入 <span translate="no">Postgres</span> 且事务提交成功的一条记录，例如 <span translate="no">MessageAppended</span>、<span translate="no">Tool</span> result 或 <span translate="no">Hook</span> decision。</dd><dd><span>不是</span>不是内存变量、浏览器草稿，也不是 <span translate="no">NATS</span> 上一条临时消息。</dd></div><div><dt><span translate="no">event stream</span></dt><dd>同一个 <span translate="no">AgentRuntime</span> 的 <span translate="no">durable fact</span>s 按 <span translate="no">event_seq</span> 编号排成一列。把它当作一份可按顺序重读的数据库流水账就行。</dd><dd><span>不是</span>不是全局事件总线，也不是 UI 实时流。</dd></div><div><dt><span translate="no">journal</span></dt><dd><span translate="no">event stream</span> 里专门记录 <span translate="no">Hook</span> <span translate="no">Pending</span>、<span translate="no">Completed</span>、<span translate="no">Failed</span> 的那部分。它把 <span translate="no">Hook</span> 当时给出的 decision 留下来，恢复时不用再猜一次。</dd><dd><span>不是</span>不是普通日志；<span translate="no">Completed</span> decision 在恢复时不能随意重调 handler。</dd></div><div><dt><span translate="no">committed context</span></dt><dd><span translate="no">kernel</span> 根据 <span translate="no">Agent</span> 定义和 <span translate="no">durable fact</span>s 重建出的、已经确认的对话上下文。</dd><dd><span>不是</span>不是发给模型前可临时修改的 <span translate="no">request view</span>。</dd></div><div><dt><span translate="no">request view</span></dt><dd>这次调用 <span translate="no">LLM</span> 前临时拼出的输入。它可以带一次性的 <span translate="no">Inject</span> 或 <span translate="no">ContextPatch</span>，用完就丢。</dd><dd><span>不是</span>不会自动写回 durable history。</dd></div><div><dt><span translate="no">NATS short tail</span></dt><dd>让在线界面尽快看到近期变化的实时推送。漏了也没关系，之后会用 PG 的 view 和 history 补回来。</dd><dd><span>不是</span>不是恢复真相，也不能替代 <span translate="no">event stream</span>。</dd></div></dl>
+    </section>
+    <aside class="kernel-primer__invariant"><span>先记这一条</span><p>对系统来说，只有已经落库并提交成功的记录才真的发生过。草稿、<span translate="no">NATS</span> 推送和进程内存都可能随断线或重启消失。</p></aside>
+    <details class="evidence">
+      <summary>这张结构图的实现证据 <span>6</span></summary>
+      <ul><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">crates/stratum-core/src/lib.rs</code>
+    <strong translate="no">TurnRuntimeSnapshot</strong>
+    <span>不可变定义身份、长期运行聚合身份与 Turn 固定快照</span>
+  </li><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">crates/stratum-agent/src/agent_loop/runner.rs</code>
+    <strong translate="no">AgentLoop</strong>
+    <span>模型、<span translate="no">Tool</span> 与迭代边界的确定性推进</span>
+  </li><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">crates/stratum-core/src/agent_loop_event.rs</code>
+    <strong translate="no">DurableAgentEvent</strong>
+    <span><span translate="no">kernel</span> durable 事实与 <span translate="no">ContextPatch</span>/decision record 的类型化定义</span>
+  </li><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
+    <strong translate="no">replay_events</strong>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+  </li><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">crates/stratum-api/src/dispatcher.rs</code>
+    <strong translate="no">flush_durable</strong>
+    <span>PG product 投影、<span translate="no">AgentRuntime</span> scope 与 <span translate="no">NATS</span> realtime tail 的收敛边界</span>
+  </li><li>
+    <span class="evidence__kind">实现</span>
+    <code translate="no">stratum-web/features/agent-conversation/recovery.ts</code>
+    <strong translate="no">reconcileConversation</strong>
+    <span>Web 以 PG view/history 推进 confirmed barrier，并在其上 rebase realtime frame</span>
+  </li></ul>
+    </details>
+  </section><section class="manual-chapter" id="context-first-principles" data-nav-section="first-principles">
     <header class="chapter-heading">
       <div><span>第一性模型</span><h2>从事实出发，而不是从进程状态出发</h2></div>
       <p>Stratum 把可重建性作为 <span translate="no">kernel</span> 的首要约束：非确定性先固化，snapshot 固定的身份、可装配的同版本组件与相同运行 limits 再和 <span translate="no">durable fact</span>s 共同驱动唯一下一步。</p>
@@ -2293,7 +3106,7 @@ main {
   </article></div>
     <div class="concept-boundaries" aria-label="确定性 kernel 的延期与非目标边界">
     <article><span>明确延期</span><p>多实例 ownership、scheduler takeover 与 automatic <span translate="no">resume</span> 由独立调度 change 定义。</p></article>
-    <article><span>非目标</span><p>durable ledger 单独不是完整运行定义；<span translate="no">kernel</span> 不读取 <span translate="no">Postgres</span>/<span translate="no">NATS</span>，不持有 <span translate="no">AgentRuntimeId</span>，也不决定 hosting。</p></article>
+    <article><span>非目标</span><p><span translate="no">durable ledger</span> 单独不是完整运行定义；<span translate="no">kernel</span> 不读取 <span translate="no">Postgres</span>/<span translate="no">NATS</span>，不持有 <span translate="no">AgentRuntimeId</span>，也不决定 hosting。</p></article>
   </div>
     <details class="evidence">
       <summary>实现证据与代码定位 <span>4</span></summary>
@@ -2311,7 +3124,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li><li>
     <span class="evidence__kind">测试</span>
     <code translate="no">crates/stratum-agent/tests/agent_loop_resume.rs</code>
@@ -2619,7 +3432,7 @@ main {
     <span class="evidence__kind">运维</span>
     <code translate="no">docs/runtime.md</code>
     <strong translate="no">AgentRuntimeId</strong>
-    <span><span translate="no">Postgres</span> 唯一真相、<span translate="no">NATS</span> short tail 与显式 <span translate="no">resume</span> 边界</span>
+    <span><span translate="no">Postgres</span> 唯一真相、<span translate="no">NATS short tail</span> 与显式 <span translate="no">resume</span> 边界</span>
   </li><li>
     <span class="evidence__kind">规范</span>
     <code translate="no">openspec/specs/session-runtime-identity/spec.md</code>
@@ -2782,7 +3595,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li><li>
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-core/src/agent_loop_event.rs</code>
@@ -2936,7 +3749,7 @@ main {
       </div>
       <a class="concept__anchor" href="#context/iteration-boundary" aria-label="链接到 迭代边界">#</a>
     </header>
-    <p class="concept__definition">成功越过本次 iteration frontier 时会以 <span translate="no">IterationCompleted</span> 收口；<span translate="no">provider</span>/<span translate="no">Hook</span>/<span translate="no">Tool</span> 失败或取消可以直接进入 Loop<span translate="no">Failed</span>/LoopCancelled，不保证先有该边界。只有完整 <span translate="no">Tool</span> cycle 的全部模型可见结果 durable 提交后，<span translate="no">kernel</span> 才在提交边界前调用 <span translate="no">prepare_next_turn</span>。无 <span translate="no">Tool</span> 的普通成功终局会直接提交 <span translate="no">IterationCompleted</span> 与 <span translate="no">LoopFinished</span>，不调用 <span translate="no">prepare_next_turn</span>。</p>
+    <p class="concept__definition">成功越过本次 iteration frontier 时会以 <span translate="no">IterationCompleted</span> 收口；<span translate="no">provider</span>/<span translate="no">Hook</span>/<span translate="no">Tool</span> 失败或取消可以直接进入 <span translate="no">LoopFailed</span>/<span translate="no">LoopCancelled</span>，不保证先有该边界。只有完整 <span translate="no">Tool</span> cycle 的全部模型可见结果 durable 提交后，<span translate="no">kernel</span> 才在提交边界前调用 <span translate="no">prepare_next_turn</span>。无 <span translate="no">Tool</span> 的普通成功终局会直接提交 <span translate="no">IterationCompleted</span> 与 <span translate="no">LoopFinished</span>，不调用 <span translate="no">prepare_next_turn</span>。</p>
     <div class="invariant"><span>强制不变量</span><p><span translate="no">prepare_next_turn</span> 的 durable compaction/<span translate="no">Inject</span>/<span translate="no">Stop</span> 决策只能发生在 <span translate="no">Tool</span> pairing 完整的成功收尾；纯文本成功终局同样提交 <span translate="no">IterationCompleted</span>，但失败/取消可直接 terminal，二者都不是该 <span translate="no">Hook</span> 边界。</p></div>
     <div class="case-grid">
       <article class="case" data-case="normal">
@@ -3397,7 +4210,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li></ul>
       <div class="avoid"><span>避免使用</span><code translate="no">普通提前返回</code><code translate="no">可交换 handler 顺序</code><code translate="no">执行全部再投票</code></div>
     </details>
@@ -3485,7 +4298,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li><li>
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/compaction.rs</code>
@@ -3559,7 +4372,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li><li>
     <span class="evidence__kind">测试</span>
     <code translate="no">crates/stratum-agent/tests/agent_loop_resume.rs</code>
@@ -3633,7 +4446,7 @@ main {
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-agent/src/agent_loop/resume.rs</code>
     <strong translate="no">replay_events</strong>
-    <span>durable ledger 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
+    <span><span translate="no">durable ledger</span> 重建、<span translate="no">Tool</span> 后缀对账与 compaction 双模式回放</span>
   </li><li>
     <span class="evidence__kind">实现</span>
     <code translate="no">crates/stratum-postgres/src/queries.rs</code>
@@ -3873,7 +4686,7 @@ main {
     </details>
   </article></div>
   </section></div>
-      <footer class="manual-footer"><div><strong>知识只有一个人工维护源。</strong><p>经确认的领域结论更新 context-site；本 HTML 由构建生成，禁止手改。</p></div><a href="#context/first-principles">回到起点</a></footer>
+      <footer class="manual-footer"><div><strong>知识只有一个人工维护源。</strong><p>经确认的领域结论更新 context-site；本 HTML 由构建生成，禁止手改。</p></div><a href="#context/kernel-map">回到核心结构</a></footer>
     </div>
     <div class="surface" id="surface-todo" role="tabpanel" aria-labelledby="tab-todo" data-surface="todo" hidden>
       <section class="todo-hero" id="todo-overview">
@@ -3896,7 +4709,7 @@ main {
     <p><span translate="no">Postgres</span> 成为 <span translate="no">Agent</span> execution 唯一 truth；四张复数表承载 definition、state、ledger 与 compaction companion。</p>
     <div class="dependencies"><span>依赖</span><a href="#todo/h3a">H3a</a></div>
     <ul class="todo-items"><li data-item-status="已取代">
-          <code translate="no">H3b.1</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong>旧 <span translate="no">Postgres</span>DurableEventSink/<span translate="no">Agent</span>Store 方案</strong></div><span class="status-tag" data-status="已取代">已取代</span>
+          <code translate="no">H3b.1</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong>旧 <span translate="no">Postgres</span><span translate="no">DurableEventSink</span>/<span translate="no">Agent</span>Store 方案</strong></div><span class="status-tag" data-status="已取代">已取代</span>
         </li><li data-item-status="已完成">
           <code translate="no">H3b.2</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong>concrete <span translate="no">Postgres</span>Backend + embedded baseline</strong></div><span class="status-tag" data-status="已完成">已完成</span>
         </li><li data-item-status="已完成">
@@ -4311,7 +5124,7 @@ main {
     <p><span translate="no">Pending</span>/<span translate="no">Completed</span>/<span translate="no">Failed</span> 与业务 facts 共用 <span translate="no">Postgres</span> ledger，<span translate="no">resume</span> 重放已完成 decision。</p>
     <div class="dependencies"><span>依赖</span><a href="#todo/h2">H2</a></div>
     <ul class="todo-items"><li data-item-status="已取代">
-          <code translate="no">H3a.1</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong>filesystem per-run <span translate="no">journal</span></strong><small>由统一 <span translate="no">Postgres</span> durable ledger 取代</small></div><span class="status-tag" data-status="已取代">已取代</span>
+          <code translate="no">H3a.1</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong>filesystem per-run <span translate="no">journal</span></strong><small>由统一 <span translate="no">Postgres</span> <span translate="no">durable ledger</span> 取代</small></div><span class="status-tag" data-status="已取代">已取代</span>
         </li><li data-item-status="已完成">
           <code translate="no">H3a.2</code><span class="todo-item__mark" aria-hidden="true"></span><div><strong><span translate="no">Pending</span> before call / <span translate="no">Completed</span> before effect</strong></div><span class="status-tag" data-status="已完成">已完成</span>
         </li><li data-item-status="已完成">

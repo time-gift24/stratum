@@ -1849,10 +1849,294 @@ const chapters: readonly ManualChapter[] = [
   },
 ]
 
+const kernelPrimer = {
+  id: "kernel-map",
+  navLabel: "核心结构",
+  title: "一条消息在 kernel 里怎么走",
+  thesis:
+    "先看一轮最普通的对话。用户消息写入数据库后，kernel 据此决定要调用模型；模型给出正式答复后，答复也写回数据库。中途进程退出没关系，新进程把已经提交的记录重新读一遍，就知道做到哪了。下面的名词都放在这条路上解释。",
+  stages: [
+    {
+      id: "runtime",
+      label: "运行档案",
+      term: "AgentRuntime",
+      detail:
+        "一份实际运行的长期档案。它固定使用一份 Agent 定义，也保存自己的状态、事件编号和历史。",
+      tone: "fact",
+    },
+    {
+      id: "replay",
+      label: "重新对账",
+      term: "strict replay",
+      detail:
+        "启动或恢复前，逐项读回运行状态、固定的 Agent 定义、当时固化的 snapshot 和已提交的 event stream。资料对不上，就停下来报错。",
+      tone: "recovery",
+    },
+    {
+      id: "kernel",
+      label: "决定下一步",
+      term: "AgentLoop / kernel",
+      detail:
+        "进程里的状态机。它只看已重建的记录、固定身份和装配好的组件，然后决定接下来该做什么；它不直接碰 Postgres、HTTP 或 NATS。",
+      tone: "internal",
+    },
+    {
+      id: "operation",
+      label: "要做的事",
+      term: "Operation",
+      detail:
+        "kernel 交给外层的一项明确待办：请求 LLM、执行 Tool、调用 Hook，或者写入终态结果。",
+      tone: "internal",
+    },
+    {
+      id: "facts",
+      label: "写进流水账",
+      term: "DurableEventSink → event stream",
+      detail:
+        "外层把需要系统承认的结果写进 Postgres。事务提交成功后，它才是一条 durable fact；这些记录按 event_seq 排开，就是这个 runtime 的 event stream。",
+      tone: "fact",
+    },
+  ],
+  reactLoop: {
+    title: "把 ReAct 循环拆开看",
+    thesis:
+      "ReAct 是 Reason + Act：Agent 先看清当前记录，再行动，再读取行动结果。它和 React 前端无关。一轮没有 Tool 的对话走到正式答复就结束；有 Tool 时，会把每个 Tool 的处理结果写回流水账，再开始下一轮。",
+    steps: [
+      {
+        id: "entry",
+        label: "新 Turn 入场",
+        term: "LoopStarted + 用户 MessageAppended",
+        detail:
+          "新 Turn 先固定本轮使用的 definition、模型和 handler 身份，再把用户消息确认写入。kernel 只从这些已经提交的内容开始工作。",
+        durable: "新 Turn 才有；两条记录都写进 event stream。",
+        tone: "fact",
+      },
+      {
+        id: "context",
+        label: "准备模型输入",
+        term: "transform_context",
+        detail:
+          "每次请求 LLM 前调用。它只可以临时调整本次 request view，不能改写已经确认的历史。",
+        durable: "调用前写 Pending；决定或失败后写 Completed / Failed。",
+        tone: "internal",
+      },
+      {
+        id: "model",
+        label: "请求模型",
+        term: "LLM stream",
+        detail:
+          "模型开始生成，浏览器可以看到逐字草稿。此时结果还不算系统事实，因为流可能中断。",
+        durable: "开始、delta 和草稿都不落库。",
+        tone: "internal",
+      },
+      {
+        id: "assistant",
+        label: "确认正式答复",
+        term: "assistant MessageAppended",
+        detail:
+          "模型完成后，完整 assistant 消息先写入 event stream，才会进入 committed context。之后判断它有没有要求 Tool。",
+        durable: "完整消息提交成功后才算已发生。",
+        tone: "fact",
+      },
+      {
+        id: "tool",
+        label: "逐个处理 Tool",
+        term: "transform → decide → execute → after",
+        detail:
+          "每个 Tool call 依次改参数、做决定、执行、处理结果。审批就在 decide 阶段；同一轮的多个 Tool 按顺序处理，结果处理完才写入历史。",
+        durable:
+          "每个 Hook 都记 journal；外部 Tool 前先写 ToolExecutionStarted，结果随后写成 role=tool 的 MessageAppended。",
+        tone: "internal",
+      },
+      {
+        id: "boundary",
+        label: "收束 Tool cycle",
+        term: "prepare_next_turn → IterationCompleted",
+        detail:
+          "所有 Tool result 都确认后，才调用 prepare_next_turn。它可以继续、停止、注入下一次输入，或要求压缩；随后提交本轮边界。",
+        durable: "可选 TranscriptCompacted 先写，再写 IterationCompleted。",
+        tone: "fact",
+      },
+      {
+        id: "terminal",
+        label: "结束或回到下一轮",
+        term: "LoopFinished / LoopFailed / LoopCancelled",
+        detail:
+          "没有 Tool 的正常答复会先写 IterationCompleted，再写 LoopFinished。失败或取消会记录终态；它们不保证先出现 IterationCompleted。",
+        durable: "终态也会写进 event stream，恢复时不会凭空补第二个终态。",
+        tone: "recovery",
+      },
+    ],
+    hooks: [
+      {
+        id: "transform-context",
+        term: "transform_context",
+        timing: "每次请求 LLM 前",
+        purpose:
+          "临时整理这次发给模型的 request view，例如裁掉一段历史；不改 committed context。",
+        durable:
+          "HookInvocationPending → HookInvocationCompleted / HookInvocationFailed",
+      },
+      {
+        id: "transform-tool",
+        term: "transform_tool_call",
+        timing: "一个 Tool call 通过原始参数校验后",
+        purpose:
+          "可以改 Tool 参数，也可以改变后续要用的授权方式；改完还会再校验一次。",
+        durable:
+          "HookInvocationPending → HookInvocationCompleted / HookInvocationFailed",
+      },
+      {
+        id: "decide-tool",
+        term: "decide_tool_call",
+        timing: "Tool 参数最终校验后、真正执行前",
+        purpose: "决定执行还是拦下。当前人工审批在这里等待并返回批准或拒绝。",
+        durable:
+          "Hook journal；需要人工决定时另写 ToolApprovalRequested / ToolApprovalResolved",
+      },
+      {
+        id: "after-tool",
+        term: "after_tool_call",
+        timing: "Tool 返回结果后、结果进入历史前",
+        purpose:
+          "检查或替换模型将要看到的 Tool result；当前 stock 组合只保留安全的 Echo 结果。",
+        durable:
+          "HookInvocationPending → HookInvocationCompleted / HookInvocationFailed；通过后才写 Tool result 的 MessageAppended",
+      },
+      {
+        id: "prepare-next",
+        term: "prepare_next_turn",
+        timing: "完整 Tool cycle 收尾时；普通无 Tool 答复不会调用它",
+        purpose:
+          "决定下一轮是继续、停止、注入一条临时消息，还是执行一次已定义的压缩机制。",
+        durable:
+          "Hook journal；若选择压缩，TranscriptCompacted 在 IterationCompleted 前写入",
+      },
+    ],
+    persistence: [
+      {
+        id: "turn-start",
+        when: "新 Turn 开始",
+        events: "LoopStarted → 用户 MessageAppended",
+        detail: "固定本轮 snapshot，并让用户消息成为可恢复的起点。",
+      },
+      {
+        id: "hook-journal",
+        when: "每次 Hook",
+        events: "HookInvocationPending → Completed / Failed",
+        detail:
+          "先留 Pending，再调用 handler；有决定先写 Completed，才应用决定影响的动作。",
+      },
+      {
+        id: "assistant-result",
+        when: "LLM 完成一条正式答复",
+        events: "assistant MessageAppended",
+        detail:
+          "流式 token 不是事实；完整消息成功提交后才进入历史和 committed context。",
+      },
+      {
+        id: "approval-tool-start",
+        when: "需要审批或调用外部 Tool",
+        events: "ToolApprovalRequested / Resolved；ToolExecutionStarted",
+        detail:
+          "审批事实单独落库；真正碰外部 Tool 前，先写 ToolExecutionStarted。崩溃后这意味着调用可能已经发生，恢复按 at-least-once 处理。",
+      },
+      {
+        id: "tool-result-boundary",
+        when: "Tool 返回、准备进入下一轮",
+        events:
+          "Tool result MessageAppended；可选 TranscriptCompacted；IterationCompleted",
+        detail:
+          "Tool result 经过 after_tool_call 后才写入。压缩存在时必须先提交，再提交迭代边界。",
+      },
+      {
+        id: "terminal",
+        when: "运行结束、失败或取消",
+        events: "LoopFinished / LoopFailed / LoopCancelled",
+        detail:
+          "终态写进流水账。失败和取消可能直接结束，不保证有 IterationCompleted。",
+      },
+    ],
+    note: "LLM 的开始事件、token delta、浏览器草稿和 NATS 推送都不是 durable fact。它们让人更快看到进展，但恢复时一律以 Postgres 的 event stream 为准。",
+  },
+  glossary: [
+    {
+      term: "Agent",
+      definition:
+        "一份固定的行为说明：prompt、允许使用的 Tool 和模板默认模型都在这里。",
+      not: "不是一次对话，也不是正在运行的进程。",
+    },
+    {
+      term: "AgentRuntime",
+      definition:
+        "一次实际运行留下的长期档案。它使用某个 Agent 定义，事件、历史和恢复都以它为范围。",
+      not: "不是 Agent 模板本身；多个 runtime 可以固定使用同一个 Agent。",
+    },
+    {
+      term: "kernel / AgentLoop",
+      definition:
+        "运行中的状态机。它读已确认的记录，再给出接下来唯一允许做的一件事。",
+      not: "不是数据库、HTTP 服务或 NATS 消费者。",
+    },
+    {
+      term: "Operation",
+      definition: "接下来要做的一件事，比如请求 LLM、运行 Tool 或调用 Hook。",
+      not: "不是已经发生的事实；真正发生后必须先写成 durable event。",
+    },
+    {
+      term: "durable fact",
+      definition:
+        "已经写入 Postgres 且事务提交成功的一条记录，例如 MessageAppended、Tool result 或 Hook decision。",
+      not: "不是内存变量、浏览器草稿，也不是 NATS 上一条临时消息。",
+    },
+    {
+      term: "event stream",
+      definition:
+        "同一个 AgentRuntime 的 durable facts 按 event_seq 编号排成一列。把它当作一份可按顺序重读的数据库流水账就行。",
+      not: "不是全局事件总线，也不是 UI 实时流。",
+    },
+    {
+      term: "journal",
+      definition:
+        "event stream 里专门记录 Hook Pending、Completed、Failed 的那部分。它把 Hook 当时给出的 decision 留下来，恢复时不用再猜一次。",
+      not: "不是普通日志；Completed decision 在恢复时不能随意重调 handler。",
+    },
+    {
+      term: "committed context",
+      definition:
+        "kernel 根据 Agent 定义和 durable facts 重建出的、已经确认的对话上下文。",
+      not: "不是发给模型前可临时修改的 request view。",
+    },
+    {
+      term: "request view",
+      definition:
+        "这次调用 LLM 前临时拼出的输入。它可以带一次性的 Inject 或 ContextPatch，用完就丢。",
+      not: "不会自动写回 durable history。",
+    },
+    {
+      term: "NATS short tail",
+      definition:
+        "让在线界面尽快看到近期变化的实时推送。漏了也没关系，之后会用 PG 的 view 和 history 补回来。",
+      not: "不是恢复真相，也不能替代 event stream。",
+    },
+  ],
+  invariant:
+    "对系统来说，只有已经落库并提交成功的记录才真的发生过。草稿、NATS 推送和进程内存都可能随断线或重启消失。",
+  evidence: [
+    evidence.coreIds,
+    evidence.runner,
+    evidence.durableEvent,
+    evidence.resume,
+    evidence.dispatcher,
+    evidence.webReconcile,
+  ],
+} satisfies ContextManual["primer"]
+
 export const contextManual: ContextManual = {
   title: "Stratum 运行时现场手册",
   description:
-    "面向人与 Agent 协同开发的静态领域地图：沿一次 AgentRuntime 的运行路线解释事实、不变量、失败、恢复与尚未解决的风险。所有 ID 与事件均为合成示例。",
+    "给需要和 Agent 一起开发的人看的静态手册。先沿一条普通消息的运行路径认清名词，再继续看不变量、失败和恢复。所有 ID 与事件都是合成示例。",
   checkedAtCommit,
+  primer: kernelPrimer,
   chapters,
 }

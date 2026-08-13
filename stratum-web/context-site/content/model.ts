@@ -82,10 +82,70 @@ export interface ManualChapter {
   readonly concepts: readonly ConceptEntry[]
 }
 
+export interface KernelStage {
+  readonly id: string
+  readonly label: string
+  readonly term: string
+  readonly detail: string
+  readonly tone: "fact" | "internal" | "recovery"
+}
+
+export interface KernelGlossaryEntry {
+  readonly term: string
+  readonly definition: string
+  readonly not: string
+}
+
+export interface ReActStep {
+  readonly id: string
+  readonly label: string
+  readonly term: string
+  readonly detail: string
+  readonly durable: string
+  readonly tone: "fact" | "internal" | "recovery"
+}
+
+export interface KernelHookGuide {
+  readonly id: string
+  readonly term: string
+  readonly timing: string
+  readonly purpose: string
+  readonly durable: string
+}
+
+export interface PersistencePoint {
+  readonly id: string
+  readonly when: string
+  readonly events: string
+  readonly detail: string
+}
+
+export interface ReActLoopGuide {
+  readonly title: string
+  readonly thesis: string
+  readonly steps: readonly ReActStep[]
+  readonly hooks: readonly KernelHookGuide[]
+  readonly persistence: readonly PersistencePoint[]
+  readonly note: string
+}
+
+export interface KernelPrimer {
+  readonly id: string
+  readonly navLabel: string
+  readonly title: string
+  readonly thesis: string
+  readonly stages: readonly KernelStage[]
+  readonly reactLoop: ReActLoopGuide
+  readonly glossary: readonly KernelGlossaryEntry[]
+  readonly invariant: string
+  readonly evidence: readonly EvidenceRef[]
+}
+
 export interface ContextManual {
   readonly title: string
   readonly description: string
   readonly checkedAtCommit: string
+  readonly primer: KernelPrimer
   readonly chapters: readonly ManualChapter[]
 }
 

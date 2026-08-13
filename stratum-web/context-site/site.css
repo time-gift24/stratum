@@ -673,6 +673,7 @@ main {
 }
 
 .route-visual,
+.kernel-map,
 .identity-map,
 .event-ledger,
 .journal-flow,
@@ -683,6 +684,536 @@ main {
   border-radius: var(--radius);
   background: var(--manual-surface-panel);
   box-shadow: 0 24px 70px var(--manual-shadow);
+}
+
+.kernel-map {
+  display: grid;
+  gap: 26px;
+  margin-bottom: 34px;
+  padding: clamp(22px, 3vw, 42px);
+}
+
+.kernel-map figcaption {
+  max-width: 72ch;
+  color: var(--manual-copy);
+  font-family: var(--font-reading);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.kernel-map__lane {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr) 88px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.kernel-map__lane--execute {
+  grid-template-columns: minmax(0, 1fr) 1fr minmax(0, 1fr);
+}
+
+.kernel-stage {
+  display: grid;
+  min-height: 172px;
+  align-content: start;
+  gap: 10px;
+  border: 1px solid var(--border-strong);
+  padding: 20px;
+}
+
+.kernel-stage > span,
+.kernel-map__cycle > span:first-child,
+.kernel-glossary header > span,
+.kernel-primer__invariant > span {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.kernel-stage strong {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.kernel-stage p {
+  margin: 0;
+  color: var(--manual-copy-muted);
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.kernel-stage[data-tone="fact"] {
+  border-color: var(--manual-fact-border);
+  background: var(--manual-fact-wash);
+}
+
+.kernel-stage[data-tone="internal"] {
+  border-color: color-mix(in srgb, var(--internal) 48%, var(--border));
+  background: var(--manual-internal-wash);
+}
+
+.kernel-stage[data-tone="recovery"] {
+  border-color: var(--manual-recovery-border);
+  background: color-mix(in srgb, var(--recovery) 7%, transparent);
+}
+
+.kernel-map__arrow {
+  position: relative;
+  align-self: center;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+.kernel-map__arrow::after {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--primary);
+  border-right: 1px solid var(--primary);
+  transform: rotate(45deg);
+  content: "";
+}
+
+.kernel-map__arrow span {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.kernel-map__cycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 0 auto;
+  border-bottom: 1px solid var(--manual-fact-border);
+  padding: 0 0 9px;
+  color: var(--primary);
+  font-size: 12px;
+}
+
+.kernel-map__cycle > span:last-child {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
+.kernel-map__tail {
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+}
+
+.kernel-map__tail strong {
+  color: var(--manual-copy-soft);
+  font-size: 13px;
+}
+
+.kernel-map__tail p {
+  max-width: 75ch;
+  margin: 7px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.react-loop {
+  margin: 0 0 38px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
+  padding: 32px 0;
+}
+
+.react-loop__heading,
+.react-loop__hooks > header,
+.react-loop__persistence > header {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.58fr) minmax(0, 1.42fr);
+  column-gap: 42px;
+  align-items: start;
+}
+
+.react-loop__heading > span,
+.react-loop__hooks > header > span,
+.react-loop__persistence > header > span,
+.react-loop__note > span {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.react-loop__heading h3,
+.react-loop__hooks h3,
+.react-loop__persistence h3 {
+  grid-column: 1;
+  margin: 10px 0 0;
+  font-size: clamp(1.45rem, 2.3vw, 2.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+.react-loop__heading p,
+.react-loop__hooks > header p,
+.react-loop__persistence > header p {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  max-width: 65ch;
+  margin: 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagram-intro {
+  max-width: 75ch;
+  margin: 28px 0 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagrams {
+  display: grid;
+  gap: 30px;
+  margin: 30px 0 34px;
+}
+
+.react-loop__diagram-panel {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 18px;
+}
+
+.react-loop__diagram-panel > header {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.58fr) minmax(0, 1.42fr);
+  gap: 18px 42px;
+  align-items: baseline;
+}
+
+.react-loop__diagram-panel > header > span {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.react-loop__diagram-panel h4 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: clamp(1.12rem, 1.8vw, 1.5rem);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.react-loop__diagram {
+  display: grid;
+  gap: 16px;
+  margin: 16px 0 0;
+  border: 1px solid var(--border-strong);
+  background: var(--manual-surface-panel);
+  padding: clamp(20px, 3vw, 38px);
+}
+
+.react-loop__diagram figcaption {
+  max-width: 74ch;
+  color: var(--manual-copy);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.react-loop__diagram-scroll-hint {
+  display: none;
+  color: var(--manual-copy-muted);
+}
+
+.react-loop__hook dl dt {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.react-loop__mermaid {
+  overflow: auto;
+  overscroll-behavior-inline: contain;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #0d0f0e;
+  padding: 16px 0;
+}
+
+.react-loop__mermaid:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+
+.react-loop__mermaid svg {
+  display: block !important;
+  width: max(100%, 880px) !important;
+  min-width: 880px;
+  max-width: none !important;
+  height: auto;
+  margin: 0 auto;
+}
+
+.react-loop__mermaid .label,
+.react-loop__mermaid .nodeLabel,
+.react-loop__mermaid .edgeLabel {
+  color: var(--foreground) !important;
+  font-family: var(--font-sans) !important;
+}
+
+.react-loop__hook {
+  display: grid;
+  gap: 7px;
+}
+
+.react-loop__hook > strong {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__hook > p,
+.react-loop__hook dd {
+  margin: 0;
+  color: var(--manual-copy-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__hook dl {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+
+.react-loop__hook dl > div {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.react-loop__hook dt,
+.react-loop__hook dd {
+  margin: 0;
+}
+
+.react-loop__hooks,
+.react-loop__persistence {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 28px;
+}
+
+.react-loop__hooks > div {
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.react-loop__hooks .react-loop__hook {
+  grid-template-columns: minmax(160px, 0.65fr) minmax(0, 1.25fr) minmax(
+      210px,
+      0.9fr
+    );
+  align-items: start;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+}
+
+.react-loop__hooks .react-loop__hook > p {
+  color: var(--manual-copy);
+  font-size: 13px;
+}
+
+.react-loop__hooks .react-loop__hook dl {
+  margin: 0;
+}
+
+.react-loop__hooks .react-loop__hook dl > div {
+  grid-template-columns: 62px minmax(0, 1fr);
+}
+
+.react-loop__persistence {
+  margin-top: 32px;
+}
+
+.react-loop__ledger {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  margin-top: 24px;
+}
+
+.react-loop__ledger table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.react-loop__ledger th,
+.react-loop__ledger td {
+  border-top: 1px solid var(--border);
+  padding: 14px 16px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.react-loop__ledger thead th {
+  border-top: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.react-loop__ledger tbody th {
+  width: 21%;
+  color: var(--manual-copy-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.react-loop__ledger td {
+  color: var(--manual-copy);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.react-loop__ledger td:nth-child(2) {
+  width: 35%;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.react-loop__note {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 24px;
+  border-top: 1px solid var(--manual-risk-border);
+  background: var(--manual-risk-wash);
+  padding: 17px 20px;
+}
+
+.react-loop__note > span {
+  color: var(--manual-risk-text);
+}
+
+.react-loop__note p {
+  margin: 0;
+  color: var(--manual-reading-strong);
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.kernel-glossary {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.5fr);
+  gap: 42px;
+  margin: 0 0 34px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
+  padding: 28px 0;
+}
+
+.kernel-glossary header h3 {
+  margin: 10px 0 0;
+  font-size: clamp(1.45rem, 2.3vw, 2.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.kernel-glossary header p {
+  margin: 14px 0 0;
+  color: var(--manual-copy-soft);
+  font-family: var(--font-reading);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.kernel-glossary dl {
+  margin: 0;
+}
+
+.kernel-glossary dl > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.52fr) minmax(0, 1fr) minmax(
+      150px,
+      0.78fr
+    );
+  gap: 18px;
+  border-top: 1px solid var(--border);
+  padding: 14px 0;
+}
+
+.kernel-glossary dl > div:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.kernel-glossary dt,
+.kernel-glossary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.kernel-glossary dt {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.kernel-glossary dd {
+  color: var(--manual-copy);
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.kernel-glossary dd:last-child {
+  color: var(--muted-foreground);
+}
+
+.kernel-glossary dd:last-child span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--manual-risk-text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.kernel-primer__invariant {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  margin: 0 0 24px;
+  border-top: 1px solid var(--manual-fact-border-invariant);
+  border-bottom: 1px solid var(--manual-fact-border-invariant-soft);
+  background: var(--manual-fact-invariant-surface);
+  padding: 18px 20px;
+}
+
+.kernel-primer__invariant > span {
+  color: var(--primary);
+}
+
+.kernel-primer__invariant p {
+  margin: 0;
+  color: var(--manual-reading-strong);
+  line-height: 1.6;
 }
 
 .route-visual {
@@ -1810,6 +2341,11 @@ main {
     height: 34px;
     justify-self: center;
   }
+
+  .kernel-glossary {
+    grid-template-columns: 1fr;
+    gap: 26px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -1902,15 +2438,90 @@ main {
   }
 
   .chapter-heading,
+  .react-loop__heading,
+  .react-loop__hooks > header,
+  .react-loop__persistence > header,
+  .react-loop__diagram-panel > header,
   .todo-hero,
   .deferred-boundaries {
     grid-template-columns: 1fr;
   }
 
   .route-visual,
+  .kernel-map,
   .identity-map,
   .compaction-modes {
     grid-template-columns: 1fr;
+  }
+
+  .kernel-map__lane,
+  .kernel-map__lane--execute {
+    grid-template-columns: 1fr;
+    gap: 0;
+    margin: 0;
+  }
+
+  .react-loop__heading p,
+  .react-loop__hooks > header p,
+  .react-loop__persistence > header p {
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 16px;
+  }
+
+  .kernel-map__arrow,
+  .route-arrow {
+    width: 1px;
+    height: 38px;
+    justify-self: center;
+    background: var(--manual-fact-border);
+  }
+
+  .kernel-map__arrow::after,
+  .route-arrow::after {
+    top: auto;
+    right: -3px;
+    bottom: 0;
+    left: auto;
+    transform: rotate(135deg);
+  }
+
+  .kernel-map__arrow span,
+  .route-arrow span {
+    right: auto;
+    bottom: auto;
+    left: 12px;
+    transform: translateY(-50%);
+  }
+
+  .kernel-map__cycle {
+    margin-left: 0;
+  }
+
+  .kernel-glossary dl > div {
+    grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1fr);
+  }
+
+  .kernel-glossary dd:last-child {
+    grid-column: 2;
+  }
+
+  .kernel-primer__invariant {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .react-loop__hooks .react-loop__hook {
+    grid-template-columns: minmax(160px, 0.6fr) minmax(0, 1fr);
+  }
+
+  .react-loop__hooks .react-loop__hook dl {
+    grid-column: 2;
+  }
+
+  .react-loop__note {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .route-visual {
@@ -2052,11 +2663,70 @@ main {
   }
 
   .route-visual,
+  .kernel-map,
   .identity-map,
   .journal-flow,
   .state-machine,
   .compaction-modes section {
     padding: 24px;
+  }
+
+  .kernel-map {
+    gap: 20px;
+  }
+
+  .react-loop {
+    padding: 26px 0;
+  }
+
+  .react-loop__diagram {
+    gap: 20px;
+    padding: 24px;
+  }
+
+  .react-loop__diagram-scroll-hint {
+    display: block;
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .react-loop__diagram-panel > header {
+    gap: 7px;
+  }
+
+  .react-loop__hooks .react-loop__hook {
+    grid-template-columns: 1fr;
+    gap: 9px;
+  }
+
+  .react-loop__hooks .react-loop__hook dl {
+    grid-column: auto;
+  }
+
+  .react-loop__hook dl > div,
+  .react-loop__hooks .react-loop__hook dl > div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .react-loop__ledger th,
+  .react-loop__ledger td {
+    padding: 13px 14px;
+  }
+
+  .kernel-stage {
+    min-height: 0;
+    padding: 18px;
+  }
+
+  .kernel-glossary dl > div {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .kernel-glossary dd:last-child {
+    grid-column: auto;
   }
 
   .event-ledger {

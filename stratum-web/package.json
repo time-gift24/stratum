@@ -45,6 +45,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@mermaid-js/mermaid-cli": "11.16.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -53,6 +54,7 @@
     "eslint-config-next": "16.2.6",
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
+    "puppeteer": "24.43.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^3.2.7"

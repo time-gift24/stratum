@@ -31,10 +31,12 @@
 ## 2. 错误处理（强制）
 
 ### 分层策略
+
 - library crates：使用 `thiserror` 定义类型化错误，集中在 crate 内 `error.rs`；禁止手写字符串型错误，禁止把 error enum 混在 trait 或实现文件里。
 - binary（`stratum-api`）：顶层可用 `anyhow`，但穿过 crate 边界的错误必须是类型化错误。
 
 ### 铁律
+
 - 可恢复失败返回 `Result<T, E>`；生产代码禁止 `unwrap()`；`expect()` 仅用于表示程序员错误的不变量。
 - 用 `#[source]` 或 `From` 转换保留错误来源链；错误消息小写开头、不加句号。
 - 可失败的公共函数必须在文档中写 `# Errors`。
@@ -202,7 +204,7 @@
 - 领域结论、风险或待办发生变更时，必须运行 `pnpm build:context-site` 并提交同步后的 `CONTEXT.html`；CI 必须运行 `pnpm check:context-site` 做 byte-for-byte 同步校验。
 - `context-site` 可以单向读取 `stratum-web` 的视觉 token、字体与构建依赖；产品 Next.js 代码禁止导入 `context-site`。该站点不得成为产品 route、不得进入 Next.js 产品构建或 Docker 镜像，也不得连接运行时后端。
 - 由 grilling、设计访谈或探索过程产生的草稿不进入知识源。只有用户明确确认的领域结论才写入 `context.ts`；只有明确确认的工程事项才写入 `todo.ts`。来源不明、未经确认或仅由审查者推测的内容必须标为“审阅提示”，不得冒充“当前事实”。
-- 每个领域概念至少记录定义、正常路径、失败模式、恢复路径、强制不变量、风险与可定位证据；示例只使用合成 identity。图示由 typed data 生成语义 HTML/CSS，不引入运行时图表 DSL 或第二份图形事实源。
+- 每个领域概念至少记录定义、正常路径、失败模式、恢复路径、强制不变量、风险与可定位证据；示例只使用合成 identity。图示默认由 typed data 生成语义 HTML/CSS。关系复杂到必须使用 Mermaid 时，只允许由 typed data 或同域封闭模板在构建期编译为内联 SVG：产物不得包含 Mermaid runtime、远程资源或手写的第二份图形事实源。
 
 ---
 
