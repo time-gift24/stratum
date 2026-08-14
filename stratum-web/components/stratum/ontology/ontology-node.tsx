@@ -34,7 +34,7 @@ import styles from "./ontology-aurora.module.css"
  * 形成磨砂染色，仅漫在头部区域）；内层实心面板承载属性列表——属性行内直接
  * 增删改（改名失焦提交、value_type shadcn Select、必填勾选、悬停删除、
  * 底部虚线「添加属性」行）。
- * 422 违例挂红框与首条消息（完整列表在编辑面板内联展示）；聚焦模式下非邻域
+ * 422 违例挂红框与首条消息（完整列表在悬浮工具条的详情 Popover 内联展示）；聚焦模式下非邻域
  * 节点淡出。编辑画布经 propertyActions 传入增删改回调；邻域只读画布省略，
  * 属性行退化为只读。
  */
@@ -181,7 +181,7 @@ export function OntologyObjectTypeNode({
  * 有 onUpdate/onRemove（编辑画布）时行内可改：点名字进入失焦提交的改名输入，
  * value_type shadcn Select、必填 checkbox、删除按钮悬停显现；否则整行只读。
  * 节点层改名以 name 为准（需通过命名校验），display_name 同步为同值；
- * 两者需要不同时走编辑面板分别修改。
+ * 两者需要不同时走悬浮工具条的详情 Popover 分别修改。
  */
 function NodePropertyRow({
   property,

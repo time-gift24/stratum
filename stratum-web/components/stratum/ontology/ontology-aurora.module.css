@@ -1,8 +1,7 @@
 /**
  * 共享极光染色：三段 oklch 渐变，blur 化开成磨砂感。
- * 消费方：画布节点背板顶部（ontology-node.tsx）、编辑面板身份头
- * （object-type-panel.tsx）——同一个 Object Type 在画布与面板染上同一色相，
- * 由容器注入 --node-hue（features/ontology-editor/hue.ts 的 nodeHue）。
+ * 消费方：画布节点背板顶部（ontology-node.tsx），由容器注入 --node-hue
+ * （features/ontology-editor/hue.ts 的 nodeHue），每节点一个稳定色相。
  * 必须是真实 class 而非自定义属性——自定义属性在 :root 计算时就固化 var()，
  * 后代覆盖的 --node-hue 无法生效；真实属性在使用处解析才能按节点继承。
  * 亮暗两态同一套规则，随 .dark 切换；--node-hue 缺省 240（蓝）。

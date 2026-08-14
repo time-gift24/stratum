@@ -38,15 +38,16 @@ const useIsomorphicLayoutEffect =
 /**
  * PromptInput —— Gemini 式提示词输入框（多行自适应 + 双结构）。
  * 单行：横向药丸——左侧 + 按钮 / 中间自动生长的 textarea / 右侧 trailing
- * 插槽与发送（items-end 底部对齐）。多行（scrollHeight 超单行高 + 2px 迟滞
+ * 插槽与发送（items-center 垂直居中）。多行（scrollHeight 超单行高 + 2px 迟滞
  * 判定）：textarea 独占顶部整行，下方控制行（左 + 按钮，右 trailing + 发送，
  * justify-between）；删回单行立即切回。单一 DOM 顺序 + flex-wrap 实现，
  * textarea 不 remount、不丢焦点。multiline 的变更只来自输入事件（含窄形态
  * 退出预判）；形态翻转后按新宽度重测高度（layout 时机，只调高度不重判）。
  * 默认 1 行高，换行/长文本自动生长（scrollHeight 手法），超过 10rem 内部滚动。
  * Enter 提交、Shift+Enter 换行、IME 组合态 Enter 不提交；空输入禁用发送。
- * 激活态：light 使用清晰的 ring / border；dark 聚焦时保留 BorderGlow 全线段
- * 点亮。popover portal 的焦点仍视为输入框内部交互，避免错误熄灭反馈。
+ * 激活态：light 是 border 变色 + 贴边 ring（无 offset，单线光晕）；dark 聚焦
+ * 时保留 BorderGlow 全线段点亮。popover portal 的焦点仍视为输入框内部交互，
+ * 避免错误熄灭反馈。
  * 值默认内部自管（提交后清空），也可传 value/onChange 受控。
  */
 export function PromptInput({
@@ -180,11 +181,11 @@ export function PromptInput({
   }
 
   const composer = (
-    <div className="flex flex-wrap items-end justify-between gap-1.5 rounded-[28px] p-1.5 shadow-sm dark:shadow-xl">
+    <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-[28px] p-1.5 shadow-sm dark:shadow-xl">
       <Button
         variant="ghost"
         size="icon"
-        className="mb-1 rounded-full"
+        className="rounded-full"
         aria-label="添加附件"
       >
         <Plus aria-hidden />
@@ -212,7 +213,7 @@ export function PromptInput({
           multiline && "order-first basis-full"
         )}
       />
-      <div className="mb-1 flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5">
         {trailing}
         <Button
           size="icon"
@@ -258,7 +259,7 @@ export function PromptInput({
           {composer}
         </BorderGlow>
       ) : (
-        <div className="grid rounded-[28px] border border-border bg-card transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/55 focus-within:ring-offset-2 focus-within:ring-offset-background">
+        <div className="grid rounded-[28px] border border-border bg-card transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
           {composer}
         </div>
       )}

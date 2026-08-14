@@ -6,7 +6,7 @@ import { isValidOntologyName } from "./validation"
 
 /**
  * 属性草稿的共享规则：命名提示、值类型全集、行内校验与自动命名。
- * 画布节点（ontology-node.tsx）与编辑面板（object-type-panel.tsx）
+ * 画布节点（ontology-node.tsx）与悬浮选中工具条（ontology-chrome.tsx）
  * 共用同一份，避免两处实现漂移。
  */
 

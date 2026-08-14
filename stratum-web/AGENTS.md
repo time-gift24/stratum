@@ -78,7 +78,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 - 对话：prompt-input、model-selector、agent-selector、conversation/*
 - 白板：excalidraw/*
-- 本体：ontology/*（面板共享控件在 ontology/form-controls.tsx：FieldRow、CommitInput、CommitTextarea）
+- 本体：ontology/*（表单共享控件在 ontology/form-controls.tsx：FieldRow、CommitInput、CommitTextarea；画布悬浮 chrome 在 ontology/ontology-chrome.tsx：身份/全局/选中工具条 pill）
 - Studio：studio/*（编辑器、tools-select、parameter-fields）
 - 页面数据缓存：`lib/page-cache.ts`（SWR 语义：重访先渲染缓存、后台刷新；写操作按前缀失效）
 
