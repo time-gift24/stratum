@@ -21,7 +21,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 ## Studio 管理面
 
-- `/studio` 是 Agent-first 的编排仪表盘；Provider 与 Model 只从页面最右侧的设置入口进入，不增加 Agents tab、说明文案、prompt 摘要或伪监控指标。
+- `/studio` 是 Agent-first 的编排仪表盘；Provider 与 Model 从顶部 SiteNav 右端的设置入口进入（设置区内为左侧垂直导航），不增加 Agents tab、说明文案、prompt 摘要或伪监控指标。
 - `/studio/agents/*` 管理 Agent definition；`/studio/settings/providers/*` 与 `/studio/settings/models/*` 管理底层资源。所有列表和编辑器都必须连接真实 management API，禁止用产品 mock 数据填充状态。
 - management DTO、分页、错误 envelope 与 ETag helper 统一维护在 `lib/stratum/api.ts`；更新和删除必须携带最近一次读取到的 `If-Match`，`412` 显示可恢复的冲突状态，`409` 显示引用 blocker。
 - Provider secret 只允许单向替换：编辑页永不回显已存 secret，留空表示保留，测试与保存期间都属于未完成操作并受离开提醒保护。
@@ -55,6 +55,36 @@ This version has breaking changes — APIs, conventions, and file structure may 
 ## 动效
 
 - 所有动效必须提供 `prefers-reduced-motion` 最终态，不做装饰性循环或滚动劫持。
+
+## 组件索引（先复用，后新增）
+
+写 UI 前按下表顺序找组件；都没有再用 `pnpm dlx shadcn add ...` 扩 `components/ui/`；仍没有的才在 `components/stratum/` 新增。禁止手写基础组件的平行实现（根 `CONSTITUTION.md` §15）。
+
+**基础组件 `components/ui/`（shadcn 官方底稿，只加不改）**
+
+- 交互：button、input、input-group、textarea、select、checkbox、label、tooltip
+- 浮层：dialog、popover、command（cmdk）、collapsible
+- 表单：field（Field/FieldLabel/FieldDescription/FieldError/FieldGroup/FieldSet/FieldLegend）、separator
+- 反馈：skeleton、avatar
+
+**页面级共享原语 `components/stratum/studio/primitives.tsx`（跨表面复用，不只 Studio）**
+
+- 外壳：PageShell（列表/表单页容器）、PageHeader（标题 + 返回 + 主操作）
+- 资源展示：ResourceCard（squircle 标识 + 名称 + 状态 chip + 虚线 meta 行，可选 action 槽）、StatusChip（只编码真实 API 状态）
+- 状态页：LoadingState（整页/整区加载的转圈指示；骨架只用于局部内容加载）、ErrorState（加载失败 + 重试）、NotFoundState（资源不存在 + 新建引导）、Pagination（列表分页，单页不渲染）
+- 表单：Field（label 包裹 + 错误/说明）、FormSection（平面 fieldset 分组）、StudioInput / StudioTextarea / StudioSelect、SaveButton、InlineDelete、SettingsShell（设置区垂直导航）、controlClass
+
+**领域组件 `components/stratum/`**
+
+- 对话：prompt-input、model-selector、agent-selector、conversation/*
+- 白板：excalidraw/*
+- 本体：ontology/*（面板共享控件在 ontology/form-controls.tsx：FieldRow、CommitInput、CommitTextarea）
+- Studio：studio/*（编辑器、tools-select、parameter-fields）
+- 页面数据缓存：`lib/page-cache.ts`（SWR 语义：重访先渲染缓存、后台刷新；写操作按前缀失效）
+
+**react-bits（含 Pro）**
+
+- `components/react-bits/`（site-nav、border-glow）是引入后的改造产物。需要装饰/动画类组件时可以从 ReactBits（含 Pro 库）引入，但必须遵守同一改造规则：数据驱动、只消费语义 token、reduced-motion 终态；禁止直贴默认实现。
 
 ## 验证
 

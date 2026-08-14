@@ -1,23 +1,47 @@
 "use client"
 
+/**
+ * THESIS: 仪表盘是 Agent definition 的资产台账——每张卡片是一个可进入的
+ * 资源，扫读优先于展示；拒绝营销页式的大 hero 与装饰卡片。
+ * OWN-WORLD: 暖纸/石墨双主题 token；squircle 字母标识 + 真实状态 chip +
+ * 虚线分隔的 mono meta 行；圆角卡片 + hairline，无阴影堆叠。
+ * STORY: 进入即见资产列表（名称、模型、工具数、更新时间），搜索过滤或
+ * 新建，点卡片进入编辑器。
+ * FIRST VIEWPORT: 页头（标题 + 新建）→ 搜索框 → 两列资源卡片网格，
+ * 首屏全部是真实资产。
+ * FORM: 用户指定的仪表盘卡片布局（Operate mode），无 concept roll。
+ */
+
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
-import { useCallback, useEffect, useState } from "react"
-import { ArrowRight, Plus, Search, Wrench } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Clock, Cpu, Plus, Search, Wrench } from "lucide-react"
 
 import {
-  StudioHeader,
+  ErrorState,
+  LoadingState,
+  PageHeader,
+  PageShell,
+  Pagination,
+  ResourceCard,
   StudioInput,
-  StudioPage,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { studioApi } from "@/features/studio-management/client"
-import { withStudioReturn } from "@/features/studio-management/navigation"
+import {
+  readPageCache,
+  writePageCache,
+} from "@/lib/page-cache"
 import type { AgentDefinitionView, PageEnvelope } from "@/lib/stratum/api"
 import { modelDisplayName } from "@/lib/stratum/model-config"
 
 const PER_PAGE = 12
+
+const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+})
 
 function safePage(value: string | null): number {
   const parsed = Number(value)
@@ -26,71 +50,25 @@ function safePage(value: string | null): number {
 
 function displayDate(value: string): string {
   const date = new Date(value)
-  return Number.isNaN(date.valueOf())
-    ? value
-    : new Intl.DateTimeFormat("zh-CN", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      }).format(date)
+  return Number.isNaN(date.valueOf()) ? value : dateFormatter.format(date)
 }
 
 function AgentCard({ agent }: { agent: AgentDefinitionView }) {
   const model = modelDisplayName(agent.model)
   return (
-    <Link
+    <ResourceCard
       href={`/studio/agents/${encodeURIComponent(agent.agent_name)}`}
       title={agent.agent_name}
-      className="group flex min-h-52 flex-col rounded-2xl border border-border bg-card p-5 transition-colors outline-none hover:bg-muted/45 focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
-    >
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <h2 className="min-w-0 text-lg font-semibold tracking-[-0.015em] break-words">
-          {agent.agent_name}
-        </h2>
-        <ArrowRight
-          aria-hidden
-          className="mt-1 size-4 shrink-0 text-muted-foreground"
-        />
-      </div>
-      <div className="mt-7 grid gap-3 text-sm">
-        <div>
-          <p className="text-muted-foreground">Provider / Model</p>
-          <p className="mt-1 truncate font-medium" title={agent.model}>
-            {model.provider ? `${model.provider} / ` : ""}
-            {model.model}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Wrench aria-hidden className="size-4" />
-          <span>{agent.tools.length} 个工具</span>
-        </div>
-      </div>
-      <p className="mt-auto pt-5 text-xs text-muted-foreground">
-        更新于 {displayDate(agent.updated_at)}
-      </p>
-    </Link>
-  )
-}
-
-function DashboardSkeleton() {
-  return (
-    <div
-      className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
-      aria-label="正在加载 Agent"
-    >
-      {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className="min-h-52 rounded-2xl border border-border bg-card p-5"
-        >
-          <Skeleton className="h-6 w-2/3" />
-          <Skeleton className="mt-8 h-4 w-24" />
-          <Skeleton className="mt-2 h-5 w-3/4" />
-          <Skeleton className="mt-5 h-4 w-28" />
-          <Skeleton className="mt-7 h-3 w-32" />
-        </div>
-      ))}
-    </div>
+      leading={(agent.agent_name[0] ?? "?").toUpperCase()}
+      meta={[
+        {
+          icon: Cpu,
+          text: model.provider ? `${model.provider} / ${model.model}` : model.model,
+        },
+        { icon: Wrench, text: `${agent.tools.length} 个工具` },
+        { icon: Clock, text: `更新于 ${displayDate(agent.updated_at)}` },
+      ]}
+    />
   )
 }
 
@@ -99,13 +77,24 @@ export function StudioDashboard() {
   const searchParams = useSearchParams()
   const query = searchParams.get("q") ?? ""
   const page = safePage(searchParams.get("page"))
-  const [searchValue, setSearchValue] = useState(query)
-  const [result, setResult] =
-    useState<PageEnvelope<AgentDefinitionView> | null>(null)
+  const cacheKey = `studio-agents:${page}:${query}`
+  const [result, setResult] = useState(() =>
+    readPageCache<PageEnvelope<AgentDefinitionView>>(cacheKey)
+  )
   const [error, setError] = useState<string | null>(null)
   const [requestKey, setRequestKey] = useState(0)
+  const requestIdRef = useRef(0)
+
+  // 参数变化（翻页/搜索/回退）时同步切到对应缓存，不等 effect
+  const [seenKey, setSeenKey] = useState(cacheKey)
+  if (seenKey !== cacheKey) {
+    setSeenKey(cacheKey)
+    setResult(readPageCache(cacheKey))
+    setError(null)
+  }
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     setError(null)
     try {
       const next = await studioApi.listAgentDefinitions({
@@ -114,11 +103,17 @@ export function StudioDashboard() {
         sort: "-updated_at",
         search: query,
       })
+      // 只接受最后一次发起的请求，避免乱序响应覆盖新状态
+      if (requestId !== requestIdRef.current) return
+      writePageCache(cacheKey, next)
       setResult(next)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法加载 Agent")
+      if (requestId !== requestIdRef.current) return
+      // 有缓存内容可展示时不刷新错误面板
+      if (readPageCache(cacheKey) === null)
+        setError(caught instanceof Error ? caught.message : "无法加载 Agent")
     }
-  }, [page, query])
+  }, [page, query, cacheKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0)
@@ -142,82 +137,64 @@ export function StudioDashboard() {
         )
       : 1)
   const hasQuery = query.trim() !== ""
-  const currentStudioPath =
-    searchParams.size === 0 ? "/studio" : `/studio?${searchParams}`
 
   return (
-    <StudioPage>
-      <StudioHeader
-        title="Studio"
-        settings
-        settingsHref={withStudioReturn(
-          "/studio/settings/providers",
-          currentStudioPath
-        )}
-      >
+    <PageShell>
+      <PageHeader title="仪表盘">
         <Link
           href="/studio/agents/new"
-          className={buttonVariants({
-            className:
-              "min-h-11 rounded-xl bg-primary px-4 text-sm text-primary-foreground hover:bg-primary/90",
-          })}
+          className={buttonVariants({ size: "lg" })}
         >
           <Plus aria-hidden />
           <span className="hidden sm:inline">新建 Agent</span>
           <span className="sm:hidden">新建</span>
         </Link>
-      </StudioHeader>
+      </PageHeader>
 
       <form
         role="search"
-        className="relative mb-7 max-w-xl"
+        className="relative mb-6 max-w-xl"
         onSubmit={(event) => {
           event.preventDefault()
-          updateQuery(searchValue)
+          const data = new FormData(event.currentTarget)
+          updateQuery(String(data.get("q") ?? ""))
         }}
       >
         <Search
           aria-hidden
-          className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-muted-foreground"
+          className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
         />
         <StudioInput
-          value={searchValue}
-          onChange={(event) => setSearchValue(event.target.value)}
+          key={query}
+          name="q"
+          defaultValue={query}
           placeholder="搜索 Agent 名称"
           aria-label="搜索 Agent 名称"
-          className="h-11 rounded-xl pr-20 pl-10"
+          className="pr-16 pl-9"
         />
         <Button
           type="submit"
           variant="ghost"
-          className="absolute top-1 right-1 h-9 rounded-lg px-3"
+          className="absolute top-1 right-1"
         >
           搜索
         </Button>
       </form>
 
-      {result === null && error === null ? <DashboardSkeleton /> : null}
+      {result === null && error === null ? (
+        <LoadingState label="正在加载 Agent" />
+      ) : null}
 
       {error ? (
-        <div
-          className="rounded-2xl border border-destructive/35 bg-card p-6"
-          role="alert"
-        >
-          <p className="font-medium text-destructive">Agent 列表加载失败</p>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <Button
-            type="button"
-            variant="outline"
-            className="mt-5 min-h-11 rounded-xl"
-            onClick={() => setRequestKey((value) => value + 1)}
-          >
-            重试
-          </Button>
-        </div>
+        <ErrorState
+          title="Agent 列表加载失败"
+          message={error}
+          onRetry={() => setRequestKey((value) => value + 1)}
+        />
       ) : null}
 
       {result && agents.length > 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           {agents.map((agent) => (
             <AgentCard key={agent.agent_name} agent={agent} />
           ))}
@@ -225,8 +202,8 @@ export function StudioDashboard() {
       ) : null}
 
       {!error && result && agents.length === 0 ? (
-        <div className="flex min-h-64 flex-col items-start justify-center rounded-2xl border border-border bg-card p-7 sm:p-10">
-          <h2 className="text-lg font-semibold">
+        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
+          <h2 className="font-semibold">
             {hasQuery ? "没有匹配的 Agent" : "尚未创建 Agent"}
           </h2>
           <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
@@ -238,20 +215,16 @@ export function StudioDashboard() {
             <Button
               type="button"
               variant="outline"
-              className="mt-5 min-h-11 rounded-xl"
-              onClick={() => {
-                setSearchValue("")
-                updateQuery("")
-              }}
+              size="lg"
+              className="mt-4"
+              onClick={() => updateQuery("")}
             >
               清除筛选
             </Button>
           ) : (
             <Link
               href="/studio/agents/new"
-              className={buttonVariants({
-                className: "mt-5 min-h-11 rounded-xl px-4 text-sm",
-              })}
+              className={buttonVariants({ size: "lg", className: "mt-4" })}
             >
               <Plus aria-hidden />
               新建 Agent
@@ -260,34 +233,14 @@ export function StudioDashboard() {
         </div>
       ) : null}
 
-      {result && totalPages > 1 ? (
-        <nav
-          aria-label="Agent 分页"
-          className="mt-8 flex items-center justify-between gap-4"
-        >
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 rounded-xl"
-            disabled={page <= 1}
-            onClick={() => updateQuery(query, page - 1)}
-          >
-            上一页
-          </Button>
-          <span className="text-sm text-muted-foreground">
-            第 {page} / {totalPages} 页
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 rounded-xl"
-            disabled={page >= totalPages}
-            onClick={() => updateQuery(query, page + 1)}
-          >
-            下一页
-          </Button>
-        </nav>
+      {result ? (
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          onPageChange={(next) => updateQuery(query, next)}
+          label="Agent 分页"
+        />
       ) : null}
-    </StudioPage>
+    </PageShell>
   )
 }

@@ -197,6 +197,16 @@
 
 ---
 
+## 15. 前端组件纪律（强制）
+
+- 基础组件一律来自 `stratum-web/components/ui/`（shadcn 官方底稿，CLI 添加）：Button、Input、Textarea、Select、Dialog、Popover、Command、Field、Checkbox、Skeleton、Tooltip 等。**禁止手写平行实现**：裸 `<button>`/`<input>`/`<select>` 配自定义样式充当按钮或输入框、自制卡片容器、自制弹层，一律视为违规。
+- 缺组件时先走 shadcn CLI 添加（`pnpm dlx shadcn add ...`）；CLI 没有的按底稿隔离规则 fork 到 `components/stratum/`，数据走 props。`components/ui/`、`components/react-bits/`、`components/assistant-ui/` 只加不改。
+- 跨页面的组合原语（页面外壳、页头、资源卡片、状态 chip、表单分组、空态/404 态）统一维护在 `components/stratum/` 的共享模块，各表面直接复用；禁止每个页面各写一套同职责的卡片/列表行/页头。
+- 沉浸画布内部（Excalidraw、本体 xyflow 节点）的节点级交互元素是唯一豁免：它们属于画布世界的自定义渲染，不属于页面级基础组件。
+- 原生 `<a>`/`<Link>` 导航与表单 label 关联等 HTML 语义元素不算手写组件；本条针对带视觉与交互实现的控件。
+
+---
+
 ## 附录：禁止清单（Red Flags）
 
 以下代码在 Review 中必须一票否决：
@@ -215,3 +225,5 @@
 - [ ] 真实密钥 / 凭据提交入库
 - [ ] 生产环境 `RUST_LOG=debug` 或 `trace`
 - [ ] 功能专属或单页样式无正当理由堆入 `stratum-web/app/globals.css`
+- [ ] 手写基础组件平行实现（裸 `<button>`/`<input>`/`<select>` 充当控件、自制卡片/弹层）替代 `components/ui/` 既有组件（画布节点内部豁免，见 §15）
+- [ ] 页面级组合件（页头、资源卡片、状态 chip、空态/错误态）绕过 `components/stratum/` 共享原语各写一套

@@ -5,6 +5,7 @@ import { useState } from "react"
 import { OntologyCreateDialog } from "@/components/stratum/ontology/ontology-create-dialog"
 import { OntologyDeleteDialog } from "@/components/stratum/ontology/ontology-delete-dialog"
 import { OntologyList } from "@/components/stratum/ontology/ontology-list"
+import { PageShell } from "@/components/stratum/studio/primitives"
 import type { OntologySummary } from "@/features/ontology-editor/types"
 import { useOntologyList } from "@/hooks/use-ontology-list"
 
@@ -31,27 +32,25 @@ export default function OntologiesPage() {
   }
 
   return (
-    <div className="min-h-svh pt-24 font-sans sm:pt-28">
-      <main className="mx-auto w-full max-w-3xl px-4 pb-16">
-        <OntologyList
-          state={state}
-          onPageChange={loadPage}
-          onRetry={reload}
-          onRequestCreate={() => setCreateOpen(true)}
-          onRequestDelete={setDeleteTarget}
-        />
-        <OntologyCreateDialog
-          api={api}
-          open={createOpen}
-          onOpenChange={setCreateOpen}
-        />
-        <OntologyDeleteDialog
-          api={api}
-          ontology={deleteTarget}
-          onClose={() => setDeleteTarget(null)}
-          onListChanged={handleListChanged}
-        />
-      </main>
-    </div>
+    <PageShell>
+      <OntologyList
+        state={state}
+        onPageChange={loadPage}
+        onRetry={reload}
+        onRequestCreate={() => setCreateOpen(true)}
+        onRequestDelete={setDeleteTarget}
+      />
+      <OntologyCreateDialog
+        api={api}
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+      />
+      <OntologyDeleteDialog
+        api={api}
+        ontology={deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onListChanged={handleListChanged}
+      />
+    </PageShell>
   )
 }

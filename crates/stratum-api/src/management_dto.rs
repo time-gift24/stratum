@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use stratum_core::{ModelId, ToolName};
+use stratum_core::{DangerLevel, ModelId, ToolKind, ToolName};
 use utoipa::ToSchema;
 
 /// Closed Provider kind accepted by the management API.
@@ -189,4 +189,17 @@ pub struct ProviderTestView {
     pub success: bool,
     /// Completion timestamp; no health state is persisted.
     pub completed_at: DateTime<Utc>,
+}
+
+/// One builtin tool the host can register for an Agent definition.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct ToolView {
+    /// Provider-visible tool name.
+    pub name: ToolName,
+    /// Provider-visible description.
+    pub description: String,
+    /// Read or write behavior.
+    pub kind: ToolKind,
+    /// Approval danger level.
+    pub danger_level: DangerLevel,
 }

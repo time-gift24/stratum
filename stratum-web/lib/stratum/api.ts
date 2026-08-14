@@ -34,11 +34,111 @@ export class ApiError extends Error {
     readonly code: string,
     readonly status: number,
     message: string,
-    readonly violations?: readonly OntologyViolation[]
+    readonly violations?: readonly OntologyViolation[],
+    readonly details: ApiErrorDetails = {}
   ) {
     super(message)
     this.name = "ApiError"
   }
+}
+
+export type FieldViolation = {
+  field: string
+  code: string
+  message: string
+}
+
+export type ResourceBlocker = {
+  resource_type: string
+  name: string
+  message?: string
+}
+
+export type ApiErrorDetails = {
+  violations?: readonly FieldViolation[]
+  blockers?: readonly ResourceBlocker[]
+}
+
+export type Pagination = {
+  page: number
+  per_page: number
+  total: number
+  total_pages?: number
+}
+
+export type PageEnvelope<T> = {
+  data: readonly T[]
+  pagination: Pagination
+}
+
+export type ResourceRevision<T> = {
+  data: T
+  etag: string
+}
+
+export type AgentDefinitionView = {
+  agent_name: string
+  model: string
+  model_parameters: Record<string, unknown>
+  tools: readonly string[]
+  prompt: string
+  updated_at: string
+}
+
+export type AgentDefinitionInput = {
+  agent_name?: string
+  model: string
+  model_parameters: Record<string, unknown>
+  tools: readonly string[]
+  prompt: string
+}
+
+export type ProviderKind = "openai" | "deepseek"
+
+export type ProviderView = {
+  provider: ProviderKind
+  credential_configured: boolean
+  models_count: number
+  updated_at: string
+}
+
+export type ProviderInput = {
+  provider: ProviderKind
+  api_key?: string
+}
+
+export type ProviderTestResult = {
+  success: boolean
+  completed_at: string
+  message?: string
+}
+
+export type ManagedModelView = {
+  model_id: string
+  provider: ProviderKind
+  name: string
+  parameter_schema: unknown
+  updated_at: string
+  is_default?: boolean
+}
+
+export type ManagedModelInput = {
+  provider: ProviderKind
+  name: string
+}
+
+export type ToolView = {
+  name: string
+  description: string
+  kind: "read" | "write"
+  danger_level: "low" | "medium" | "high"
+}
+
+export type ListQuery = {
+  page?: number
+  perPage?: number
+  sort?: string
+  search?: string
 }
 
 export type AgentRuntimeStatus =
@@ -269,6 +369,47 @@ export type StratumApi = {
     objectTypeId: string,
     depth?: number
   ): Promise<OntologyNeighborhood>
+  listAgentDefinitions(
+    query?: ListQuery
+  ): Promise<PageEnvelope<AgentDefinitionView>>
+  getAgentDefinition(
+    agentName: string
+  ): Promise<ResourceRevision<AgentDefinitionView>>
+  createAgentDefinition(
+    input: AgentDefinitionInput
+  ): Promise<ResourceRevision<AgentDefinitionView>>
+  updateAgentDefinition(
+    agentName: string,
+    input: AgentDefinitionInput,
+    etag: string
+  ): Promise<ResourceRevision<AgentDefinitionView>>
+  deleteAgentDefinition(agentName: string, etag: string): Promise<void>
+  listProviders(query?: ListQuery): Promise<PageEnvelope<ProviderView>>
+  getProvider(provider: ProviderKind): Promise<ResourceRevision<ProviderView>>
+  createProvider(input: ProviderInput): Promise<ResourceRevision<ProviderView>>
+  updateProvider(
+    provider: ProviderKind,
+    input: ProviderInput,
+    etag: string
+  ): Promise<ResourceRevision<ProviderView>>
+  deleteProvider(provider: ProviderKind, etag: string): Promise<void>
+  testProvider(provider: ProviderKind): Promise<ProviderTestResult>
+  listTools(): Promise<readonly ToolView[]>
+  listManagedModels(
+    query?: ListQuery & { provider?: ProviderKind }
+  ): Promise<PageEnvelope<ManagedModelView>>
+  getManagedModel(
+    provider: ProviderKind,
+    modelName: string
+  ): Promise<ResourceRevision<ManagedModelView>>
+  createManagedModel(
+    input: ManagedModelInput
+  ): Promise<ResourceRevision<ManagedModelView>>
+  deleteManagedModel(
+    provider: ProviderKind,
+    modelName: string,
+    etag: string
+  ): Promise<void>
 }
 
 // 携带强 ETag 的 Ontology 资源读取结果（GET / POST 201）。
@@ -279,7 +420,12 @@ export type OntologyResource = {
 }
 
 type ApiErrorBody = {
-  error?: { code?: unknown; message?: unknown; violations?: unknown }
+  error?: {
+    code?: unknown
+    message?: unknown
+    violations?: unknown
+    blockers?: unknown
+  }
 }
 
 const isApiErrorBody = (value: unknown): value is ApiErrorBody =>
@@ -292,6 +438,26 @@ const isOntologyViolation = (value: unknown): value is OntologyViolation => {
     typeof violation.code === "string" &&
     typeof violation.path === "string" &&
     typeof violation.message === "string"
+  )
+}
+
+const isFieldViolation = (value: unknown): value is FieldViolation => {
+  if (typeof value !== "object" || value === null) return false
+  const violation = value as Record<string, unknown>
+  return (
+    typeof violation.field === "string" &&
+    typeof violation.code === "string" &&
+    typeof violation.message === "string"
+  )
+}
+
+const isResourceBlocker = (value: unknown): value is ResourceBlocker => {
+  if (typeof value !== "object" || value === null) return false
+  const blocker = value as Record<string, unknown>
+  return (
+    typeof blocker.resource_type === "string" &&
+    typeof blocker.name === "string" &&
+    (blocker.message === undefined || typeof blocker.message === "string")
   )
 }
 
@@ -312,11 +478,21 @@ export async function apiErrorFromResponse(
         : undefined
       const violations =
         filtered !== undefined && filtered.length > 0 ? filtered : undefined
+      const fieldViolations = Array.isArray(rawViolations)
+        ? rawViolations.filter(isFieldViolation)
+        : []
+      const blockers = Array.isArray(body.error.blockers)
+        ? body.error.blockers.filter(isResourceBlocker)
+        : []
       return new ApiError(
         body.error.code,
         response.status,
         body.error.message,
-        violations
+        violations,
+        {
+          ...(fieldViolations.length > 0 ? { violations: fieldViolations } : {}),
+          ...(blockers.length > 0 ? { blockers } : {}),
+        }
       )
     }
   } catch {
@@ -344,6 +520,19 @@ export function incrementEventSeq(value: string): string {
 }
 
 type Parser<T> = (value: unknown) => T | undefined
+
+const asJson = <T>(value: unknown): T => value as T
+
+function listSearch(query: ListQuery = {}): string {
+  const search = new URLSearchParams()
+  if (query.page !== undefined) search.set("page", String(query.page))
+  if (query.perPage !== undefined) search.set("per_page", String(query.perPage))
+  if (query.sort !== undefined) search.set("sort", query.sort)
+  if (query.search !== undefined && query.search.trim() !== "")
+    search.set("search", query.search.trim())
+  const value = search.toString()
+  return value === "" ? "" : `?${value}`
+}
 
 export function createStratumApi(options: {
   baseUrl: string
@@ -377,6 +566,44 @@ export function createStratumApi(options: {
     if (!response.ok) throw await apiErrorFromResponse(response)
     assertResponseStatus(response, expectedStatuses)
   }
+
+  const resource = async <T>(
+    path: string,
+    init?: RequestInit
+  ): Promise<ResourceRevision<T>> => {
+    const response = await fetcher(`${baseUrl}${path}`, init)
+    if (!response.ok) throw await apiErrorFromResponse(response)
+    const body: unknown = await response.json()
+    const data =
+      typeof body === "object" &&
+      body !== null &&
+      "data" in body &&
+      !Array.isArray((body as { data?: unknown }).data)
+        ? (body as { data: T }).data
+        : (body as T)
+    return { data, etag: response.headers.get("etag") ?? "" }
+  }
+
+  const remove = async (path: string, etag: string): Promise<void> => {
+    const response = await fetcher(`${baseUrl}${path}`, {
+      method: "DELETE",
+      headers: { "if-match": etag },
+    })
+    if (!response.ok) throw await apiErrorFromResponse(response)
+  }
+
+  const jsonInit = (
+    method: "POST" | "PUT",
+    body: unknown,
+    etag?: string
+  ): RequestInit => ({
+    method,
+    headers: {
+      "content-type": "application/json",
+      ...(etag === undefined ? {} : { "if-match": etag }),
+    },
+    body: JSON.stringify(body),
+  })
 
   // Ontology 契约通过 ETag 头暴露强验证器；缺失即视为契约破坏。
   const readEtag = (response: Response): string => {
@@ -568,6 +795,120 @@ export function createStratumApi(options: {
         (value) => value as OntologyNeighborhood
       )
     },
+    listAgentDefinitions: (query) =>
+      request<PageEnvelope<AgentDefinitionView>>(
+        `/v1/agent-definitions${listSearch(query)}`,
+        asJson
+      ),
+    getAgentDefinition: (agentName) =>
+      resource(`/v1/agent-definitions/${encodeURIComponent(agentName)}`),
+    createAgentDefinition: (input) =>
+      resource("/v1/agent-definitions", jsonInit("POST", input)),
+    updateAgentDefinition: (agentName, input, etag) =>
+      resource(
+        `/v1/agent-definitions/${encodeURIComponent(agentName)}`,
+        jsonInit(
+          "PUT",
+          {
+            model: input.model,
+            model_parameters: input.model_parameters,
+            tools: input.tools,
+            prompt: input.prompt,
+          },
+          etag
+        )
+      ),
+    deleteAgentDefinition: (agentName, etag) =>
+      remove(`/v1/agent-definitions/${encodeURIComponent(agentName)}`, etag),
+    listProviders: (query) =>
+      request<PageEnvelope<ProviderView>>(
+        `/v1/providers${listSearch(query)}`,
+        asJson
+      ),
+    getProvider: (provider) => resource(`/v1/providers/${provider}`),
+    createProvider: (input) =>
+      resource("/v1/providers", jsonInit("POST", input)),
+    updateProvider: (provider, input, etag) =>
+      resource(
+        `/v1/providers/${provider}`,
+        jsonInit(
+          "PUT",
+          input.api_key === undefined ? {} : { api_key: input.api_key },
+          etag
+        )
+      ),
+    deleteProvider: (provider, etag) =>
+      remove(`/v1/providers/${provider}`, etag),
+    testProvider: (provider) =>
+      request<ProviderTestResult>(`/v1/providers/${provider}/test`, asJson, {
+        method: "POST",
+      }),
+    listTools: () => request<readonly ToolView[]>("/v1/tools", asJson),
+    listManagedModels: async (query = {}) => {
+      const { provider, ...listQuery } = query
+      if (provider !== undefined)
+        return request<PageEnvelope<ManagedModelView>>(
+          `/v1/providers/${provider}/models${listSearch(listQuery)}`,
+          asJson
+        )
+      const providerPage = await request<PageEnvelope<ProviderView>>(
+        "/v1/providers?per_page=50",
+        asJson
+      )
+      const providerModels = await Promise.all(
+        providerPage.data.map(async (item) => {
+          const first = await request<PageEnvelope<ManagedModelView>>(
+            `/v1/providers/${item.provider}/models?page=1&per_page=100`,
+            asJson
+          )
+          const totalPages = Math.ceil(
+            first.pagination.total / first.pagination.per_page
+          )
+          if (totalPages <= 1) return [...first.data]
+          const rest = await Promise.all(
+            Array.from({ length: totalPages - 1 }, (_, index) =>
+              request<PageEnvelope<ManagedModelView>>(
+                `/v1/providers/${item.provider}/models?page=${index + 2}&per_page=100`,
+                asJson
+              )
+            )
+          )
+          return [first, ...rest].flatMap((page) => page.data)
+        })
+      )
+      const normalizedSearch = query.search?.trim().toLocaleLowerCase()
+      const filtered = providerModels
+        .flat()
+        .filter(
+          (model) =>
+            normalizedSearch === undefined ||
+            normalizedSearch === "" ||
+            model.model_id.toLocaleLowerCase().includes(normalizedSearch) ||
+            model.name.toLocaleLowerCase().includes(normalizedSearch)
+        )
+        .toSorted((left, right) => left.model_id.localeCompare(right.model_id))
+      const page = query.page ?? 1
+      const perPage = query.perPage ?? 20
+      const start = Math.max(0, page - 1) * perPage
+      return {
+        data: filtered.slice(start, start + perPage),
+        pagination: { page, per_page: perPage, total: filtered.length },
+      }
+    },
+    getManagedModel: (provider, modelName) =>
+      resource(
+        `/v1/providers/${provider}/models/${encodeURIComponent(modelName)}`
+      ),
+    createManagedModel: (input) =>
+      resource(
+        `/v1/providers/${input.provider}/models`,
+        jsonInit("POST", { name: input.name })
+      ),
+    deleteManagedModel: (provider, modelName, etag) =>
+      remove(
+        `/v1/providers/${provider}/models/${encodeURIComponent(modelName)}`,
+        etag
+      ),
   }
 }
 

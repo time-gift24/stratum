@@ -5,21 +5,25 @@ import { useEffect, useReducer, useState } from "react"
 
 import {
   BlockerList,
+  ErrorState,
   Field,
+  FormSection,
   FormStatus,
   InlineDelete,
+  LoadingState,
+  NotFoundState,
+  PageHeader,
+  PageShell,
   SaveButton,
-  SettingsNav,
-  StudioHeader,
+  SettingsShell,
   StudioInput,
-  StudioPage,
+  StudioSelect,
   StudioTextarea,
-  controlClass,
 } from "@/components/stratum/studio/primitives"
 import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { studioApi } from "@/features/studio-management/client"
 import {
+  dispatchApiError,
   formReducer,
   initialFormState,
   isDirtyPhase,
@@ -34,11 +38,17 @@ import {
 } from "@/features/studio-management/transforms"
 import type { ModelDraft } from "@/features/studio-management/types"
 import { useDirtyGuard } from "@/features/studio-management/use-dirty-guard"
+import {
+  invalidatePageCache,
+  readPageCache,
+  writePageCache,
+} from "@/lib/page-cache"
 import { ApiError } from "@/lib/stratum/api"
 import type {
   ManagedModelView,
   ProviderKind,
   ProviderView,
+  ResourceRevision,
 } from "@/lib/stratum/api"
 
 const EMPTY: ModelDraft = { provider: "openai", modelName: "" }
@@ -65,9 +75,22 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
     EMPTY,
     initialFormState
   )
-  const [resource, setResource] = useState<ManagedModelView | null>(null)
-  const [providers, setProviders] = useState<readonly ProviderView[]>([])
-  const [loading, setLoading] = useState(!isNew)
+  const [resource, setResource] = useState<ManagedModelView | null>(() => {
+    if (!modelId) return null
+    return (
+      readPageCache<ResourceRevision<ManagedModelView>>(`studio:model:${modelId}`)
+        ?.data ?? null
+    )
+  })
+  const [providers, setProviders] = useState<readonly ProviderView[]>(
+    () => readPageCache("studio:catalog:providers") ?? []
+  )
+  const [loading, setLoading] = useState(
+    !isNew &&
+      readPageCache<ResourceRevision<ManagedModelView>>(
+        `studio:model:${modelId}`
+      ) === null
+  )
   const [loadError, setLoadError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(
     modelId !== undefined && parsedId === null
@@ -75,13 +98,31 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
   const [deleting, setDeleting] = useState(false)
   const confirmNavigation = useDirtyGuard(isDirtyPhase(state.phase))
 
+  // 重访先用缓存填充，权威版本由 load 刷新
+  const modelCacheKey = modelId ? `studio:model:${modelId}` : null
+  const [appliedCacheKey, setAppliedCacheKey] = useState<string | null>(null)
+  const cachedModel = modelCacheKey
+    ? readPageCache<ResourceRevision<ManagedModelView>>(modelCacheKey)
+    : null
+  if (cachedModel && appliedCacheKey !== modelCacheKey) {
+    setAppliedCacheKey(modelCacheKey)
+    dispatch({
+      type: "reload",
+      value: modelViewToDraft(cachedModel.data),
+      etag: cachedModel.etag,
+    })
+  }
+
   const load = async () => {
     setLoadError(null)
     try {
-      const providerList = await studioApi.listProviders({
-        page: 1,
-        perPage: 50,
-      })
+      const [providerList, response] = await Promise.all([
+        studioApi.listProviders({ page: 1, perPage: 50 }),
+        isNew || !parsedId
+          ? Promise.resolve(null)
+          : studioApi.getManagedModel(parsedId.provider, parsedId.modelName),
+      ])
+      writePageCache("studio:catalog:providers", providerList.data)
       setProviders(providerList.data)
       if (isNew) {
         if (providerList.data[0])
@@ -92,11 +133,8 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
           })
         return
       }
-      if (!parsedId) return
-      const response = await studioApi.getManagedModel(
-        parsedId.provider,
-        parsedId.modelName
-      )
+      if (!response) return
+      if (modelCacheKey) writePageCache(modelCacheKey, response)
       setResource(response.data)
       dispatch({
         type: "reload",
@@ -105,7 +143,7 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
       })
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 404) setNotFound(true)
-      else
+      else if (cachedModel === null)
         setLoadError(
           caught instanceof Error ? caught.message : "无法加载 Model"
         )
@@ -136,6 +174,11 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
         value: modelViewToDraft(response.data),
         etag: response.etag,
       })
+      invalidatePageCache("studio-settings:")
+      writePageCache(`studio:model:${response.data.model_id}`, {
+        data: response.data,
+        etag: response.etag,
+      })
       router.replace(
         withStudioReturn(
           `/studio/settings/models/${encodeURIComponent(response.data.model_id)}`,
@@ -143,20 +186,10 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
         )
       )
     } catch (caught) {
-      if (
-        caught instanceof ApiError &&
-        (caught.status === 400 || caught.status === 422)
-      )
-        dispatch({
-          type: "invalid",
-          message: caught.message,
-          violations: caught.details.violations,
-        })
-      else
-        dispatch({
-          type: "invalid",
-          message: caught instanceof Error ? caught.message : "保存失败",
-        })
+      dispatchApiError(dispatch, caught, {
+        conflict: "Model 已在别处变更，本地输入仍保留。",
+        fallback: "保存失败",
+      })
     }
   }
 
@@ -169,144 +202,149 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
         resource.name,
         state.etag
       )
+      invalidatePageCache()
       router.replace(modelsHref)
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 409)
-        dispatch({
-          type: "blocked",
-          message: caught.message,
-          blockers: caught.details.blockers ?? [],
-        })
-      else if (caught instanceof ApiError && caught.status === 412)
-        dispatch({
-          type: "conflict",
-          message: "Model 已变更，请重新加载后再删除。",
-        })
-      else
-        dispatch({
-          type: "invalid",
-          message: caught instanceof Error ? caught.message : "删除失败",
-        })
+      dispatchApiError(dispatch, caught, {
+        conflict: "Model 已变更，请重新加载后再删除。",
+        fallback: "删除失败",
+      })
       setDeleting(false)
     }
   }
 
   if (loading)
     return (
-      <StudioPage>
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="mt-10 h-96 rounded-2xl" />
-      </StudioPage>
+      <PageShell>
+        <LoadingState label="正在加载 Model" />
+      </PageShell>
     )
   if (notFound)
     return (
-      <StudioPage>
-        <StudioHeader title="Model 不存在" backHref={modelsHref} />
-      </StudioPage>
+      <PageShell>
+        <PageHeader title="Model 不存在" backHref={modelsHref} />
+        <NotFoundState
+          message="该 Model 不存在或已被删除。可以返回列表，或直接新建一个。"
+          createHref={withStudioReturn("/studio/settings/models/new", returnTo)}
+          createLabel="新建 Model"
+        />
+      </PageShell>
     )
   if (loadError)
     return (
-      <StudioPage>
-        <StudioHeader title="无法打开 Model" backHref={modelsHref} />
-        <FormStatus message={loadError} tone="error" />
-      </StudioPage>
+      <PageShell>
+        <PageHeader title="无法打开 Model" backHref={modelsHref} />
+        <ErrorState
+          title="Model 加载失败"
+          message={loadError}
+          onRetry={() => {
+            setLoading(true)
+            void load()
+          }}
+        />
+      </PageShell>
     )
 
   return (
-    <StudioPage>
-      <StudioHeader
+    <PageShell>
+      <PageHeader
         title={isNew ? "新建 Model" : (resource?.name ?? state.draft.modelName)}
         backHref={modelsHref}
         backLabel="返回 Model"
       />
-      <SettingsNav current="models" returnTo={returnTo} />
-      <form onSubmit={save} className="grid gap-7">
-        <section className="grid gap-6 rounded-2xl border border-border bg-card p-5 sm:p-7">
-          <Field label="Provider" error={state.violations.provider}>
-            <select
-              className={`${controlClass} h-9 rounded-md border px-3 text-sm outline-none focus-visible:ring-2`}
-              disabled={!isNew}
-              value={state.draft.provider}
-              onChange={(event) =>
-                dispatch({
-                  type: "edit",
-                  draft: {
-                    ...state.draft,
-                    provider: event.target.value as ProviderKind,
-                  },
-                })
-              }
-            >
-              {providers.map((provider) => (
-                <option key={provider.provider} value={provider.provider}>
-                  {provider.provider}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Model name" error={state.violations.name}>
-            <StudioInput
-              disabled={!isNew}
-              autoFocus={isNew}
-              value={state.draft.modelName}
-              onChange={(event) =>
-                dispatch({
-                  type: "edit",
-                  draft: { ...state.draft, modelName: event.target.value },
-                })
-              }
-            />
-          </Field>
+      <SettingsShell current="models" returnTo={returnTo}>
+        <form onSubmit={save} className="grid gap-8">
+          <FormSection
+            title="模型"
+            description="Model 挂在 Provider 下，名称与 Provider 创建后不可修改。"
+          >
+            <div className="grid gap-6">
+              <Field label="Provider" error={state.violations.provider}>
+                <StudioSelect
+                  ariaLabel="Provider"
+                  disabled={!isNew}
+                  value={state.draft.provider}
+                  options={providers.map((provider) => ({
+                    value: provider.provider,
+                    label: provider.provider,
+                  }))}
+                  onChange={(next) =>
+                    dispatch({
+                      type: "edit",
+                      draft: {
+                        ...state.draft,
+                        provider: next as ProviderKind,
+                      },
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Model name" error={state.violations.name}>
+                <StudioInput
+                  disabled={!isNew}
+                  autoFocus={isNew}
+                  className="font-mono"
+                  value={state.draft.modelName}
+                  onChange={(event) =>
+                    dispatch({
+                      type: "edit",
+                      draft: { ...state.draft, modelName: event.target.value },
+                    })
+                  }
+                />
+              </Field>
+            </div>
+          </FormSection>
           {resource ? (
-            <Field
-              label="Parameter schema"
-              hint="由 Provider adapter 声明，只读。"
+            <FormSection
+              title="Parameter schema"
+              description="由 Provider adapter 声明，只读。"
             >
               <StudioTextarea
                 readOnly
                 rows={18}
                 spellCheck={false}
-                className="font-mono text-sm"
+                className="font-mono text-sm leading-6"
                 value={encodeModelSchema(resource)}
               />
-            </Field>
+            </FormSection>
           ) : null}
-        </section>
-        <FormStatus
-          message={state.message}
-          tone={
-            state.phase === "invalid" || state.phase === "conflict"
-              ? "error"
-              : state.message
-                ? "success"
-                : "neutral"
-          }
-        />
-        <BlockerList blockers={state.blockers} />
-        <div className="flex justify-end gap-3">
-          <Button
-            type="button"
-            variant="ghost"
-            className="min-h-11 rounded-xl"
-            onClick={() => {
-              if (confirmNavigation()) router.push(modelsHref)
-            }}
-          >
-            返回列表
-          </Button>
-          {isNew ? <SaveButton saving={state.phase === "saving"} /> : null}
-        </div>
-      </form>
-      {!isNew ? (
-        <div className="mt-12">
-          <InlineDelete
-            resourceLabel="Model"
-            explanation="若此 Model 是默认 Model 或被 Agent definition 引用，系统会列出 blocker 并保持资源不变。"
-            pending={deleting}
-            onDelete={() => void remove()}
+          <FormStatus
+            message={state.message}
+            tone={
+              state.phase === "invalid" || state.phase === "conflict"
+                ? "error"
+                : state.message
+                  ? "success"
+                  : "neutral"
+            }
           />
-        </div>
-      ) : null}
-    </StudioPage>
+          <BlockerList blockers={state.blockers} />
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="lg"
+              onClick={() => {
+                if (confirmNavigation()) router.push(modelsHref)
+              }}
+            >
+              返回列表
+            </Button>
+            {isNew ? <SaveButton saving={state.phase === "saving"} /> : null}
+          </div>
+        </form>
+        {!isNew ? (
+          <div className="mt-12">
+            <InlineDelete
+              resourceLabel="Model"
+              explanation="若此 Model 是默认 Model 或被 Agent definition 引用，系统会列出 blocker 并保持资源不变。"
+              pending={deleting}
+              onDelete={() => void remove()}
+            />
+          </div>
+        ) : null}
+      </SettingsShell>
+    </PageShell>
   )
 }

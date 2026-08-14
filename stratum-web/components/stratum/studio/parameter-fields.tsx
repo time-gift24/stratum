@@ -11,9 +11,10 @@ import { isTomlCompatibleParameters } from "@/features/studio-management/transfo
 import {
   Field,
   StudioInput,
+  StudioSelect,
   StudioTextarea,
-  controlClass,
 } from "@/components/stratum/studio/primitives"
+import { Checkbox } from "@/components/ui/checkbox"
 
 export function ParameterFields({
   schema,
@@ -49,42 +50,32 @@ export function ParameterFields({
             currentThinkingLevel(parameters) ?? control.options[0]?.value ?? ""
           return (
             <Field key={control.key} label={control.label}>
-              <select
-                className={`${controlClass} h-9 rounded-md border px-3 text-sm outline-none focus-visible:ring-2`}
+              <StudioSelect
+                ariaLabel={control.label}
                 value={current}
-                onChange={(event) =>
-                  onChange(withThinkingLevel(parameters, event.target.value))
+                options={control.options}
+                onChange={(next) =>
+                  onChange(withThinkingLevel(parameters, next))
                 }
-              >
-                {control.options.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              />
             </Field>
           )
         }
         if (control.kind === "select") {
           return (
             <Field key={control.key} label={control.label}>
-              <select
-                className={`${controlClass} h-9 rounded-md border px-3 text-sm outline-none focus-visible:ring-2`}
+              <StudioSelect
+                ariaLabel={control.label}
                 value={
                   typeof parameters[control.key] === "string"
                     ? String(parameters[control.key])
                     : ""
                 }
-                onChange={(event) =>
-                  onChange({ ...parameters, [control.key]: event.target.value })
+                options={control.options}
+                onChange={(next) =>
+                  onChange({ ...parameters, [control.key]: next })
                 }
-              >
-                {control.options.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              />
             </Field>
           )
         }
@@ -92,16 +83,15 @@ export function ParameterFields({
           return (
             <label
               key={control.key}
-              className="flex min-h-11 items-center gap-3 text-sm font-medium"
+              className="flex min-h-9 items-center gap-3 text-sm font-medium"
             >
-              <input
-                type="checkbox"
-                className="size-4 accent-primary"
+              <Checkbox
+                className="size-4"
                 checked={parameters[control.key] === true}
-                onChange={(event) =>
+                onCheckedChange={(checked) =>
                   onChange({
                     ...parameters,
-                    [control.key]: event.target.checked,
+                    [control.key]: checked === true,
                   })
                 }
               />

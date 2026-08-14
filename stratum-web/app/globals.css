@@ -24,7 +24,7 @@
     --destructive: #b3462f;
     --border: #e7e2da;
     --input: #d9d3c8;
-    --ring: #7378d8;
+    --ring: oklch(0.52 0.07 155);
     --chart-1: #9eb6a6;
     --chart-2: #7378d8;
     --chart-3: #9a7a64;
@@ -38,7 +38,7 @@
     --sidebar-accent: #9eb6a6;
     --sidebar-accent-foreground: #2e2d2a;
     --sidebar-border: #e7e2da;
-    --sidebar-ring: #7378d8;
+    --sidebar-ring: oklch(0.52 0.07 155);
     --canvas-grid: oklch(0.556 0 0 / 25%);
     --edge: oklch(0.556 0 0);
     --port-model: oklch(0.75 0.16 95);

@@ -33,7 +33,7 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/
 
 - 路由分工：`/conversation` 面向最终用户，`/excalidraw` 是沉浸白板，`/studio` 与其子路由面向开发者/管理员；`app/(site)/page.tsx` 只做 `redirect("/conversation")`。
 - 数据必须真实：消息、流式草稿、运行/失败状态、连接错误、会话 404 都有可见的对应状态；禁止 mock 数据与演示文案。
-- Studio 首期只管理 Provider、Model 和 Agent definition。Agent-first 仪表盘不显示 Agents 页签、说明区、Prompt 摘要、假指标、健康灯或监控占位；资源管理仅从右上设置进入。
+- Studio 首期只管理 Provider、Model 和 Agent definition。Agent-first 仪表盘不显示 Agents 页签、说明区、Prompt 摘要、假指标、健康灯或监控占位；资源管理从顶部导航右端的设置入口进入。
 - 外部/底稿组件隔离：`components/ui`（shadcn 官方）、`components/react-bits`、`components/assistant-ui`（CLI 底稿，只读参考）不改内部实现；适配经 props、组合、包裹层和 token 完成。
 - 组件获取一律走 shadcn CLI；fork 产物落 `components/stratum/`，数据全部走 props。
 - 模型配置 schema 驱动：模型列表与 Thinking 等级来自 `GET /v1/models` 的 `parameters_schema`，UI 严禁硬编码等级（见 `lib/stratum/model-config.ts` 的 `thinkingLevels`）。

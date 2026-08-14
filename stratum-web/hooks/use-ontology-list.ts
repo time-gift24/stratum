@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import type { OntologyListPage } from "@/features/ontology-editor/types"
+import { readPageCache, writePageCache } from "@/lib/page-cache"
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
 import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 
@@ -47,6 +48,7 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
         sort: ONTOLOGY_LIST_SORT,
       })
       .then((result) => {
+        writePageCache(`ontologies:${page}`, result)
         if (!cancelled) setSettled({ key, ok: true, page, result })
       })
       .catch((error: unknown) => {
@@ -73,11 +75,17 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
   }, [])
 
   const state: OntologyListState =
-    settled === null || settled.key !== requestKey
-      ? { phase: "loading" }
-      : settled.ok
+    settled !== null && settled.key === requestKey
+      ? settled.ok
         ? { phase: "ready", page: settled.page, result: settled.result }
         : { phase: "error", page: settled.page, message: settled.message }
+      : // 新请求在途：先展示该页缓存，没有缓存才是 loading
+        (() => {
+          const cached = readPageCache<OntologyListPage>(`ontologies:${page}`)
+          return cached
+            ? { phase: "ready", page, result: cached }
+            : { phase: "loading" }
+        })()
 
   return { state, api, loadPage, reload }
 }

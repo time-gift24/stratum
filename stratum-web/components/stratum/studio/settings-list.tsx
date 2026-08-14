@@ -2,23 +2,30 @@
 
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
-import { useCallback, useEffect, useState } from "react"
-import { Plus } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Box, Cpu, KeyRound, Plug, Plus, Search } from "lucide-react"
 
 import {
-  FormStatus,
-  ListRow,
-  SettingsNav,
-  StudioHeader,
-  StudioPage,
+  ErrorState,
+  LoadingState,
+  PageHeader,
+  PageShell,
+  Pagination,
+  ResourceCard,
+  SettingsShell,
+  StatusChip,
+  StudioInput,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { studioApi } from "@/features/studio-management/client"
 import {
   safeStudioReturn,
   withStudioReturn,
 } from "@/features/studio-management/navigation"
+import {
+  readPageCache,
+  writePageCache,
+} from "@/lib/page-cache"
 import type {
   ManagedModelView,
   PageEnvelope,
@@ -38,20 +45,56 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
   const query = searchParams.get("q")?.trim() ?? ""
   const page = safePage(searchParams.get("page"))
   const returnTo = safeStudioReturn(searchParams.get("returnTo"))
+  const cacheKey = `studio-settings:${kind}:${page}:${query}`
+  const [cached, setCached] = useState(() =>
+    readPageCache<{
+      result: PageEnvelope<ProviderView> | PageEnvelope<ManagedModelView>
+      hasResources: boolean
+    }>(cacheKey)
+  )
   const [providers, setProviders] = useState<PageEnvelope<ProviderView> | null>(
-    null
+    () => (cached?.result as PageEnvelope<ProviderView> | undefined) ?? null
   )
   const [models, setModels] = useState<PageEnvelope<ManagedModelView> | null>(
-    null
+    () => (cached?.result as PageEnvelope<ManagedModelView> | undefined) ?? null
   )
-  const [hasResources, setHasResources] = useState(false)
+  const [hasResources, setHasResources] = useState(
+    () => cached?.hasResources ?? false
+  )
   const [error, setError] = useState<string | null>(null)
+  const requestIdRef = useRef(0)
+
+  // kind/参数变化时同步切缓存，不等 effect
+  const [seenKey, setSeenKey] = useState(cacheKey)
+  if (seenKey !== cacheKey) {
+    setSeenKey(cacheKey)
+    const next = readPageCache<{
+      result: PageEnvelope<ProviderView> | PageEnvelope<ManagedModelView>
+      hasResources: boolean
+    }>(cacheKey)
+    setCached(next)
+    if (kind === "providers") {
+      setProviders(
+        (next?.result as PageEnvelope<ProviderView> | undefined) ?? null
+      )
+      setModels(null)
+    } else {
+      setModels(
+        (next?.result as PageEnvelope<ManagedModelView> | undefined) ?? null
+      )
+      setProviders(null)
+    }
+    setHasResources(next?.hasResources ?? false)
+    setError(null)
+  }
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     setError(null)
     try {
       if (kind === "providers") {
         const all = await studioApi.listProviders({ page: 1, perPage: 100 })
+        if (requestId !== requestIdRef.current) return
         const normalized = query.toLocaleLowerCase()
         const filtered = all.data.filter(
           (provider) =>
@@ -59,15 +102,22 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
             provider.provider.toLocaleLowerCase().includes(normalized)
         )
         const start = (page - 1) * PER_PAGE
-        setProviders({
+        const result: PageEnvelope<ProviderView> = {
           data: filtered.slice(start, start + PER_PAGE),
           pagination: {
             page,
             per_page: PER_PAGE,
             total: filtered.length,
           },
-        })
-        setHasResources(all.pagination.total > 0)
+        }
+        const nextCache = {
+          result,
+          hasResources: all.pagination.total > 0,
+        }
+        writePageCache(cacheKey, nextCache)
+        setCached(nextCache)
+        setProviders(result)
+        setHasResources(nextCache.hasResources)
       } else {
         const [modelPage, providerPage] = await Promise.all([
           studioApi.listManagedModels({
@@ -77,15 +127,24 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
           }),
           studioApi.listProviders({ page: 1, perPage: 100 }),
         ])
+        if (requestId !== requestIdRef.current) return
+        const nextCache = {
+          result: modelPage,
+          hasResources: providerPage.data.some(
+            (provider) => provider.models_count > 0
+          ),
+        }
+        writePageCache(cacheKey, nextCache)
+        setCached(nextCache)
         setModels(modelPage)
-        setHasResources(
-          providerPage.data.some((provider) => provider.models_count > 0)
-        )
+        setHasResources(nextCache.hasResources)
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法加载设置")
+      if (requestId !== requestIdRef.current) return
+      if (readPageCache(cacheKey) === null)
+        setError(caught instanceof Error ? caught.message : "无法加载设置")
     }
-  }, [kind, page, query])
+  }, [kind, page, query, cacheKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0)
@@ -110,157 +169,145 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
   }
 
   return (
-    <StudioPage>
-      <StudioHeader title="设置" backHref={returnTo} backLabel="返回 Studio">
+    <PageShell>
+      <PageHeader title="设置" backHref={returnTo}>
         <Link
           href={withStudioReturn(`/studio/settings/${kind}/new`, returnTo)}
-          className={buttonVariants({
-            className: "min-h-11 rounded-xl px-4 text-sm",
-          })}
+          className={buttonVariants({ size: "lg" })}
         >
           <Plus aria-hidden />
           新建
         </Link>
-      </StudioHeader>
-      <SettingsNav current={kind} returnTo={returnTo} />
-      <form
-        role="search"
-        className="relative mb-6 max-w-xl"
-        onSubmit={(event) => {
-          event.preventDefault()
-          const data = new FormData(event.currentTarget)
-          updateQuery(String(data.get("q") ?? ""))
-        }}
-      >
-        <input
-          key={query}
-          name="q"
-          defaultValue={query}
-          aria-label={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
-          placeholder={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
-          className="h-11 w-full rounded-xl border border-border bg-card px-3 pr-20 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25"
-        />
-        <Button
-          type="submit"
-          variant="ghost"
-          className="absolute top-1 right-1 h-9 rounded-lg px-3"
+      </PageHeader>
+      <SettingsShell current={kind} returnTo={returnTo}>
+        <form
+          role="search"
+          className="relative mb-6 max-w-xl"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const data = new FormData(event.currentTarget)
+            updateQuery(String(data.get("q") ?? ""))
+          }}
         >
-          搜索
-        </Button>
-      </form>
-      {error ? (
-        <div className="mb-5 grid gap-3">
-          <FormStatus message={error} tone="error" />
+          <Search
+            aria-hidden
+            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <StudioInput
+            key={query}
+            name="q"
+            defaultValue={query}
+            aria-label={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
+            placeholder={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
+            className="pr-16 pl-9"
+          />
           <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 w-fit rounded-xl"
-            onClick={() => void load()}
+            type="submit"
+            variant="ghost"
+            className="absolute top-1 right-1"
           >
-            重试
+            搜索
           </Button>
-        </div>
-      ) : null}
-      {items === undefined && !error ? (
-        <div className="rounded-2xl border border-border bg-card p-5">
-          {Array.from({ length: 4 }, (_, index) => (
-            <div
-              key={index}
-              className="flex min-h-16 items-center border-b border-border last:border-none"
-            >
-              <div className="w-full">
-                <Skeleton className="h-5 w-32" />
-                <Skeleton className="mt-2 h-4 w-56 max-w-full" />
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : items?.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-card p-8">
-          <h2 className="font-semibold">
-            {hasQuery && hasResources
-              ? `没有匹配的 ${kind === "providers" ? "Provider" : "Model"}`
-              : kind === "providers"
-                ? "尚未配置 Provider"
-                : "尚未配置 Model"}
-          </h2>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {hasQuery && hasResources
-              ? "调整搜索词，或清除筛选查看全部资源。"
-              : kind === "providers"
-                ? "创建受支持的 Provider 后，可以继续配置它的 Model。"
-                : "添加一个真实可用的模型名称。"}
-          </p>
-          {hasQuery && hasResources ? (
-            <Button
-              type="button"
-              variant="outline"
-              className="mt-5 min-h-11 rounded-xl"
-              onClick={() => updateQuery("")}
-            >
-              清除筛选
-            </Button>
-          ) : null}
-        </div>
-      ) : items ? (
-        <div className="rounded-2xl border border-border bg-card px-4 sm:px-5">
-          {kind === "providers"
-            ? (items as readonly ProviderView[]).map((provider) => (
-                <ListRow
-                  key={provider.provider}
-                  href={withStudioReturn(
-                    `/studio/settings/providers/${provider.provider}`,
-                    returnTo
-                  )}
-                  title={provider.provider}
-                  meta={`${provider.models_count} 个模型 · ${provider.credential_configured ? "凭据已配置" : "未配置凭据"}`}
-                >
-                  <span className="hidden text-sm text-muted-foreground sm:block">
-                    {provider.credential_configured ? "凭据已配置" : "需要凭据"}
-                  </span>
-                </ListRow>
-              ))
-            : (items as readonly ManagedModelView[]).map((model) => (
-                <ListRow
-                  key={model.model_id}
-                  href={withStudioReturn(
-                    `/studio/settings/models/${encodeURIComponent(model.model_id)}`,
-                    returnTo
-                  )}
-                  title={model.name}
-                  meta={`${model.provider}${model.is_default ? " · 默认 Model" : ""}`}
-                />
-              ))}
-        </div>
-      ) : null}
-      {result && totalPages > 1 ? (
-        <nav
-          aria-label={`${kind === "providers" ? "Provider" : "Model"} 分页`}
-          className="mt-8 flex items-center justify-between gap-4"
-        >
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 rounded-xl"
-            disabled={page <= 1}
-            onClick={() => updateQuery(query, page - 1)}
-          >
-            上一页
-          </Button>
-          <span className="text-sm text-muted-foreground">
-            第 {page} / {totalPages} 页
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 rounded-xl"
-            disabled={page >= totalPages}
-            onClick={() => updateQuery(query, page + 1)}
-          >
-            下一页
-          </Button>
-        </nav>
-      ) : null}
-    </StudioPage>
+        </form>
+        {error ? (
+          <div className="mb-5">
+            <ErrorState
+              title={`${kind === "providers" ? "Provider" : "Model"} 列表加载失败`}
+              message={error}
+              onRetry={() => void load()}
+            />
+          </div>
+        ) : null}
+        {items === undefined && !error ? (
+          <LoadingState
+            label={`正在加载 ${kind === "providers" ? "Provider" : "Model"}`}
+          />
+        ) : items?.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
+            <h2 className="font-semibold">
+              {hasQuery && hasResources
+                ? `没有匹配的 ${kind === "providers" ? "Provider" : "Model"}`
+                : kind === "providers"
+                  ? "尚未配置 Provider"
+                  : "尚未配置 Model"}
+            </h2>
+            <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
+              {hasQuery && hasResources
+                ? "调整搜索词，或清除筛选查看全部资源。"
+                : kind === "providers"
+                  ? "创建受支持的 Provider 后，可以继续配置它的 Model。"
+                  : "添加一个真实可用的模型名称。"}
+            </p>
+            {hasQuery && hasResources ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="mt-4"
+                onClick={() => updateQuery("")}
+              >
+                清除筛选
+              </Button>
+            ) : null}
+          </div>
+        ) : items ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {kind === "providers"
+              ? (items as readonly ProviderView[]).map((provider) => (
+                  <ResourceCard
+                    key={provider.provider}
+                    href={withStudioReturn(
+                      `/studio/settings/providers/${provider.provider}`,
+                      returnTo
+                    )}
+                    title={provider.provider}
+                    leading={<Plug aria-hidden className="size-5" />}
+                    badge={
+                      provider.credential_configured ? (
+                        <StatusChip tone="ok">已配置</StatusChip>
+                      ) : (
+                        <StatusChip tone="warn">需要凭据</StatusChip>
+                      )
+                    }
+                    meta={[
+                      { icon: Box, text: `${provider.models_count} 个模型` },
+                      {
+                        icon: KeyRound,
+                        text: provider.credential_configured
+                          ? "凭据已配置"
+                          : "未配置凭据",
+                      },
+                    ]}
+                  />
+                ))
+              : (items as readonly ManagedModelView[]).map((model) => (
+                  <ResourceCard
+                    key={model.model_id}
+                    href={withStudioReturn(
+                      `/studio/settings/models/${encodeURIComponent(model.model_id)}`,
+                      returnTo
+                    )}
+                    title={model.name}
+                    leading={<Cpu aria-hidden className="size-5" />}
+                    badge={
+                      model.is_default ? (
+                        <StatusChip tone="neutral">默认</StatusChip>
+                      ) : undefined
+                    }
+                    meta={[{ icon: Plug, text: model.provider }]}
+                  />
+                ))}
+          </div>
+        ) : null}
+        {result ? (
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={(next) => updateQuery(query, next)}
+            label={`${kind === "providers" ? "Provider" : "Model"} 分页`}
+          />
+        ) : null}
+      </SettingsShell>
+    </PageShell>
   )
 }

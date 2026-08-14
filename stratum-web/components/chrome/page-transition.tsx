@@ -25,7 +25,12 @@ gsap.registerPlugin(useGSAP)
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
 
-const PAGE_ORDER = ["/conversation", "/excalidraw"]
+const PAGE_ORDER = ["/conversation", "/studio", "/ontologies", "/excalidraw"]
+
+/** 子路由归并到一级入口：/studio/agents/x → /studio。 */
+function pageIndex(pathname: string): number {
+  return PAGE_ORDER.indexOf(`/${pathname.split("/")[1]}`)
+}
 
 // 模块级共享状态（应用级单例，仅客户端运行）
 let pageElement: HTMLElement | null = null
@@ -48,15 +53,12 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       let direction: 1 | -1 = 1
       if (armedDirection !== null) {
         direction = armedDirection
-      } else if (
-        lastPathname !== null &&
-        PAGE_ORDER.includes(lastPathname) &&
-        PAGE_ORDER.includes(pathname)
-      ) {
-        direction =
-          PAGE_ORDER.indexOf(pathname) > PAGE_ORDER.indexOf(lastPathname)
-            ? 1
-            : -1
+      } else if (lastPathname !== null) {
+        const from = pageIndex(lastPathname)
+        const to = pageIndex(pathname)
+        if (from !== -1 && to !== -1 && from !== to) {
+          direction = to > from ? 1 : -1
+        }
       }
       armedDirection = null
       lastPathname = pathname
@@ -106,8 +108,8 @@ export function TransitionLink({
     // hash 锚点（含跨页锚点）与外链走默认导航，不播转场
     if (href.includes("#") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return
 
-    const from = PAGE_ORDER.indexOf(pathname)
-    const to = PAGE_ORDER.indexOf(href)
+    const from = pageIndex(pathname)
+    const to = pageIndex(href)
     if (to === -1 || to === from) return // 未知页或当前页：交给 Link 默认导航
 
     const el = pageElement

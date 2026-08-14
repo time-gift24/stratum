@@ -1,7 +1,10 @@
+import type { Dispatch } from "react"
+
 import type {
   FormPhase,
   ManagementFormState,
 } from "@/features/studio-management/types"
+import { ApiError } from "@/lib/stratum/api"
 import type { FieldViolation, ResourceBlocker } from "@/lib/stratum/api"
 
 export type FormAction<T> =
@@ -101,4 +104,38 @@ export function isDirtyPhase(phase: FormPhase): boolean {
     phase === "invalid" ||
     phase === "conflict"
   )
+}
+
+/**
+ * 管理 API 错误 → 表单 phase：412 → conflict、409 → blocked、
+ * 400/422 → invalid（带字段级 violations）、其他 → invalid（fallback 文案）。
+ */
+export function dispatchApiError<T>(
+  dispatch: Dispatch<FormAction<T>>,
+  caught: unknown,
+  messages: { conflict: string; fallback: string }
+): void {
+  if (caught instanceof ApiError && caught.status === 412) {
+    dispatch({ type: "conflict", message: messages.conflict })
+  } else if (caught instanceof ApiError && caught.status === 409) {
+    dispatch({
+      type: "blocked",
+      message: caught.message,
+      blockers: caught.details.blockers ?? [],
+    })
+  } else if (
+    caught instanceof ApiError &&
+    (caught.status === 400 || caught.status === 422)
+  ) {
+    dispatch({
+      type: "invalid",
+      message: caught.message,
+      violations: caught.details.violations,
+    })
+  } else {
+    dispatch({
+      type: "invalid",
+      message: caught instanceof Error ? caught.message : messages.fallback,
+    })
+  }
 }

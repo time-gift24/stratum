@@ -1,18 +1,24 @@
-import Link from "next/link"
-import { Trash2Icon } from "lucide-react"
+import { AlignLeft, Clock, Hash, Plus, Trash2Icon } from "lucide-react"
 
+import {
+  ErrorState,
+  LoadingState,
+  PageHeader,
+  Pagination,
+  ResourceCard,
+} from "@/components/stratum/studio/primitives"
+import { Button } from "@/components/ui/button"
 import type { OntologySummary } from "@/features/ontology-editor/types"
 import {
   ONTOLOGY_LIST_PER_PAGE,
   type OntologyListState,
 } from "@/hooks/use-ontology-list"
-import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 
 /**
  * Ontology 列表（数据经 props 下发，见 app/(site)/ontologies/page.tsx）。
- * 覆盖契约四态：loading（骨架行）、error（重试入口）、empty（新建入口，
- * 无虚构数据）、ready（分页表格）。点击行进入画布编辑器 /ontologies/[id]。
+ * 与仪表盘/设置列表共享 ResourceCard 扫读语言：squircle 字母标识 +
+ * 虚线分隔的 mono meta 行；四态齐全（骨架 / 错误 / 空态 / 分页网格）。
+ * 点击卡片进入画布编辑器 /ontologies/[id]，删除入口在卡片右侧。
  */
 
 const updatedAtFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -42,132 +48,80 @@ export function OntologyList({
   onRequestDelete,
 }: OntologyListProps) {
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex items-center justify-between gap-4">
-        <h1 className="font-heading text-xl tracking-tight">本体</h1>
-        <Button className="min-h-11" onClick={onRequestCreate}>
+    <>
+      <PageHeader title="本体">
+        <Button size="lg" onClick={onRequestCreate}>
+          <Plus aria-hidden />
           新建本体
         </Button>
-      </header>
+      </PageHeader>
 
       {state.phase === "loading" ? (
-        <div aria-busy="true" className="flex flex-col gap-2">
-          <span className="sr-only">正在加载本体列表…</span>
-          {Array.from({ length: 5 }, (_, index) => (
-            <Skeleton key={index} className="h-16 w-full rounded-xl" />
-          ))}
-        </div>
+        <LoadingState label="正在加载本体列表" />
       ) : state.phase === "error" ? (
-        <div
-          role="alert"
-          className="flex flex-col items-start gap-3 rounded-xl border border-destructive/40 p-4"
-        >
-          <p className="text-sm text-destructive">
-            列表加载失败：{state.message}
-          </p>
-          <Button variant="outline" onClick={onRetry}>
-            重试
-          </Button>
-        </div>
+        <ErrorState
+          title="本体列表加载失败"
+          message={state.message}
+          onRetry={onRetry}
+        />
       ) : state.result.data.length === 0 &&
         state.result.pagination.total === 0 ? (
-        <div className="flex flex-col items-start gap-3 rounded-xl border border-dashed border-border p-6">
-          <p className="text-sm text-muted-foreground">
-            还没有本体。新建一个本体，开始定义对象类型与关系。
+        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
+          <h2 className="font-semibold">尚未创建本体</h2>
+          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
+            新建一个本体，开始定义对象类型与关系。
           </p>
-          <Button
-            variant="outline"
-            className="min-h-11"
-            onClick={onRequestCreate}
-          >
+          <Button size="lg" className="mt-4" onClick={onRequestCreate}>
+            <Plus aria-hidden />
             新建本体
           </Button>
         </div>
       ) : (
         <>
-          <ul className="flex flex-col gap-2">
+          <div className="grid gap-3 sm:grid-cols-2">
             {state.result.data.map((ontology) => (
-              <li key={ontology.id}>
-                <div className="group flex items-center gap-2 rounded-xl border border-border bg-card transition-colors hover:border-foreground/20">
-                  <Link
-                    href={`/ontologies/${ontology.id}`}
-                    className="min-w-0 flex-1 rounded-xl px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-                  >
-                    <span className="flex items-baseline gap-2">
-                      <span className="truncate text-sm font-medium">
-                        {ontology.display_name}
-                      </span>
-                      <span className="truncate font-mono text-xs text-muted-foreground">
-                        {ontology.name}
-                      </span>
-                    </span>
-                    {ontology.description ? (
-                      <span className="mt-1 line-clamp-1 block text-xs text-muted-foreground">
-                        {ontology.description}
-                      </span>
-                    ) : null}
-                    <span className="mt-1 block text-xs text-muted-foreground">
-                      更新于 {formatUpdatedAt(ontology.updated_at)}
-                    </span>
-                  </Link>
+              <ResourceCard
+                key={ontology.id}
+                href={`/ontologies/${ontology.id}`}
+                title={ontology.display_name}
+                leading={(ontology.display_name[0] ?? "?").toUpperCase()}
+                meta={[
+                  { icon: Hash, text: ontology.name },
+                  {
+                    icon: AlignLeft,
+                    text: ontology.description ?? "无描述",
+                  },
+                  {
+                    icon: Clock,
+                    text: `更新于 ${formatUpdatedAt(ontology.updated_at)}`,
+                  },
+                ]}
+                action={
                   <Button
                     variant="ghost"
                     size="icon-sm"
                     aria-label={`删除 ${ontology.display_name}`}
                     onClick={() => onRequestDelete(ontology)}
-                    className="mr-3 text-muted-foreground hover:text-destructive"
+                    className="text-muted-foreground hover:text-destructive"
                   >
                     <Trash2Icon />
                   </Button>
-                </div>
-              </li>
+                }
+              />
             ))}
-          </ul>
-          <OntologyListPagination
+          </div>
+          <Pagination
             page={state.page}
-            total={state.result.pagination.total}
+            totalPages={Math.max(
+              1,
+              Math.ceil(state.result.pagination.total / ONTOLOGY_LIST_PER_PAGE)
+            )}
             onPageChange={onPageChange}
+            label="分页"
+            summary={`共 ${state.result.pagination.total} 项 · `}
           />
         </>
       )}
-    </div>
-  )
-}
-
-function OntologyListPagination({
-  page,
-  total,
-  onPageChange,
-}: {
-  page: number
-  total: number
-  onPageChange(page: number): void
-}) {
-  const totalPages = Math.max(1, Math.ceil(total / ONTOLOGY_LIST_PER_PAGE))
-  return (
-    <nav
-      aria-label="分页"
-      className="flex items-center justify-between gap-4 text-xs text-muted-foreground"
-    >
-      <span>
-        共 {total} 项 · 第 {page} / {totalPages} 页
-      </span>
-      <span className="flex gap-2">
-        <Button
-          variant="outline"
-          disabled={page <= 1}
-          onClick={() => onPageChange(page - 1)}
-        >
-          上一页
-        </Button>
-        <Button
-          variant="outline"
-          disabled={page >= totalPages}
-          onClick={() => onPageChange(page + 1)}
-        >
-          下一页
-        </Button>
-      </span>
-    </nav>
+    </>
   )
 }

@@ -4,6 +4,7 @@ import { useState, type CSSProperties } from "react"
 import { Check, Plus, Trash2Icon, XIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Select,
   SelectContent,
@@ -290,16 +291,18 @@ export function ObjectTypePanel({
           </table>
         </div>
         <div className="border-t border-border">
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             disabled={!canAddProperty}
             title={propertyLimitMessage ?? undefined}
             onClick={addProperty}
-            className="flex w-full items-center gap-1.5 px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            className="w-full justify-start gap-1.5 px-4 text-muted-foreground hover:text-foreground"
           >
             <Plus aria-hidden className="size-3.5" />
             添加属性
-          </button>
+          </Button>
           {!canAddProperty && propertyLimitMessage !== null && (
             <p className="px-4 pb-2 text-[0.6875rem] text-muted-foreground">
               {propertyLimitMessage}
@@ -487,21 +490,18 @@ function PropertyRow({
         </td>
         <td className={cn(cellBorder, "px-1 py-0.5 text-center")}>
           {editing ? (
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={`属性 ${property.name} 必填`}
-              className="size-3.5 accent-primary"
+              className="size-3.5"
               checked={property.required}
-              onChange={(event) =>
-                onUpdate({ ...property, required: event.target.checked })
+              onCheckedChange={(checked) =>
+                onUpdate({ ...property, required: checked === true })
               }
             />
           ) : property.required ? (
             <Check aria-label="必填" className="inline size-3.5 text-primary" />
           ) : (
-            <span aria-hidden className="text-muted-foreground/60">
-              —
-            </span>
+            <span className="text-xs text-muted-foreground/60">否</span>
           )}
         </td>
         <td className={cn(cellBorder, "px-1 py-0.5")}>

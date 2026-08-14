@@ -9,7 +9,7 @@
 ## Tokens
 
 - 唯一来源 `app/globals.css`（shadcn neutral 基色 + cssVariables），`:root` / `.dark` 双份，在 `@theme inline` 登记为 Tailwind 色。组件只消费语义 token（`bg-card`、`text-muted-foreground`、`border-border`、`bg-popover` 等），禁止写死色值/hex。
-- Light 固定语义：background `#F7F4EE`、card/popover `#FAF8F3`、foreground `#2E2D2A`、primary `#383735`、muted `#F0ECE3`、border `#E7E2DA`、scarce accent/success `#9EB6A6`、focus ring `#7378D8`、destructive `#B3462F`。组件仍只消费 token，不写 hex。
+- Light 固定语义：background `#F7F4EE`、card/popover `#FAF8F3`、foreground `#2E2D2A`、primary `#383735`、muted `#F0ECE3`、border `#E7E2DA`、scarce accent/success `#9EB6A6`、focus ring 深苔绿 `oklch(0.52 0.07 155)`（与 dark 绿 ring 同族）、destructive `#B3462F`。组件仍只消费 token，不写 hex。
 - Dark 的 `--primary(-foreground)` 保留 Stratum 绿（`oklch(0.87 0.22 150)`）；dark 选中与焦点继续使用 primary。两个主题共享语义，不共享物理色值。
 - `--destructive` = 错误语义：发送失败、生成中断、连接错误、会话 404。
 - `--muted(-foreground)` = 次级文字与纯悬停反馈；`--accent(-foreground)` = 分段控件选中底（model-selector 的 Thinking 行）。
@@ -19,14 +19,17 @@
 
 ## Typography
 
-- Geist（`font-sans`）：界面正文与控件；Geist Mono（`font-mono`）：html 默认基底、数据感场景；Roboto Slab（`--font-heading` → `font-heading`）：展示性标题（如对话页 welcome）。均由 `app/layout.tsx` 经 next/font 加载。
+- Geist（`font-sans`）：界面正文与控件；Geist Mono（`font-mono`）：html 默认基底、数据感场景；Roboto Slab（`--font-heading` → `font-heading`）：展示性标题（如对话页 welcome）。均由 `app/layout.tsx` 经 next/font 加载。Studio 表面以 sans 为基底（`StudioPage` 统一挂 `font-sans`），mono 只用于数据标识与配置文本：agent 名、model id、tool 名、TOML/JSON/schema 编辑区。
 - 消息体排版：`components/stratum/styles/prose-medium.module.css`——`--font-reading`（Charter 系 + 中文宋体系衬线，系统字体零加载），对话用 `.proseMediumChat` 档（15→17px，行高收紧）。只消费外层 token、随主题切换；module 内规则保持无 `@layer`，压过 streamdown 注入元素的 utility class。
 - 组件级 CSS 一律 CSS Module 随组件走（共享的放 `components/stratum/styles/`），不进 `globals.css`（globals 只放 token 与第三方样式引入）。
 
 ## Layout & Chrome
 
-- 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx`，挂对话 / 白板 / Studio 三个真实入口。Light 为实色暖表面，dark 可保留限定玻璃；不得修改受保护的 `components/react-bits/*` 实现。
-- Studio `/studio` 是 Agent-first 平面卡片网格；右上 44px 设置按钮通往 Provider/Model 二级设置。编辑使用全页结构化表单，raw config 只是次级视图；不得新增 Agents 页签、资源配置首屏区或监控占位。
+- 唯一固定外壳是顶部 SiteNav：`components/chrome/site-chrome.tsx` + react-bits `SiteNav`（数据驱动），入口为对话 / 仪表盘（`/studio`）/ 本体 / Excalidraw，右端 CTA 为设置（`/studio/settings/providers`）。不得修改受保护的 `components/react-bits/*` 实现。
+- 页面转场：`components/chrome/page-transition.tsx`，`PAGE_ORDER` 按导航顺序登记全部一级入口（对话 → 仪表盘 → 本体 → Excalidraw），子路由按首段归并；新增内部页面必须登记，否则只有入场没有出场。时长/缓动走 `lib/motion.ts` 统一尺度。
+- 列表/表单页共享外壳与原语在 `components/stratum/studio/primitives.tsx`（跨表面复用，本体列表同款）：`PageShell`（max-w-6xl + 顶部避让 + font-sans 基底）、`PageHeader`、`ResourceCard`（squircle 标识 + 名称 + 真实状态 chip + 虚线分隔 mono meta 行，可选 action 槽）、`StatusChip`、`LoadingState`（整页/整区加载一律转圈；骨架只用于卡片框架已在、局部内容在加载的场景）、`ErrorState` / `NotFoundState`（平面虚线面板，附重试/新建出路）、`Pagination`。仪表盘（`/studio`）与本体列表（`/ontologies`）都是 ResourceCard 双列网格；沉浸页（对话、白板、本体画布编辑器）豁免。
+- Studio 设置区用左侧垂直导航（`SettingsShell`，移动端横排）切换 Provider / Model；编辑使用全页平面表单——`FormSection`（ui/field 的 fieldset/legend，无卡片容器）+ `Field` + `StudioInput/StudioTextarea/StudioSelect`，raw config 只是次级视图；不得新增 Agents 页签、资源配置首屏区或监控占位。Agent 工具从 `GET /v1/tools` 目录多选（`tools-select.tsx`），不做自由文本输入。Agent 编辑器页签为 结构化 / System prompt / Raw TOML；System prompt 页签是撰写纸面而非表单字段：编辑/预览共用居中纸张（max-w-46rem、bg-card、无边框、focus-within 软 ring），编辑态用 `--font-reading` 阅读字体 + `field-sizing-content` 自动增高（min-h-50vh），与预览的 streamdown + `.proseMedium`（对话同款排版）同字同宽，切换即所见即所得。编辑器 catch 链统一走 `features/studio-management/form-state.ts` 的 `dispatchApiError`。
+- 页面数据缓存：`lib/page-cache.ts`（SWR 语义，client-only）——列表与编辑器重访先渲染缓存、后台刷新替换，骨架只在冷启动出现；写操作后按前缀失效（删除类操作全清）。
 - 沉浸模式（`/excalidraw`）：SiteNavChrome 按路由把导航收起、只留画布——进入时 peek 1.6s 再滑出；顶边 8px 感应条（悬停 150ms 意图延迟）或居中阶梯两道杠手柄（w-8/5 漏斗形，点击 / 键盘聚焦，悬停微亮，Tab 第一站）唤出，离开 200ms 或 Esc 收回；GSAP 对 fixed nav 做 y/autoAlpha，展开完成 clearProps transform（避免困住内部 fixed 后代）；reduced-motion 全程瞬时。白板页因此不做顶部避让（`h-svh` 满铺），对话页保持常开导航 + `pt-24 sm:pt-28`。
 - 页面自管避让：对话页（`app/(site)/conversation/page.tsx`）整屏 `h-svh` + 顶部留白（`pt-24 sm:pt-28`）；消息列 `max-w-[44rem]` 居中；composer sticky 在消息列底部。空会话是 Gemini 式居中开场：composer 脱离文档流绝对居中（`absolute inset-0` + flex 居中，位置与上方欢迎语/未来内容解耦，欢迎语独立锚定在中线上方），首发消息与回空态都做 GSAP FLIP（双向，composer 在中心 ⇄ 底部间滑动）。
 - 会话列表 `components/stratum/conversation/thread-list-rail.tsx`：页面内 absolute 悬浮卡片，收起为图标列（w-11）、展开 w-64，选中态 `bg-primary/15 text-primary`，Esc 收回。
