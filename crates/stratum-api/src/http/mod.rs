@@ -3,6 +3,7 @@
 
 mod agents;
 mod events;
+mod ontology;
 mod turns;
 
 use std::sync::Arc;
@@ -48,6 +49,12 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         turns::post_cancel,
         turns::post_approval,
         events::get_events,
+        ontology::list_ontologies,
+        ontology::create_ontology,
+        ontology::get_ontology,
+        ontology::replace_ontology,
+        ontology::delete_ontology,
+        ontology::get_neighborhood,
         liveness,
         readiness,
     ),
@@ -77,6 +84,27 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         ReadinessResponse,
         ErrorResponse,
         crate::error::ErrorBody,
+        crate::error::OntologyValidationErrorResponse,
+        crate::error::OntologyViolationCode,
+        crate::error::ViolationResponse,
+        ontology::OntologyIdDto,
+        ontology::ObjectTypeIdDto,
+        ontology::PropertyIdDto,
+        ontology::LinkTypeIdDto,
+        ontology::ValueTypeDto,
+        ontology::CardinalityDto,
+        ontology::CreateOntologyRequest,
+        ontology::OntologyDto,
+        ontology::ObjectTypeDto,
+        ontology::PropertyDto,
+        ontology::LinkTypeDto,
+        ontology::CanvasDto,
+        ontology::CanvasPositionDto,
+        ontology::OntologySummaryDto,
+        ontology::PaginationDto,
+        ontology::OntologyListResponse,
+        ontology::NeighborhoodDto,
+        ontology::ListSortDto,
         stratum_core::ModelConfig,
         stratum_core::TokenUsage,
         stratum_core::ChatMessage,
@@ -137,6 +165,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/agent-runtimes/{agent_runtime_id}/events",
             get(events::get_events),
         )
+        .merge(ontology::routes())
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .with_state(state)
@@ -160,6 +189,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                         agent_id = field::Empty,
                         session_id = field::Empty,
                         turn_id = field::Empty,
+                        ontology_id = field::Empty,
+                        object_type_id = field::Empty,
+                        ontology_depth = field::Empty,
+                        operation = field::Empty,
+                        outcome = field::Empty,
                         status = field::Empty,
                         latency = field::Empty,
                     )
@@ -175,7 +209,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         router.layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([http::Method::GET, http::Method::POST])
+                .allow_methods([
+                    http::Method::GET,
+                    http::Method::POST,
+                    http::Method::PUT,
+                    http::Method::DELETE,
+                ])
                 // Browser clients send `Idempotency-Key` on create and
                 // `Last-Event-ID` on SSE reconnect; both must survive the
                 // preflight allowlist.
@@ -183,7 +222,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                     http::header::CONTENT_TYPE,
                     http::HeaderName::from_static("last-event-id"),
                     http::HeaderName::from_static("idempotency-key"),
-                ]),
+                    http::header::IF_MATCH,
+                ])
+                .expose_headers([http::header::ETAG, http::header::LOCATION]),
         )
     }
 }
@@ -236,13 +277,13 @@ async fn liveness() -> Json<LivenessResponse> {
     Json(LivenessResponse { status: "ok" })
 }
 
-/// Readiness: Postgres is the core dependency; NATS only degrades realtime.
+/// Readiness: execution and Ontology Postgres must answer; NATS only degrades realtime.
 #[utoipa::path(
     get,
     path = "/health/ready",
     responses(
-        (status = 200, description = "postgres serves; realtime capability is reported", body = ReadinessResponse),
-        (status = 503, description = "postgres is unavailable", body = ReadinessResponse),
+        (status = 200, description = "execution and Ontology Postgres serve; realtime capability is reported", body = ReadinessResponse),
+        (status = 503, description = "a required Postgres dependency is unavailable", body = ReadinessResponse),
     )
 )]
 async fn readiness(State(state): State<Arc<AppState>>) -> Response {
@@ -251,8 +292,12 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
     } else {
         "degraded"
     };
-    match state.pg().ping().await {
-        Ok(()) => (
+    let probes = tokio::time::timeout(state.readiness_timeout(), async {
+        tokio::join!(state.pg().ping(), state.ontology().is_ready())
+    })
+    .await;
+    match probes {
+        Ok((Ok(()), true)) => (
             http::StatusCode::OK,
             Json(ReadinessResponse {
                 status: "ok",
@@ -260,8 +305,23 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             }),
         )
             .into_response(),
-        Err(error) => {
-            tracing::error!(error = %error, "readiness probe failed: postgres unavailable");
+        Ok((execution, ontology_ready)) => {
+            tracing::error!(
+                execution_ready = execution.is_ok(),
+                ontology_ready,
+                "readiness probe failed"
+            );
+            (
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(ReadinessResponse {
+                    status: "unavailable",
+                    realtime,
+                }),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            tracing::error!("readiness probe timed out");
             (
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 Json(ReadinessResponse {
@@ -293,7 +353,7 @@ mod tests {
     use super::{ApiDoc, reject_during_shutdown};
 
     #[test]
-    fn openapi_contains_exactly_the_twelve_public_endpoints_and_decimal_sequences() {
+    fn openapi_contains_all_public_endpoints_and_decimal_sequences() {
         let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
         let actual = document["paths"]
             .as_object()
@@ -314,6 +374,9 @@ mod tests {
             "/v1/agent-runtimes/{agent_runtime_id}/resume",
             "/v1/agent-templates",
             "/v1/models",
+            "/v1/ontologies",
+            "/v1/ontologies/{ontology_id}",
+            "/v1/ontologies/{ontology_id}/object-types/{object_type_id}/neighborhood",
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

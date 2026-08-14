@@ -15,6 +15,7 @@
 - **核心层**：`stratum-core`（+ `stratum-macros`）——领域类型、ID newtype、事件、错误、trait 定义；不得依赖任何其他 stratum crate。
 - **能力层**：`stratum-filesystem`、`stratum-infra`、`stratum-llm`、`stratum-tools`、`stratum-config`——单一能力，默认只依赖核心层；只有当一个能力明确通过另一个能力的公开边界完成自身职责时才允许窄向依赖。当前唯一批准的同层依赖是 `stratum-tools -> stratum-filesystem`，用于注入受控虚拟文件能力；不得反向依赖或形成环。
 - **存储后端层**：`stratum-postgres`——具体执行存储边界，暴露具体的 command/query 接口、类型与 `thiserror` 错误；只允许被装配层 `stratum-api` 调用，组合层及以下不得依赖。
+- **独立领域模块**：`stratum-ontology`——library-only 的 Ontology 元数据模块，独占其领域规则、五张 PostgreSQL 表、迁移和查询事务；不得依赖装配层或 `stratum-postgres`，当前只由 `stratum-api` 进程内调用。
 - **组合层**：`stratum-agent`——编排能力层，不得被能力层依赖；kernel/`stratum-agent` 不得依赖 Postgres、HTTP、Session、hosting、scheduler 或分页。
 - **装配层**：`stratum-api`（HTTP/进程入口）——最上层、唯一装配 crate；`stratum-api` 是唯一含 `main.rs` 的 crate，`main.rs` 必须保持薄，可复用逻辑放 `lib.rs`。
 
@@ -78,6 +79,7 @@
 ## 5. 存储与实时事件（强制）
 
 - 执行持久化的唯一真相是 Postgres durable ledger，经 `stratum-postgres` 的具体 command/query 接口访问；只有装配层 `stratum-api` 允许调用这些接口，kernel 持久化仍经 `DurableEventSink` 合同、telemetry 仍经 `TelemetryEventSink` 合同。业务 crate 禁止直连 `sqlx`。
+- `stratum-ontology` 是上一条的唯一窄化例外：它只可直接管理 Ontology bounded context 自有的五张 PostgreSQL 表、迁移和事务，不得成为其他领域的通用存储入口；其 SQLx migration history 必须与执行存储隔离到独立 database。
 - 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；作为基础设施后端的 `stratum-postgres` / `stratum-infra` 可以直接使用相应存储驱动，并自行保证崩溃一致性。禁止 filesystem 执行持久化（Agent 状态、历史、durable 事件、checkpoint 一律不得落盘）；`stratum-filesystem` 只保留只读 template catalog 访问与 Agent 可见的业务文件操作。
 - Agent realtime 事件只经 `stratum-infra` 的窄 concrete Agent-tail transport 边界；业务代码禁止直连 `async-nats`。
 - 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
@@ -201,7 +203,7 @@
 - [ ] `println!` / `eprintln!` 出现在非 CLI 生产代码中（测试代码豁免）
 - [ ] 密钥、token、用户凭据进入日志、span 字段或错误消息
 - [ ] 领域 ID 以裸字符串（stringly typed）穿越 crate 或 HTTP 边界
-- [ ] 业务 crate 直连 `std::fs` / `tokio::fs`、`sqlx` 或 `async-nats`（作为基础设施后端的 `stratum-postgres` / `stratum-infra` 的存储 IO 除外，见 §5）
+- [ ] 业务 crate 直连 `std::fs` / `tokio::fs`、`sqlx` 或 `async-nats`（作为基础设施后端的 `stratum-postgres` / `stratum-infra`，以及 §5 明确限定的 `stratum-ontology` 持久化除外）
 - [ ] 在宿主机直接执行 agent 生成的命令
 - [ ] std `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点（为跨 await 串行化而持有 `tokio::sync::Mutex` guard 是允许的，见 §11）
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）

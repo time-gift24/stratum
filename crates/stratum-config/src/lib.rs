@@ -27,6 +27,9 @@ pub struct Config {
     /// Postgres execution-storage configuration, required by the API host.
     #[serde(default)]
     pub postgres: Option<PostgresConfig>,
+    /// Ontology PostgreSQL configuration, required by the API host.
+    #[serde(default)]
+    pub ontology: Option<OntologyConfig>,
 }
 
 /// Agent template catalog configuration.
@@ -59,6 +62,9 @@ pub struct ApiConfig {
     /// handles releases its map entry and task.
     #[serde(default = "default_dispatcher_idle_timeout_seconds")]
     pub dispatcher_idle_timeout_seconds: u64,
+    /// Maximum time allowed for the complete readiness dependency probe.
+    #[serde(default = "default_readiness_timeout_ms")]
+    pub readiness_timeout_ms: u64,
 }
 
 impl Default for ApiConfig {
@@ -69,6 +75,7 @@ impl Default for ApiConfig {
             shutdown_drain_timeout_seconds: default_shutdown_drain_timeout_seconds(),
             sse_keep_alive_seconds: default_sse_keep_alive_seconds(),
             dispatcher_idle_timeout_seconds: default_dispatcher_idle_timeout_seconds(),
+            readiness_timeout_ms: default_readiness_timeout_ms(),
         }
     }
 }
@@ -87,6 +94,10 @@ const fn default_sse_keep_alive_seconds() -> u64 {
 
 const fn default_dispatcher_idle_timeout_seconds() -> u64 {
     60
+}
+
+const fn default_readiness_timeout_ms() -> u64 {
+    1000
 }
 
 /// NATS short-tail configuration.
@@ -124,6 +135,24 @@ const fn default_nats_connect_timeout_seconds() -> u64 {
 pub struct PostgresConfig {
     /// Postgres connection URL.
     pub url: String,
+}
+
+/// PostgreSQL settings for canonical Ontology metadata.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OntologyConfig {
+    /// PostgreSQL connection URL. This value is never emitted in logs or errors.
+    pub database_url: String,
+}
+
+impl fmt::Debug for OntologyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OntologyConfig")
+            .field("database_url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Stable name used to identify an agent definition.
@@ -315,6 +344,29 @@ impl Config {
         Ok(config)
     }
 
+    /// Replaces the configured DeepSeek credential with a runtime secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::MissingSection`] when DeepSeek is not configured,
+    /// or [`ConfigError::EmptyApiKey`] when the supplied secret is blank.
+    pub fn override_deepseek_api_key(&mut self, api_key: SecretString) -> Result<(), ConfigError> {
+        if api_key.expose_secret().trim().is_empty() {
+            return Err(ConfigError::EmptyApiKey {
+                provider: "deepseek",
+            });
+        }
+        let provider = self
+            .llm
+            .deepseek
+            .as_mut()
+            .ok_or(ConfigError::MissingSection {
+                section: "llm.deepseek",
+            })?;
+        provider.api_key = api_key;
+        Ok(())
+    }
+
     /// Resolves a strict TOML agent template against this configuration.
     ///
     /// # Errors
@@ -381,6 +433,17 @@ impl Config {
         })
     }
 
+    /// Returns the configured Ontology persistence section.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::MissingSection`] when no Ontology configuration was provided.
+    pub fn require_ontology(&self) -> Result<&OntologyConfig, ConfigError> {
+        self.ontology.as_ref().ok_or(ConfigError::MissingSection {
+            section: "ontology",
+        })
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.agent.templates_root.as_os_str().is_empty() {
             return Err(ConfigError::InvalidTemplatesRoot);
@@ -391,6 +454,9 @@ impl Config {
             && postgres.url.trim().is_empty()
         {
             return Err(ConfigError::InvalidPostgresConfig { field: "url" });
+        }
+        if let Some(ontology) = &self.ontology {
+            validate_ontology_database_url(&ontology.database_url)?;
         }
         if let Some(nats) = &self.nats {
             validate_nats(nats)?;
@@ -411,6 +477,7 @@ impl Config {
                     "dispatcher_idle_timeout_seconds",
                     api.dispatcher_idle_timeout_seconds,
                 ),
+                ("readiness_timeout_ms", api.readiness_timeout_ms),
             ] {
                 if value == 0 {
                     return Err(ConfigError::InvalidApiConfig { field });
@@ -444,6 +511,89 @@ impl Config {
             model: model.clone(),
         })
     }
+}
+
+fn validate_ontology_database_url(value: &str) -> Result<(), ConfigError> {
+    let uri = value.parse::<http::Uri>();
+    let valid = value == value.trim()
+        && percent_decoding_is_utf8(value)
+        && uri.is_ok_and(|uri| {
+            matches!(uri.scheme_str(), Some("postgres" | "postgresql"))
+                && uri.authority().is_some_and(|authority| {
+                    !authority.host().is_empty() && authority_has_valid_port(authority)
+                })
+                && uri.path().len() > 1
+                && uri.path().starts_with('/')
+                // Query parameters are intentionally unsupported: unknown SQLx
+                // options may be logged together with credential-like values.
+                && uri.query().is_none()
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidOntologyConfig {
+            field: "database_url",
+        })
+    }
+}
+
+fn percent_decoding_is_utf8(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(digits) = bytes.get(index + 1..index + 3) else {
+                return false;
+            };
+            let Some(high) = hex_value(digits[0]) else {
+                return false;
+            };
+            let Some(low) = hex_value(digits[1]) else {
+                return false;
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    std::str::from_utf8(&decoded).is_ok()
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn authority_has_valid_port(authority: &http::uri::Authority) -> bool {
+    let host_and_port = authority
+        .as_str()
+        .rsplit_once('@')
+        .map_or(authority.as_str(), |(_, host_and_port)| host_and_port);
+    let port = if host_and_port.starts_with('[') {
+        let Some((_, suffix)) = host_and_port.split_once(']') else {
+            return false;
+        };
+        if suffix.is_empty() {
+            return true;
+        }
+        let Some(port) = suffix.strip_prefix(':') else {
+            return false;
+        };
+        port
+    } else {
+        let Some((_, port)) = host_and_port.rsplit_once(':') else {
+            return true;
+        };
+        port
+    };
+    !port.is_empty() && port.parse::<u16>().is_ok()
 }
 
 fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
@@ -543,6 +693,8 @@ fn validate_tools(tools: &[ToolName]) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
+
+    use secrecy::ExposeSecret;
 
     use super::{AgentName, Config, ConfigError};
 
@@ -793,6 +945,44 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
+    fn runtime_deepseek_secret_replaces_the_file_placeholder() {
+        let mut config = Config::parse(VALID_CONFIG).expect("config parses");
+
+        config
+            .override_deepseek_api_key("runtime-secret".into())
+            .expect("runtime secret overrides the placeholder");
+
+        let provider = config.llm.deepseek.as_ref().expect("provider exists");
+        assert_eq!(provider.api_key.expose_secret(), "runtime-secret");
+        assert!(!format!("{config:?}").contains("runtime-secret"));
+    }
+
+    #[test]
+    fn runtime_deepseek_secret_rejects_blank_and_missing_provider() {
+        let mut config = Config::parse(VALID_CONFIG).expect("config parses");
+        assert!(matches!(
+            config.override_deepseek_api_key("  ".into()),
+            Err(ConfigError::EmptyApiKey {
+                provider: "deepseek"
+            })
+        ));
+
+        let without_deepseek = VALID_CONFIG
+            .replace("default = \"deepseek:deepseek-v4-flash\"", "default = \"openai:gpt-4.1\"")
+            .replace(
+                "[llm.deepseek]\napi_key = \"secret-key\"\nmodels = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
+                "[llm.openai]\napi_key = \"openai-key\"\nmodels = [\"gpt-4.1\"]",
+            );
+        let mut config = Config::parse(&without_deepseek).expect("openai-only config parses");
+        assert!(matches!(
+            config.override_deepseek_api_key("runtime-secret".into()),
+            Err(ConfigError::MissingSection {
+                section: "llm.deepseek"
+            })
+        ));
+    }
+
+    #[test]
     fn parses_valid_agent_name() {
         let name: AgentName = "coding-agent-2".parse().expect("name parses");
         assert_eq!(name.as_str(), "coding-agent-2");
@@ -990,6 +1180,56 @@ prompt = "Use tools."
                 section: "postgres"
             })
         ));
+        assert!(matches!(
+            config.require_ontology(),
+            Err(ConfigError::MissingSection {
+                section: "ontology"
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_and_redacts_valid_ontology_database_url() {
+        let database_url = "postgresql://ontology:secret-password@localhost/ontology";
+        let input = format!("{VALID_CONFIG}\n[ontology]\ndatabase_url = \"{database_url}\"\n");
+
+        let config = Config::parse(&input).expect("configured ontology parses");
+
+        assert_eq!(
+            config
+                .require_ontology()
+                .expect("ontology exists")
+                .database_url,
+            database_url
+        );
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(database_url));
+        assert!(!debug.contains("secret-password"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn rejects_invalid_ontology_database_urls() {
+        for database_url in [
+            "   ",
+            "http://ontology:password@localhost/ontology",
+            "postgres:///ontology",
+            "postgres://localhost/",
+            "postgres://localhost/%zz",
+            "postgres://localhost/%FF",
+            "postgres://localhost:not-a-port/ontology",
+            "postgres://localhost:70000/ontology",
+            "postgres://localhost/ontology?token=supersecret",
+            "not a URL",
+        ] {
+            let input = format!("{VALID_CONFIG}\n[ontology]\ndatabase_url = {database_url:?}\n");
+            assert!(matches!(
+                Config::parse(&input),
+                Err(ConfigError::InvalidOntologyConfig {
+                    field: "database_url"
+                })
+            ));
+        }
     }
 
     #[test]

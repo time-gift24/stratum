@@ -24,6 +24,7 @@ use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, LlmError,
     LlmProvider, LlmProviderManager,
 };
+use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
 use tower::ServiceExt;
 
@@ -34,6 +35,13 @@ use tower::ServiceExt;
 pub fn pg_url() -> String {
     std::env::var("STRATUM_API_TEST_PG_URL")
         .unwrap_or_else(|_| "postgres://stratum:stratum@127.0.0.1:45433/stratum_test".to_owned())
+}
+
+/// Ontology database of the shared Postgres test container.
+pub fn ontology_pg_url() -> String {
+    std::env::var("STRATUM_API_TEST_ONTOLOGY_PG_URL").unwrap_or_else(|_| {
+        "postgres://stratum:stratum@127.0.0.1:45433/stratum_ontology_test".to_owned()
+    })
 }
 
 /// NATS of the test compose stack.
@@ -259,8 +267,11 @@ impl Fixture {
         let pg = PostgresBackend::connect(&pg_url())
             .await
             .expect("postgres connects");
+        let ontology = OntologyStore::connect(&ontology_pg_url())
+            .await
+            .expect("ontology store connects");
         let state = Arc::new(
-            AppState::new(pg, tail, providers, config)
+            AppState::new(pg, tail, providers, ontology, config)
                 .await
                 .expect("state assembles"),
         );
@@ -346,8 +357,11 @@ pub async fn restarted(fixture: &Fixture, script: Vec<Script>) -> Fixture {
     let pg = PostgresBackend::connect(&pg_url())
         .await
         .expect("postgres connects");
+    let ontology = OntologyStore::connect(&ontology_pg_url())
+        .await
+        .expect("ontology store connects");
     let state = Arc::new(
-        AppState::new(pg, tail, providers, config)
+        AppState::new(pg, tail, providers, ontology, config)
             .await
             .expect("state assembles"),
     );
@@ -369,6 +383,8 @@ pub async fn default_tail_config() -> Option<NatsAgentRuntimeTail> {
 
 fn test_config(root: &Path) -> Config {
     let nats_url = nats_url();
+    let pg_url = pg_url();
+    let ontology_pg_url = ontology_pg_url();
     Config::parse(&format!(
         r#"
 [agent]
@@ -394,7 +410,10 @@ max_bytes = 67108864
 max_messages = 100000
 
 [postgres]
-url = "postgres://unused:unused@127.0.0.1:1/unused"
+url = {pg_url:?}
+
+[ontology]
+database_url = {ontology_pg_url:?}
 "#,
         root = root.to_string_lossy(),
     ))

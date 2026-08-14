@@ -7,6 +7,7 @@ use stratum_config::ConfigError;
 use stratum_core::{ModelId, ModelIdParseError};
 use stratum_filesystem::FilesystemError;
 use stratum_llm::LlmError;
+use stratum_ontology::OntologyStoreError;
 use stratum_postgres::PostgresError;
 use thiserror::Error;
 
@@ -23,6 +24,9 @@ pub enum HostError {
     /// Postgres (the core readiness dependency) could not connect or migrate.
     #[error("postgres execution store failed to initialize")]
     Postgres(#[from] PostgresError),
+    /// Ontology PostgreSQL could not connect or migrate.
+    #[error("ontology store failed to initialize")]
+    Ontology(#[from] OntologyStoreError),
     /// The template catalog root is missing, not a directory, or unreadable.
     #[error("agent template catalog root is not a readable directory")]
     TemplatesRoot(#[from] FilesystemError),
@@ -46,6 +50,9 @@ pub enum HostError {
         /// Configured model identity.
         model: ModelId,
     },
+    /// `DEEPSEEK_API_KEY` was present but could not be represented as UTF-8.
+    #[error("deepseek API key environment variable is not valid UTF-8")]
+    InvalidDeepSeekApiKeyEnvironment,
     /// The tracing subscriber or OTLP exporter could not be initialized.
     #[error("telemetry initialization failed")]
     Telemetry(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),

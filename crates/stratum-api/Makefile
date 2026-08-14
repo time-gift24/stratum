@@ -15,8 +15,9 @@ test-integration:
 	pg_port=$${pg_binding##*:}; \
 	nats_port=$${nats_binding##*:}; \
 	STRATUM_API_TEST_PG_URL="postgres://stratum:stratum@127.0.0.1:$${pg_port}/stratum_test" \
+	STRATUM_API_TEST_ONTOLOGY_PG_URL="postgres://stratum:stratum@127.0.0.1:$${pg_port}/stratum_ontology_test" \
 	STRATUM_API_TEST_NATS_URL="nats://127.0.0.1:$${nats_port}" \
-	cargo test -p stratum-api --test api -- --ignored --test-threads=1
+	cargo test -p stratum-api --tests -- --ignored --test-threads=1
 
 test-up:
 	$(COMPOSE) -f $(TEST_COMPOSE_FILE) up -d

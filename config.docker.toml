@@ -5,8 +5,8 @@ templates_root = "/etc/stratum/templates"
 default = "deepseek:deepseek-v4-flash"
 
 [llm.deepseek]
-# Replace this placeholder before sending real agent requests.
-api_key = "replace-with-deepseek-api-key"
+# Overridden at process startup from DEEPSEEK_API_KEY.
+api_key = "injected-at-runtime"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 # Optional endpoint override (e.g. an LLM gateway); when omitted the
 # provider's well-known public endpoint is used. Blank is rejected.
@@ -14,12 +14,16 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 [api]
 bind = "0.0.0.0:8080"
+readiness_timeout_ms = 1000
 allowed_origins = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5175",
   "http://127.0.0.1:5175",
 ]
+
+[ontology]
+database_url = "postgres://stratum:stratum@postgres:5432/stratum_ontology"
 
 [nats]
 url = "nats://nats:4222"

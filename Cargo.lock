@@ -2824,6 +2824,7 @@ dependencies = [
  "stratum-filesystem",
  "stratum-infra",
  "stratum-llm",
+ "stratum-ontology",
  "stratum-postgres",
  "stratum-tools",
  "thiserror",
@@ -2913,6 +2914,20 @@ dependencies = [
 [[package]]
 name = "stratum-macros"
 version = "0.1.0"
+
+[[package]]
+name = "stratum-ontology"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "stratum-postgres"

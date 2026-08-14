@@ -8,3 +8,6 @@
 - NATS 连接超时与 AgentRuntime 短尾流的保留时长/字节数/消息数上限继续放在 `[nats]` 能力配置中，解析边界完成字段校验（非空字符串、正数超时/上限、`replicas` 为 `1..=5`）；不编码固定历史保留保证。配置类型到基础设施运行时类型的映射由 `stratum-api` 装配时完成，本 crate 不依赖 `stratum-infra`。
 - `ProviderConfig` 支持可选 `base_url` 覆盖（缺省时由装配层使用提供方官方公开端点常量）；空串在解析边界拒绝。连接建立、非流式请求、首个响应与流式数据块空闲超时均为正秒数并真实传入提供方。`api_key` 的 `Debug` 输出必须为 `[redacted]`，新增凭据字段同样不得进入 `Debug`/`Display`。
 - `ProviderConfig.api_key` 以 `secrecy::SecretString` 承载（§6）；装配层通过机密值包装器的所有权转换交给 `ApiKey`，不得先 `expose_secret()` 生成普通 `String` 副本。
+- `DEEPSEEK_API_KEY` 只在 `stratum-api` 启动边界覆盖 `[llm.deepseek].api_key`；覆盖值直接 move 进 `SecretString`，不得写回文件、打印或进入错误内容。容器部署必须用 Compose required expansion 在缺失或空值时启动失败。
+- `[api].readiness_timeout_ms` 是正整数；执行与 Ontology readiness 共用这一完整探针时限，不在 handler 中硬编码环境超时。
+- `[ontology].database_url` 在解析边界验证为无 query 参数的 `postgres`/`postgresql` URL，`Debug` 永久脱敏。它可以与 `[postgres].url` 使用同一服务器，但必须指向独立 database，隔离两个 crate 各自的 SQLx migration history。
