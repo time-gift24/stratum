@@ -6,3 +6,6 @@ allowBuilds:
   msw: false
   # vitest 传递依赖 esbuild 的 postinstall 构建批准
   esbuild: true
+  # Mermaid is rendered at build time with the system Chrome binary; its postinstall
+  # browser download is intentionally disabled.
+  puppeteer: false

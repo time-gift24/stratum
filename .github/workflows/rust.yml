@@ -39,6 +39,8 @@ jobs:
           cache-dependency-path: stratum-web/pnpm-lock.yaml
 
       - name: Install dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
         run: pnpm install --frozen-lockfile
 
       - name: Lint
@@ -49,6 +51,9 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Check generated context site
+        run: pnpm check:context-site
 
       - name: Build
         run: pnpm build

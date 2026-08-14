@@ -2,7 +2,7 @@
 
 ## Contexts
 
-- [Agent Kernel](./CONTEXT.md) — 驱动模型与工具迭代，并通过事件流和 journal 保证耐久恢复
+- [Agent Kernel](./CONTEXT.html#context/first-principles) — 驱动模型与工具迭代，并通过事件流和 journal 保证耐久恢复；人工维护源位于 `stratum-web/context-site/content/context.ts`
 
 ## Relationships
 

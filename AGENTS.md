@@ -57,7 +57,7 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 - 一个配置项至少要有真实使用场景；不会被用户或调用方改变的值不要配置化。
 - 一个 abstraction 必须减少真实重复、隔离真实外部边界，或编码重要不变量；否则不要添加。
 - 优先复用 Rust 标准库、已有 crate 内部函数和已经引入的依赖，不为几行代码新增依赖。
-- 需要明显扩展点时，先在 TODO 或注释里记录边界，等需求出现后再实现。
+- 需要明显扩展点时，先在 `stratum-web/context-site/content/todo.ts` 或注释里记录边界，等需求出现后再实现。
 - 如果认为必须引入额外层次或设计模式，先在回复中说明原因、替代方案和成本，经过讨论后再落代码。
 
 ## 错误处理
@@ -151,7 +151,9 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 - 示例中避免 `unwrap()`，优先使用 `?`。
 - 不要提交 `docs/superpowers/` 这类 superpower 过程文档；它们只用于临时协作。
 - 最终设计和实现约定要简洁、明确地归档到相关 crate 的 `AGENTS.md` 中。
-- 内核领域词汇表在根目录 `CONTEXT.md`（第一性模型 + 术语定义）；改动 kernel 前先读，术语随 change 演进时同步更新。
+- 领域手册的唯一人工维护源是 `stratum-web/context-site/content/context.ts`；工程待办的唯一人工维护源是同目录 `todo.ts`。根目录 `CONTEXT.html` 是供人直接阅读的生成制品，禁止手改。改动 kernel 前先阅读该制品或 typed source；术语随 change 演进时同步更新，并运行 `pnpm --dir stratum-web build:context-site`。
+- grilling 或探索内容只有在用户明确确认后才能落盘：领域结论进入 `context.ts`，工程事项进入 `todo.ts`。不要恢复 `CONTEXT.md` / `TODO.md`，不要在 AGENTS 或临时过程文档中复制一套领域真相。
+- `stratum-web/context-site` 是完全静态的说明站点源码，不是产品前端 route；生成物必须保持自包含，并提交到根目录 `CONTEXT.html`。
 - 实现完成后、PR 合入前，必须提醒用户完成 crate `AGENTS.md` 归档。
 
 ## Git 工作流
