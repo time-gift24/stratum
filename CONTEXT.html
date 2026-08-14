@@ -46,12 +46,6 @@
     --port-positive: oklch(0.8 0.17 155);
     --port-negative: oklch(0.68 0.2 20);
     --port-image: oklch(0.72 0.13 240);
-    --node-aurora: linear-gradient(
-      90deg,
-      oklch(0.72 0.13 240 / 30%),
-      oklch(0.7 0.15 320 / 25%),
-      oklch(0.75 0.15 350 / 30%)
-    );
 }
 :root {
   color-scheme: dark;
@@ -5159,7 +5153,7 @@ main {
     <details><summary>验收条件</summary><ul><li>压缩后 <span translate="no">resume</span> 等价</li><li>不切断 <span translate="no">Tool</span> pair</li><li>崩溃窗口不重复已完成工作</li></ul></details>
   </article></div>
       </section>
-      <section class="deferred-boundaries"><div><span>边界账本</span><h2>不会被“顺手实现”的事项</h2></div><ul><li>scheduler：durable scheduling、lease/fencing、多实例 takeover、rolling deployment、automatic <span translate="no">resume</span>、durable cancel、<span translate="no">Agent</span>/<span translate="no">Workflow</span> Session 协调。</li><li><span translate="no">Agent</span> template 管理：catalog CRUD、版本浏览、发布/提升/回滚与既有 <span translate="no">AgentRuntime</span> upgrade。</li><li>Rust 动态库、运行中 Skill/Extension 热替换、Marketplace，以及 Command、Renderer、Shortcut 与任意 UI Plugin Registry。</li><li>并发 <span translate="no">Tool</span> 执行、动态修改共享 <span translate="no">Tool</span> Registry、模型主动安装 Skill。</li><li>W2 前的 Loop/Iteration/Subgraph、多地域 <span translate="no">Workflow</span> 迁移、无真实调用方的通用远程文件系统。</li></ul></section>
+      <section class="deferred-boundaries"><div><span>边界账本</span><h2>不会被“顺手实现”的事项</h2></div><ul><li>Ontology Metadata MVP：只实现 Ontology、Object Type、Property 与 Link Type；对象实例与 Memory 集成由独立 change 承担。</li><li>Ontology 演进：Shared Property Type、Interface / 多继承、Action Type、Object Type Group、schema history / snapshot / branch、实时协作、OT / CRDT 与离线自动合并，均等待实际需求后再设计。</li><li>Ontology 物理数据绑定：数据源、外键或 join binding 等对象数据层需求明确后再设计；认证、授权与多租户沿用平台基础统一方案，不随 Ontology Metadata MVP 提前实现。</li><li>Ontology 前端：并行前端可以消费已冻结 <span translate="no">HTTP</span> 契约，但不构成本后端 change 的交付或验收依赖。</li><li>scheduler：durable scheduling、lease/fencing、多实例 takeover、rolling deployment、automatic <span translate="no">resume</span>、durable cancel、<span translate="no">Agent</span>/<span translate="no">Workflow</span> Session 协调。</li><li><span translate="no">Agent</span> template 管理：catalog CRUD、版本浏览、发布/提升/回滚与既有 <span translate="no">AgentRuntime</span> upgrade。</li><li>Rust 动态库、运行中 Skill/Extension 热替换、Marketplace，以及 Command、Renderer、Shortcut 与任意 UI Plugin Registry。</li><li>并发 <span translate="no">Tool</span> 执行、动态修改共享 <span translate="no">Tool</span> Registry、模型主动安装 Skill。</li><li>W2 前的 Loop/Iteration/Subgraph、多地域 <span translate="no">Workflow</span> 迁移、无真实调用方的通用远程文件系统。</li></ul></section>
     </div>
   </main>
   <script>/*!
