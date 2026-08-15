@@ -17,7 +17,10 @@ pub use agent_loop_event::{
     PrepareNextTurnDecisionRecord, TransformContextDecisionRecord, TransformToolCallDecisionRecord,
     TransformToolCallModificationRecord,
 };
-pub use error::{AgentVersionTagParseError, FingerprintParseError, HookFailure, ModelIdParseError};
+pub use error::{
+    AgentNameParseError, AgentVersionTagParseError, FingerprintParseError, HookFailure,
+    ModelIdParseError,
+};
 
 uuid_identity!(SessionId, "Identity of one long-lived runtime session.");
 uuid_identity!(
@@ -91,6 +94,89 @@ string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
+
+/// Stable name for an Agent definition.
+///
+/// Names are ASCII identifiers matching `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
+
+impl AgentName {
+    /// Parses a stable Agent definition name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentNameParseError`] when `value` is outside the durable
+    /// Agent name boundary.
+    pub fn new(value: impl Into<String>) -> Result<Self, AgentNameParseError> {
+        value.into().try_into()
+    }
+
+    /// Returns the validated name as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AgentName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for AgentName {
+    type Err = AgentNameParseError;
+
+    /// Parses a stable Agent definition name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentNameParseError`] when `value` is outside the durable
+    /// Agent name boundary.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl TryFrom<String> for AgentName {
+    type Error = AgentNameParseError;
+
+    /// Validates an owned Agent definition name without normalizing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentNameParseError`] when `value` is outside the durable
+    /// Agent name boundary.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(AgentNameParseError::Empty);
+        }
+        if value.len() > 64 {
+            return Err(AgentNameParseError::TooLong);
+        }
+
+        let mut bytes = value.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(AgentNameParseError::InvalidStart);
+        }
+        if bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) {
+            Ok(Self(value))
+        } else {
+            Err(AgentNameParseError::InvalidCharacter)
+        }
+    }
+}
+
+impl From<AgentName> for String {
+    fn from(value: AgentName) -> Self {
+        value.0
+    }
+}
 
 /// Author-supplied identity tag for one immutable Agent template version.
 ///
@@ -899,6 +985,36 @@ pub enum LlmEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_name_accepts_the_documented_ascii_boundary() {
+        for value in ["A", "coding-agent-2", "coding_agent", "a--b", "coding-"] {
+            let name: AgentName = value.parse().expect("name parses");
+            assert_eq!(name.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn agent_name_rejects_invalid_starts_and_characters() {
+        assert_eq!("".parse::<AgentName>(), Err(AgentNameParseError::Empty));
+        assert_eq!(
+            "_agent".parse::<AgentName>(),
+            Err(AgentNameParseError::InvalidStart)
+        );
+        assert_eq!(
+            "agent name".parse::<AgentName>(),
+            Err(AgentNameParseError::InvalidCharacter)
+        );
+    }
+
+    #[test]
+    fn agent_name_rejects_values_longer_than_64_bytes() {
+        let value = "a".repeat(65);
+        assert_eq!(
+            value.parse::<AgentName>(),
+            Err(AgentNameParseError::TooLong)
+        );
+    }
 
     #[test]
     fn session_id_uses_uuid_v7() {

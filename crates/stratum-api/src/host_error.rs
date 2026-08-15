@@ -9,6 +9,7 @@ use stratum_filesystem::FilesystemError;
 use stratum_llm::LlmError;
 use stratum_ontology::OntologyStoreError;
 use stratum_postgres::PostgresError;
+use stratum_studio::StudioError;
 use thiserror::Error;
 
 /// Error returned while assembling or running the API host.
@@ -27,6 +28,12 @@ pub enum HostError {
     /// Ontology PostgreSQL could not connect or migrate.
     #[error("ontology store failed to initialize")]
     Ontology(#[from] OntologyStoreError),
+    /// The isolated Studio catalog could not connect, migrate, or seed.
+    #[error("studio management catalog failed to initialize")]
+    Studio(#[from] StudioError),
+    /// The read-only template source could not seed a new Studio catalog.
+    #[error("studio management catalog could not seed templates")]
+    StudioTemplateSeed(#[source] crate::ApiError),
     /// The template catalog root is missing, not a directory, or unreadable.
     #[error("agent template catalog root is not a readable directory")]
     TemplatesRoot(#[from] FilesystemError),

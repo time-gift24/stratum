@@ -10,9 +10,6 @@ pub enum ConfigError {
     /// TOML input could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[source] toml::de::Error),
-    /// An agent name did not match the required ASCII pattern.
-    #[error("invalid agent name `{value}`")]
-    InvalidAgentName { value: String },
     /// The agent templates root was empty.
     #[error("agent templates root must not be empty")]
     InvalidTemplatesRoot,
@@ -70,6 +67,9 @@ pub enum ConfigError {
     /// An Ontology persistence setting was invalid.
     #[error("invalid ontology configuration field `{field}`")]
     InvalidOntologyConfig { field: &'static str },
+    /// A Studio management setting was invalid.
+    #[error("invalid studio configuration field `{field}`")]
+    InvalidStudioConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {

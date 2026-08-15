@@ -243,6 +243,7 @@ impl Filesystem for LocalFilesystem {
         Ok(FileMetadata {
             file_type,
             len: metadata.is_file().then_some(metadata.len()),
+            modified: metadata.modified().ok(),
         })
     }
 

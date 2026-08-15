@@ -18,6 +18,18 @@ _Avoid_: Agent 实例、会话 Agent、自动递增版本
 长期运行的 Agent 对话聚合。它永久 pin 一个 AgentId，可以跨多个 Turn，并拥有自己的当前模型配置、Session/current Turn、历史、审批与运行状态。同一 AgentId 可以被多个相互隔离的 AgentRuntime 复用。
 _Avoid_: AgentVersionId、用 AgentId 充当运行实例、RunId
 
+**Studio Agent Definition**:
+Studio 数据库中可变的作者记录，为未来 AgentRuntime 选择一个不可变的 `(name, version tag)` template。修改行为必须提供新 version tag；已创建的 AgentRuntime 永远只使用 execution ledger 中 pin 住的定义。
+_Avoid_: 用 Studio 记录替代 AgentId、原地改写已发布 template
+
+**Studio catalog**:
+与 execution ledger 分离的 PostgreSQL authoring store，拥有 Provider credential、Model 与 Studio Agent Definition。首次可从 boot config 和只读 templates 导入，之后 Studio DB 是 authoring truth；credential 绝不进入 API 读取响应、事件、NATS 或日志。
+_Avoid_: 文件配置真相、execution table、credential cache
+
+**Ontology context**:
+独立的知识建模领域，未来可作为自主服务部署；AgentRuntime 只能作为其消费者，不能拥有或依赖 Ontology 的模型、状态或存储。
+_Avoid_: Agent metadata、Agent-owned ontology、runtime schema
+
 **AgentRuntime-wide event sequence**:
 每个 AgentRuntime 从 1 开始、跨 Turn 连续无空洞的 durable 事实顺序。稳定 identity 是 `(AgentRuntimeId,event_seq)`；公开 product 过滤掉内部事实后允许数值跳号。共享同一 AgentId 的不同 runtime 不共享顺序或历史。
 _Avoid_: agent-wide（未区分 definition/runtime）、per-Turn sequence、message_seq

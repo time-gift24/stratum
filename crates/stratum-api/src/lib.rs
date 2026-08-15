@@ -18,10 +18,13 @@ mod error;
 mod frames;
 mod host_error;
 mod http;
+mod management_dto;
 mod provenance;
+mod provider_catalog;
 mod registry;
 mod sink;
 mod state;
+mod studio_management;
 mod telemetry;
 mod templates;
 mod turn;
@@ -40,6 +43,7 @@ use stratum_llm::{
 };
 use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
+use stratum_studio::{ProviderKind, RuntimeProvider, StudioStore};
 
 pub use dto::{
     AgentRuntimeCreated, AgentRuntimeStatusDto, AgentRuntimeView, AgentTemplateDto,
@@ -60,6 +64,79 @@ const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 /// Well-known public DeepSeek API endpoint; same product-constant contract as
 /// [`OPENAI_BASE_URL`], overridable via `[llm.deepseek].base_url`.
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+
+/// Non-secret provider construction options retained by the API assembly
+/// layer while Studio owns credentials and model membership.
+#[derive(Clone)]
+pub(crate) struct ProviderFactory {
+    openai: ProviderTransport,
+    deepseek: ProviderTransport,
+}
+
+#[derive(Clone)]
+struct ProviderTransport {
+    base_url: String,
+    timeouts: LlmTimeouts,
+}
+
+impl ProviderFactory {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            openai: transport_for(config.llm.openai.as_ref(), OPENAI_BASE_URL),
+            deepseek: transport_for(config.llm.deepseek.as_ref(), DEEPSEEK_BASE_URL),
+        }
+    }
+
+    fn build(
+        &self,
+        provider_records: Vec<RuntimeProvider>,
+    ) -> Result<LlmProviderManager, HostError> {
+        let mut providers = LlmProviderManager::new();
+        for provider in provider_records {
+            match provider.kind {
+                ProviderKind::Openai => {
+                    let api_key = ApiKey::from(provider.api_key);
+                    for model in provider.models {
+                        let model_id = model_id("openai", &model)?;
+                        providers.register(Arc::new(OpenAICompatibleProvider::new(
+                            &self.openai.base_url,
+                            api_key.clone(),
+                            model_id,
+                            self.openai.timeouts,
+                        )))?;
+                    }
+                }
+                ProviderKind::Deepseek => {
+                    let api_key = ApiKey::from(provider.api_key);
+                    for model in provider.models {
+                        let adapter_model = deepseek_model(&model)?;
+                        providers.register(Arc::new(DeepSeekProvider::new(
+                            &self.deepseek.base_url,
+                            api_key.clone(),
+                            adapter_model,
+                            DeepSeekThinking::Disabled,
+                            self.deepseek.timeouts,
+                        )))?;
+                    }
+                }
+            }
+        }
+        Ok(providers)
+    }
+
+    pub(crate) fn validate_model(&self, kind: ProviderKind, name: &str) -> Result<(), HostError> {
+        match kind {
+            ProviderKind::Openai => {
+                model_id("openai", name)?;
+                Ok(())
+            }
+            ProviderKind::Deepseek => {
+                deepseek_model(name)?;
+                Ok(())
+            }
+        }
+    }
+}
 /// Reads a config file and serves until shutdown.
 ///
 /// # Errors
@@ -99,8 +176,23 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     let pg = PostgresBackend::connect(postgres_url).await?;
     let ontology = OntologyStore::connect(ontology_url).await?;
     let tail = connect_tail(&config).await;
-    let providers = providers(&config)?;
-    let state = Arc::new(AppState::new(pg, tail, providers, ontology, config).await?);
+    let state = if let Some(studio_config) = config
+        .studio
+        .as_ref()
+        .filter(|studio| studio.management_enabled)
+    {
+        // Invariant: `stratum-config` requires this value when management is
+        // enabled and rejects non-loopback binding before host assembly.
+        let database_url = studio_config
+            .database_url
+            .as_deref()
+            .expect("enabled studio has a validated database URL");
+        let studio = StudioStore::connect(database_url).await?;
+        Arc::new(AppState::with_studio(pg, tail, ontology, config, studio).await?)
+    } else {
+        let providers = providers(&config)?;
+        Arc::new(AppState::new(pg, tail, providers, ontology, config).await?)
+    };
 
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
     let shutdown = state.shutdown_token();
@@ -224,60 +316,49 @@ async fn connect_tail(config: &Config) -> Option<NatsAgentRuntimeTail> {
 ///
 /// Returns [`HostError`] when a configured model cannot be registered.
 pub fn providers(config: &Config) -> Result<LlmProviderManager, HostError> {
-    let mut providers = LlmProviderManager::new();
+    let mut provider_records = Vec::with_capacity(2);
     if let Some(provider) = &config.llm.openai {
-        register_openai(&mut providers, provider)?;
+        provider_records.push(RuntimeProvider {
+            kind: ProviderKind::Openai,
+            api_key: provider.api_key.clone(),
+            models: provider.models.clone(),
+        });
     }
     if let Some(provider) = &config.llm.deepseek {
-        register_deepseek(&mut providers, provider)?;
+        provider_records.push(RuntimeProvider {
+            kind: ProviderKind::Deepseek,
+            api_key: provider.api_key.clone(),
+            models: provider.models.clone(),
+        });
     }
-    Ok(providers)
+    ProviderFactory::from_config(config).build(provider_records)
 }
 
-fn register_openai(
-    providers: &mut LlmProviderManager,
-    config: &ProviderConfig,
-) -> Result<(), HostError> {
-    let base_url = config.base_url.as_deref().unwrap_or(OPENAI_BASE_URL);
-    let api_key = ApiKey::from(config.api_key.clone());
-    let timeouts = provider_timeouts(config);
-    for model in &config.models {
-        let model_id = model_id("openai", model)?;
-        providers.register(Arc::new(OpenAICompatibleProvider::new(
-            base_url,
-            api_key.clone(),
-            model_id,
-            timeouts,
-        )))?;
-    }
-    Ok(())
+async fn providers_from_studio(
+    studio: &StudioStore,
+    factory: &ProviderFactory,
+) -> Result<LlmProviderManager, HostError> {
+    factory.build(studio.runtime_providers().await?)
 }
 
-fn register_deepseek(
-    providers: &mut LlmProviderManager,
-    config: &ProviderConfig,
-) -> Result<(), HostError> {
-    let api_key = ApiKey::from(config.api_key.clone());
-    let timeouts = provider_timeouts(config);
-    for model in &config.models {
-        let adapter_model = match model.as_str() {
-            "deepseek-v4-flash" => DeepSeekModel::V4Flash,
-            "deepseek-v4-pro" => DeepSeekModel::V4Pro,
-            _ => {
-                return Err(HostError::UnsupportedDeepSeekModel {
-                    model: model_id("deepseek", model)?,
-                });
-            }
-        };
-        providers.register(Arc::new(DeepSeekProvider::new(
-            config.base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL),
-            api_key.clone(),
-            adapter_model,
-            DeepSeekThinking::Disabled,
-            timeouts,
-        )))?;
+fn transport_for(config: Option<&ProviderConfig>, default_base_url: &str) -> ProviderTransport {
+    ProviderTransport {
+        base_url: config
+            .and_then(|config| config.base_url.as_deref())
+            .unwrap_or(default_base_url)
+            .to_owned(),
+        timeouts: config.map_or_else(
+            || {
+                LlmTimeouts::new(
+                    Duration::from_secs(10),
+                    Duration::from_secs(120),
+                    Duration::from_secs(30),
+                    Duration::from_secs(60),
+                )
+            },
+            provider_timeouts,
+        ),
     }
-    Ok(())
 }
 
 fn provider_timeouts(config: &ProviderConfig) -> LlmTimeouts {
@@ -287,6 +368,16 @@ fn provider_timeouts(config: &ProviderConfig) -> LlmTimeouts {
         Duration::from_secs(config.first_response_timeout_seconds),
         Duration::from_secs(config.stream_idle_timeout_seconds),
     )
+}
+
+fn deepseek_model(model: &str) -> Result<DeepSeekModel, HostError> {
+    match model {
+        "deepseek-v4-flash" => Ok(DeepSeekModel::V4Flash),
+        "deepseek-v4-pro" => Ok(DeepSeekModel::V4Pro),
+        _ => Err(HostError::UnsupportedDeepSeekModel {
+            model: model_id("deepseek", model)?,
+        }),
+    }
 }
 
 fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {

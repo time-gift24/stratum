@@ -7,6 +7,7 @@ members = [
     "crates/stratum-filesystem",
     "crates/stratum-infra",
     "crates/stratum-postgres",
+    "crates/stratum-studio",
     "crates/stratum-llm",
     "crates/stratum-macros",
     "crates/stratum-ontology",
@@ -68,6 +69,7 @@ stratum-filesystem = { path = "crates/stratum-filesystem" }
 stratum-agent = { path = "crates/stratum-agent" }
 stratum-infra = { path = "crates/stratum-infra" }
 stratum-postgres = { path = "crates/stratum-postgres" }
+stratum-studio = { path = "crates/stratum-studio" }
 stratum-llm = { path = "crates/stratum-llm" }
 stratum-macros = { path = "crates/stratum-macros" }
 stratum-ontology = { path = "crates/stratum-ontology" }

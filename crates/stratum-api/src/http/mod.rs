@@ -120,6 +120,8 @@ struct ApiDoc;
 
 /// Builds the HTTP API router for one assembled state.
 pub fn router(state: Arc<AppState>) -> Router {
+    let studio_enabled = state.studio().is_some();
+    let openapi = openapi(studio_enabled);
     let shutdown = state.shutdown_token();
     let origins = state
         .allowed_origins()
@@ -133,7 +135,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         })
         .collect::<Vec<_>>();
     let router = Router::new()
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi))
         .route("/v1/agent-runtimes", post(agents::create_agent_runtime))
         .route("/v1/agent-templates", get(agents::list_agent_templates))
         .route("/v1/models", get(agents::list_models))
@@ -167,7 +169,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(ontology::routes())
         .route("/health/live", get(liveness))
-        .route("/health/ready", get(readiness))
+        .route("/health/ready", get(readiness));
+    let router = if studio_enabled {
+        router.merge(crate::studio_management::routes())
+    } else {
+        router
+    };
+    let router = router
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .layer(axum::middleware::from_fn_with_state(
@@ -227,6 +235,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .expose_headers([http::header::ETAG, http::header::LOCATION]),
         )
     }
+}
+
+fn openapi(studio_enabled: bool) -> utoipa::openapi::OpenApi {
+    let mut document = ApiDoc::openapi();
+    if studio_enabled {
+        document.merge(crate::studio_management::openapi());
+    }
+    document
 }
 
 /// Cancels an in-flight handler future when process shutdown begins. Axum's
@@ -348,13 +364,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
-    use utoipa::OpenApi;
-
-    use super::{ApiDoc, reject_during_shutdown};
+    use super::{openapi, reject_during_shutdown};
 
     #[test]
-    fn openapi_contains_all_public_endpoints_and_decimal_sequences() {
-        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
+    fn openapi_documents_base_endpoints_and_decimal_sequences() {
+        let document = serde_json::to_value(openapi(false)).expect("OpenAPI serializes");
         let actual = document["paths"]
             .as_object()
             .expect("paths are an object")
@@ -395,6 +409,73 @@ mod tests {
             collect_property_schemas(frame, field, &mut matches);
             assert_eq!(matches.len(), 1, "one frame variant owns {field}");
             assert_eq!(matches[0]["type"], "string", "{field} is a string");
+        }
+    }
+
+    #[test]
+    fn openapi_documents_studio_endpoints_only_when_studio_is_enabled() {
+        let disabled = serde_json::to_value(openapi(false)).expect("OpenAPI serializes");
+        let disabled_paths = disabled["paths"].as_object().expect("paths are an object");
+        assert!(!disabled_paths.contains_key("/v1/agent-definitions"));
+        assert!(!disabled_paths.contains_key("/v1/providers"));
+
+        let enabled = serde_json::to_value(openapi(true)).expect("OpenAPI serializes");
+        let enabled_paths = enabled["paths"].as_object().expect("paths are an object");
+        let expected_operations = [
+            ("/v1/agent-definitions", ["get", "post"].as_slice()),
+            (
+                "/v1/agent-definitions/{agent_name}",
+                ["get", "put", "delete"].as_slice(),
+            ),
+            ("/v1/providers", ["get", "post"].as_slice()),
+            (
+                "/v1/providers/{provider}",
+                ["get", "put", "delete"].as_slice(),
+            ),
+            (
+                "/v1/providers/{provider}/models",
+                ["get", "post"].as_slice(),
+            ),
+            (
+                "/v1/providers/{provider}/models/{model_name}",
+                ["get", "delete"].as_slice(),
+            ),
+        ];
+
+        for (path, methods) in expected_operations {
+            let item = enabled_paths
+                .get(path)
+                .and_then(serde_json::Value::as_object)
+                .expect("Studio path is documented");
+            for method in methods {
+                let responses = item
+                    .get(*method)
+                    .and_then(|operation| operation.get("responses"))
+                    .and_then(serde_json::Value::as_object)
+                    .expect("Studio operation documents responses");
+                assert!(
+                    responses
+                        .values()
+                        .all(|response| response["description"].is_string())
+                );
+            }
+        }
+
+        let schemas = enabled["components"]["schemas"]
+            .as_object()
+            .expect("schemas are an object");
+        for schema in [
+            "AgentDefinitionView",
+            "CreateAgentDefinitionRequest",
+            "ProviderView",
+            "CreateProviderRequest",
+            "ModelView",
+            "CreateModelRequest",
+        ] {
+            assert!(
+                schemas.contains_key(schema),
+                "Studio schema {schema} is documented"
+            );
         }
     }
 

@@ -72,6 +72,8 @@ pub struct FileMetadata {
     pub file_type: FileType,
     /// File length in bytes when known.
     pub len: Option<u64>,
+    /// Last modification time when provided by the backend.
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// Directory entry returned by [`Filesystem::list_dir`].

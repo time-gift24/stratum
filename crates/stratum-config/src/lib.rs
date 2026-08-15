@@ -2,11 +2,12 @@
 
 mod error;
 
-use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf};
 
 pub use error::ConfigError;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+pub use stratum_core::AgentName;
 use stratum_core::{AgentVersionTag, ModelId, ToolName};
 
 /// Top-level Stratum configuration.
@@ -30,6 +31,9 @@ pub struct Config {
     /// Ontology PostgreSQL configuration, required by the API host.
     #[serde(default)]
     pub ontology: Option<OntologyConfig>,
+    /// Optional loopback-only Studio management configuration.
+    #[serde(default)]
+    pub studio: Option<StudioConfig>,
 }
 
 /// Agent template catalog configuration.
@@ -146,64 +150,38 @@ pub struct OntologyConfig {
     pub database_url: String,
 }
 
+/// PostgreSQL settings for the mutable Studio management catalog.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct StudioConfig {
+    /// Enables loopback-only management routes.
+    #[serde(default)]
+    pub management_enabled: bool,
+    /// Dedicated Studio database URL, required when management is enabled.
+    #[serde(default)]
+    pub database_url: Option<String>,
+}
+
+impl fmt::Debug for StudioConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StudioConfig")
+            .field("management_enabled", &self.management_enabled)
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
 impl fmt::Debug for OntologyConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OntologyConfig")
             .field("database_url", &"[REDACTED]")
             .finish()
-    }
-}
-
-/// Stable name used to identify an agent definition.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct AgentName(String);
-
-impl AgentName {
-    /// Returns the validated name as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for AgentName {
-    type Err = ConfigError;
-
-    /// Parses an ASCII agent name matching `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::InvalidAgentName`] if the value is empty, too long, or not
-    /// the documented ASCII pattern.
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut bytes = value.bytes();
-        let valid = value.len() <= 64
-            && bytes
-                .next()
-                .is_some_and(|byte| byte.is_ascii_alphanumeric())
-            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
-        if !valid {
-            return Err(ConfigError::InvalidAgentName {
-                value: value.to_owned(),
-            });
-        }
-        Ok(Self(value.to_owned()))
-    }
-}
-
-impl TryFrom<String> for AgentName {
-    type Error = ConfigError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.parse()
-    }
-}
-
-impl From<AgentName> for String {
-    fn from(value: AgentName) -> Self {
-        value.0
     }
 }
 
@@ -444,6 +422,19 @@ impl Config {
         })
     }
 
+    /// Returns Studio configuration when loopback management is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::MissingSection`] when Studio configuration was
+    /// not supplied or management is disabled.
+    pub fn require_studio(&self) -> Result<&StudioConfig, ConfigError> {
+        self.studio
+            .as_ref()
+            .filter(|studio| studio.management_enabled)
+            .ok_or(ConfigError::MissingSection { section: "studio" })
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.agent.templates_root.as_os_str().is_empty() {
             return Err(ConfigError::InvalidTemplatesRoot);
@@ -457,6 +448,27 @@ impl Config {
         }
         if let Some(ontology) = &self.ontology {
             validate_ontology_database_url(&ontology.database_url)?;
+        }
+        if let Some(studio) = &self.studio {
+            if let Some(database_url) = &studio.database_url {
+                validate_studio_database_url(database_url)?;
+            }
+            if studio.management_enabled {
+                let api = self
+                    .api
+                    .as_ref()
+                    .ok_or(ConfigError::MissingSection { section: "api" })?;
+                if !api.bind.ip().is_loopback() {
+                    return Err(ConfigError::InvalidStudioConfig {
+                        field: "management_enabled",
+                    });
+                }
+                if studio.database_url.is_none() {
+                    return Err(ConfigError::InvalidStudioConfig {
+                        field: "database_url",
+                    });
+                }
+            }
         }
         if let Some(nats) = &self.nats {
             validate_nats(nats)?;
@@ -514,6 +526,24 @@ impl Config {
 }
 
 fn validate_ontology_database_url(value: &str) -> Result<(), ConfigError> {
+    validate_database_url(
+        value,
+        ConfigError::InvalidOntologyConfig {
+            field: "database_url",
+        },
+    )
+}
+
+fn validate_studio_database_url(value: &str) -> Result<(), ConfigError> {
+    validate_database_url(
+        value,
+        ConfigError::InvalidStudioConfig {
+            field: "database_url",
+        },
+    )
+}
+
+fn validate_database_url(value: &str, error: ConfigError) -> Result<(), ConfigError> {
     let uri = value.parse::<http::Uri>();
     let valid = value == value.trim()
         && percent_decoding_is_utf8(value)
@@ -528,13 +558,7 @@ fn validate_ontology_database_url(value: &str) -> Result<(), ConfigError> {
                 // options may be logged together with credential-like values.
                 && uri.query().is_none()
         });
-    if valid {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidOntologyConfig {
-            field: "database_url",
-        })
-    }
+    if valid { Ok(()) } else { Err(error) }
 }
 
 fn percent_decoding_is_utf8(value: &str) -> bool {
@@ -695,6 +719,8 @@ mod tests {
     use std::error::Error as StdError;
 
     use secrecy::ExposeSecret;
+
+    use stratum_core::AgentNameParseError;
 
     use super::{AgentName, Config, ConfigError};
 
@@ -1001,7 +1027,7 @@ prompt = "  You are a coding agent.  "
         for value in ["", "éagent", "_coding", "-coding"] {
             assert!(matches!(
                 value.parse::<AgentName>(),
-                Err(ConfigError::InvalidAgentName { .. })
+                Err(AgentNameParseError::Empty | AgentNameParseError::InvalidStart)
             ));
         }
     }
@@ -1069,7 +1095,7 @@ prompt = "  You are a coding agent.  "
         let value = "a".repeat(65);
         assert!(matches!(
             value.parse::<AgentName>(),
-            Err(ConfigError::InvalidAgentName { .. })
+            Err(AgentNameParseError::TooLong)
         ));
     }
 
