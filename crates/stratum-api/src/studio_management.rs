@@ -111,7 +111,7 @@ async fn list_agent_definitions(
         })
         .map(|entry| agent_view(entry.value))
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
     let response = page_response(entries, page, per_page);
     Ok(Json(AgentDefinitionsPage {
         data: response.data,
