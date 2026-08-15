@@ -3,6 +3,24 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Error returned when an Agent definition name is outside its stable boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AgentNameParseError {
+    /// The name is empty.
+    #[error("agent name must not be empty")]
+    Empty,
+    /// The name exceeds the durable protocol limit.
+    #[error("agent name must be at most 64 bytes")]
+    TooLong,
+    /// The first byte is not an ASCII letter or digit.
+    #[error("agent name must start with an ASCII letter or digit")]
+    InvalidStart,
+    /// A byte is not an ASCII letter, digit, underscore, or hyphen.
+    #[error("agent name contains an invalid character")]
+    InvalidCharacter,
+}
+
 /// Error returned when a model id is not canonical.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ModelIdParseError {

@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use stratum_core::{ModelId, ToolName};
+use stratum_core::{AgentVersionTag, ModelId, ToolName};
 use utoipa::ToSchema;
 
 /// Closed Provider kind accepted by the management API.
@@ -33,6 +33,8 @@ pub struct PaginationView {
 pub struct CreateAgentDefinitionRequest {
     /// Stable Agent name.
     pub agent_name: String,
+    /// Author-supplied immutable template version tag.
+    pub agent_version: AgentVersionTag,
     /// Canonical model identity.
     pub model: ModelId,
     /// Provider parameters.
@@ -49,6 +51,8 @@ pub struct CreateAgentDefinitionRequest {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateAgentDefinitionRequest {
+    /// New author-supplied immutable template version tag.
+    pub agent_version: AgentVersionTag,
     /// Canonical model identity.
     pub model: ModelId,
     /// Provider parameters.
@@ -66,6 +70,8 @@ pub struct UpdateAgentDefinitionRequest {
 pub struct AgentDefinitionView {
     /// Stable Agent name.
     pub agent_name: String,
+    /// Author-supplied immutable template version tag.
+    pub agent_version: AgentVersionTag,
     /// Canonical model identity.
     pub model: ModelId,
     /// Provider parameters.
@@ -74,7 +80,7 @@ pub struct AgentDefinitionView {
     pub tools: Vec<ToolName>,
     /// System prompt.
     pub prompt: String,
-    /// Persisted file modification time.
+    /// Persisted Studio record modification time.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -117,7 +123,7 @@ pub struct ProviderView {
     pub credential_configured: bool,
     /// Number of models under this Provider.
     pub models_count: usize,
-    /// Catalog file modification time.
+    /// Persisted Studio record modification time.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -149,7 +155,7 @@ pub struct ModelView {
     pub name: String,
     /// Read-only adapter parameter schema.
     pub parameter_schema: serde_json::Value,
-    /// Catalog file modification time.
+    /// Persisted Studio record modification time.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -160,33 +166,4 @@ pub struct ModelsPage {
     pub data: Vec<ModelView>,
     /// Page metadata.
     pub pagination: PaginationView,
-}
-
-/// A field-level validation violation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-pub struct FieldViolation {
-    /// Stable form field path.
-    pub field: &'static str,
-    /// Stable violation code.
-    pub code: &'static str,
-    /// Safe user-facing message.
-    pub message: &'static str,
-}
-
-/// One resource preventing a destructive operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-pub struct ResourceBlocker {
-    /// Resource category, such as `default_model` or `agent_definition`.
-    pub resource_type: &'static str,
-    /// Stable resource name.
-    pub name: String,
-}
-
-/// Result of one transient Provider connection probe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-pub struct ProviderTestView {
-    /// Successful completion.
-    pub success: bool,
-    /// Completion timestamp; no health state is persisted.
-    pub completed_at: DateTime<Utc>,
 }

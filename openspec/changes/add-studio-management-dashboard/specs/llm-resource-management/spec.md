@@ -88,19 +88,19 @@ Provider credentials MUST 在内存中使用 secret 类型、在持久化文件�
 - **THEN** structured fields 只能包含 provider kind、model id 与安全状态码，不得记录请求 DTO 或 credential
 
 #### Scenario: 持久化 catalog
-- **WHEN** managed catalog 被写入本地文件系统
-- **THEN** 文件必须位于配置的 storage root 内、使用 crash-consistent 原子替换并只允许运行用户读写
+- **WHEN** managed catalog 被写入 Studio PostgreSQL database
+- **THEN** credential 只能被运行进程的 database identity 读取，且不得写入执行 durable events、NATS、OpenAPI、日志或错误响应
 
 ### Requirement: Managed catalog 启动与热替换
-Host SHALL 以 boot config 首次 seed managed catalog，并在后续启动使用 managed catalog；成功管理写入必须作用于后续新 Agent 而不改变进行中的 Turn。
+Host SHALL 以 boot config 与只读 template catalog 首次 seed managed catalog，并在后续启动使用 Studio database；成功管理写入必须作用于后续 provider selection，而不改变已经开始的 Turn。
 
 #### Scenario: 首次启动
-- **WHEN** `/providers/catalog.toml` 不存在且 boot `[llm]` 配置有效
-- **THEN** Host 必须从 boot config 原子创建 managed catalog 并装配等价 Provider/Models
+- **WHEN** Studio database 的 catalog 为空且 boot `[llm]` 配置与只读 template catalog 有效
+- **THEN** Host 必须在一个事务中 seed managed catalog 并装配等价 Provider/Models 和 Agent definitions
 
 #### Scenario: 后续启动
-- **WHEN** managed catalog 已存在
-- **THEN** Host 必须验证并使用它，不得用 boot `[llm]` 静默覆盖管理变更
+- **WHEN** Studio catalog 已存在
+- **THEN** Host 必须验证并使用它，不得用 boot config 或 template files 静默覆盖管理变更
 
 #### Scenario: catalog 写入失败
 - **WHEN** candidate manager 可构造但持久化失败
@@ -108,10 +108,10 @@ Host SHALL 以 boot config 首次 seed managed catalog，并在后续启动使�
 
 #### Scenario: 热替换成功
 - **WHEN** catalog 更新完成
-- **THEN** 之后创建的 Agent 必须使用新 catalog，已创建 Agent/进行中 Turn 必须继续使用其捕获的 Provider `Arc` 快照
+- **THEN** 之后启动的 Turn 必须使用新 catalog，已经开始的 Turn 必须继续使用其捕获的 Provider `Arc` snapshot
 
 ### Requirement: 管理面网络边界
-Provider、Model 与 Agent definition 的写 API MUST 仅在管理面显式启用且 API 绑定 loopback 地址时注册。
+Provider、Model 与 Agent definition 的写 API MUST 仅在 Studio 管理面显式启用、Studio database 配置有效且 API 绑定 loopback 地址时注册。
 
 #### Scenario: 默认配置
 - **WHEN** `management_enabled` 未设置或为 false

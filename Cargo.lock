@@ -2826,6 +2826,7 @@ dependencies = [
  "stratum-llm",
  "stratum-ontology",
  "stratum-postgres",
+ "stratum-studio",
  "stratum-tools",
  "thiserror",
  "tokio",
@@ -2847,6 +2848,8 @@ dependencies = [
  "http",
  "secrecy",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "stratum-core",
  "thiserror",
  "toml",
@@ -2941,6 +2944,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-studio"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "stratum-core",
+ "thiserror",
+ "tokio",
  "uuid",
 ]
 

@@ -32,6 +32,14 @@ readiness_timeout_ms = 1000
 # independent SQLx migration history.
 database_url = "postgres://stratum:stratum@127.0.0.1:5432/stratum_ontology"
 
+# Optional loopback-only Studio authoring catalog. On first enabled startup it
+# imports providers and read-only templates; its own database then becomes the
+# source for new AgentRuntimes. Keep this database independently access
+# controlled because it holds provider credentials.
+[studio]
+management_enabled = false
+# database_url = "postgres://stratum:stratum@127.0.0.1:5432/stratum_studio"
+
 [nats]
 # Connection and short AgentRuntime-scoped realtime tail limits. The tail is
 # lossy and never carries durable history.

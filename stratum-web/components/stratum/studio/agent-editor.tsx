@@ -37,6 +37,7 @@ import type { ModelDescriptor } from "@/lib/stratum/model-config"
 
 const EMPTY_DRAFT: AgentDraft = {
   agentName: "",
+  agentVersion: "v1",
   model: "",
   parameters: {},
   tools: [],
@@ -117,7 +118,17 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
       const input = agentDraftToInput(state.draft)
       const response = isNew
         ? await studioApi.createAgentDefinition(input)
-        : await studioApi.updateAgentDefinition(agentName, input, state.etag)
+        : await studioApi.updateAgentDefinition(
+            agentName,
+            {
+              agent_version: input.agent_version,
+              model: input.model,
+              model_parameters: input.model_parameters,
+              tools: input.tools,
+              prompt: input.prompt,
+            },
+            state.etag
+          )
       const value = agentViewToDraft(response.data)
       dispatch({ type: "acknowledge", value, etag: response.etag })
       setRaw(encodeAgentToml(value))
@@ -262,6 +273,14 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
                   value={state.draft.agentName}
                   onChange={(event) =>
                     edit({ ...state.draft, agentName: event.target.value })
+                  }
+                />
+              </Field>
+              <Field label="版本" hint="更新行为时必须使用新版本。">
+                <StudioInput
+                  value={state.draft.agentVersion}
+                  onChange={(event) =>
+                    edit({ ...state.draft, agentVersion: event.target.value })
                   }
                 />
               </Field>

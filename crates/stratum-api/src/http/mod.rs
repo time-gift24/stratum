@@ -167,7 +167,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(ontology::routes())
         .route("/health/live", get(liveness))
-        .route("/health/ready", get(readiness))
+        .route("/health/ready", get(readiness));
+    let router = if state.studio().is_some() {
+        router.merge(crate::studio_management::routes())
+    } else {
+        router
+    };
+    let router = router
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .layer(axum::middleware::from_fn_with_state(

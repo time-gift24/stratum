@@ -6,10 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use stratum_config::Config;
+use stratum_core::{AgentName, AgentVersionTag, ModelConfig, ToolName};
 use stratum_infra::NatsAgentRuntimeTail;
 use stratum_llm::LlmProviderManager;
 use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
+use stratum_studio::{
+    AgentDefinitionInput, ProviderKind, ProviderSeed, StudioCatalogSeed, StudioError, StudioStore,
+};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -18,13 +22,36 @@ use crate::approval::ApprovalWaiters;
 use crate::dispatcher::DispatcherHub;
 use crate::error::{ApiError, ErrorKind};
 use crate::host_error::HostError;
+use crate::provider_catalog::ProviderCatalog;
 use crate::registry::TurnRegistry;
 use crate::templates::TemplateCatalog;
+use crate::{ProviderFactory, providers_from_studio};
 
 /// Process-owned background tasks (dispatchers and SSE tail pumps). Every
 /// spawned task stays in this set until it is joined during normal operation
 /// or shutdown; dropping the set aborts any unfinished task.
 pub(crate) type RuntimeTasks = Arc<Mutex<JoinSet<()>>>;
+
+/// Fully resolved definition used for a new AgentRuntime creation.
+///
+/// In Studio mode it comes from the mutable authoring catalog; otherwise it
+/// is resolved from the read-only template directory. Either way, the caller
+/// persists the result into the immutable execution ledger before a runtime
+/// exists.
+pub(crate) struct RuntimeAgentDefinition {
+    pub(crate) agent_version: AgentVersionTag,
+    pub(crate) model: ModelConfig,
+    pub(crate) tools: Vec<ToolName>,
+    pub(crate) prompt: String,
+}
+
+/// Dependencies that jointly form the hot catalog boundary.
+struct CatalogDependencies {
+    providers: LlmProviderManager,
+    templates: TemplateCatalog,
+    studio: Option<StudioStore>,
+    provider_factory: Option<ProviderFactory>,
+}
 
 /// Shared state of the assembled API host.
 pub struct AppState {
@@ -32,7 +59,9 @@ pub struct AppState {
     tail: Option<NatsAgentRuntimeTail>,
     registry: TurnRegistry,
     dispatchers: DispatcherHub,
-    providers: LlmProviderManager,
+    providers: ProviderCatalog,
+    provider_factory: Option<ProviderFactory>,
+    studio: Option<StudioStore>,
     ontology: OntologyStore,
     waiters: Arc<ApprovalWaiters>,
     templates: TemplateCatalog,
@@ -58,10 +87,72 @@ impl AppState {
         ontology: OntologyStore,
         config: Config,
     ) -> Result<Self, HostError> {
+        let templates = TemplateCatalog::new(&config.agent.templates_root, config.clone()).await?;
+        Self::from_parts(
+            pg,
+            tail,
+            ontology,
+            config,
+            CatalogDependencies {
+                providers,
+                templates,
+                studio: None,
+                provider_factory: None,
+            },
+        )
+    }
+
+    /// Assembles a state whose mutable catalog is owned by Studio.
+    ///
+    /// The read-only boot configuration and template directory are read once
+    /// only when Studio is empty. All later runtime definition/provider reads
+    /// resolve through the Studio database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when the catalog cannot be bootstrapped or its
+    /// runtime provider registry cannot be assembled.
+    pub async fn with_studio(
+        pg: PostgresBackend,
+        tail: Option<NatsAgentRuntimeTail>,
+        ontology: OntologyStore,
+        config: Config,
+        studio: StudioStore,
+    ) -> Result<Self, HostError> {
+        let templates = TemplateCatalog::new(&config.agent.templates_root, config.clone()).await?;
+        let definitions = templates
+            .studio_seed_definitions()
+            .await
+            .map_err(HostError::StudioTemplateSeed)?;
+        studio
+            .seed_if_empty(studio_seed(&config, definitions))
+            .await?;
+        let factory = ProviderFactory::from_config(&config);
+        let providers = providers_from_studio(&studio, &factory).await?;
+        Self::from_parts(
+            pg,
+            tail,
+            ontology,
+            config,
+            CatalogDependencies {
+                providers,
+                templates,
+                studio: Some(studio),
+                provider_factory: Some(factory),
+            },
+        )
+    }
+
+    fn from_parts(
+        pg: PostgresBackend,
+        tail: Option<NatsAgentRuntimeTail>,
+        ontology: OntologyStore,
+        config: Config,
+        catalog: CatalogDependencies,
+    ) -> Result<Self, HostError> {
         let shutdown = CancellationToken::new();
         let runtime_tasks = Arc::new(Mutex::new(JoinSet::new()));
         let api = config.api.clone().unwrap_or_default();
-        let templates = TemplateCatalog::new(&config.agent.templates_root, config.clone()).await?;
         let allowed_origins = config
             .api
             .as_ref()
@@ -77,10 +168,12 @@ impl AppState {
             pg,
             tail,
             registry: TurnRegistry::default(),
-            providers,
+            providers: ProviderCatalog::new(catalog.providers),
+            provider_factory: catalog.provider_factory,
+            studio: catalog.studio,
             ontology,
             waiters: Arc::new(ApprovalWaiters::default()),
-            templates,
+            templates: catalog.templates,
             allowed_origins,
             shutdown,
             admission: AdmissionGate::default(),
@@ -111,8 +204,94 @@ impl AppState {
     }
 
     /// Registered LLM providers.
-    pub(crate) fn providers(&self) -> &LlmProviderManager {
-        &self.providers
+    pub(crate) fn providers(&self) -> Arc<LlmProviderManager> {
+        self.providers.snapshot()
+    }
+
+    /// Returns the enabled Studio catalog, if this host was configured for it.
+    pub(crate) fn studio(&self) -> Option<&StudioStore> {
+        self.studio.as_ref()
+    }
+
+    /// Resolves the current authoring definition for a future AgentRuntime.
+    pub(crate) async fn resolve_agent_definition(
+        &self,
+        agent_name: &AgentName,
+    ) -> Result<RuntimeAgentDefinition, ApiError> {
+        if let Some(studio) = &self.studio {
+            let definition = studio
+                .agent_definition(agent_name)
+                .await
+                .map_err(map_studio_error)?
+                .value;
+            return Ok(RuntimeAgentDefinition {
+                agent_version: definition.agent_version,
+                model: definition.model,
+                tools: definition.tools,
+                prompt: definition.prompt,
+            });
+        }
+
+        let definition = self.templates.resolve(agent_name).await?;
+        let providers = self.providers();
+        let model = providers
+            .default_model_config(&definition.model)
+            .map_err(|_| ApiError::new(ErrorKind::ModelNotConfigured))?;
+        Ok(RuntimeAgentDefinition {
+            agent_version: definition.agent_version,
+            model,
+            tools: definition.tools,
+            prompt: definition.prompt,
+        })
+    }
+
+    /// Lists the current definition catalog used for new AgentRuntimes.
+    pub(crate) async fn list_agent_templates(
+        &self,
+    ) -> Result<Vec<crate::dto::AgentTemplateDto>, ApiError> {
+        if let Some(studio) = &self.studio {
+            return studio
+                .list_agent_definitions()
+                .await
+                .map_err(map_studio_error)
+                .map(|definitions| {
+                    definitions
+                        .into_iter()
+                        .map(|definition| crate::dto::AgentTemplateDto {
+                            agent_name: definition.value.agent_name.to_string(),
+                            version: definition.value.agent_version,
+                            model_config: definition.value.model,
+                        })
+                        .collect()
+                });
+        }
+        let providers = self.providers();
+        self.templates.list(&providers).await
+    }
+
+    /// Rebuilds the complete registry after a Studio Provider/model change.
+    /// Existing Turns retain their previously-cloned provider [`Arc`].
+    pub(crate) async fn refresh_studio_providers(&self) -> Result<(), HostError> {
+        let studio = self.studio.as_ref().ok_or(StudioError::NotInitialized)?;
+        let factory = self
+            .provider_factory
+            .as_ref()
+            .ok_or(StudioError::NotInitialized)?;
+        let providers = providers_from_studio(studio, factory).await?;
+        self.providers.replace(providers);
+        Ok(())
+    }
+
+    /// Checks whether a new Studio model can be assembled by this binary.
+    pub(crate) fn validate_studio_model(
+        &self,
+        kind: ProviderKind,
+        name: &str,
+    ) -> Result<(), HostError> {
+        self.provider_factory
+            .as_ref()
+            .ok_or(StudioError::NotInitialized)?
+            .validate_model(kind, name)
     }
 
     /// Canonical Ontology metadata store.
@@ -123,11 +302,6 @@ impl AppState {
     /// Process-local approval waiters.
     pub(crate) fn waiters(&self) -> &Arc<ApprovalWaiters> {
         &self.waiters
-    }
-
-    /// Read-only template catalog.
-    pub(crate) fn templates(&self) -> &TemplateCatalog {
-        &self.templates
     }
 
     /// Browser origins allowed to call the API.
@@ -201,6 +375,46 @@ impl AppState {
             while tasks.join_next().await.is_some() {}
         }
     }
+}
+
+fn studio_seed(config: &Config, agent_definitions: Vec<AgentDefinitionInput>) -> StudioCatalogSeed {
+    let mut providers = Vec::with_capacity(2);
+    if let Some(openai) = &config.llm.openai {
+        providers.push(ProviderSeed {
+            kind: ProviderKind::Openai,
+            api_key: openai.api_key.clone(),
+            models: openai.models.clone(),
+        });
+    }
+    if let Some(deepseek) = &config.llm.deepseek {
+        providers.push(ProviderSeed {
+            kind: ProviderKind::Deepseek,
+            api_key: deepseek.api_key.clone(),
+            models: deepseek.models.clone(),
+        });
+    }
+    StudioCatalogSeed {
+        providers,
+        agent_definitions,
+    }
+}
+
+fn map_studio_error(error: StudioError) -> ApiError {
+    let kind = match error {
+        StudioError::NotFound => ErrorKind::AgentTemplateNotFound,
+        StudioError::ModelNotConfigured => ErrorKind::ModelNotConfigured,
+        StudioError::Database(_) | StudioError::Migration(_) | StudioError::NotInitialized => {
+            ErrorKind::RuntimeUnavailable
+        }
+        StudioError::CatalogCorrupt { .. } => ErrorKind::Internal,
+        StudioError::AlreadyExists
+        | StudioError::PreconditionFailed
+        | StudioError::AgentVersionUnchanged
+        | StudioError::DeletionBlocked { .. }
+        | StudioError::InvalidInput { .. } => ErrorKind::InvalidAgentTemplate,
+        _ => ErrorKind::Internal,
+    };
+    ApiError::with_source(kind, error)
 }
 
 /// Adds a task to the shared process task set. This is a function rather than

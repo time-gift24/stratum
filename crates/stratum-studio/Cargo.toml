@@ -1,0 +1,22 @@
+[package]
+name = "stratum-studio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+stratum-core.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

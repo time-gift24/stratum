@@ -14,6 +14,7 @@ import type {
 export function agentViewToDraft(view: AgentDefinitionView): AgentDraft {
   return {
     agentName: view.agent_name,
+    agentVersion: view.agent_version,
     model: view.model,
     parameters: structuredClone(view.model_parameters),
     tools: [...view.tools],
@@ -24,6 +25,7 @@ export function agentViewToDraft(view: AgentDefinitionView): AgentDraft {
 export function agentDraftToInput(draft: AgentDraft): AgentDefinitionInput {
   return {
     agent_name: draft.agentName.trim(),
+    agent_version: draft.agentVersion.trim(),
     model: draft.model,
     model_parameters: structuredClone(draft.parameters),
     tools: draft.tools.map((tool) => tool.trim()).filter(Boolean),
@@ -53,7 +55,7 @@ export function encodeAgentToml(draft: AgentDraft): string {
 export type RawAgentParseResult =
   { ok: true; draft: AgentDraft } | { ok: false; line: number; message: string }
 
-const AGENT_KEYS = new Set(["model", "model_parameters", "tools", "prompt"])
+const AGENT_KEYS = new Set(["version", "model", "model_parameters", "tools", "prompt"])
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" &&
@@ -92,9 +94,10 @@ export function parseAgentToml(source: string): RawAgentParseResult {
         message: `未知字段 ${unknown}`,
       }
 
-    const { model, tools, prompt } = document
+    const { version, model, tools, prompt } = document
     const parameters = document.model_parameters ?? {}
     if (
+      typeof version !== "string" ||
       typeof model !== "string" ||
       !Array.isArray(tools) ||
       !tools.every((tool) => typeof tool === "string") ||
@@ -105,7 +108,7 @@ export function parseAgentToml(source: string): RawAgentParseResult {
     }
     return {
       ok: true,
-      draft: { agentName: "", model, tools, prompt, parameters },
+      draft: { agentName: "", agentVersion: version, model, tools, prompt, parameters },
     }
   } catch (error) {
     if (

@@ -36,6 +36,7 @@ stratum-infra.workspace = true
 stratum-llm.workspace = true
 stratum-ontology.workspace = true
 stratum-postgres.workspace = true
+stratum-studio.workspace = true
 stratum-tools.workspace = true
 
 [dev-dependencies]

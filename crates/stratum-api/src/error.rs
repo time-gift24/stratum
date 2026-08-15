@@ -214,12 +214,16 @@ pub enum ErrorKind {
     OntologyNameConflict,
     /// 409: an Ontology child ID belongs to another live Ontology.
     OntologyEntityIdConflict,
+    /// 409: a Studio resource already exists or remains referenced.
+    StudioConflict,
     /// 410: the requested tail cursor was discarded by retention.
     CursorExpired,
     /// 413: the JSON body exceeded the hard limit.
     RequestTooLarge,
     /// 412: the supplied Ontology ETag is stale.
     OntologyPreconditionFailed,
+    /// 412: the supplied Studio ETag is stale.
+    StudioPreconditionFailed,
     /// 413: an Ontology body exceeded its route-specific limit.
     OntologyPayloadTooLarge,
     /// 422: an author-provided Agent template version tag is invalid.
@@ -232,8 +236,12 @@ pub enum ErrorKind {
     InvalidModelParameters,
     /// 422: a complete Ontology candidate violates the metamodel.
     InvalidOntologySchema,
+    /// 422: Studio input violates a catalog invariant.
+    InvalidStudioResource,
     /// 428: an Ontology conditional write omitted `If-Match`.
     OntologyPreconditionRequired,
+    /// 428: a Studio conditional write omitted `If-Match`.
+    StudioPreconditionRequired,
     /// 500: durable truth is incomplete or violates an invariant.
     DurableStateCorrupt,
     /// 500: unclassified internal failure.
@@ -248,6 +256,8 @@ pub enum ErrorKind {
     ServiceShuttingDown,
     /// 503: Ontology PostgreSQL cannot serve the request.
     OntologyStoreUnavailable,
+    /// 503: Studio PostgreSQL cannot serve the request.
+    StudioStoreUnavailable,
 }
 
 impl ErrorKind {
@@ -278,8 +288,10 @@ impl ErrorKind {
             Self::RuntimeIncompatible => "runtime_incompatible",
             Self::OntologyNameConflict => "ontology_name_conflict",
             Self::OntologyEntityIdConflict => "ontology_entity_id_conflict",
+            Self::StudioConflict => "studio_conflict",
             Self::CursorExpired => "cursor_expired",
             Self::OntologyPreconditionFailed => "ontology_precondition_failed",
+            Self::StudioPreconditionFailed => "studio_precondition_failed",
             Self::RequestTooLarge => "request_too_large",
             Self::OntologyPayloadTooLarge => "ontology_payload_too_large",
             Self::InvalidAgentVersion => "invalid_agent_version",
@@ -287,7 +299,9 @@ impl ErrorKind {
             Self::ModelNotConfigured => "model_not_configured",
             Self::InvalidModelParameters => "invalid_model_parameters",
             Self::InvalidOntologySchema => "invalid_ontology_schema",
+            Self::InvalidStudioResource => "invalid_studio_resource",
             Self::OntologyPreconditionRequired => "ontology_precondition_required",
+            Self::StudioPreconditionRequired => "studio_precondition_required",
             Self::DurableStateCorrupt => "durable_state_corrupt",
             Self::Internal => "internal_error",
             Self::StoreUnavailable => "store_unavailable",
@@ -295,6 +309,7 @@ impl ErrorKind {
             Self::RealtimeUnavailable => "realtime_unavailable",
             Self::ServiceShuttingDown => "service_shutting_down",
             Self::OntologyStoreUnavailable => "ontology_store_unavailable",
+            Self::StudioStoreUnavailable => "studio_store_unavailable",
         }
     }
 
@@ -324,22 +339,29 @@ impl ErrorKind {
             | Self::ApprovalInvalidated
             | Self::RuntimeIncompatible
             | Self::OntologyNameConflict
-            | Self::OntologyEntityIdConflict => StatusCode::CONFLICT,
+            | Self::OntologyEntityIdConflict
+            | Self::StudioConflict => StatusCode::CONFLICT,
             Self::CursorExpired => StatusCode::GONE,
-            Self::OntologyPreconditionFailed => StatusCode::PRECONDITION_FAILED,
+            Self::OntologyPreconditionFailed | Self::StudioPreconditionFailed => {
+                StatusCode::PRECONDITION_FAILED
+            }
             Self::RequestTooLarge | Self::OntologyPayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidAgentVersion
             | Self::InvalidAgentTemplate
             | Self::ModelNotConfigured
             | Self::InvalidModelParameters
-            | Self::InvalidOntologySchema => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::OntologyPreconditionRequired => StatusCode::PRECONDITION_REQUIRED,
+            | Self::InvalidOntologySchema
+            | Self::InvalidStudioResource => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::OntologyPreconditionRequired | Self::StudioPreconditionRequired => {
+                StatusCode::PRECONDITION_REQUIRED
+            }
             Self::DurableStateCorrupt | Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::StoreUnavailable
             | Self::RuntimeUnavailable
             | Self::RealtimeUnavailable
             | Self::ServiceShuttingDown
-            | Self::OntologyStoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::OntologyStoreUnavailable
+            | Self::StudioStoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -380,8 +402,10 @@ impl ErrorKind {
             }
             Self::OntologyNameConflict => "ontology name is already in use",
             Self::OntologyEntityIdConflict => "ontology entity id is already in use",
+            Self::StudioConflict => "the studio resource conflicts with current catalog state",
             Self::CursorExpired => "the event cursor is no longer retained",
             Self::OntologyPreconditionFailed => "ontology precondition failed",
+            Self::StudioPreconditionFailed => "studio resource version no longer matches",
             Self::RequestTooLarge => "the request body is too large",
             Self::OntologyPayloadTooLarge => "ontology request body is too large",
             Self::InvalidAgentVersion => "the agent version tag is invalid",
@@ -389,7 +413,9 @@ impl ErrorKind {
             Self::ModelNotConfigured => "the model is not configured",
             Self::InvalidModelParameters => "the model parameters are invalid",
             Self::InvalidOntologySchema => "ontology schema is invalid",
+            Self::InvalidStudioResource => "studio resource is invalid",
             Self::OntologyPreconditionRequired => "ontology precondition is required",
+            Self::StudioPreconditionRequired => "studio precondition is required",
             Self::DurableStateCorrupt => "the durable agent state is corrupt",
             Self::Internal => "an internal error occurred",
             Self::StoreUnavailable => "the execution store is unavailable",
@@ -397,6 +423,7 @@ impl ErrorKind {
             Self::RealtimeUnavailable => "the realtime event tail is unavailable",
             Self::ServiceShuttingDown => "the service is shutting down",
             Self::OntologyStoreUnavailable => "ontology store is unavailable",
+            Self::StudioStoreUnavailable => "studio store is unavailable",
         }
     }
 }
@@ -604,11 +631,17 @@ mod tests {
                 409,
                 "ontology_entity_id_conflict",
             ),
+            (ErrorKind::StudioConflict, 409, "studio_conflict"),
             (ErrorKind::CursorExpired, 410, "cursor_expired"),
             (
                 ErrorKind::OntologyPreconditionFailed,
                 412,
                 "ontology_precondition_failed",
+            ),
+            (
+                ErrorKind::StudioPreconditionFailed,
+                412,
+                "studio_precondition_failed",
             ),
             (ErrorKind::RequestTooLarge, 413, "request_too_large"),
             (
@@ -634,9 +667,19 @@ mod tests {
                 "invalid_ontology_schema",
             ),
             (
+                ErrorKind::InvalidStudioResource,
+                422,
+                "invalid_studio_resource",
+            ),
+            (
                 ErrorKind::OntologyPreconditionRequired,
                 428,
                 "ontology_precondition_required",
+            ),
+            (
+                ErrorKind::StudioPreconditionRequired,
+                428,
+                "studio_precondition_required",
             ),
             (ErrorKind::DurableStateCorrupt, 500, "durable_state_corrupt"),
             (ErrorKind::Internal, 500, "internal_error"),
@@ -648,6 +691,11 @@ mod tests {
                 ErrorKind::OntologyStoreUnavailable,
                 503,
                 "ontology_store_unavailable",
+            ),
+            (
+                ErrorKind::StudioStoreUnavailable,
+                503,
+                "studio_store_unavailable",
             ),
         ];
         for (kind, status, code) in expectations {

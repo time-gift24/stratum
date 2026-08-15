@@ -8,6 +8,7 @@ import type {
 
 export type AgentDraft = {
   agentName: string
+  agentVersion: string
   model: string
   parameters: Record<string, unknown>
   tools: string[]

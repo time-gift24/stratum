@@ -78,11 +78,8 @@ pub(crate) async fn create_agent_runtime(
         .parse()
         .map_err(|_| ApiError::new(ErrorKind::InvalidRequest))?;
     Span::current().record("agent_name", agent_name.as_str());
-    let definition = state.templates().resolve(&agent_name).await?;
-    let template_model = state
-        .providers()
-        .default_model_config(&definition.model)
-        .map_err(|_| ApiError::new(ErrorKind::ModelNotConfigured))?;
+    let definition = state.resolve_agent_definition(&agent_name).await?;
+    let template_model = definition.model.clone();
     let effective_model = match &body.model_config {
         Some(overridden) => {
             validate_model_override(&state, overridden)?;
@@ -182,7 +179,7 @@ fn parse_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, ApiError> {
 pub(crate) async fn list_agent_templates(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AgentTemplatesResponse>, ApiError> {
-    let templates: Vec<AgentTemplateDto> = state.templates().list(state.providers()).await?;
+    let templates: Vec<AgentTemplateDto> = state.list_agent_templates().await?;
     Ok(Json(AgentTemplatesResponse { templates }))
 }
 

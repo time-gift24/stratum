@@ -65,6 +65,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
             page,
             per_page: PER_PAGE,
             total: filtered.length,
+            total_pages: Math.max(1, Math.ceil(filtered.length / PER_PAGE)),
           },
         })
         setHasResources(all.pagination.total > 0)

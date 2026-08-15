@@ -53,37 +53,37 @@ Studio header 最右侧齿轮按钮使用明确的 `aria-label="设置"` 并进�
 
 `/v1/agents` 继续表示运行实例，不复用为 definition CRUD；既有 `/v1/agent/templates` 与 `/v1/models` 保持向后兼容并从同一最新 catalog 投影。列表统一 `page/per_page/sort`，写操作使用 POST/PUT/DELETE；每个 Handler 与 DTO 纳入 utoipa OpenAPI。错误继续使用统一 envelope，并增加稳定的 `resource_conflict`、`revision_conflict`、`provider_test_failed` 等安全错误码。
 
-### D4: 复用现有文件边界，不新增 repository/service trait
+### D4: `stratum-studio::StudioStore` 是独立、具体的管理持久化模块
 
-Agent definition 继续使用 `/templates/{agent_name}.toml`；运行期读写统一经过 `stratum-store` 的具体 `FilesystemConfigurationStore`，再由它使用 `stratum-filesystem` 的 CAS 与原子写能力。LLM 管理 catalog 使用 storage root 内单个 `/providers/catalog.toml`，包含默认 model、OpenAI/DeepSeek 是否配置、各自 models 与凭据。单文件保证 Provider、Model 和 default model 的引用不变量能在一次原子替换中提交；文件权限设为仅运行用户可读写。该 Store 是当前唯一后端，因此不新增 repository/service trait。
+`stratum-studio` 是与 `stratum-postgres` 并列的独立领域模块，拥有独立 Studio database、迁移历史和五张管理表：单例 catalog revision、Provider、Provider credential、Provider Model 与当前 Agent definition。它只依赖 `stratum-core` 与数据库驱动，只暴露具体 `StudioStore` command/query 方法；不创建 repository/service trait，也不被 kernel 或能力层依赖。`stratum-api` 是唯一装配与调用方。
 
-`HostState` 增加一个具体的、进程内 management catalog 状态与有界写临界区，不引入只有单实现的 repository/service trait。写流程为：在锁内基于当前 revision 构造 candidate → 完整验证并构建新的 provider manager → 原子写文件 → 替换内存 catalog/manager。读取先 clone 快照再释放锁，不在 await 期间持有 std guard。
+所有改写经一条锁定 catalog revision 行的事务完成：校验引用与 If-Match、写受影响资源、推进 revision 后提交。这样 Provider、Model 与 definition 的引用不变量不依赖跨文件原子写，也不侵入执行账本。被否决方案是重用只读 template filesystem、直接改 boot config、以及扩展 `stratum-postgres` 的执行 schema；三者分别违反当前文件/装配约束、会覆盖运维配置、或把两个真相域混为一体。
 
-被否决方案：直接改原始 `config.toml`（host 已丢失可靠的来源路径且容易覆盖运维配置）、为三个资源新增数据库（超出当前存储模型）、每个 model 单独文件（需要跨文件事务维护 default/reference）。
+### D5: boot config 与只读 templates 只用于首次 seed
 
-### D5: boot config 只作为首次 seed，managed catalog 成为后续真相
+启用 Studio 时，`stratum-api` 连接独立 Studio database。空 catalog 只在首次启动事务性 seed：从严格 `[llm]` 配置创建 Provider/Model/credential，从只读 templates root 导入已解析的 Agent definition。其后 Studio database 是唯一管理真相，boot config 与模板目录不会覆盖管理写入。非空 catalog 必须完整验证后才能装配；非法数据 fail closed。
 
-启动时若 `/providers/catalog.toml` 不存在，则用当前 `[llm]` 配置生成并原子写入；存在时优先读取 managed catalog。随后扫描独立的 `/templates` 目录，对每个 canonical Agent name、strict TOML、Model、parameters 与 tool 引用做完整恢复校验；任一异常都 fail closed，禁止返回只恢复部分 definition 的 Host。旧配置继续作为首次部署与回滚输入，不在每次启动覆盖管理变更。回滚到不支持 Studio 的版本时，运维方仍可从原 config 启动；managed catalog 不会破坏旧二进制。
+受管 Agent definition 含必填的作者版本标签。内容更新必须提供一个未被同名 definition 使用过的新标签，确保随后创建的 AgentRuntime 仍 pin 一个不可变 Agent template version。删除 definition 不删除任何 runtime Agent、Session、history 或 event，只阻止未来按该名称创建 runtime。
 
-Agent definitions 已位于 `/templates`，无需数据迁移。更新 definition 只影响之后创建的 runtime Agent；现存 Agent 已持久化 resolved definition 与 runtime snapshot，继续使用原语义。删除 definition 不删除历史或运行实例，只阻止以后以该名称创建 Agent。
+### D6: 小 interface 的运行时 catalog 隔离管理持久化与执行读取
 
-### D6: catalog 热替换不改变进行中的 Turn
+`stratum-api` 内部的 runtime catalog 是唯一供 HTTP runtime routes 调用的 module interface：解析 definition、列出 template、列出 model 和配置 provider。它隐藏 filesystem/static 与 Studio/Postgres adapter 的差异，并在读取时先 clone `Arc` snapshot 后释放锁。管理写入先由 `StudioStore` 提交，再构建并发布新的 catalog snapshot；锁不会跨越数据库、provider 或网络 await。
 
-可配置 provider 保持 `Arc` 快照语义。Provider credential 或 model catalog 更新成功后，新的 `LlmProviderManager` 原子替换为 HostState 的当前 manager；已经构造的 Agent/Turn 继续持有旧 `Arc<dyn LlmProvider>`，不会在执行中换 key 或模型。之后的新 Agent 使用新 manager。删除 model/provider 前检查 default model 与所有 Agent definitions；有引用时返回 409 和结构化 blocker 列表，不做 cascade 猜测。
+新建 AgentRuntime 读取当前 definition，因现有 `AgentId` pinning 而自然保持版本不变。Provider manager 的选择发生在 Turn 启动前，故已开始的 Turn 保留自己的 `Arc<dyn LlmProvider>`；后续 Turn 使用最新受管 credential/catalog。该语义避免向 durable AgentRuntime state 写入 secret 或隐式维护未定义的长期 credential snapshot。
 
-Provider 首期是闭集 enum `openai | deepseek`，base URL 使用当前代码中的固定可信地址。这样避免自定义 URL 与连接测试带来的 SSRF，同时忠实反映当前 adapter 能力。未来增加真正的 provider kind 时再扩展 enum，不先造 plugin 层。
+Provider 首期是闭集 enum `openai | deepseek`，base URL 继续使用当前可信固定端点。删除 Model/Provider 前检查 default model、受管 Agent definition 及持久 Agent template version 引用；有引用时返回结构化 409，不 cascade 或猜测迁移。
 
-### D7: secret 通过单向写入边界管理
+### D7: secret 只在受限存储与 provider 装配边界显露
 
-Provider 创建要求 API key；更新请求的 `api_key` 可省略以保留已有值。读取响应只返回 `credential_configured: bool`，raw config 也不包含占位 key、长度、前后缀或 hash。API key 进入 Rust 后立即包装为 `secrecy::SecretString` / 现有 `ApiKey`，HTTP DTO 不实现会泄露 secret 的 Debug；日志、tracing 与错误只记录 provider enum 和安全错误码。
+Provider 创建要求 API key；更新请求的 `api_key` 可省略以保留已有值。读取响应只返回 `credential_configured: bool`，raw config 不包含占位 key、长度、前后缀或 hash。API key 进入 Rust 后立即包装为 `secrecy::SecretString` / `ApiKey`；HTTP DTO、日志、tracing 与错误从不记录请求 DTO 或 credential。
 
-本 change 新增直接依赖 `secrecy 0.8.0`（`Apache-2.0 OR MIT`）。选择它是为了使用默认脱敏 Debug、显式 `ExposeSecret` 边界与 drop 时由 `zeroize` 清理，而不是维护容易误实现 Serialize/Debug 的自定义包装。启用 `serde` 仅用于 secret 输入反序列化；`SecretString` 默认不可序列化，持久化必须通过 catalog 的单一显式编码边界。依赖继续受现有 CI `cargo audit` 与 `cargo deny check` 门禁约束。
+Studio database 使用仅授予运行进程的独立连接 URL，credential 表不参与执行 durable events、NATS 或 OpenAPI；`StudioStore` 只在构建 Provider manager 时返回 secret 值。首期不新增不成熟的自定义加密或 credential-provider abstraction；部署方必须使用 PostgreSQL TLS、数据库访问控制与备份加密来保护静态数据。Provider test 是瞬时命令，不保存“在线/就绪”状态。
 
-Provider test 是瞬时命令，不保存“在线/就绪”状态。它使用 adapter 定义的低副作用连接探测、固定超时和脱敏错误；UI 只显示本次请求的 pending/success/failure，刷新后消失。管理路由仅在 `api.management_enabled = true` 且 bind address 为 loopback 时注册；非 loopback 配置在启动校验阶段失败。远程管理需要后续带认证的独立设计。
+管理路由仅在 `[studio].management_enabled = true`、Studio database 配置有效且 API bind address 为 loopback 时注册；否则 route 不存在。远程、多租户管理与 at-rest key-management 保持独立 change。
 
 ### D8: ETag + If-Match 保护并发编辑
 
-单资源 GET 返回由 canonical persisted representation 计算的强 ETag。PUT/DELETE 必须携带 `If-Match`；revision 不一致返回 412，前端保留本地表单并提供重新加载，不静默覆盖。POST 对重复 `agent_name`、已存在 Provider 或重复 Model 返回 409。HostState 的写临界区保证同进程 check-and-write 原子，文件写采用临时文件 + rename，并满足文件/目录落盘要求。
+单资源 GET 返回由 canonical persisted representation 计算的强 ETag。PUT/DELETE 必须携带 `If-Match`；revision 不一致返回 412，前端保留本地表单并提供重新加载，不静默覆盖。POST 对重复 `agent_name`、已存在 Provider 或重复 Model 返回 409。`StudioStore` 事务锁定 catalog revision，而非依赖进程内临界区，因此该规则在多个 API 进程间仍成立。
 
 ### D9: 前端采用 route-local hooks 与显式表单状态
 
@@ -116,11 +116,11 @@ Agent raw config 必须接受后端 `toml` crate 生成的 canonical TOML（包�
 
 ## Migration Plan
 
-1. 在 workspace/config 中加入受校验的 `management_enabled`，默认关闭；现有部署行为不变。
-2. 启动时检测 managed catalog；不存在则从 `[llm]` 一次性 seed 并设置安全文件权限，存在则读取、验证并装配。
-3. 新增 API 与 Web 路由；保留 `/v1/models`、`/v1/agent/templates` 和既有对话消费者。
-4. 更新 PRODUCT.md、`stratum-web/PRODUCT.md`、DESIGN.md 与相关 AGENTS.md；运行前端 detector、lint/typecheck/build 与 Rust fmt/clippy/test。
-5. 回滚时关闭 `management_enabled` 或回退二进制；旧 config 仍可启动，managed catalog 可保留以便再次升级。任何删除都不触及 agent history。
+1. 在 workspace/config 中加入严格 `[studio]` 配置（独立 database URL 与 `management_enabled`，默认关闭）；现有部署行为不变。
+2. 部署 Studio database migration；空 catalog 首次从 `[llm]` 与只读 template catalog seed，非空 catalog 通过严格校验后装配。
+3. 新增 API 与 Web 路由；保留 `/v1/models`、`/v1/agent-templates` 和既有对话消费者。
+4. 更新 CONSTITUTION.md、CONTEXT.md、PRODUCT.md、DESIGN.md 与相关 AGENTS.md；运行前端 detector、lint/typecheck/build 与 Rust fmt/clippy/test。
+5. 回滚时关闭 `management_enabled` 或回退二进制；执行 database、历史与 event 不受 Studio database 影响，Studio 数据可保留以便再次升级。
 
 ## Open Questions
 

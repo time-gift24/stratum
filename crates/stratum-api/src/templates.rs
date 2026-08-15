@@ -10,10 +10,12 @@
 use std::path::Path;
 
 use stratum_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+use stratum_core::ModelConfig;
 use stratum_filesystem::{
     FileType, Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
 };
 use stratum_llm::LlmProviderManager;
+use stratum_studio::AgentDefinitionInput;
 
 use crate::dto::AgentTemplateDto;
 use crate::error::{ApiError, ErrorKind};
@@ -109,6 +111,40 @@ impl TemplateCatalog {
         }
         templates.sort_by(|left, right| left.agent_name.cmp(&right.agent_name));
         Ok(templates)
+    }
+
+    /// Reads all file-backed definitions as one-time Studio seed input.
+    ///
+    /// The filesystem remains read-only. Once the Studio catalog has been
+    /// initialized, this method is never used for runtime resolution.
+    pub(crate) async fn studio_seed_definitions(
+        &self,
+    ) -> Result<Vec<AgentDefinitionInput>, ApiError> {
+        let entries = self
+            .fs
+            .list_dir(&root_path()?)
+            .await
+            .map_err(|source| ApiError::with_source(ErrorKind::InvalidAgentTemplate, source))?;
+        let mut definitions = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File || !entry.file_name.ends_with(".toml") {
+                continue;
+            }
+            let stem = entry.file_name.trim_end_matches(".toml");
+            let agent_name: AgentName = stem
+                .parse()
+                .map_err(|source| ApiError::with_source(ErrorKind::InvalidAgentTemplate, source))?;
+            let definition = self.resolve(&agent_name).await?;
+            definitions.push(AgentDefinitionInput {
+                agent_name,
+                agent_version: definition.agent_version,
+                model: ModelConfig::new(definition.model, serde_json::Map::new()),
+                tools: definition.tools,
+                prompt: definition.prompt,
+            });
+        }
+        definitions.sort_by(|left, right| left.agent_name.as_str().cmp(right.agent_name.as_str()));
+        Ok(definitions)
     }
 }
 
