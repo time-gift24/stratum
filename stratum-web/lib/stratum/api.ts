@@ -30,11 +30,6 @@ export const STRATUM_API_BASE_URL =
   process.env.NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"
 
 export class ApiError extends Error {
-  readonly details: {
-    violations: readonly FieldViolation[]
-    blockers: readonly ResourceBlocker[]
-  }
-
   constructor(
     readonly code: string,
     readonly status: number,
@@ -43,7 +38,6 @@ export class ApiError extends Error {
   ) {
     super(message)
     this.name = "ApiError"
-    this.details = { violations: [], blockers: [] }
   }
 }
 
@@ -209,38 +203,6 @@ export type AgentRuntimeCreated = {
   created_at: string
 }
 
-export type ProviderKind = "openai" | "deepseek"
-export type AgentDefinitionInput = {
-  agent_name: string
-  agent_version: string
-  model: string
-  model_parameters: Record<string, unknown>
-  tools: string[]
-  prompt: string
-}
-export type AgentDefinitionView = AgentDefinitionInput & { updated_at: string }
-export type ProviderView = {
-  provider: ProviderKind
-  credential_configured: boolean
-  models_count: number
-  updated_at: string
-}
-export type ManagedModelView = {
-  model_id: string
-  provider: ProviderKind
-  name: string
-  parameter_schema: unknown
-  updated_at: string
-  is_default: boolean
-}
-export type FieldViolation = { field: string; code: string; message: string }
-export type ResourceBlocker = { resource_type: string; name: string }
-export type PageEnvelope<T> = {
-  data: readonly T[]
-  pagination: { page: number; per_page: number; total: number; total_pages: number }
-}
-export type StudioResource<T> = { data: T; etag: string; location: string | null }
-
 export type AgentRuntimeTurnAccepted = {
   agent_runtime_id: string
   agent_id: string
@@ -307,25 +269,6 @@ export type StratumApi = {
     objectTypeId: string,
     depth?: number
   ): Promise<OntologyNeighborhood>
-  listAgentDefinitions(query?: { page?: number; perPage?: number; search?: string; sort?: string }): Promise<PageEnvelope<AgentDefinitionView>>
-  createAgentDefinition(input: AgentDefinitionInput): Promise<StudioResource<AgentDefinitionView>>
-  getAgentDefinition(name: string): Promise<StudioResource<AgentDefinitionView>>
-  updateAgentDefinition(name: string, input: Omit<AgentDefinitionInput, "agent_name">, etag: string): Promise<StudioResource<AgentDefinitionView>>
-  deleteAgentDefinition(name: string, etag: string): Promise<void>
-  listProviders(query?: { page?: number; perPage?: number }): Promise<PageEnvelope<ProviderView>>
-  createProvider(input: { provider: ProviderKind; api_key?: string }): Promise<StudioResource<ProviderView>>
-  getProvider(provider: ProviderKind): Promise<StudioResource<ProviderView>>
-  updateProvider(provider: ProviderKind, input: { api_key?: string }, etag: string): Promise<StudioResource<ProviderView>>
-  deleteProvider(provider: ProviderKind, etag: string): Promise<void>
-  listProviderModels(provider: ProviderKind, query?: { page?: number; perPage?: number }): Promise<PageEnvelope<ManagedModelView>>
-  createProviderModel(provider: ProviderKind, input: { name: string }): Promise<StudioResource<ManagedModelView>>
-  getProviderModel(provider: ProviderKind, name: string): Promise<StudioResource<ManagedModelView>>
-  deleteProviderModel(provider: ProviderKind, name: string, etag: string): Promise<void>
-  listManagedModels(query?: { page?: number; perPage?: number; search?: string }): Promise<PageEnvelope<ManagedModelView>>
-  getManagedModel(provider: ProviderKind, name: string): Promise<StudioResource<ManagedModelView>>
-  createManagedModel(input: { provider: ProviderKind; name: string }): Promise<StudioResource<ManagedModelView>>
-  deleteManagedModel(provider: ProviderKind, name: string, etag: string): Promise<void>
-  testProvider(provider: ProviderKind): Promise<{ success: boolean; completed_at: string; message?: string }>
 }
 
 // 携带强 ETag 的 Ontology 资源读取结果（GET / POST 201）。
@@ -454,17 +397,6 @@ export function createStratumApi(options: {
     const etag = readEtag(response)
     const document = (await response.json()) as OntologyDocument
     return { document, etag, location: response.headers.get("location") }
-  }
-  const readStudioResource = async <T>(response: Response): Promise<StudioResource<T>> => {
-    if (!response.ok) throw await apiErrorFromResponse(response)
-    return { data: (await response.json()) as T, etag: readEtag(response), location: response.headers.get("location") }
-  }
-  const studioPage = <T>(path: string) => request(path, (value) => value as PageEnvelope<T>)
-  const studioWrite = async <T>(path: string, method: "POST" | "PUT", body: unknown, etag?: string) =>
-    readStudioResource<T>(await fetcher(`${baseUrl}${path}`, { method, headers: { "content-type": "application/json", ...(etag === undefined ? {} : { "if-match": etag }) }, body: JSON.stringify(body) }))
-  const studioDelete = async (path: string, etag: string) => {
-    const response = await fetcher(`${baseUrl}${path}`, { method: "DELETE", headers: { "if-match": etag } })
-    if (!response.ok) throw await apiErrorFromResponse(response)
   }
 
   return {
@@ -635,65 +567,6 @@ export function createStratumApi(options: {
         `/v1/ontologies/${ontologyId}/object-types/${objectTypeId}/neighborhood${suffix}`,
         (value) => value as OntologyNeighborhood
       )
-    },
-    listAgentDefinitions: async (query) => {
-      const params = new URLSearchParams()
-      if (query?.page !== undefined) params.set("page", String(query.page))
-      if (query?.perPage !== undefined) params.set("per_page", String(query.perPage))
-      if (query?.search !== undefined) params.set("search", query.search)
-      const page = await studioPage<AgentDefinitionView>(`/v1/agent-definitions${params.size === 0 ? "" : `?${params}`}`)
-      return { ...page, pagination: { ...page.pagination, total_pages: Math.max(1, Math.ceil(page.pagination.total / page.pagination.per_page)) } }
-    },
-    createAgentDefinition: (input) => studioWrite<AgentDefinitionView>("/v1/agent-definitions", "POST", input),
-    getAgentDefinition: async (name) => readStudioResource<AgentDefinitionView>(await fetcher(`${baseUrl}/v1/agent-definitions/${encodeURIComponent(name)}`)),
-    updateAgentDefinition: (name, input, etag) =>
-      studioWrite<AgentDefinitionView>(
-        `/v1/agent-definitions/${encodeURIComponent(name)}`,
-        "PUT",
-        input,
-        etag
-      ),
-    deleteAgentDefinition: (name, etag) => studioDelete(`/v1/agent-definitions/${encodeURIComponent(name)}`, etag),
-    listProviders: async (query) => {
-      const params = new URLSearchParams()
-      if (query?.page !== undefined) params.set("page", String(query.page))
-      if (query?.perPage !== undefined) params.set("per_page", String(query.perPage))
-      const page = await studioPage<ProviderView>(`/v1/providers${params.size === 0 ? "" : `?${params}`}`)
-      return { ...page, pagination: { ...page.pagination, total_pages: Math.max(1, Math.ceil(page.pagination.total / page.pagination.per_page)) } }
-    },
-    createProvider: (input) => studioWrite<ProviderView>("/v1/providers", "POST", input),
-    getProvider: async (provider) => readStudioResource<ProviderView>(await fetcher(`${baseUrl}/v1/providers/${provider}`)),
-    updateProvider: (provider, input, etag) => studioWrite<ProviderView>(`/v1/providers/${provider}`, "PUT", input, etag),
-    deleteProvider: (provider, etag) => studioDelete(`/v1/providers/${provider}`, etag),
-    listProviderModels: async (provider, query) => {
-      const params = new URLSearchParams()
-      if (query?.page !== undefined) params.set("page", String(query.page))
-      if (query?.perPage !== undefined) params.set("per_page", String(query.perPage))
-      const page = await studioPage<ManagedModelView>(`/v1/providers/${provider}/models${params.size === 0 ? "" : `?${params}`}`)
-      return { ...page, data: page.data.map((model) => ({ ...model, is_default: false })), pagination: { ...page.pagination, total_pages: Math.max(1, Math.ceil(page.pagination.total / page.pagination.per_page)) } }
-    },
-    createProviderModel: async (provider, input) => {
-      const resource = await studioWrite<ManagedModelView>(`/v1/providers/${provider}/models`, "POST", input)
-      return { ...resource, data: { ...resource.data, is_default: false } }
-    },
-    getProviderModel: async (provider, name) => {
-      const resource = await readStudioResource<ManagedModelView>(await fetcher(`${baseUrl}/v1/providers/${provider}/models/${encodeURIComponent(name)}`))
-      return { ...resource, data: { ...resource.data, is_default: false } }
-    },
-    deleteProviderModel: (provider, name, etag) => studioDelete(`/v1/providers/${provider}/models/${encodeURIComponent(name)}`, etag),
-    listManagedModels: async (query) => {
-      const providers = await studioPage<ProviderView>("/v1/providers?per_page=100")
-      const pages = await Promise.all(providers.data.map((provider) => studioPage<ManagedModelView>(`/v1/providers/${provider.provider}/models?per_page=100`)))
-      const all = pages.flatMap((page) => page.data).map((model) => ({ ...model, is_default: false })).filter((model) => query?.search === undefined || model.model_id.toLowerCase().includes(query.search.toLowerCase()))
-      const perPage = query?.perPage ?? 20
-      const page = query?.page ?? 1
-      return { data: all.slice((page - 1) * perPage, page * perPage), pagination: { page, per_page: perPage, total: all.length, total_pages: Math.max(1, Math.ceil(all.length / perPage)) } }
-    },
-    getManagedModel: (provider, name) => createStratumApi({ baseUrl, fetcher }).getProviderModel(provider, name),
-    createManagedModel: (input) => createStratumApi({ baseUrl, fetcher }).createProviderModel(input.provider, { name: input.name }),
-    deleteManagedModel: (provider, name, etag) => studioDelete(`/v1/providers/${provider}/models/${encodeURIComponent(name)}`, etag),
-    testProvider: async () => {
-      throw new ApiError("unsupported", 501, "provider connection testing is unavailable")
     },
   }
 }
