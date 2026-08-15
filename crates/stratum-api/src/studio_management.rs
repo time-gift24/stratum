@@ -24,9 +24,11 @@ use stratum_studio::{
     AgentDefinition, AgentDefinitionInput, ManagedModel, ProviderKind, ProviderSummary,
     ResourceVersion, StudioError, StudioStore, Versioned,
 };
+use utoipa::OpenApi;
 
 use crate::{
     ApiError, AppState, ErrorKind,
+    error::ErrorResponse,
     management_dto::{
         AgentDefinitionView, AgentDefinitionsPage, CreateAgentDefinitionRequest,
         CreateModelRequest, CreateProviderRequest, ModelView, ModelsPage, PaginationView,
@@ -38,6 +40,53 @@ use crate::{
 const DEFAULT_PAGE: usize = 1;
 const DEFAULT_PER_PAGE: usize = 20;
 const MAX_PER_PAGE: usize = 100;
+
+/// OpenAPI document for the loopback-only Studio management surface.
+#[derive(OpenApi)]
+#[openapi(
+    tags((
+        name = "Studio",
+        description = "Loopback-only management API for the mutable Studio catalog"
+    )),
+    paths(
+        list_agent_definitions,
+        create_agent_definition,
+        get_agent_definition,
+        update_agent_definition,
+        delete_agent_definition,
+        list_providers,
+        create_provider,
+        get_provider,
+        update_provider,
+        delete_provider,
+        list_provider_models,
+        create_provider_model,
+        get_provider_model,
+        delete_provider_model,
+    ),
+    components(schemas(
+        AgentDefinitionView,
+        AgentDefinitionsPage,
+        CreateAgentDefinitionRequest,
+        UpdateAgentDefinitionRequest,
+        ProviderKindDto,
+        ProviderView,
+        ProvidersPage,
+        CreateProviderRequest,
+        UpdateProviderRequest,
+        ModelView,
+        ModelsPage,
+        CreateModelRequest,
+        PaginationView,
+        ErrorResponse,
+    ))
+)]
+struct StudioApiDoc;
+
+/// Returns the management OpenAPI fragment when Studio is enabled.
+pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
+    StudioApiDoc::openapi()
+}
 
 #[derive(Deserialize)]
 struct PageParams {
@@ -88,6 +137,23 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         )
 }
 
+/// Lists Studio Agent definitions with deterministic pagination.
+#[utoipa::path(
+    get,
+    path = "/v1/agent-definitions",
+    tag = "Studio",
+    params(
+        ("page" = Option<usize>, Query, description = "one-based page number; defaults to 1"),
+        ("per_page" = Option<usize>, Query, description = "page size from 1 through 100; defaults to 20"),
+        ("search" = Option<String>, Query, description = "case-insensitive Agent name substring")
+    ),
+    responses(
+        (status = 200, description = "one Studio Agent definition page", body = AgentDefinitionsPage),
+        (status = 400, description = "pagination is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn list_agent_definitions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentPageParams>,
@@ -119,6 +185,30 @@ async fn list_agent_definitions(
     }))
 }
 
+/// Creates a Studio Agent definition.
+#[utoipa::path(
+    post,
+    path = "/v1/agent-definitions",
+    tag = "Studio",
+    request_body(
+        content = CreateAgentDefinitionRequest,
+        description = "complete Studio Agent definition; maximum encoded body size is 64 KiB"
+    ),
+    responses(
+        (status = 201, description = "Studio Agent definition created", body = AgentDefinitionView,
+            headers(
+                ("Location" = String, description = "canonical URI of the created definition"),
+                ("ETag" = String, description = "current strong Studio entity tag")
+            )
+        ),
+        (status = 400, description = "request body is invalid", body = ErrorResponse),
+        (status = 409, description = "Agent name or version conflicts with the catalog", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "Studio Agent definition is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn create_agent_definition(
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateAgentDefinitionRequest>, JsonRejection>,
@@ -148,6 +238,22 @@ async fn create_agent_definition(
     )
 }
 
+/// Reads one Studio Agent definition.
+#[utoipa::path(
+    get,
+    path = "/v1/agent-definitions/{agent_name}",
+    tag = "Studio",
+    params(("agent_name" = String, Path, description = "stable Agent name")),
+    responses(
+        (status = 200, description = "current Studio Agent definition", body = AgentDefinitionView,
+            headers(("ETag" = String, description = "current strong Studio entity tag"))
+        ),
+        (status = 404, description = "Studio Agent definition was not found", body = ErrorResponse),
+        (status = 422, description = "Agent name is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_agent_definition(
     State(state): State<Arc<AppState>>,
     Path(agent_name): Path<String>,
@@ -165,6 +271,34 @@ async fn get_agent_definition(
     )
 }
 
+/// Replaces a Studio Agent definition when its strong ETag is current.
+#[utoipa::path(
+    put,
+    path = "/v1/agent-definitions/{agent_name}",
+    tag = "Studio",
+    params(
+        ("agent_name" = String, Path, description = "stable Agent name"),
+        ("If-Match" = String, Header, description = "one required current strong Studio entity tag")
+    ),
+    request_body(
+        content = UpdateAgentDefinitionRequest,
+        description = "complete replacement definition; maximum encoded body size is 64 KiB"
+    ),
+    responses(
+        (status = 200, description = "Studio Agent definition replaced", body = AgentDefinitionView,
+            headers(("ETag" = String, description = "new strong Studio entity tag"))
+        ),
+        (status = 400, description = "request, path, or If-Match header is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Agent definition was not found", body = ErrorResponse),
+        (status = 409, description = "replacement conflicts with the catalog", body = ErrorResponse),
+        (status = 412, description = "Studio entity tag is stale", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "Studio Agent definition is invalid", body = ErrorResponse),
+        (status = 428, description = "If-Match header is required", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn update_agent_definition(
     State(state): State<Arc<AppState>>,
     Path(agent_name): Path<String>,
@@ -192,6 +326,26 @@ async fn update_agent_definition(
     )
 }
 
+/// Deletes a Studio Agent definition when its strong ETag is current.
+#[utoipa::path(
+    delete,
+    path = "/v1/agent-definitions/{agent_name}",
+    tag = "Studio",
+    params(
+        ("agent_name" = String, Path, description = "stable Agent name"),
+        ("If-Match" = String, Header, description = "one required current strong Studio entity tag")
+    ),
+    responses(
+        (status = 204, description = "Studio Agent definition deleted", body = ()),
+        (status = 400, description = "path or If-Match header is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Agent definition was not found", body = ErrorResponse),
+        (status = 409, description = "definition remains referenced by a Provider model", body = ErrorResponse),
+        (status = 412, description = "Studio entity tag is stale", body = ErrorResponse),
+        (status = 428, description = "If-Match header is required", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn delete_agent_definition(
     State(state): State<Arc<AppState>>,
     Path(agent_name): Path<String>,
@@ -205,6 +359,22 @@ async fn delete_agent_definition(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists configured Studio Providers with deterministic pagination.
+#[utoipa::path(
+    get,
+    path = "/v1/providers",
+    tag = "Studio",
+    params(
+        ("page" = Option<usize>, Query, description = "one-based page number; defaults to 1"),
+        ("per_page" = Option<usize>, Query, description = "page size from 1 through 100; defaults to 20")
+    ),
+    responses(
+        (status = 200, description = "one Studio Provider page", body = ProvidersPage),
+        (status = 400, description = "pagination is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn list_providers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageParams>,
@@ -224,6 +394,30 @@ async fn list_providers(
     }))
 }
 
+/// Configures one Studio Provider credential.
+#[utoipa::path(
+    post,
+    path = "/v1/providers",
+    tag = "Studio",
+    request_body(
+        content = CreateProviderRequest,
+        description = "Provider credential; maximum encoded body size is 64 KiB"
+    ),
+    responses(
+        (status = 201, description = "Studio Provider created", body = ProviderView,
+            headers(
+                ("Location" = String, description = "canonical URI of the created Provider"),
+                ("ETag" = String, description = "current strong Studio entity tag")
+            )
+        ),
+        (status = 400, description = "request body is invalid", body = ErrorResponse),
+        (status = 409, description = "Provider already exists", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "Provider credential is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn create_provider(
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateProviderRequest>, JsonRejection>,
@@ -246,6 +440,22 @@ async fn create_provider(
     )
 }
 
+/// Reads one Studio Provider without returning its credential.
+#[utoipa::path(
+    get,
+    path = "/v1/providers/{provider}",
+    tag = "Studio",
+    params(("provider" = ProviderKindDto, Path, description = "supported Provider kind")),
+    responses(
+        (status = 200, description = "current Studio Provider without credential material", body = ProviderView,
+            headers(("ETag" = String, description = "current strong Studio entity tag"))
+        ),
+        (status = 400, description = "Provider path parameter is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider was not found", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<ProviderKindDto>,
@@ -262,6 +472,32 @@ async fn get_provider(
     )
 }
 
+/// Replaces a Studio Provider credential when its strong ETag is current.
+#[utoipa::path(
+    put,
+    path = "/v1/providers/{provider}",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("If-Match" = String, Header, description = "one required current strong Studio entity tag")
+    ),
+    request_body(
+        content = UpdateProviderRequest,
+        description = "credential replacement; omission preserves the current credential; maximum encoded body size is 64 KiB"
+    ),
+    responses(
+        (status = 200, description = "Studio Provider updated", body = ProviderView,
+            headers(("ETag" = String, description = "current strong Studio entity tag"))
+        ),
+        (status = 400, description = "request, path, or If-Match header is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider was not found", body = ErrorResponse),
+        (status = 412, description = "Studio entity tag is stale", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 428, description = "If-Match header is required", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn update_provider(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<ProviderKindDto>,
@@ -299,6 +535,26 @@ async fn update_provider(
     )
 }
 
+/// Deletes a Studio Provider when its strong ETag is current.
+#[utoipa::path(
+    delete,
+    path = "/v1/providers/{provider}",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("If-Match" = String, Header, description = "one required current strong Studio entity tag")
+    ),
+    responses(
+        (status = 204, description = "Studio Provider deleted", body = ()),
+        (status = 400, description = "path or If-Match header is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider was not found", body = ErrorResponse),
+        (status = 409, description = "Provider remains referenced by a model", body = ErrorResponse),
+        (status = 412, description = "Studio entity tag is stale", body = ErrorResponse),
+        (status = 428, description = "If-Match header is required", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn delete_provider(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<ProviderKindDto>,
@@ -315,6 +571,23 @@ async fn delete_provider(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists one Studio Provider's configured models with deterministic pagination.
+#[utoipa::path(
+    get,
+    path = "/v1/providers/{provider}/models",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("page" = Option<usize>, Query, description = "one-based page number; defaults to 1"),
+        ("per_page" = Option<usize>, Query, description = "page size from 1 through 100; defaults to 20")
+    ),
+    responses(
+        (status = 200, description = "one Studio model page", body = ModelsPage),
+        (status = 400, description = "path or pagination is invalid", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn list_provider_models(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<ProviderKindDto>,
@@ -337,6 +610,31 @@ async fn list_provider_models(
     }))
 }
 
+/// Adds a Provider-local model to the Studio catalog.
+#[utoipa::path(
+    post,
+    path = "/v1/providers/{provider}/models",
+    tag = "Studio",
+    params(("provider" = ProviderKindDto, Path, description = "supported Provider kind")),
+    request_body(
+        content = CreateModelRequest,
+        description = "Provider-local model name; maximum encoded body size is 64 KiB"
+    ),
+    responses(
+        (status = 201, description = "Studio Provider model created", body = ModelView,
+            headers(
+                ("Location" = String, description = "canonical URI of the created model"),
+                ("ETag" = String, description = "current strong Studio entity tag")
+            )
+        ),
+        (status = 400, description = "request body or Provider path is invalid", body = ErrorResponse),
+        (status = 409, description = "model already exists", body = ErrorResponse),
+        (status = 413, description = "request body is too large", body = ErrorResponse),
+        (status = 422, description = "model is invalid or not supported by the Provider adapter", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn create_provider_model(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<ProviderKindDto>,
@@ -364,6 +662,25 @@ async fn create_provider_model(
     versioned_response(StatusCode::CREATED, view, model.version, Some(&location))
 }
 
+/// Reads one Studio Provider model.
+#[utoipa::path(
+    get,
+    path = "/v1/providers/{provider}/models/{model_name}",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("model_name" = String, Path, description = "Provider-local model name")
+    ),
+    responses(
+        (status = 200, description = "current Studio Provider model", body = ModelView,
+            headers(("ETag" = String, description = "current strong Studio entity tag"))
+        ),
+        (status = 400, description = "Provider path is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider model was not found", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn get_provider_model(
     State(state): State<Arc<AppState>>,
     Path((provider, model_name)): Path<(ProviderKindDto, String)>,
@@ -376,6 +693,26 @@ async fn get_provider_model(
     versioned_response(StatusCode::OK, view, model.version, None)
 }
 
+/// Deletes one Studio Provider model when its strong ETag is current.
+#[utoipa::path(
+    delete,
+    path = "/v1/providers/{provider}/models/{model_name}",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("model_name" = String, Path, description = "Provider-local model name"),
+        ("If-Match" = String, Header, description = "one required current strong Studio entity tag")
+    ),
+    responses(
+        (status = 204, description = "Studio Provider model deleted", body = ()),
+        (status = 400, description = "path or If-Match header is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider model was not found", body = ErrorResponse),
+        (status = 412, description = "Studio entity tag is stale", body = ErrorResponse),
+        (status = 428, description = "If-Match header is required", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
 async fn delete_provider_model(
     State(state): State<Arc<AppState>>,
     Path((provider, model_name)): Path<(ProviderKindDto, String)>,
