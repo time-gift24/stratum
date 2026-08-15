@@ -83,3 +83,64 @@
   --button-destructive-color: var(--destructive);
   --button-destructive-bg-color: color-mix(in oklch, var(--destructive) 15%, var(--popover));
 }
+
+/**
+ * 工具栏竖置左缘（仅白板页挂 verticalTools；对话内嵌只读卡片不挂，
+ * 移动端底栏 .App-toolbar--mobile 不受影响）：
+ * shapes-section 脱离顶部三列栅格，锚定 layer-ui 左缘垂直居中；
+ * Island 与内部 Row 改列排（!important 压 Excalidraw 的内联 flex 方向）；
+ * 分隔线随方向旋转；更多工具弹层改向画布内侧展开；顶部工具提示隐藏
+ * （其箭头指向顶部工具栏，竖置后语义失效）。
+ */
+.verticalTools :global(.shapes-section) {
+  position: absolute;
+  top: 50%;
+  left: 0.75rem;
+  transform: translateY(-50%);
+  justify-content: flex-start;
+  z-index: 1;
+}
+
+.verticalTools :global(.App-toolbar):not(.App-toolbar--mobile) {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center;
+  width: auto;
+}
+
+/* 按钮的实际容器是 .Stack_horizontal——display:grid + grid-auto-flow:column
+   （flex-direction 对 grid 无效），竖置 = 改 grid 流向 */
+.verticalTools :global(.App-toolbar):not(.App-toolbar--mobile) :global(.Stack_horizontal) {
+  grid-auto-flow: row;
+  grid-auto-rows: min-content;
+  grid-template-rows: none;
+  grid-template-columns: auto;
+}
+
+/* 画布操作提示（"To move canvas…"）：跟随工具栏的常驻 hint，竖置后隐藏 */
+.verticalTools :global(.App-toolbar) :global(.HintViewer) {
+  display: none !important;
+}
+
+/* 顶栏三列栅格与右上角 Library 避让常开的站点导航 */
+.verticalTools :global(.App-menu_top),
+.verticalTools :global(.layer-ui__wrapper__top-right) {
+  padding-top: 5rem;
+}
+
+.verticalTools :global(.App-toolbar__divider) {
+  width: 1.5rem;
+  height: 1px;
+  margin: 0.25rem 0;
+}
+
+.verticalTools :global(.App-toolbar__extra-tools-dropdown) {
+  top: 0;
+  right: auto;
+  left: calc(100% + 0.5rem);
+  margin-top: 0;
+}
+
+.verticalTools :global(.welcome-screen-decor-hint--toolbar) {
+  display: none !important;
+}

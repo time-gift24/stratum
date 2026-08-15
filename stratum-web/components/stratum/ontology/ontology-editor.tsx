@@ -2,13 +2,19 @@
 
 import { useCallback, useMemo, useState } from "react"
 import Link from "next/link"
-import { ArrowLeft, CircleAlert, Loader2, XIcon } from "lucide-react"
+import {
+  ArrowLeft,
+  CircleAlert,
+  Loader2,
+  Network,
+  Plus,
+  Save,
+  SquarePen,
+  XIcon,
+} from "lucide-react"
 
 import { Button, buttonVariants } from "@/components/ui/button"
-import {
-  OntologyCanvas,
-  type CanvasSelection,
-} from "@/components/stratum/ontology/ontology-canvas"
+import { OntologyCanvas } from "@/components/stratum/ontology/ontology-canvas"
 import { ConflictDialog } from "@/components/stratum/ontology/conflict-dialog"
 import { NeighborhoodView } from "@/components/stratum/ontology/neighborhood-view"
 import {
@@ -16,16 +22,18 @@ import {
   DeleteObjectTypeDialog,
 } from "@/components/stratum/ontology/object-type-dialogs"
 import {
-  CanvasGlobalPill,
-  CanvasIdentityPill,
-  LinkTypeSelectionPill,
-  ObjectTypeSelectionPill,
+  ChromePill,
+  PillDivider,
+  PillIconButton,
+  PillLinkButton,
+  PrimaryPillButton,
 } from "@/components/stratum/ontology/ontology-chrome"
 import { LinkTypeDialog } from "@/components/stratum/ontology/link-type-dialog"
 import type {
+  ObjectTypeNodeActions,
   ObjectTypePropertyActions,
-  ObjectTypePropertyDraft,
 } from "@/components/stratum/ontology/ontology-node"
+import type { LinkTypeEdgeActions } from "@/components/stratum/ontology/ontology-edge"
 import type { OntologyEditor as OntologyEditorController } from "@/hooks/use-ontology-editor"
 import { computeLocalNeighborhood } from "@/features/ontology-editor/neighborhood"
 import { mapViolations } from "@/features/ontology-editor/violations"
@@ -193,29 +201,15 @@ function groupViolations(
   }
 }
 
-function propertyMessagesFor(
-  propertyViolations: ReadonlyMap<string, readonly string[]>,
-  objectTypeId: string
-): ReadonlyMap<string, readonly string[]> {
-  const prefix = `${objectTypeId}/`
-  const result = new Map<string, readonly string[]>()
-  for (const [key, messages] of propertyViolations) {
-    if (key.startsWith(prefix)) result.set(key.slice(prefix.length), messages)
-  }
-  return result
-}
-
 function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
   const { state, dirty, save } = editor
   const candidate = state.candidate
 
-  const [selection, setSelection] = useState<CanvasSelection>(null)
   const [view, setView] = useState<"edit" | "neighborhood">("edit")
   const [focus, setFocus] = useState<{
     originId: string
     depth: number
   } | null>(null)
-  const [focusDepth, setFocusDepth] = useState(1)
   const [addOpen, setAddOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{
     objectType: OntologyObjectType
@@ -289,16 +283,35 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
     ]
   )
 
-  const selectedObjectType =
-    candidate !== null && selection?.kind === "objectType"
-      ? candidate.object_types.find(
-          (objectType) => objectType.id === selection.id
-        )
-      : undefined
-  const selectedLinkType =
-    candidate !== null && selection?.kind === "linkType"
-      ? candidate.link_types.find((linkType) => linkType.id === selection.id)
-      : undefined
+  // 节点级动作：详情更新 / 请求删除（打开确认对话框）/ 聚焦邻域。
+  // 引用稳定（candidate 变化时才重建，与文档派生同步），避免画布无谓重渲染
+  const objectActions = useMemo<ObjectTypeNodeActions>(
+    () => ({
+      onUpdate: editor.updateObjectType,
+      onRequestDelete: (objectType) =>
+        setDeleteTarget({
+          objectType,
+          referencingLinks:
+            candidate?.link_types.filter(
+              (linkType) =>
+                linkType.source_object_type_id === objectType.id ||
+                linkType.target_object_type_id === objectType.id
+            ) ?? [],
+        }),
+      onFocus: (originId, depth) => setFocus({ originId, depth }),
+    }),
+    [candidate, editor.updateObjectType]
+  )
+
+  const updateLinkType = editor.updateLinkType
+  const removeLinkType = editor.removeLinkType
+  const edgeActions = useMemo<LinkTypeEdgeActions>(
+    () => ({
+      onUpdate: updateLinkType,
+      onDelete: (linkType) => removeLinkType(linkType.id),
+    }),
+    [updateLinkType, removeLinkType]
+  )
 
   const findObjectType = useCallback(
     (id: string) =>
@@ -348,17 +361,6 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
     setPendingLink({ sourceId, targetId })
   }
 
-  const requestDeleteObjectType = (objectType: OntologyObjectType) => {
-    setDeleteTarget({
-      objectType,
-      referencingLinks: candidate.link_types.filter(
-        (linkType) =>
-          linkType.source_object_type_id === objectType.id ||
-          linkType.target_object_type_id === objectType.id
-      ),
-    })
-  }
-
   const saveDisabled =
     !dirty || inFlight || state.conflict !== null || view !== "edit"
 
@@ -376,86 +378,87 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
             document={candidate}
             focus={activeFocus !== null ? focusNeighborhood : null}
             objectViolations={violations.objectViolations}
+            propertyViolations={violations.propertyViolations}
             linkViolations={violations.linkViolations}
             propertyActions={propertyActions}
-            onSelectionChange={setSelection}
+            objectActions={objectActions}
+            edgeActions={edgeActions}
             onConnectNodes={handleConnect}
             onNodeDragStop={editor.setPosition}
           />
         )}
 
-        {/* 悬浮 chrome：左上身份 / 右上选中工具条 + 全局动作 */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-wrap items-start justify-between gap-2 p-3">
-          <CanvasIdentityPill
-            displayName={candidate.display_name}
-            dirty={dirty}
-            inFlight={inFlight}
-          />
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {view === "edit" && selectedObjectType !== undefined && (
-              <ObjectTypeSelectionPill
-                objectType={selectedObjectType}
-                messages={
-                  violations.objectViolations.get(selectedObjectType.id) ?? []
-                }
-                propertyMessages={propertyMessagesFor(
-                  violations.propertyViolations,
-                  selectedObjectType.id
-                )}
-                addPropertyDisabledReason={propertyActions.getAddPropertyDisabledReason(
-                  selectedObjectType
-                )}
-                focusDepth={focusDepth}
-                onFocusDepthChange={setFocusDepth}
-                onFocus={() =>
-                  setFocus({
-                    originId: selectedObjectType.id,
-                    depth: focusDepth,
-                  })
-                }
-                onUpdate={editor.updateObjectType}
-                onDelete={() => requestDeleteObjectType(selectedObjectType)}
-                onAddProperty={(input: ObjectTypePropertyDraft) =>
-                  editor.addProperty(selectedObjectType.id, input)
-                }
-                onClearSelection={() => setSelection(null)}
-              />
-            )}
-            {view === "edit" &&
-              selectedObjectType === undefined &&
-              selectedLinkType !== undefined && (
-                <LinkTypeSelectionPill
-                  linkType={selectedLinkType}
-                  source={findObjectType(
-                    selectedLinkType.source_object_type_id
-                  )}
-                  target={findObjectType(
-                    selectedLinkType.target_object_type_id
-                  )}
-                  messages={
-                    violations.linkViolations.get(selectedLinkType.id) ?? []
-                  }
-                  onUpdate={editor.updateLinkType}
-                  onDelete={() => {
-                    editor.removeLinkType(selectedLinkType.id)
-                    setSelection(null)
-                  }}
-                  onClearSelection={() => setSelection(null)}
+        {/* 顶部悬浮 pill 群：左 = 返回 + 标题 + 保存状态；
+            右 = 视图切换 / 新增 pill + 独立的保存主操作（有脏数据时实心） */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 px-3 pt-20">
+          <ChromePill className="max-w-[60vw]">
+            <PillLinkButton label="返回列表" href="/ontologies">
+              <ArrowLeft aria-hidden className="size-4" />
+            </PillLinkButton>
+            <PillDivider />
+            <span className="max-w-56 truncate px-1.5 text-xs font-medium">
+              {candidate.display_name}
+            </span>
+            {inFlight ? (
+              <span className="flex items-center gap-1.5 pr-1.5 text-xs text-muted-foreground">
+                <Loader2
+                  aria-hidden
+                  className="size-3.5 animate-spin motion-reduce:animate-none"
                 />
-              )}
-            <CanvasGlobalPill
-              view={view}
-              onViewChange={setView}
-              onAddObjectType={openAddDialog}
-              saveDisabled={saveDisabled}
-              inFlight={inFlight}
-              onSave={() => void handleSave()}
-            />
+                保存中
+              </span>
+            ) : dirty ? (
+              <span
+                role="status"
+                className="pr-1.5 text-xs text-muted-foreground"
+              >
+                未保存
+              </span>
+            ) : null}
+          </ChromePill>
+          <div className="flex items-start gap-2">
+            <ChromePill>
+              <PillIconButton
+                label="编辑画布"
+                active={view === "edit"}
+                onClick={() => setView("edit")}
+              >
+                <SquarePen aria-hidden className="size-4" />
+              </PillIconButton>
+              <PillIconButton
+                label="邻域视图"
+                active={view === "neighborhood"}
+                onClick={() => setView("neighborhood")}
+              >
+                <Network aria-hidden className="size-4" />
+              </PillIconButton>
+              {view === "edit" ? (
+                <>
+                  <PillDivider />
+                  <PillIconButton
+                    label="新增 Object Type"
+                    onClick={openAddDialog}
+                  >
+                    <Plus aria-hidden className="size-4" />
+                  </PillIconButton>
+                </>
+              ) : null}
+            </ChromePill>
+            {view === "edit" ? (
+              <PrimaryPillButton
+                label="保存"
+                loading={inFlight}
+                disabled={saveDisabled}
+                onClick={() => void handleSave()}
+              >
+                <Save aria-hidden className="size-4" />
+              </PrimaryPillButton>
+            ) : null}
           </div>
         </div>
 
-        {/* 状态横幅 + 聚焦指示：顶部居中浮层，只在有事时出现 */}
-        <div className="pointer-events-none absolute inset-x-0 top-16 z-10 flex flex-col items-center gap-2 px-3">
+        {/* 状态横幅 + 聚焦指示：顶部居中浮层（避开 pill 群与站点导航），有事才出现 */}
+        <div className="pointer-events-none absolute inset-x-0 top-32 z-10 flex flex-col items-center gap-2 px-3">
           {state.draftAvailable !== null && (
             <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-xl border border-border bg-popover/95 px-3 py-2 text-xs shadow-[0_8px_30px] shadow-black/10 backdrop-blur">
               <span>发现未保存的草稿（上次编辑未完成保存）。</span>
@@ -559,9 +562,8 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
         open={addOpen}
         onOpenChange={setAddOpen}
         onSubmit={(input) => {
-          const id = editor.addObjectType(input)
+          editor.addObjectType(input)
           setAddOpen(false)
-          setSelection({ kind: "objectType", id })
         }}
       />
       <DeleteObjectTypeDialog
@@ -571,7 +573,6 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           if (deleteTarget !== null)
             editor.removeObjectType(deleteTarget.objectType.id)
           setDeleteTarget(null)
-          setSelection(null)
         }}
       />
       <LinkTypeDialog
@@ -589,13 +590,12 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
         onCancel={() => setPendingLink(null)}
         onSubmit={(input) => {
           if (pendingLink === null) return
-          const id = editor.addLinkType({
+          editor.addLinkType({
             ...input,
             source_object_type_id: pendingLink.sourceId,
             target_object_type_id: pendingLink.targetId,
           })
           setPendingLink(null)
-          setSelection({ kind: "linkType", id })
         }}
       />
       <ConflictDialog

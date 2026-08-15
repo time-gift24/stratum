@@ -30,10 +30,12 @@ import { cn } from "@/lib/utils"
 import {
   OntologyLinkTypeEdge,
   type LinkTypeEdge,
+  type LinkTypeEdgeActions,
 } from "@/components/stratum/ontology/ontology-edge"
 import {
   OntologyObjectTypeNode,
   type ObjectTypeNode,
+  type ObjectTypeNodeActions,
   type ObjectTypePropertyActions,
 } from "@/components/stratum/ontology/ontology-node"
 import styles from "@/components/stratum/ontology/ontology-theme.module.css"
@@ -50,8 +52,9 @@ const edgeTypes = { ontologyLinkType: OntologyLinkTypeEdge }
 
 const MINIMAP_PROPS = { pannable: true, zoomable: true } as const
 
-// 共享空违例列表 / 边箭头：避免每次 derive 分配新对象，保持 node/edge data 引用稳定
+// 共享空违例列表 / 空属性违例表 / 边箭头：避免每次 derive 分配新对象，保持 node/edge data 引用稳定
 const EMPTY_MESSAGES: readonly string[] = []
+const EMPTY_PROPERTY_MESSAGES: ReadonlyMap<string, readonly string[]> = new Map()
 const EDGE_MARKER_END = { type: MarkerType.ArrowClosed } as const
 
 export type CanvasSelection = {
@@ -67,28 +70,41 @@ function toNodes(
   document: OntologyDocument,
   focus: LocalNeighborhood | null,
   objectViolations: CanvasMessages,
-  propertyActions: ObjectTypePropertyActions
+  propertyViolations: CanvasMessages,
+  propertyActions: ObjectTypePropertyActions,
+  objectActions: ObjectTypeNodeActions
 ): ObjectTypeNode[] {
   const positions = resolveNodePositions(document)
-  return document.object_types.map((objectType) => ({
-    id: objectType.id,
-    type: "ontologyObjectType" as const,
-    position: positions.get(objectType.id) ?? { x: 0, y: 0 },
-    data: {
-      objectType,
-      violations: objectViolations.get(objectType.id) ?? EMPTY_MESSAGES,
-      dimmed: focus !== null && !focus.objectTypeIds.has(objectType.id),
-      propertyActions,
-    },
-  }))
+  return document.object_types.map((objectType) => {
+    // 属性级违例按键前缀切片：property.id → 消息列表
+    const propertyMessages = new Map<string, readonly string[]>()
+    for (const property of objectType.properties) {
+      const messages = propertyViolations.get(`${objectType.id}/${property.id}`)
+      if (messages !== undefined) propertyMessages.set(property.id, messages)
+    }
+    return {
+      id: objectType.id,
+      type: "ontologyObjectType" as const,
+      position: positions.get(objectType.id) ?? { x: 0, y: 0 },
+      data: {
+        objectType,
+        violations: objectViolations.get(objectType.id) ?? EMPTY_MESSAGES,
+        propertyMessages,
+        dimmed: focus !== null && !focus.objectTypeIds.has(objectType.id),
+        propertyActions,
+        objectActions,
+      },
+    }
+  })
 }
 
 function toEdges(
-  linkTypes: OntologyDocument["link_types"],
+  document: OntologyDocument,
   focus: LocalNeighborhood | null,
-  linkViolations: CanvasMessages
+  linkViolations: CanvasMessages,
+  edgeActions: LinkTypeEdgeActions
 ): LinkTypeEdge[] {
-  return linkTypes.map((linkType) => {
+  return document.link_types.map((linkType) => {
     const dimmed = focus !== null && !focus.linkTypeIds.has(linkType.id)
     return {
       id: linkType.id,
@@ -101,6 +117,13 @@ function toEdges(
         linkType,
         violations: linkViolations.get(linkType.id) ?? EMPTY_MESSAGES,
         dimmed,
+        source: document.object_types.find(
+          (objectType) => objectType.id === linkType.source_object_type_id
+        ),
+        target: document.object_types.find(
+          (objectType) => objectType.id === linkType.target_object_type_id
+        ),
+        edgeActions,
       },
     }
   })
@@ -110,8 +133,11 @@ export function OntologyCanvas({
   document,
   focus,
   objectViolations,
+  propertyViolations,
   linkViolations,
   propertyActions,
+  objectActions,
+  edgeActions,
   onSelectionChange,
   onConnectNodes,
   onNodeDragStop,
@@ -119,20 +145,40 @@ export function OntologyCanvas({
   document: OntologyDocument
   focus: LocalNeighborhood | null
   objectViolations: CanvasMessages
+  propertyViolations: CanvasMessages
   linkViolations: CanvasMessages
   /** 属性行内增删改（来自 use-ontology-editor，需引用稳定） */
   propertyActions: ObjectTypePropertyActions
-  onSelectionChange(selection: CanvasSelection): void
+  /** 节点级动作（详情/删除/聚焦，引用需稳定） */
+  objectActions: ObjectTypeNodeActions
+  /** 边级动作（编辑/删除，引用需稳定） */
+  edgeActions: LinkTypeEdgeActions
+  onSelectionChange?(selection: CanvasSelection): void
   onConnectNodes(sourceId: string, targetId: string): void
   onNodeDragStop(objectTypeId: string, x: number, y: number): void
 }) {
   const baseNodes = useMemo(
-    () => toNodes(document, focus, objectViolations, propertyActions),
-    [document, focus, objectViolations, propertyActions]
+    () =>
+      toNodes(
+        document,
+        focus,
+        objectViolations,
+        propertyViolations,
+        propertyActions,
+        objectActions
+      ),
+    [
+      document,
+      focus,
+      objectViolations,
+      propertyViolations,
+      propertyActions,
+      objectActions,
+    ]
   )
   const baseEdges = useMemo(
-    () => toEdges(document.link_types, focus, linkViolations),
-    [document.link_types, focus, linkViolations]
+    () => toEdges(document, focus, linkViolations, edgeActions),
+    [document, focus, linkViolations, edgeActions]
   )
 
   // 本地渲染态：拖拽/框选等交互即时应用；外部数据变化时重建并保留内部选中态
@@ -157,8 +203,10 @@ export function OntologyCanvas({
         if (
           before.data.objectType === node.data.objectType &&
           before.data.violations === node.data.violations &&
+          before.data.propertyMessages === node.data.propertyMessages &&
           before.data.dimmed === node.data.dimmed &&
           before.data.propertyActions === node.data.propertyActions &&
+          before.data.objectActions === node.data.objectActions &&
           before.position.x === node.position.x &&
           before.position.y === node.position.y
         )
@@ -184,7 +232,10 @@ export function OntologyCanvas({
         if (
           beforeData.linkType === data.linkType &&
           beforeData.violations === data.violations &&
-          beforeData.dimmed === data.dimmed
+          beforeData.dimmed === data.dimmed &&
+          beforeData.source === data.source &&
+          beforeData.target === data.target &&
+          beforeData.edgeActions === data.edgeActions
         )
           return before
         return before.selected ? { ...edge, selected: true } : edge
@@ -205,6 +256,7 @@ export function OntologyCanvas({
 
   const handleSelectionChange = useCallback(
     (params: OnSelectionChangeParams<ObjectTypeNode, LinkTypeEdge>) => {
+      if (onSelectionChange === undefined) return
       const node = params.nodes[0]
       if (node !== undefined) {
         onSelectionChange({ kind: "objectType", id: node.id })
@@ -275,7 +327,12 @@ export function NeighborhoodCanvas({
       type: "ontologyObjectType" as const,
       position: positions.get(objectType.id) ?? { x: 0, y: 0 },
       draggable: false,
-      data: { objectType, violations: EMPTY_MESSAGES, dimmed: false },
+      data: {
+        objectType,
+        violations: EMPTY_MESSAGES,
+        propertyMessages: EMPTY_PROPERTY_MESSAGES,
+        dimmed: false,
+      },
     }))
   }, [neighborhood])
 

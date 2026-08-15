@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react"
-import { ArrowUp, Plus } from "lucide-react"
+import { ArrowUp, Loader2, Plus, Square } from "lucide-react"
 
 import { BorderGlow } from "@/components/react-bits/border-glow"
 import { Button } from "@/components/ui/button"
@@ -45,6 +45,8 @@ const useIsomorphicLayoutEffect =
  * 退出预判）；形态翻转后按新宽度重测高度（layout 时机，只调高度不重判）。
  * 默认 1 行高，换行/长文本自动生长（scrollHeight 手法），超过 10rem 内部滚动。
  * Enter 提交、Shift+Enter 换行、IME 组合态 Enter 不提交；空输入禁用发送。
+ * 执行中（running）发送钮变为停止钮，取消已发出（cancelRequested）则转圈
+ * 禁用，等待真实停止。左侧插槽 leading 缺省时渲染默认 + 附件按钮。
  * 激活态：light 是 border 变色 + 贴边 ring（无 offset，单线光晕）；dark 聚焦
  * 时保留 BorderGlow 全线段点亮。popover portal 的焦点仍视为输入框内部交互，
  * 避免错误熄灭反馈。
@@ -52,15 +54,26 @@ const useIsomorphicLayoutEffect =
  */
 export function PromptInput({
   placeholder = "问问 Stratum",
+  leading,
   trailing,
+  running = false,
+  cancelRequested = false,
+  onCancel,
   value,
   onChange,
   onSubmit,
   className,
 }: {
   placeholder?: string
+  /** 输入框左侧插槽（如 Agent 选择器）；不传则渲染默认的 + 附件按钮 */
+  leading?: React.ReactNode
   /** 输入框右侧、发送按钮之前的插槽（如模型选择器）；不传则不渲染 */
   trailing?: React.ReactNode
+  /** 执行中：发送钮变为停止钮，点击走 onCancel */
+  running?: boolean
+  /** 取消请求已发出：停止钮转圈并禁用，等待真实停止 */
+  cancelRequested?: boolean
+  onCancel?: () => void
   /** 受控值；不传则内部自管（提交后自动清空） */
   value?: string
   onChange?: (value: string) => void
@@ -182,14 +195,16 @@ export function PromptInput({
 
   const composer = (
     <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-[28px] p-1.5 shadow-sm dark:shadow-xl">
-      <Button
-        variant="ghost"
-        size="icon"
-        className="rounded-full"
-        aria-label="添加附件"
-      >
-        <Plus aria-hidden />
-      </Button>
+      {leading ?? (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="rounded-full"
+          aria-label="添加附件"
+        >
+          <Plus aria-hidden />
+        </Button>
+      )}
       <textarea
         ref={textareaRef}
         rows={1}
@@ -215,15 +230,34 @@ export function PromptInput({
       />
       <div className="flex items-center gap-1.5">
         {trailing}
-        <Button
-          size="icon"
-          className="rounded-full"
-          aria-label="发送"
-          disabled={!canSend}
-          onClick={submit}
-        >
-          <ArrowUp aria-hidden />
-        </Button>
+        {running ? (
+          <Button
+            size="icon"
+            className="rounded-full"
+            aria-label={cancelRequested ? "正在取消" : "取消执行"}
+            disabled={cancelRequested}
+            onClick={onCancel}
+          >
+            {cancelRequested ? (
+              <Loader2
+                aria-hidden
+                className="animate-spin motion-reduce:animate-none"
+              />
+            ) : (
+              <Square aria-hidden fill="currentColor" />
+            )}
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            className="rounded-full"
+            aria-label="发送"
+            disabled={!canSend}
+            onClick={submit}
+          >
+            <ArrowUp aria-hidden />
+          </Button>
+        )}
       </div>
     </div>
   )

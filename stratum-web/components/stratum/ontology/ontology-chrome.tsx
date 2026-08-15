@@ -1,19 +1,8 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
-import {
-  ArrowLeft,
-  Crosshair,
-  ListPlus,
-  Loader2,
-  Network,
-  PenLine,
-  Plus,
-  Save,
-  SquarePen,
-  Trash2Icon,
-  XIcon,
-} from "lucide-react"
+import { Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -43,10 +32,8 @@ import {
   FieldRow,
 } from "@/components/stratum/ontology/form-controls"
 import { CardinalitySelect } from "@/components/stratum/ontology/link-type-dialog"
-import type { ObjectTypePropertyDraft } from "@/components/stratum/ontology/ontology-node"
 import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import {
-  nextPropertyName,
   validatePropertyDisplayName,
   validatePropertyName,
 } from "@/features/ontology-editor/property"
@@ -58,16 +45,25 @@ import type {
 import { cn } from "@/lib/utils"
 
 /**
- * Ontology 画布的悬浮 chrome——方向契约：
- * 画布满铺，没有头部栏。所有控制收进浮在画布上的圆角 pill：
- * 左上 = 返回 + 标题 + 保存状态；右上 = 选中工具条（有选中时）+ 全局动作
- * （视图切换 / 新增 / 保存）。文字只保留标题与真实保存状态，其余一律图标
- * + tooltip；需要输入的编辑（改名、描述、cardinality、聚焦深度）收进图标
- * 弹出的 Popover，不再使用右侧常驻面板。
+ * Ontology 画布的悬浮 chrome 原语——方向契约（对齐暗色节点编辑器参考）：
+ * 画布满铺。顶部：左右两枚悬浮 pill——左 = 返回 + 标题 + 保存状态，
+ * 右 = 视图切换 / 新增（图标 + 分隔线收进一枚 pill）+ 独立的主操作 pill
+ * （保存：有脏数据时实心 primary，图标+文字，全页最显眼）。
+ * 节点/边的操作不长在任何侧栏——直接长在卡片上：CardIconButton /
+ * CardIconPopover 是卡片内的小图标动作（nodrag，tooltip 向上，
+ * Popover 向下右对齐）。文字只保留标题、保存状态与主操作。
+ * 组装方式：编辑器用 pill 族组合顶部栏；节点/边组件用 card 族组合
+ * 卡片内动作；本文件不含整段装配。不用任何常驻面板或侧边按钮列。
  */
 
-/** 悬浮 pill 容器：popover 底 + 细边 + 投影，与画布节点同一浮层语言 */
-function CanvasPill({
+const pillIcon = "size-4"
+
+// ---------------------------------------------------------------------------
+// 顶部 pill 族
+// ---------------------------------------------------------------------------
+
+/** 顶部悬浮 pill 容器：深色圆角全胶囊 + 细边 + 投影 + backdrop-blur */
+export function ChromePill({
   className,
   children,
 }: {
@@ -77,7 +73,7 @@ function CanvasPill({
   return (
     <div
       className={cn(
-        "pointer-events-auto flex items-center gap-0.5 rounded-full border border-border bg-popover/95 p-1 shadow-[0_8px_30px] shadow-black/10 backdrop-blur",
+        "pointer-events-auto flex h-10 items-center gap-0.5 rounded-full border border-border bg-card/95 px-1.5 shadow-xl backdrop-blur",
         className
       )}
     >
@@ -86,8 +82,12 @@ function CanvasPill({
   )
 }
 
-/** 图标动作：ghost 圆钮 + tooltip（tooltip 即无障碍名） */
-function IconAction({
+export function PillDivider() {
+  return <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+}
+
+/** pill 内图标钮：ghost 圆钮 + tooltip（side=bottom，tooltip 即无障碍名） */
+export function PillIconButton({
   label,
   active,
   disabled,
@@ -114,8 +114,9 @@ function IconAction({
               disabled={disabled}
               onClick={onClick}
               className={cn(
-                "rounded-full",
-                active && "bg-accent text-accent-foreground"
+                "rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                active &&
+                  "bg-primary/15 text-primary hover:bg-primary/15 hover:text-primary"
               )}
             />
           }
@@ -128,13 +129,141 @@ function IconAction({
   )
 }
 
-/** 图标弹层动作：图标钮 + tooltip，点击弹出 Popover 表单 */
-function IconPopover({
+/** pill 内链接（返回等导航）：与 PillIconButton 同一几何 */
+export function PillLinkButton({
   label,
+  href,
+  children,
+}: {
+  label: string
+  href: string
+  children: React.ReactNode
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Link
+              href={href}
+              aria-label={label}
+              className="flex size-8 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          }
+        >
+          {children}
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+/**
+ * 主操作 pill（保存）：独立实心胶囊，图标 + 文字。
+ * 可行动（有脏数据）时实心 primary——参考里白色 Share 钮的视觉权重；
+ * 不可行动时退回安静 pill，不抢注意力。
+ */
+export function PrimaryPillButton({
+  label,
+  loading,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string
+  loading?: boolean
+  disabled?: boolean
+  onClick?: () => void
+  children: React.ReactNode
+}) {
+  const actionable = !disabled && !loading
+  return (
+    <Button
+      type="button"
+      aria-label={label}
+      disabled={disabled || loading}
+      onClick={onClick}
+      className={cn(
+        "pointer-events-auto h-10 gap-1.5 rounded-full px-4 text-sm font-medium shadow-xl",
+        actionable
+          ? "bg-primary text-primary-foreground hover:bg-primary/90"
+          : "border border-border bg-card/95 text-muted-foreground backdrop-blur"
+      )}
+    >
+      {loading ? (
+        <Loader2
+          aria-hidden
+          className={cn(pillIcon, "animate-spin motion-reduce:animate-none")}
+        />
+      ) : (
+        children
+      )}
+      {label}
+    </Button>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 卡片内动作族（节点头 / 边标签）
+// ---------------------------------------------------------------------------
+
+type CardTone = "default" | "danger"
+
+const cardToneClass: Record<CardTone, string> = {
+  default: "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+  danger: "text-muted-foreground hover:bg-destructive/10 hover:text-destructive",
+}
+
+/** 卡片内小图标动作：size-7 + nodrag（不触发节点拖拽）+ tooltip 向上 */
+export function CardIconButton({
+  label,
+  tone = "default",
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string
+  tone?: CardTone
+  disabled?: boolean
+  onClick?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={label}
+              disabled={disabled}
+              onClick={onClick}
+              className={cn("nodrag size-7 rounded-md", cardToneClass[tone])}
+            />
+          }
+        >
+          {children}
+        </TooltipTrigger>
+        <TooltipContent side="top">{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+/** 卡片内小图标弹层：点击弹出 Popover 表单（默认向下右对齐，nodrag） */
+export function CardIconPopover({
+  label,
+  side = "bottom",
+  align = "end",
   children,
   content,
 }: {
   label: string
+  side?: "top" | "bottom" | "left" | "right"
+  align?: "start" | "center" | "end"
   children: React.ReactNode
   content: React.ReactNode
 }) {
@@ -149,9 +278,12 @@ function IconPopover({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon-sm"
+                    size="icon-xs"
                     aria-label={label}
-                    className="rounded-full"
+                    className={cn(
+                      "nodrag size-7 rounded-md",
+                      cardToneClass.default
+                    )}
                   />
                 }
               />
@@ -159,139 +291,19 @@ function IconPopover({
           >
             {children}
           </TooltipTrigger>
-          <TooltipContent side="bottom">{label}</TooltipContent>
+          <TooltipContent side="top">{label}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      <PopoverContent align="end" className="w-80">
+      <PopoverContent side={side} align={align} className="nodrag w-80">
         {content}
       </PopoverContent>
     </Popover>
   )
 }
 
-const pillIcon = "size-4"
-
-/** 左上：返回 + Ontology 标题 + 真实保存状态（已保存时不占视觉） */
-export function CanvasIdentityPill({
-  displayName,
-  dirty,
-  inFlight,
-}: {
-  displayName: string
-  dirty: boolean
-  inFlight: boolean
-}) {
-  return (
-    <CanvasPill className="max-w-[70vw]">
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Link
-                href="/ontologies"
-                aria-label="返回列表"
-                className="flex size-8 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
-              />
-            }
-          >
-            <ArrowLeft aria-hidden className={pillIcon} />
-          </TooltipTrigger>
-          <TooltipContent side="bottom">返回列表</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-      <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-      <span className="max-w-48 truncate px-1.5 text-xs font-medium">
-        {displayName}
-      </span>
-      {inFlight ? (
-        <span className="flex items-center gap-1.5 pr-1.5 text-xs text-muted-foreground">
-          <Loader2
-            aria-hidden
-            className="size-3.5 animate-spin motion-reduce:animate-none"
-          />
-          保存中
-        </span>
-      ) : dirty ? (
-        <span role="status" className="pr-1.5 text-xs text-muted-foreground">
-          未保存
-        </span>
-      ) : null}
-    </CanvasPill>
-  )
-}
-
-/** 右上全局动作：视图切换（编辑/邻域）+ 新增 Object Type + 保存 */
-export function CanvasGlobalPill({
-  view,
-  onViewChange,
-  onAddObjectType,
-  saveDisabled,
-  inFlight,
-  onSave,
-}: {
-  view: "edit" | "neighborhood"
-  onViewChange(view: "edit" | "neighborhood"): void
-  onAddObjectType(): void
-  saveDisabled: boolean
-  inFlight: boolean
-  onSave(): void
-}) {
-  return (
-    <CanvasPill>
-      <IconAction
-        label="编辑画布"
-        active={view === "edit"}
-        onClick={() => onViewChange("edit")}
-      >
-        <SquarePen aria-hidden className={pillIcon} />
-      </IconAction>
-      <IconAction
-        label="邻域视图"
-        active={view === "neighborhood"}
-        onClick={() => onViewChange("neighborhood")}
-      >
-        <Network aria-hidden className={pillIcon} />
-      </IconAction>
-      {view === "edit" ? (
-        <>
-          <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-          <IconAction label="新增 Object Type" onClick={onAddObjectType}>
-            <Plus aria-hidden className={pillIcon} />
-          </IconAction>
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-sm"
-                    aria-label="保存"
-                    disabled={saveDisabled}
-                    onClick={onSave}
-                    className="rounded-full"
-                  />
-                }
-              >
-                {inFlight ? (
-                  <Loader2
-                    aria-hidden
-                    className={cn(
-                      pillIcon,
-                      "animate-spin motion-reduce:animate-none"
-                    )}
-                  />
-                ) : (
-                  <Save aria-hidden className={pillIcon} />
-                )}
-              </TooltipTrigger>
-              <TooltipContent side="bottom">保存</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </>
-      ) : null}
-    </CanvasPill>
-  )
-}
+// ---------------------------------------------------------------------------
+// 自包含 Popover 动作（表单与校验逻辑封装在此，图标由调用方传入）
+// ---------------------------------------------------------------------------
 
 function ViolationList({ messages }: { messages: readonly string[] }) {
   if (messages.length === 0) return null
@@ -307,31 +319,19 @@ function ViolationList({ messages }: { messages: readonly string[] }) {
   )
 }
 
-/** 选中 Object Type 的悬浮工具条：加属性 / 编辑详情 / 聚焦邻域 / 删除 / 取消选中 */
-export function ObjectTypeSelectionPill({
+/** Object Type 详情动作：CardIconPopover + 显示名/name/描述表单 + 违例列表 */
+export function ObjectTypeDetailsAction({
   objectType,
   messages,
   propertyMessages,
-  addPropertyDisabledReason,
-  focusDepth,
-  onFocusDepthChange,
-  onFocus,
   onUpdate,
-  onDelete,
-  onAddProperty,
-  onClearSelection,
+  icon,
 }: {
   objectType: OntologyObjectType
   messages: readonly string[]
   propertyMessages: ReadonlyMap<string, readonly string[]>
-  addPropertyDisabledReason: string | null
-  focusDepth: number
-  onFocusDepthChange(depth: number): void
-  onFocus(): void
   onUpdate(next: OntologyObjectType): void
-  onDelete(): void
-  onAddProperty(input: ObjectTypePropertyDraft): void
-  onClearSelection(): void
+  icon: React.ReactNode
 }) {
   const allMessages = [
     ...messages,
@@ -341,222 +341,193 @@ export function ObjectTypeSelectionPill({
       )
     ),
   ]
-  const addProperty = () => {
-    if (addPropertyDisabledReason !== null) return
-    const name = nextPropertyName(objectType.properties)
-    onAddProperty({
-      name,
-      display_name: name,
-      value_type: "string",
-      required: false,
-    })
-  }
-
   return (
-    <CanvasPill>
-      <span className="max-w-32 truncate px-1.5 text-xs font-medium">
-        {objectType.display_name}
-      </span>
-      <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-      <IconAction
-        label={addPropertyDisabledReason ?? "添加属性"}
-        disabled={addPropertyDisabledReason !== null}
-        onClick={addProperty}
-      >
-        <ListPlus aria-hidden className={pillIcon} />
-      </IconAction>
-      <IconPopover
-        label="编辑详情"
-        content={
-          <>
-            <PopoverHeader>
-              <PopoverTitle>{objectType.display_name}</PopoverTitle>
-              <PopoverDescription className="font-mono">
-                {objectType.name}
-              </PopoverDescription>
-            </PopoverHeader>
-            <ViolationList messages={allMessages} />
-            <FieldRow label="显示名（display_name）">
-              <CommitInput
-                ariaLabel="Object Type 显示名"
-                value={objectType.display_name}
-                validate={validatePropertyDisplayName}
-                onCommit={(displayName) =>
-                  onUpdate({ ...objectType, display_name: displayName })
-                }
-              />
-            </FieldRow>
-            <FieldRow label="名称（name）">
-              <CommitInput
-                mono
-                ariaLabel="Object Type 名称"
-                value={objectType.name}
-                validate={validatePropertyName}
-                onCommit={(name) => onUpdate({ ...objectType, name })}
-              />
-            </FieldRow>
-            <FieldRow label="描述（description，可选）">
-              <CommitTextarea
-                ariaLabel="Object Type 描述"
-                value={objectType.description ?? ""}
-                placeholder="留空表示无描述"
-                onCommit={(description) =>
-                  onUpdate({
-                    ...objectType,
-                    description: description === "" ? undefined : description,
-                  })
-                }
-              />
-            </FieldRow>
-          </>
-        }
-      >
-        <PenLine aria-hidden className={pillIcon} />
-      </IconPopover>
-      <IconPopover
-        label="聚焦邻域"
-        content={
-          <>
-            <PopoverHeader>
-              <PopoverTitle>聚焦邻域</PopoverTitle>
-              <PopoverDescription>
-                只显示「{objectType.display_name}」及其指定深度内的邻居。
-              </PopoverDescription>
-            </PopoverHeader>
-            <FieldRow label="深度">
-              <Select
-                value={focusDepth}
-                onValueChange={(next) => onFocusDepthChange(next ?? 1)}
-              >
-                <SelectTrigger aria-label="聚焦深度" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Array.from(
-                    { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
-                    (_, depth) => (
-                      <SelectItem key={depth} value={depth}>
-                        深度 {depth}
-                      </SelectItem>
-                    )
-                  )}
-                </SelectContent>
-              </Select>
-            </FieldRow>
-            <Button type="button" size="sm" onClick={onFocus}>
-              聚焦
-            </Button>
-          </>
-        }
-      >
-        <Crosshair aria-hidden className={pillIcon} />
-      </IconPopover>
-      <IconAction label="删除该 Object Type" onClick={onDelete}>
-        <Trash2Icon aria-hidden className={pillIcon} />
-      </IconAction>
-      <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-      <IconAction label="取消选中" onClick={onClearSelection}>
-        <XIcon aria-hidden className={pillIcon} />
-      </IconAction>
-    </CanvasPill>
+    <CardIconPopover
+      label={`编辑详情（${objectType.display_name}）`}
+      content={
+        <>
+          <PopoverHeader>
+            <PopoverTitle>{objectType.display_name}</PopoverTitle>
+            <PopoverDescription className="font-mono">
+              {objectType.name}
+            </PopoverDescription>
+          </PopoverHeader>
+          <ViolationList messages={allMessages} />
+          <FieldRow label="显示名（display_name）">
+            <CommitInput
+              ariaLabel="Object Type 显示名"
+              value={objectType.display_name}
+              validate={validatePropertyDisplayName}
+              onCommit={(displayName) =>
+                onUpdate({ ...objectType, display_name: displayName })
+              }
+            />
+          </FieldRow>
+          <FieldRow label="名称（name）">
+            <CommitInput
+              mono
+              ariaLabel="Object Type 名称"
+              value={objectType.name}
+              validate={validatePropertyName}
+              onCommit={(name) => onUpdate({ ...objectType, name })}
+            />
+          </FieldRow>
+          <FieldRow label="描述（description，可选）">
+            <CommitTextarea
+              ariaLabel="Object Type 描述"
+              value={objectType.description ?? ""}
+              placeholder="留空表示无描述"
+              onCommit={(description) =>
+                onUpdate({
+                  ...objectType,
+                  description: description === "" ? undefined : description,
+                })
+              }
+            />
+          </FieldRow>
+        </>
+      }
+    >
+      {icon}
+    </CardIconPopover>
   )
 }
 
-/** 选中 Link Type 的悬浮工具条：编辑（名称/显示名/双向 cardinality）/ 删除 / 取消选中 */
-export function LinkTypeSelectionPill({
+/** 聚焦邻域动作：CardIconPopover + 深度选择（内部状态）+ 聚焦确认 */
+export function FocusNeighborhoodAction({
+  objectType,
+  onFocus,
+  icon,
+}: {
+  objectType: OntologyObjectType
+  onFocus(depth: number): void
+  icon: React.ReactNode
+}) {
+  const [depth, setDepth] = useState(1)
+  return (
+    <CardIconPopover
+      label={`聚焦邻域（${objectType.display_name}）`}
+      content={
+        <>
+          <PopoverHeader>
+            <PopoverTitle>聚焦邻域</PopoverTitle>
+            <PopoverDescription>
+              只显示「{objectType.display_name}」及其指定深度内的邻居。
+            </PopoverDescription>
+          </PopoverHeader>
+          <FieldRow label="深度">
+            <Select
+              value={depth}
+              onValueChange={(next) => setDepth(next ?? 1)}
+            >
+              <SelectTrigger aria-label="聚焦深度" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Array.from(
+                  { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
+                  (_, option) => (
+                    <SelectItem key={option} value={option}>
+                      深度 {option}
+                    </SelectItem>
+                  )
+                )}
+              </SelectContent>
+            </Select>
+          </FieldRow>
+          <Button type="button" size="sm" onClick={() => onFocus(depth)}>
+            聚焦
+          </Button>
+        </>
+      }
+    >
+      {icon}
+    </CardIconPopover>
+  )
+}
+
+/** Link Type 编辑动作：CardIconPopover + name/显示名/双向 cardinality 表单 */
+export function LinkTypeEditAction({
   linkType,
   source,
   target,
   messages,
   onUpdate,
-  onDelete,
-  onClearSelection,
+  icon,
 }: {
   linkType: OntologyLinkType
   source: OntologyObjectType | undefined
   target: OntologyObjectType | undefined
   messages: readonly string[]
   onUpdate(next: OntologyLinkType): void
-  onDelete(): void
-  onClearSelection(): void
+  icon: React.ReactNode
 }) {
   return (
-    <CanvasPill>
-      <span className="max-w-32 truncate px-1.5 text-xs font-medium">
-        {linkType.display_name}
-      </span>
-      <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-      <IconPopover
-        label="编辑 Link Type"
-        content={
-          <>
-            <PopoverHeader>
-              <PopoverTitle>{linkType.display_name}</PopoverTitle>
-              <PopoverDescription>
-                {source?.display_name ?? "未知源"} →{" "}
-                {target?.display_name ?? "未知目标"}
-              </PopoverDescription>
-            </PopoverHeader>
-            <ViolationList messages={messages} />
-            <FieldRow label="名称（name）">
-              <CommitInput
-                mono
-                ariaLabel="Link Type 名称"
-                value={linkType.name}
-                validate={(next) =>
-                  isValidOntologyName(next)
-                    ? null
-                    : "需匹配 ^[a-z][a-z0-9_]{0,63}$"
-                }
-                onCommit={(name) => onUpdate({ ...linkType, name })}
-              />
-            </FieldRow>
-            <FieldRow label="显示名（display_name）">
-              <CommitInput
-                ariaLabel="Link Type 显示名"
-                value={linkType.display_name}
-                validate={(next) =>
-                  next.trim() === "" ? "显示名不能为空" : null
-                }
-                onCommit={(displayName) =>
-                  onUpdate({ ...linkType, display_name: displayName })
-                }
-              />
-            </FieldRow>
-            <FieldRow
-              label={`源 → 目标（每个「${source?.display_name ?? "源"}」对应多少「${target?.display_name ?? "目标"}」）`}
-            >
-              <CardinalitySelect
-                ariaLabel="源到目标 cardinality"
-                value={linkType.source_to_target}
-                onChange={(sourceToTarget) =>
-                  onUpdate({ ...linkType, source_to_target: sourceToTarget })
-                }
-              />
-            </FieldRow>
-            <FieldRow
-              label={`目标 → 源（每个「${target?.display_name ?? "目标"}」对应多少「${source?.display_name ?? "源"}」）`}
-            >
-              <CardinalitySelect
-                ariaLabel="目标到源 cardinality"
-                value={linkType.target_to_source}
-                onChange={(targetToSource) =>
-                  onUpdate({ ...linkType, target_to_source: targetToSource })
-                }
-              />
-            </FieldRow>
-          </>
-        }
-      >
-        <PenLine aria-hidden className={pillIcon} />
-      </IconPopover>
-      <IconAction label="删除该 Link Type" onClick={onDelete}>
-        <Trash2Icon aria-hidden className={pillIcon} />
-      </IconAction>
-      <span aria-hidden className="mx-1 h-4 w-px bg-border" />
-      <IconAction label="取消选中" onClick={onClearSelection}>
-        <XIcon aria-hidden className={pillIcon} />
-      </IconAction>
-    </CanvasPill>
+    <CardIconPopover
+      label={`编辑 Link Type（${linkType.display_name}）`}
+      side="top"
+      align="center"
+      content={
+        <>
+          <PopoverHeader>
+            <PopoverTitle>{linkType.display_name}</PopoverTitle>
+            <PopoverDescription>
+              {source?.display_name ?? "未知源"} →{" "}
+              {target?.display_name ?? "未知目标"}
+            </PopoverDescription>
+          </PopoverHeader>
+          <ViolationList messages={messages} />
+          <FieldRow label="名称（name）">
+            <CommitInput
+              mono
+              ariaLabel="Link Type 名称"
+              value={linkType.name}
+              validate={(next) =>
+                isValidOntologyName(next)
+                  ? null
+                  : "需匹配 ^[a-z][a-z0-9_]{0,63}$"
+              }
+              onCommit={(name) => onUpdate({ ...linkType, name })}
+            />
+          </FieldRow>
+          <FieldRow label="显示名（display_name）">
+            <CommitInput
+              ariaLabel="Link Type 显示名"
+              value={linkType.display_name}
+              validate={(next) =>
+                next.trim() === "" ? "显示名不能为空" : null
+              }
+              onCommit={(displayName) =>
+                onUpdate({ ...linkType, display_name: displayName })
+              }
+            />
+          </FieldRow>
+          <FieldRow
+            label={`源 → 目标（每个「${source?.display_name ?? "源"}」对应多少「${target?.display_name ?? "目标"}」）`}
+          >
+            <CardinalitySelect
+              ariaLabel="源到目标 cardinality"
+              value={linkType.source_to_target}
+              onChange={(sourceToTarget) =>
+                onUpdate({ ...linkType, source_to_target: sourceToTarget })
+              }
+            />
+          </FieldRow>
+          <FieldRow
+            label={`目标 → 源（每个「${target?.display_name ?? "目标"}」对应多少「${source?.display_name ?? "源"}」）`}
+          >
+            <CardinalitySelect
+              ariaLabel="目标到源 cardinality"
+              value={linkType.target_to_source}
+              onChange={(targetToSource) =>
+                onUpdate({ ...linkType, target_to_source: targetToSource })
+              }
+            />
+          </FieldRow>
+        </>
+      }
+    >
+      {icon}
+    </CardIconPopover>
   )
 }
