@@ -416,6 +416,28 @@ describe("ontology api client", () => {
     expect(requests[0]?.url).toBe(`${BASE_URL}/v1/ontologies`)
   })
 
+  it("passes trimmed search query and omits blank search", async () => {
+    const { fetcher, requests } = createMockFetcher(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: [],
+            pagination: { page: 1, per_page: 20, total: 0 },
+          }),
+          { status: 200 }
+        )
+    )
+    const api = createStratumApi({ baseUrl: BASE_URL, fetcher })
+
+    await api.listOntologies({ search: "  支付  " })
+    expect(requests[0]?.url).toBe(
+      `${BASE_URL}/v1/ontologies?search=${encodeURIComponent("支付")}`
+    )
+
+    await api.listOntologies({ search: "   " })
+    expect(requests[1]?.url).toBe(`${BASE_URL}/v1/ontologies`)
+  })
+
   it("creates an ontology and returns document, etag, and location", async () => {
     const document = makeDocument()
     const { fetcher, requests } = createMockFetcher(

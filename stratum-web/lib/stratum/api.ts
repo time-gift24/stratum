@@ -351,6 +351,7 @@ export type StratumApi = {
     page?: number
     perPage?: number
     sort?: string
+    search?: string
   }): Promise<OntologyListPage>
   createOntology(input: {
     name: string
@@ -747,6 +748,8 @@ export function createStratumApi(options: {
       if (query?.perPage !== undefined)
         search.set("per_page", String(query.perPage))
       if (query?.sort !== undefined) search.set("sort", query.sort)
+      if (query?.search !== undefined && query.search.trim() !== "")
+        search.set("search", query.search.trim())
       const suffix = search.size === 0 ? "" : `?${search}`
       return request(
         `/v1/ontologies${suffix}`,

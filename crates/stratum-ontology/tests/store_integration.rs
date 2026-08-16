@@ -547,6 +547,7 @@ async fn crud_list_round_trips_order_and_hard_deletes_children() {
             page: 1,
             per_page: 100,
             sort: ListSort::NameAsc,
+            search: None,
         })
         .await
         .expect("list should succeed");
@@ -570,6 +571,7 @@ async fn crud_list_round_trips_order_and_hard_deletes_children() {
             page: u32::MAX,
             per_page: 100,
             sort: ListSort::NameAsc,
+            search: None,
         })
         .await
         .expect("out-of-range list should succeed");
@@ -630,6 +632,85 @@ async fn crud_list_round_trips_order_and_hard_deletes_children() {
         .expect("link count should be queryable");
         assert_eq!(link_count, 0);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the stratum-ontology PostgreSQL container"]
+async fn list_search_matches_name_and_display_name_case_insensitively() {
+    let _guard = integration_lock().lock().await;
+    let store = connect_store().await;
+
+    let unique = OntologyId::new().as_uuid().simple().to_string();
+    let needle = format!("needle{unique}");
+    let by_name = store
+        .create(CreateOntology {
+            name: format!("{needle}_by_name"),
+            display_name: "Unrelated title".to_owned(),
+            description: None,
+        })
+        .await
+        .expect("name-matched root should be created");
+    let by_display_name = store
+        .create(CreateOntology {
+            name: format!("unrelated_{unique}"),
+            display_name: format!("Mixed {needle} Case"),
+            description: None,
+        })
+        .await
+        .expect("display-name-matched root should be created");
+
+    let upper = store
+        .list(ListOntologies {
+            search: Some(needle.to_uppercase()),
+            ..ListOntologies::default()
+        })
+        .await
+        .expect("case-insensitive search should succeed");
+    assert_eq!(upper.total, 2);
+    assert_eq!(
+        upper
+            .data
+            .iter()
+            .map(|summary| summary.id)
+            .collect::<std::collections::HashSet<_>>(),
+        [by_name.ontology.id, by_display_name.ontology.id]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        "search should match both name and display_name case-insensitively"
+    );
+
+    let absent = store
+        .list(ListOntologies {
+            search: None,
+            ..ListOntologies::default()
+        })
+        .await
+        .expect("unfiltered list should succeed");
+    assert!(
+        absent.total >= upper.total,
+        "an absent search term must not filter the list"
+    );
+
+    let literal_metacharacters = store
+        .list(ListOntologies {
+            search: Some(format!("%{needle}%_\\")),
+            ..ListOntologies::default()
+        })
+        .await
+        .expect("metacharacter search should succeed");
+    assert_eq!(
+        literal_metacharacters.total, 0,
+        "ILIKE metacharacters must be escaped and matched literally"
+    );
+
+    store
+        .delete(by_name.ontology.id, by_name.revision)
+        .await
+        .expect("name-matched root should be deleted");
+    store
+        .delete(by_display_name.ontology.id, by_display_name.revision)
+        .await
+        .expect("display-name-matched root should be deleted");
 }
 
 #[tokio::test]
