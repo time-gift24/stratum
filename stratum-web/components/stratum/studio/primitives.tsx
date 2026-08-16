@@ -1,7 +1,10 @@
 "use client"
 
 import Link from "next/link"
-import { cloneElement, isValidElement } from "react"
+import { usePathname } from "next/navigation"
+import { cloneElement, isValidElement, useRef } from "react"
+import { useGSAP } from "@gsap/react"
+import gsap from "gsap"
 import {
   ArrowLeft,
   ChevronRight,
@@ -31,7 +34,15 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  MOTION_DURATION,
+  MOTION_EASE,
+  motionDuration,
+  prefersReducedMotion,
+} from "@/lib/motion"
 import { cn } from "@/lib/utils"
+
+gsap.registerPlugin(useGSAP)
 
 export const controlClass =
   "rounded-lg border-border bg-card font-sans text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25"
@@ -356,9 +367,24 @@ const SETTINGS_ITEMS = [
 
 export type SettingsSection = (typeof SETTINGS_ITEMS)[number]["key"]
 
+/** 父路径：/studio/settings/providers → /studio/settings。 */
+function parentPath(pathname: string): string {
+  const index = pathname.lastIndexOf("/")
+  return index <= 0 ? "" : pathname.slice(0, index)
+}
+
+// 模块级接力状态：上一次选中项的视口矩形 + 所在路径。
+// SettingsShell 随页面重挂载，靠它在页签切换时把选中底纹滑过去而不是跳变。
+let lastIndicator: {
+  pathname: string
+  rect: { left: number; top: number; width: number; height: number }
+} | null = null
+
 /**
  * 设置区外壳：左侧垂直导航（桌面）/ 顶部横排（移动端）+ 右侧内容。
- * 选中态与全站 rail 同一语言（accent 底 / dark primary tint）。
+ * 选中态与全站 rail 同一语言（accent 底 / dark primary tint），
+ * 由绝对定位 underlay 承载；同级页签切换时 underlay 从上一位置滑动到位，
+ * 内容区做一次快速淡入上浮（prefers-reduced-motion 时全部瞬时）。
  */
 export function SettingsShell({
   current,
@@ -369,12 +395,112 @@ export function SettingsShell({
   returnTo?: string
   children: React.ReactNode
 }) {
+  const pathname = usePathname()
+  const navRef = useRef<HTMLElement>(null)
+  const indicatorRef = useRef<HTMLSpanElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  useGSAP(
+    () => {
+      const nav = navRef.current
+      const indicator = indicatorRef.current
+      const content = contentRef.current
+      if (!nav || !indicator || !content) return
+
+      const measure = () => {
+        const active = nav.querySelector<HTMLElement>('[aria-current="page"]')
+        if (!active) return null
+        const navRect = nav.getBoundingClientRect()
+        const rect = active.getBoundingClientRect()
+        return {
+          x: rect.left - navRect.left,
+          y: rect.top - navRect.top,
+          width: rect.width,
+          height: rect.height,
+          viewport: {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+          },
+        }
+      }
+
+      const place = (from: typeof lastIndicator) => {
+        const target = measure()
+        if (!target) return
+        if (from && !prefersReducedMotion()) {
+          const navRect = nav.getBoundingClientRect()
+          gsap.fromTo(
+            indicator,
+            {
+              x: from.rect.left - navRect.left,
+              y: from.rect.top - navRect.top,
+              width: from.rect.width,
+              height: from.rect.height,
+            },
+            {
+              x: target.x,
+              y: target.y,
+              width: target.width,
+              height: target.height,
+              duration: MOTION_DURATION.fast,
+              ease: MOTION_EASE.enter,
+              overwrite: "auto",
+            }
+          )
+        } else {
+          gsap.set(indicator, {
+            x: target.x,
+            y: target.y,
+            width: target.width,
+            height: target.height,
+          })
+        }
+        lastIndicator = { pathname, rect: target.viewport }
+      }
+
+      // 只有同级页签切换（父路径相同）才接力滑动；跨区到达直接落位
+      const from =
+        lastIndicator !== null &&
+        parentPath(lastIndicator.pathname) === parentPath(pathname)
+          ? lastIndicator
+          : null
+      place(from)
+
+      const onResize = () => place(null)
+      window.addEventListener("resize", onResize)
+
+      // 内容区进场：快速淡入 + 轻微上浮，软化页签切换的内容替换
+      gsap.fromTo(
+        content,
+        { opacity: 0, y: 6 },
+        {
+          opacity: 1,
+          y: 0,
+          duration: motionDuration(MOTION_DURATION.fast),
+          ease: MOTION_EASE.enter,
+          clearProps: "transform,opacity",
+        }
+      )
+
+      return () => window.removeEventListener("resize", onResize)
+    },
+    { scope: navRef }
+  )
+
   return (
     <div className="grid gap-6 lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-8">
       <nav
+        ref={navRef}
         aria-label="设置"
-        className="flex gap-1 self-start lg:sticky lg:top-20 lg:flex-col"
+        className="relative flex gap-1 self-start lg:sticky lg:top-20 lg:flex-col"
       >
+        <span
+          ref={indicatorRef}
+          aria-hidden
+          className="pointer-events-none absolute top-0 left-0 rounded-lg bg-accent/60 dark:bg-primary/15"
+        />
         {SETTINGS_ITEMS.map((item) => {
           const active = current === item.key
           const Icon = item.icon
@@ -384,9 +510,9 @@ export function SettingsShell({
               href={`/studio/settings/${item.key}?${new URLSearchParams({ returnTo })}`}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex h-9 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
+                "relative flex h-9 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
                 active
-                  ? "bg-accent/60 text-accent-foreground dark:bg-primary/15 dark:text-primary"
+                  ? "text-accent-foreground dark:text-primary"
                   : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
               )}
             >
@@ -396,7 +522,9 @@ export function SettingsShell({
           )
         })}
       </nav>
-      <div className="min-w-0">{children}</div>
+      <div ref={contentRef} className="min-w-0">
+        {children}
+      </div>
     </div>
   )
 }

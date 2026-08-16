@@ -32,6 +32,19 @@ function pageIndex(pathname: string): number {
   return PAGE_ORDER.indexOf(`/${pathname.split("/")[1]}`)
 }
 
+/**
+ * 同级路径（父目录相同）间的跳转视为页签切换，例如
+ * /studio/settings/providers ↔ /studio/settings/models：
+ * 不做整页滑入，由局部动效（如 SettingsShell 的选中 underlay）接管。
+ */
+function isSiblingSwitch(from: string, to: string): boolean {
+  const parent = (p: string) => {
+    const index = p.lastIndexOf("/")
+    return index <= 0 ? "" : p.slice(0, index)
+  }
+  return from !== to && parent(from) === parent(to)
+}
+
 // 模块级共享状态（应用级单例，仅客户端运行）
 let pageElement: HTMLElement | null = null
 let armedDirection: 1 | -1 | null = null
@@ -50,6 +63,8 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
 
       // 首屏不播入场：SSR 内容直接可见，不推迟 LCP
       const isFirstPaint = lastPathname === null
+      const siblingSwitch =
+        lastPathname !== null && isSiblingSwitch(lastPathname, pathname)
       let direction: 1 | -1 = 1
       if (armedDirection !== null) {
         direction = armedDirection
@@ -63,7 +78,7 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       armedDirection = null
       lastPathname = pathname
 
-      if (!isFirstPaint && !prefersReducedMotion()) {
+      if (!isFirstPaint && !siblingSwitch && !prefersReducedMotion()) {
         gsap.fromTo(
           el,
           { x: 40 * direction, opacity: 0 },

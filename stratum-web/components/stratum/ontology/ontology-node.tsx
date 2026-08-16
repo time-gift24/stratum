@@ -43,9 +43,9 @@ import styles from "./ontology-aurora.module.css"
  * 节点级操作长在卡片上：头部文本（display_name / name / description）双击
  * 即行内编辑（失焦提交 + 校验）；头部右侧动作组只剩 聚焦（图标 + 深度直选，
  * 选中即聚焦，无弹窗）与 删除，悬停或选中时显现，nodrag 不抢拖拽。
- * 内层实心面板承载属性列表——属性单行（name mono 行内改名、display_name
- * 同步同值）+ value_type 深色瓦片 Select + 必填勾选 + 悬停删除 + 底部虚线
- * 「添加属性」行。对象级与属性级 422 违例合并为底部红框首条 + 总数；
+ * 内层实心面板承载属性列表——属性单行两列（name mono 与 display_name
+ * 各自点击行内编辑，失焦提交+校验，两者独立）+ value_type 深色瓦片
+ * Select + 必填勾选 + 悬停删除 + 底部虚线「添加属性」行。对象级与属性级 422 违例合并为底部红框首条 + 总数；
  * 聚焦模式下非邻域节点淡出。邻域只读画布省略全部动作。
  */
 
@@ -102,7 +102,11 @@ export function OntologyObjectTypeNode({
   const hasViolations = allViolations.length > 0
   const addPropertyDisabledReason =
     propertyActions?.getAddPropertyDisabledReason(objectType) ?? null
-  const [renamingId, setRenamingId] = useState<string | null>(null)
+  /** 属性行内编辑：{ id, field }——name 与 display_name 两列各自独立编辑 */
+  const [editingProperty, setEditingProperty] = useState<{
+    id: string
+    field: "name" | "display_name"
+  } | null>(null)
   /** 头部文本的双击行内编辑：display_name / name / description */
   const [editingField, setEditingField] = useState<
     "display_name" | "name" | "description" | null
@@ -122,13 +126,13 @@ export function OntologyObjectTypeNode({
       required: false,
     })
     // 新建后直接进入行内改名
-    setRenamingId(id)
+    setEditingProperty({ id, field: "name" })
   }
 
   return (
     <div
       className={cn(
-        "group relative w-64 rounded-2xl border bg-card/50 p-1.5 text-card-foreground shadow-[0_8px_30px] shadow-black/10 backdrop-blur-xl transition-opacity",
+        "group relative w-72 rounded-2xl border bg-card/50 p-1.5 text-card-foreground shadow-[0_8px_30px] shadow-black/10 backdrop-blur-xl transition-opacity",
         selected ? "border-primary ring-2 ring-ring/30" : "border-border",
         hasViolations && "border-destructive ring-2 ring-destructive/30",
         dimmed && "opacity-30"
@@ -271,9 +275,13 @@ export function OntologyObjectTypeNode({
           <NodePropertyRow
             key={property.id}
             property={property}
-            renaming={renamingId === property.id}
-            onStartRename={() => setRenamingId(property.id)}
-            onFinishRename={() => setRenamingId(null)}
+            editing={
+              editingProperty?.id === property.id ? editingProperty.field : null
+            }
+            onStartEdit={(field) =>
+              setEditingProperty({ id: property.id, field })
+            }
+            onFinishEdit={() => setEditingProperty(null)}
             onUpdate={
               propertyActions === undefined
                 ? undefined
@@ -316,23 +324,23 @@ export function OntologyObjectTypeNode({
 }
 
 /**
- * 属性行（单行）：name mono 主文本（点击进入行内改名，失焦提交并校验，
- * display_name 同步为同值——一处填写两者一致，需要不同值时走头部详情
- * Popover）；右侧 value_type 深色瓦片 Select + 必填勾选 + 悬停删除。
- * 无 onUpdate/onRemove（邻域只读画布）时整行只读。
+ * 属性行（单行两列）：name（mono）与 display_name 两列都可点击行内编辑
+ * （失焦提交 + 校验，两者独立、不再强制同值）；右侧 value_type 深色瓦片
+ * Select + 必填勾选 + 悬停删除。无 onUpdate/onRemove（邻域只读画布）时
+ * 整行只读。
  */
 function NodePropertyRow({
   property,
-  renaming,
-  onStartRename,
-  onFinishRename,
+  editing,
+  onStartEdit,
+  onFinishEdit,
   onUpdate,
   onRemove,
 }: {
   property: OntologyProperty
-  renaming: boolean
-  onStartRename(): void
-  onFinishRename(): void
+  editing: "name" | "display_name" | null
+  onStartEdit(field: "name" | "display_name"): void
+  onFinishEdit(): void
   onUpdate?(next: OntologyProperty): void
   onRemove?(): void
 }) {
@@ -358,7 +366,7 @@ function NodePropertyRow({
 
   return (
     <div className="group/row flex items-center gap-1 rounded-md px-1 py-0.5">
-      {renaming ? (
+      {editing === "name" ? (
         <div className="min-w-0 flex-1">
           <CommitInput
             mono
@@ -367,8 +375,8 @@ function NodePropertyRow({
             value={property.name}
             validate={validatePropertyName}
             onCommit={(name) => {
-              onUpdate({ ...property, name, display_name: name })
-              onFinishRename()
+              onUpdate({ ...property, name })
+              onFinishEdit()
             }}
           />
         </div>
@@ -376,10 +384,34 @@ function NodePropertyRow({
         <button
           type="button"
           aria-label={`重命名属性 ${property.name}`}
-          onClick={onStartRename}
+          onClick={() => onStartEdit("name")}
           className="min-w-0 flex-1 truncate rounded px-0.5 text-left font-mono text-xs hover:bg-accent"
         >
           {property.name}
+        </button>
+      )}
+      {editing === "display_name" ? (
+        <div className="min-w-0 flex-1">
+          <CommitInput
+            autoFocus
+            ariaLabel={`属性 ${property.name} 显示名`}
+            value={property.display_name}
+            validate={validatePropertyDisplayName}
+            onCommit={(displayName) => {
+              onUpdate({ ...property, display_name: displayName })
+              onFinishEdit()
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label={`修改属性 ${property.name} 显示名`}
+          title="点击修改显示名"
+          onClick={() => onStartEdit("display_name")}
+          className="min-w-0 flex-1 truncate rounded px-0.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          {property.display_name}
         </button>
       )}
       <Select
