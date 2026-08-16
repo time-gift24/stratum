@@ -25,6 +25,12 @@ allowed_origins = [
 [ontology]
 database_url = "postgres://stratum:stratum@postgres:5432/stratum_ontology"
 
+# Studio 编排目录在 docker 栈保持关闭：management_enabled = true 要求
+# api.bind 为 loopback（loopback-only 安全边界），而容器需要 0.0.0.0 才能
+# 发布端口，两者冲突。本地直跑（127.0.0.1 bind）时可开启。
+[studio]
+management_enabled = false
+
 [nats]
 url = "nats://nats:4222"
 stream_name = "AGENT_EVENTS"

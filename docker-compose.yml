@@ -29,6 +29,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/create-ontology-database.sql:/docker-entrypoint-initdb.d/10-create-ontology-database.sql:ro
+      - ./docker/postgres/create-studio-database.sql:/docker-entrypoint-initdb.d/20-create-studio-database.sql:ro
 
   stratum-api:
     build:
