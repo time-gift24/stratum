@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { ChevronDown, Menu, X } from "lucide-react"
@@ -10,9 +10,11 @@ import { cn } from "@/lib/utils"
 
 /**
  * SiteNav —— 站点顶部导航（reactbits navigation-2 改造）。
- * 全部内容数据驱动：brand / menus（悬停下拉）/ links（直链）/ cta 由调用方传入。
+ * 全部内容数据驱动：brand / menus（悬停下拉）/ links（直链）/ cta / actions（右端图标槽）由调用方传入。
  * 颜色只消费最外层 token（card / foreground / muted / border / primary），随主题切换。
  * 品牌语言来自节点世界：主色状态点 + 字标。
+ * 吸顶状态机：页顶时全宽展开；滚动超过 12px 收缩为居中浮 pill。
+ * 两态同为磨砂质感（bg-card/55 + backdrop-blur-2xl + saturate + hairline + 浅阴影）。
  * 动效全部 GSAP：入场、下拉面板高度展开/收起、菜单项交错、悬停滑动底片。
  * 内部导航链接使用 TransitionLink，页面跳转带方向性转场。
  */
@@ -97,6 +99,17 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
   const desktopPanelRef = useRef<HTMLDivElement>(null)
   const mobilePanelRef = useRef<HTMLDivElement>(null)
   const prevMenuRef = useRef<number | null>(null)
+
+  // 吸顶状态机：页顶 = 全宽展开、透明无边框；滚动后 = 居中磨砂浮 pill。
+  // useSyncExternalStore 订阅 scroll（外部系统），SSR 快照恒为未滚动，无 hydration mismatch。
+  const scrolled = useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener("scroll", onChange, { passive: true })
+      return () => window.removeEventListener("scroll", onChange)
+    },
+    () => window.scrollY > 12,
+    () => false
+  )
 
   const { contextSafe } = useGSAP(
     () => {
@@ -221,7 +234,7 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
   return (
     <nav
       ref={rootRef}
-      className="fixed inset-x-0 top-0 z-50 w-full px-4 py-6 sm:px-6 sm:py-8"
+      className="fixed inset-x-0 top-0 z-50 w-full px-4 py-3 sm:px-6 sm:py-4"
     >
       <div className="mx-auto w-full max-w-[1400px]">
         {/* Desktop Navigation */}
@@ -236,10 +249,15 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
             if (e.key === "Escape") closeDesktopMenu()
           }}
         >
-          {/* Nav Container - Always rounded rectangle */}
-          <div className="mx-auto w-fit overflow-hidden rounded-3xl border border-border bg-card/40 shadow-xl backdrop-blur-2xl">
+          {/* Nav Container：页顶全宽展开，滚动后收缩为居中 pill；两态都磨砂+边框+阴影 */}
+          <div
+            className={cn(
+              "overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150 transition-[background-color,border-color,box-shadow] duration-300 motion-reduce:transition-none",
+              scrolled ? "mx-auto w-fit" : "mx-auto w-full max-w-6xl"
+            )}
+          >
             {/* Main Nav Bar */}
-            <div className="flex items-center justify-between gap-2 py-3 pr-3 pl-6">
+            <div className="flex items-center justify-between gap-2 py-2 pr-2.5 pl-5">
               {/* Brand */}
               <TransitionLink
                 href={brand.href ?? "/"}
@@ -357,9 +375,9 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
 
         {/* Mobile Navigation */}
         <div data-nav-mobile className="lg:hidden">
-          <div className="overflow-hidden rounded-3xl border border-border bg-card/40 shadow-xl backdrop-blur-2xl">
+          <div className="overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150">
             {/* Mobile Nav Bar */}
-            <div className="flex items-center justify-between py-3 pr-3 pl-4">
+            <div className="flex items-center justify-between py-2.5 pr-2.5 pl-4">
               {/* Brand */}
               <TransitionLink
                 href={brand.href ?? "/"}
