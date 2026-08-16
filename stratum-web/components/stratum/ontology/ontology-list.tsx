@@ -6,6 +6,7 @@ import {
   PageHeader,
   Pagination,
   ResourceCard,
+  SearchRow,
 } from "@/components/stratum/studio/primitives"
 import { Button } from "@/components/ui/button"
 import type { OntologySummary } from "@/features/ontology-editor/types"
@@ -18,6 +19,7 @@ import {
  * Ontology 列表（数据经 props 下发，见 app/(site)/ontologies/page.tsx）。
  * 与仪表盘/设置列表共享 ResourceCard 扫读语言：squircle 字母标识 +
  * 虚线分隔的 mono meta 行；四态齐全（骨架 / 错误 / 空态 / 分页网格）。
+ * 搜索（SearchRow，匹配 name/display_name）+ 图标化新建入口在列表上方；
  * 点击卡片进入画布编辑器 /ontologies/[id]，删除入口在卡片右侧。
  */
 
@@ -34,27 +36,45 @@ function formatUpdatedAt(iso: string): string {
 
 export type OntologyListProps = {
   state: OntologyListState
+  /** 当前生效的搜索词（用于空态文案与搜索框回显） */
+  query: string
   onPageChange(page: number): void
   onRetry(): void
+  onSearch(query: string): void
   onRequestCreate(): void
   onRequestDelete(ontology: OntologySummary): void
 }
 
 export function OntologyList({
   state,
+  query,
   onPageChange,
   onRetry,
+  onSearch,
   onRequestCreate,
   onRequestDelete,
 }: OntologyListProps) {
+  const hasQuery = query.trim() !== ""
   return (
     <>
-      <PageHeader title="本体">
-        <Button size="lg" onClick={onRequestCreate}>
-          <Plus aria-hidden />
-          新建本体
-        </Button>
-      </PageHeader>
+      <PageHeader title="本体" />
+
+      <SearchRow
+        defaultValue={query}
+        placeholder="搜索本体名称"
+        onSearch={onSearch}
+        action={
+          <Button
+            size="icon-lg"
+            className="size-9 rounded-lg"
+            aria-label="新建本体"
+            title="新建本体"
+            onClick={onRequestCreate}
+          >
+            <Plus aria-hidden />
+          </Button>
+        }
+      />
 
       {state.phase === "loading" ? (
         <LoadingState label="正在加载本体列表" />
@@ -67,14 +87,30 @@ export function OntologyList({
       ) : state.result.data.length === 0 &&
         state.result.pagination.total === 0 ? (
         <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
-          <h2 className="font-semibold">尚未创建本体</h2>
+          <h2 className="font-semibold">
+            {hasQuery ? "没有匹配的本体" : "尚未创建本体"}
+          </h2>
           <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
-            新建一个本体，开始定义对象类型与关系。
+            {hasQuery
+              ? "调整搜索词，或清除筛选查看全部本体。"
+              : "新建一个本体，开始定义对象类型与关系。"}
           </p>
-          <Button size="lg" className="mt-4" onClick={onRequestCreate}>
-            <Plus aria-hidden />
-            新建本体
-          </Button>
+          {hasQuery ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              className="mt-4"
+              onClick={() => onSearch("")}
+            >
+              清除筛选
+            </Button>
+          ) : (
+            <Button size="lg" className="mt-4" onClick={onRequestCreate}>
+              <Plus aria-hidden />
+              新建本体
+            </Button>
+          )}
         </div>
       ) : (
         <>

@@ -36,6 +36,8 @@ export interface SiteNavProps {
   menus?: SiteNavMenu[]
   links?: { label: string; href: string }[]
   cta?: { label: string; href: string }
+  /** 右端图标操作槽（如主题切换、设置入口），桌面与移动面板都会渲染 */
+  actions?: React.ReactNode
 }
 
 /** 菜单项卡片：桌面下拉（md）与移动面板（sm）共用，尺寸差异走 prop */
@@ -88,7 +90,7 @@ function NavMenuItemCard({
   )
 }
 
-export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
+export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNavProps) {
   const [activeMenu, setActiveMenu] = useState<number | null>(null)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const rootRef = useRef<HTMLElement>(null)
@@ -316,17 +318,20 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
               </div>
 
               {/* Right Side Actions */}
-              {cta ? (
+              {cta || actions ? (
                 <div className="ml-6 flex items-center gap-2">
-                  <TransitionLink
-                    href={cta.href}
-                    className="rounded-lg bg-primary px-5 py-2 text-sm font-medium tracking-tight text-primary-foreground no-underline hover:bg-primary/80"
-                    onMouseEnter={() =>
-                      activeMenu !== null && closeDesktopMenu()
-                    }
-                  >
-                    {cta.label}
-                  </TransitionLink>
+                  {actions}
+                  {cta ? (
+                    <TransitionLink
+                      href={cta.href}
+                      className="rounded-lg bg-primary px-5 py-2 text-sm font-medium tracking-tight text-primary-foreground no-underline hover:bg-primary/80"
+                      onMouseEnter={() =>
+                        activeMenu !== null && closeDesktopMenu()
+                      }
+                    >
+                      {cta.label}
+                    </TransitionLink>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -402,6 +407,13 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
                         ))}
                       </div>
                     )}
+
+                    {/* Mobile Actions（主题切换、设置等图标操作） */}
+                    {actions ? (
+                      <div className="flex items-center gap-2 px-2">
+                        {actions}
+                      </div>
+                    ) : null}
 
                     {/* Mobile CTA */}
                     {cta ? (

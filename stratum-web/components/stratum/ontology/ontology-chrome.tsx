@@ -1,6 +1,5 @@
 "use client"
 
-import { useState } from "react"
 import Link from "next/link"
 import { Loader2 } from "lucide-react"
 
@@ -14,13 +13,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -28,15 +20,9 @@ import {
 } from "@/components/ui/tooltip"
 import {
   CommitInput,
-  CommitTextarea,
   FieldRow,
 } from "@/components/stratum/ontology/form-controls"
 import { CardinalitySelect } from "@/components/stratum/ontology/link-type-dialog"
-import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
-import {
-  validatePropertyDisplayName,
-  validatePropertyName,
-} from "@/features/ontology-editor/property"
 import { isValidOntologyName } from "@/features/ontology-editor/validation"
 import type {
   OntologyLinkType,
@@ -49,9 +35,10 @@ import { cn } from "@/lib/utils"
  * 画布满铺。顶部：左右两枚悬浮 pill——左 = 返回 + 标题 + 保存状态，
  * 右 = 视图切换 / 新增（图标 + 分隔线收进一枚 pill）+ 独立的主操作 pill
  * （保存：有脏数据时实心 primary，图标+文字，全页最显眼）。
- * 节点/边的操作不长在任何侧栏——直接长在卡片上：CardIconButton /
- * CardIconPopover 是卡片内的小图标动作（nodrag，tooltip 向上，
- * Popover 向下右对齐）。文字只保留标题、保存状态与主操作。
+ * 节点/边的操作不长在任何侧栏——直接长在卡片上：节点头部文本双击即
+ * 行内编辑，聚焦是图标 + 深度直选（选中即聚焦，无弹窗）；CardIconButton /
+ * CardIconPopover 是卡片内小图标动作（nodrag，tooltip 向上），边的编辑
+ * 弹层（LinkTypeEditAction）是唯一保留的 Popover 表单。
  * 组装方式：编辑器用 pill 族组合顶部栏；节点/边组件用 card 族组合
  * 卡片内动作；本文件不含整段装配。不用任何常驻面板或侧边按钮列。
  */
@@ -316,133 +303,6 @@ function ViolationList({ messages }: { messages: readonly string[] }) {
         <p key={message}>{message}</p>
       ))}
     </div>
-  )
-}
-
-/** Object Type 详情动作：CardIconPopover + 显示名/name/描述表单 + 违例列表 */
-export function ObjectTypeDetailsAction({
-  objectType,
-  messages,
-  propertyMessages,
-  onUpdate,
-  icon,
-}: {
-  objectType: OntologyObjectType
-  messages: readonly string[]
-  propertyMessages: ReadonlyMap<string, readonly string[]>
-  onUpdate(next: OntologyObjectType): void
-  icon: React.ReactNode
-}) {
-  const allMessages = [
-    ...messages,
-    ...objectType.properties.flatMap((property) =>
-      (propertyMessages.get(property.id) ?? []).map(
-        (message) => `${property.name}：${message}`
-      )
-    ),
-  ]
-  return (
-    <CardIconPopover
-      label={`编辑详情（${objectType.display_name}）`}
-      content={
-        <>
-          <PopoverHeader>
-            <PopoverTitle>{objectType.display_name}</PopoverTitle>
-            <PopoverDescription className="font-mono">
-              {objectType.name}
-            </PopoverDescription>
-          </PopoverHeader>
-          <ViolationList messages={allMessages} />
-          <FieldRow label="显示名（display_name）">
-            <CommitInput
-              ariaLabel="Object Type 显示名"
-              value={objectType.display_name}
-              validate={validatePropertyDisplayName}
-              onCommit={(displayName) =>
-                onUpdate({ ...objectType, display_name: displayName })
-              }
-            />
-          </FieldRow>
-          <FieldRow label="名称（name）">
-            <CommitInput
-              mono
-              ariaLabel="Object Type 名称"
-              value={objectType.name}
-              validate={validatePropertyName}
-              onCommit={(name) => onUpdate({ ...objectType, name })}
-            />
-          </FieldRow>
-          <FieldRow label="描述（description，可选）">
-            <CommitTextarea
-              ariaLabel="Object Type 描述"
-              value={objectType.description ?? ""}
-              placeholder="留空表示无描述"
-              onCommit={(description) =>
-                onUpdate({
-                  ...objectType,
-                  description: description === "" ? undefined : description,
-                })
-              }
-            />
-          </FieldRow>
-        </>
-      }
-    >
-      {icon}
-    </CardIconPopover>
-  )
-}
-
-/** 聚焦邻域动作：CardIconPopover + 深度选择（内部状态）+ 聚焦确认 */
-export function FocusNeighborhoodAction({
-  objectType,
-  onFocus,
-  icon,
-}: {
-  objectType: OntologyObjectType
-  onFocus(depth: number): void
-  icon: React.ReactNode
-}) {
-  const [depth, setDepth] = useState(1)
-  return (
-    <CardIconPopover
-      label={`聚焦邻域（${objectType.display_name}）`}
-      content={
-        <>
-          <PopoverHeader>
-            <PopoverTitle>聚焦邻域</PopoverTitle>
-            <PopoverDescription>
-              只显示「{objectType.display_name}」及其指定深度内的邻居。
-            </PopoverDescription>
-          </PopoverHeader>
-          <FieldRow label="深度">
-            <Select
-              value={depth}
-              onValueChange={(next) => setDepth(next ?? 1)}
-            >
-              <SelectTrigger aria-label="聚焦深度" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {Array.from(
-                  { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
-                  (_, option) => (
-                    <SelectItem key={option} value={option}>
-                      深度 {option}
-                    </SelectItem>
-                  )
-                )}
-              </SelectContent>
-            </Select>
-          </FieldRow>
-          <Button type="button" size="sm" onClick={() => onFocus(depth)}>
-            聚焦
-          </Button>
-        </>
-      }
-    >
-      {icon}
-    </CardIconPopover>
   )
 }
 

@@ -15,7 +15,7 @@
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Clock, Cpu, Plus, Search, Wrench } from "lucide-react"
+import { Clock, Cpu, Plus, Wrench } from "lucide-react"
 
 import {
   ErrorState,
@@ -24,7 +24,7 @@ import {
   PageShell,
   Pagination,
   ResourceCard,
-  StudioInput,
+  SearchRow,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { studioApi } from "@/features/studio-management/client"
@@ -140,46 +140,26 @@ export function StudioDashboard() {
 
   return (
     <PageShell>
-      <PageHeader title="仪表盘">
-        <Link
-          href="/studio/agents/new"
-          className={buttonVariants({ size: "lg" })}
-        >
-          <Plus aria-hidden />
-          <span className="hidden sm:inline">新建 Agent</span>
-          <span className="sm:hidden">新建</span>
-        </Link>
-      </PageHeader>
+      <PageHeader title="仪表盘" />
 
-      <form
-        role="search"
-        className="relative mb-6 max-w-xl"
-        onSubmit={(event) => {
-          event.preventDefault()
-          const data = new FormData(event.currentTarget)
-          updateQuery(String(data.get("q") ?? ""))
-        }}
-      >
-        <Search
-          aria-hidden
-          className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-        />
-        <StudioInput
-          key={query}
-          name="q"
-          defaultValue={query}
-          placeholder="搜索 Agent 名称"
-          aria-label="搜索 Agent 名称"
-          className="pr-16 pl-9"
-        />
-        <Button
-          type="submit"
-          variant="ghost"
-          className="absolute top-1 right-1"
-        >
-          搜索
-        </Button>
-      </form>
+      <SearchRow
+        defaultValue={query}
+        placeholder="搜索 Agent 名称"
+        onSearch={(next) => updateQuery(next)}
+        action={
+          <Link
+            href="/studio/agents/new"
+            aria-label="新建 Agent"
+            title="新建 Agent"
+            className={buttonVariants({
+              size: "icon-lg",
+              className: "size-9 rounded-lg",
+            })}
+          >
+            <Plus aria-hidden />
+          </Link>
+        }
+      />
 
       {result === null && error === null ? (
         <LoadingState label="正在加载 Agent" />

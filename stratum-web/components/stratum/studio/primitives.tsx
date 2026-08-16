@@ -8,6 +8,7 @@ import {
   Cpu,
   LoaderCircle,
   Plug,
+  Search,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -183,6 +184,53 @@ export function Field({
 export function StudioInput(props: React.ComponentProps<typeof Input>) {
   return (
     <Input {...props} className={cn(controlClass, "h-9", props.className)} />
+  )
+}
+
+/**
+ * 列表页搜索行：搜索框（放大镜即提交钮，也可回车）+ 右侧紧跟的图标化操作
+ * （通常是新建入口）。仪表盘与本体列表共用，保持同一扫读语言。
+ */
+export function SearchRow({
+  defaultValue,
+  placeholder,
+  onSearch,
+  action,
+}: {
+  defaultValue: string
+  placeholder: string
+  onSearch(query: string): void
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="mb-6 flex max-w-xl items-center gap-2">
+      <form
+        role="search"
+        className="relative min-w-0 flex-1"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const data = new FormData(event.currentTarget)
+          onSearch(String(data.get("q") ?? ""))
+        }}
+      >
+        <button
+          type="submit"
+          aria-label="搜索"
+          className="absolute top-1/2 left-1.5 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Search aria-hidden className="size-4" />
+        </button>
+        <StudioInput
+          key={defaultValue}
+          name="q"
+          defaultValue={defaultValue}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          className="pl-9"
+        />
+      </form>
+      {action}
+    </div>
   )
 }
 

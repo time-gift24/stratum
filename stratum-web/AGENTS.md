@@ -69,7 +69,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 **页面级共享原语 `components/stratum/studio/primitives.tsx`（跨表面复用，不只 Studio）**
 
-- 外壳：PageShell（列表/表单页容器）、PageHeader（标题 + 返回 + 主操作）
+- 外壳：PageShell（列表/表单页容器）、PageHeader（标题 + 返回 + 主操作）、SearchRow（列表页搜索行：放大镜即提交钮/回车提交，右侧紧跟图标化新建操作；新建入口不放 PageHeader 文字按钮）
 - 资源展示：ResourceCard（squircle 标识 + 名称 + 状态 chip + 虚线 meta 行，可选 action 槽）、StatusChip（只编码真实 API 状态）
 - 状态页：LoadingState（整页/整区加载的转圈指示；骨架只用于局部内容加载）、ErrorState（加载失败 + 重试）、NotFoundState（资源不存在 + 新建引导）、Pagination（列表分页，单页不渲染）
 - 表单：Field（label 包裹 + 错误/说明）、FormSection（平面 fieldset 分组）、StudioInput / StudioTextarea / StudioSelect、SaveButton、InlineDelete、SettingsShell（设置区垂直导航）、controlClass
@@ -78,7 +78,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 - 对话：prompt-input、model-selector、agent-selector、conversation/*
 - 白板：excalidraw/*
-- 本体：ontology/*（表单共享控件在 ontology/form-controls.tsx：FieldRow、CommitInput、CommitTextarea；画布悬浮 chrome 原语在 ontology/ontology-chrome.tsx：CanvasRail/RailButton/RailPopover 等左侧垂直 rail 组件）
+- 本体：ontology/*（表单共享控件在 ontology/form-controls.tsx：FieldRow、CommitInput、CommitTextarea；画布 chrome 原语在 ontology/ontology-chrome.tsx：顶部 pill 族 ChromePill/PillIconButton/PillLinkButton/PrimaryPillButton/PillDivider + 卡片内动作族 CardIconButton/CardIconPopover/LinkTypeEditAction）
 - Studio：studio/*（编辑器、tools-select、parameter-fields）
 - 页面数据缓存：`lib/page-cache.ts`（SWR 语义：重访先渲染缓存、后台刷新；写操作按前缀失效）
 

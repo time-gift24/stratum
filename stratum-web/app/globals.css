@@ -7,6 +7,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+    /* 浅色 = Tavily 暖白纸面体系：暖白画布 / 浅米卡片 / 炭黑文字 / 鼠尾草绿品牌 */
     --background: #f7f4ee;
     --foreground: #2e2d2a;
     --card: #faf8f3;
@@ -18,10 +19,17 @@
     --secondary: #f0ece3;
     --secondary-foreground: #383735;
     --muted: #f0ece3;
+    /* Tavily content-muted #9aa3b2 在暖白上仅约 2.8:1，不达 WCAG AA 正文线，
+       辅助文字用更深的暖灰；#9aa3b2 只允许出现在占位符等非必需场景 */
     --muted-foreground: #68645d;
     --accent: #9eb6a6;
     --accent-foreground: #2e2d2a;
     --destructive: #b3462f;
+    /* 成功态（chip/状态点用，不用于小字号正文）；AI/链接专用靛蓝 */
+    --success: #5dbb7a;
+    --success-foreground: #2e2d2a;
+    --ai: #7378d8;
+    --ai-foreground: #faf8f3;
     --border: #e7e2da;
     --input: #d9d3c8;
     --ring: oklch(0.52 0.07 155);
@@ -45,47 +53,55 @@
     --port-positive: oklch(0.65 0.17 155);
     --port-negative: oklch(0.6 0.22 25);
     --port-image: oklch(0.6 0.15 250);
+    --port-collab: oklch(0.6 0.2 330);
     --shadow-ink: 45 42 36;
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.87 0.22 150);
-    --primary-foreground: oklch(0.25 0.05 150);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.922 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.87 0.22 150);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.87 0.22 150);
-    --sidebar-primary-foreground: oklch(0.25 0.05 150);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
-    --canvas-grid: oklch(1 0 0 / 7%);
-    --edge: oklch(0.556 0 0);
-    --port-model: oklch(0.85 0.18 100);
-    --port-positive: oklch(0.8 0.17 155);
-    --port-negative: oklch(0.68 0.2 20);
-    --port-image: oklch(0.72 0.13 240);
+    /* 暗色 = PicGen 信号色板：深炭画布 / 炭灰节点 / 荧光色只编码语义状态
+       （黄=模型 绿=正向/成功 红=负向/风险 蓝=媒体输出 粉=协作标记），不是装饰 */
+    --background: #0d0f0e;
+    --foreground: #f1f4ef;
+    --card: #282b29;
+    --card-foreground: #f1f4ef;
+    --popover: #282b29;
+    --popover-foreground: #f1f4ef;
+    --primary: #a5ff4f;
+    --primary-foreground: #0d0f0e;
+    --secondary: #333633;
+    --secondary-foreground: #f1f4ef;
+    --muted: #333633;
+    --muted-foreground: #a2aaa1;
+    --accent: #333633;
+    --accent-foreground: #f1f4ef;
+    --destructive: #f15c63;
+    --success: #68eba0;
+    --success-foreground: #0d0f0e;
+    --ai: #73bfff;
+    --ai-foreground: #0d0f0e;
+    --border: #4c514d;
+    --input: #4c514d;
+    --ring: #a5ff4f;
+    --chart-1: #a5ff4f;
+    --chart-2: #e7f238;
+    --chart-3: #68eba0;
+    --chart-4: #73bfff;
+    --chart-5: #f05bd2;
+    --sidebar: #282b29;
+    --sidebar-foreground: #f1f4ef;
+    --sidebar-primary: #a5ff4f;
+    --sidebar-primary-foreground: #0d0f0e;
+    --sidebar-accent: #333633;
+    --sidebar-accent-foreground: #f1f4ef;
+    --sidebar-border: #4c514d;
+    --sidebar-ring: #a5ff4f;
+    --canvas-grid: #1c231f;
+    --edge: #a2aaa1;
+    --port-model: #e7f238;
+    --port-positive: #68eba0;
+    --port-negative: #f15c63;
+    --port-image: #73bfff;
+    --port-collab: #f05bd2;
     --shadow-ink: 0 0 0;
     --node-aurora: linear-gradient(
       90deg,
@@ -108,6 +124,11 @@
     --color-port-positive: var(--port-positive);
     --color-port-negative: var(--port-negative);
     --color-port-image: var(--port-image);
+    --color-port-collab: var(--port-collab);
+    --color-success: var(--success);
+    --color-success-foreground: var(--success-foreground);
+    --color-ai: var(--ai);
+    --color-ai-foreground: var(--ai-foreground);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
     --color-sidebar-accent: var(--sidebar-accent);

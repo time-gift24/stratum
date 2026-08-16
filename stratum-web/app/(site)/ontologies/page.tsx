@@ -14,7 +14,7 @@ import { useOntologyList } from "@/hooks/use-ontology-list"
  * 顶部避让常开导航（pt-24 sm:pt-28，与对话页一致）。
  */
 export default function OntologiesPage() {
-  const { state, api, loadPage, reload } = useOntologyList()
+  const { state, api, search, loadPage, setSearch, reload } = useOntologyList()
   const [createOpen, setCreateOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<OntologySummary | null>(null)
 
@@ -35,8 +35,10 @@ export default function OntologiesPage() {
     <PageShell>
       <OntologyList
         state={state}
+        query={search}
         onPageChange={loadPage}
         onRetry={reload}
+        onSearch={setSearch}
         onRequestCreate={() => setCreateOpen(true)}
         onRequestDelete={setDeleteTarget}
       />

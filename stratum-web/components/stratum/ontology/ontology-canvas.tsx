@@ -13,7 +13,6 @@ import {
   type Connection,
   type EdgeChange,
   type NodeChange,
-  type OnSelectionChangeParams,
 } from "@xyflow/react"
 
 // xyflow 样式表随本模块动态 chunk 懒加载（不进首屏 CSS）
@@ -56,11 +55,6 @@ const MINIMAP_PROPS = { pannable: true, zoomable: true } as const
 const EMPTY_MESSAGES: readonly string[] = []
 const EMPTY_PROPERTY_MESSAGES: ReadonlyMap<string, readonly string[]> = new Map()
 const EDGE_MARKER_END = { type: MarkerType.ArrowClosed } as const
-
-export type CanvasSelection = {
-  kind: "objectType" | "linkType"
-  id: string
-} | null
 
 type CanvasMessages = ReadonlyMap<string, readonly string[]>
 
@@ -138,7 +132,6 @@ export function OntologyCanvas({
   propertyActions,
   objectActions,
   edgeActions,
-  onSelectionChange,
   onConnectNodes,
   onNodeDragStop,
 }: {
@@ -153,7 +146,6 @@ export function OntologyCanvas({
   objectActions: ObjectTypeNodeActions
   /** 边级动作（编辑/删除，引用需稳定） */
   edgeActions: LinkTypeEdgeActions
-  onSelectionChange?(selection: CanvasSelection): void
   onConnectNodes(sourceId: string, targetId: string): void
   onNodeDragStop(objectTypeId: string, x: number, y: number): void
 }) {
@@ -254,24 +246,6 @@ export function OntologyCanvas({
     []
   )
 
-  const handleSelectionChange = useCallback(
-    (params: OnSelectionChangeParams<ObjectTypeNode, LinkTypeEdge>) => {
-      if (onSelectionChange === undefined) return
-      const node = params.nodes[0]
-      if (node !== undefined) {
-        onSelectionChange({ kind: "objectType", id: node.id })
-        return
-      }
-      const edge = params.edges[0]
-      if (edge !== undefined) {
-        onSelectionChange({ kind: "linkType", id: edge.id })
-        return
-      }
-      onSelectionChange(null)
-    },
-    [onSelectionChange]
-  )
-
   const handleConnect = useCallback(
     (connection: Connection) => {
       if (connection.source === "" || connection.target === "") return
@@ -290,7 +264,6 @@ export function OntologyCanvas({
         onlyRenderVisibleElements
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
-        onSelectionChange={handleSelectionChange}
         onConnect={handleConnect}
         onNodeDragStop={(_, node) =>
           onNodeDragStop(node.id, node.position.x, node.position.y)
