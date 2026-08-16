@@ -11,7 +11,7 @@ import { useOntologyList } from "@/hooks/use-ontology-list"
 
 /**
  * Ontology 列表页：薄页面，数据经 useOntologyList 获取后以 props 下发。
- * 顶部避让常开导航（pt-24 sm:pt-28，与对话页一致）。
+ * 顶部避让常开导航（pt-20，与对话页一致）。
  */
 export default function OntologiesPage() {
   const { state, api, search, loadPage, setSearch, reload } = useOntologyList()

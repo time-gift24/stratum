@@ -84,7 +84,7 @@ export function StudioSelect({
 
 export function PageShell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="min-h-svh bg-background px-4 pt-24 pb-16 font-sans text-foreground sm:px-6 sm:pt-28 lg:px-8">
+    <main className="min-h-svh bg-background px-4 pt-20 pb-16 font-sans text-foreground sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-6xl">{children}</div>
     </main>
   )
@@ -373,7 +373,7 @@ export function SettingsShell({
     <div className="grid gap-6 lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-8">
       <nav
         aria-label="设置"
-        className="flex gap-1 self-start lg:sticky lg:top-24 lg:flex-col"
+        className="flex gap-1 self-start lg:sticky lg:top-20 lg:flex-col"
       >
         {SETTINGS_ITEMS.map((item) => {
           const active = current === item.key

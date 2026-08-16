@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { ChevronDown, Menu, X } from "lucide-react"
@@ -100,16 +100,22 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
   const mobilePanelRef = useRef<HTMLDivElement>(null)
   const prevMenuRef = useRef<number | null>(null)
 
-  // 吸顶状态机：页顶 = 全宽展开、透明无边框；滚动后 = 居中磨砂浮 pill。
-  // useSyncExternalStore 订阅 scroll（外部系统），SSR 快照恒为未滚动，无 hydration mismatch。
-  const scrolled = useSyncExternalStore(
-    (onChange) => {
-      window.addEventListener("scroll", onChange, { passive: true })
-      return () => window.removeEventListener("scroll", onChange)
-    },
-    () => window.scrollY > 12,
-    () => false
-  )
+  // 吸顶状态机：页顶 = max-w-6xl 展开条；滚动后 = 居中磨砂浮 pill。
+  // capture 阶段监听：scroll 不冒泡但会捕获，因此 window 与内部滚动容器
+  // （对话线程流等 h-svh 页面，window.scrollY 恒为 0）都能驱动状态切换。
+  const [scrolled, setScrolled] = useState(false)
+  useEffect(() => {
+    const onScroll = (event: Event) => {
+      const target = event.target
+      const top =
+        target instanceof Element && target !== document.documentElement && target !== document.body
+          ? target.scrollTop
+          : window.scrollY
+      setScrolled(top > 12)
+    }
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true })
+    return () => window.removeEventListener("scroll", onScroll, { capture: true })
+  }, [])
 
   const { contextSafe } = useGSAP(
     () => {
@@ -249,33 +255,36 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
             if (e.key === "Escape") closeDesktopMenu()
           }}
         >
-          {/* Nav Container：页顶全宽展开，滚动后收缩为居中 pill；两态都磨砂+边框+阴影 */}
+          {/* Nav Container：页顶 max-w-6xl 展开，滚动后收缩为 pill；
+              两态都磨砂+边框+阴影；max-width 数值过渡保证收缩/展开丝滑 */}
           <div
             className={cn(
-              "overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150 transition-[background-color,border-color,box-shadow] duration-300 motion-reduce:transition-none",
-              scrolled ? "mx-auto w-fit" : "mx-auto w-full max-w-6xl"
+              "mx-auto w-full overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150 transition-[max-width,background-color,border-color,box-shadow] duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+              scrolled ? "max-w-[38rem]" : "max-w-6xl"
             )}
           >
             {/* Main Nav Bar */}
             <div className="flex items-center justify-between gap-2 py-2 pr-2.5 pl-5">
-              {/* Brand */}
-              <TransitionLink
-                href={brand.href ?? "/"}
-                className="mr-6 flex items-center gap-2 text-xl font-semibold tracking-tight text-foreground"
-              >
-                {brandContent}
-              </TransitionLink>
+              {/* 左侧：品牌 + 导航链接（文字组靠左，不居中） */}
+              <div className="flex items-center gap-1">
+                {/* Brand */}
+                <TransitionLink
+                  href={brand.href ?? "/"}
+                  className="mr-3 flex items-center gap-2 text-base font-semibold tracking-tight text-foreground"
+                >
+                  {brandContent}
+                </TransitionLink>
 
-              {/* Nav Links */}
-              <div className="relative flex items-center gap-1">
-                <span
-                  data-nav-pill
-                  aria-hidden
-                  className="pointer-events-none absolute top-1/2 left-0 h-8 w-0 -translate-y-1/2 rounded-full bg-muted opacity-0"
-                />
-                {menus.map((menu, index) => {
-                  const menuClass =
-                    "relative flex items-center gap-1 rounded-full px-4 py-2 text-sm font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
+                {/* Nav Links */}
+                <div className="relative flex items-center gap-1">
+                  <span
+                    data-nav-pill
+                    aria-hidden
+                    className="pointer-events-none absolute top-1/2 left-0 h-8 w-0 -translate-y-1/2 rounded-full bg-muted opacity-0"
+                  />
+                  {menus.map((menu, index) => {
+                    const menuClass =
+                      "relative flex items-center gap-1 rounded-full px-4 py-2 text-[0.9375rem] font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
                   const chevron = (
                     <ChevronDown
                       aria-hidden
@@ -324,7 +333,7 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
                   <TransitionLink
                     key={link.label}
                     href={link.href}
-                    className="relative rounded-full px-4 py-2 text-sm font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
+                    className="relative rounded-full px-4 py-2 text-[0.9375rem] font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
                     onMouseEnter={(e) => {
                       if (activeMenu !== null) closeDesktopMenu()
                       movePill(e.currentTarget as HTMLElement)
@@ -333,6 +342,7 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
                     {link.label}
                   </TransitionLink>
                 ))}
+                </div>
               </div>
 
               {/* Right Side Actions */}
@@ -381,7 +391,7 @@ export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNav
               {/* Brand */}
               <TransitionLink
                 href={brand.href ?? "/"}
-                className="flex items-center gap-2 text-xl font-semibold tracking-tight text-foreground"
+                className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground"
               >
                 {brandContent}
               </TransitionLink>

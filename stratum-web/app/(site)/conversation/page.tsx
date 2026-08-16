@@ -140,7 +140,7 @@ export default function ConversationPage() {
   )
 
   return (
-    <div className="flex h-svh pt-24 font-sans sm:pt-28">
+    <div className="flex h-svh pt-20 font-sans">
       <main className="relative min-w-0 flex-1">
         <ThreadListRail
           threads={threads}
