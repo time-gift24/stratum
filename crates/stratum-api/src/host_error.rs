@@ -5,6 +5,7 @@
 
 use stratum_config::ConfigError;
 use stratum_core::{ModelId, ModelIdParseError};
+use stratum_filesystem::FilesystemError;
 use stratum_llm::LlmError;
 use stratum_ontology::OntologyStoreError;
 use stratum_postgres::PostgresError;
@@ -15,7 +16,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum HostError {
-    /// Listener or signal I/O failed.
+    /// A host process, listener, or signal I/O operation failed.
     #[error("host io operation failed")]
     Io(#[from] std::io::Error),
     /// Shared configuration is invalid or incomplete.
@@ -30,6 +31,9 @@ pub enum HostError {
     /// The isolated Studio catalog could not connect, migrate, or be read.
     #[error("studio management catalog failed to initialize")]
     Studio(#[from] StudioError),
+    /// The configured Agent tool workspace is missing or not a directory.
+    #[error("agent tool workspace root is not a usable directory")]
+    ToolWorkspace(#[source] FilesystemError),
     /// LLM provider registration failed.
     #[error("llm provider registration failed")]
     Llm(#[from] LlmError),

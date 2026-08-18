@@ -1,16 +1,11 @@
 //! Builtin tool implementations.
 
 mod apply_patch;
-mod file_metadata;
-mod filesystem;
-mod list_dir;
-mod read_file_lines;
-mod search_text;
+mod shell;
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::json;
 use stratum_core::{DangerLevel, ToolKind, ToolName, ToolSpec};
 use tokio_util::sync::CancellationToken;
 
@@ -18,10 +13,7 @@ use crate::schema_validation;
 use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 
 pub use apply_patch::ApplyPatchTool;
-pub use file_metadata::FileMetadataTool;
-pub use list_dir::ListDirTool;
-pub use read_file_lines::ReadFileLinesTool;
-pub use search_text::SearchTextTool;
+pub use shell::ShellTool;
 
 /// Registry backed by builtin in-memory tools.
 struct RegisteredTool {
@@ -132,60 +124,5 @@ impl ToolRegistry for BuiltinToolRegistry {
         let tool = Arc::clone(&registered.tool);
 
         tool.call(input, cancellation).await
-    }
-}
-
-/// Builtin tool that returns its input arguments.
-pub struct EchoTool {
-    spec: ToolSpec,
-}
-
-impl EchoTool {
-    /// Creates an echo tool.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            spec: ToolSpec::builder()
-                .name("echo")
-                .description("returns input arguments")
-                .input_schema(json!({"type": "object"}))
-                .build(),
-        }
-    }
-}
-
-impl Default for EchoTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-
-    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
-        if input.arguments.is_object() {
-            Ok(())
-        } else {
-            Err(ToolError::InvalidArgument {
-                name: "arguments",
-                reason: "must be an object".into(),
-            })
-        }
-    }
-
-    async fn call(
-        &self,
-        input: ToolInput,
-        cancellation: &CancellationToken,
-    ) -> Result<ToolOutput, ToolError> {
-        self.validate(&input)?;
-        if cancellation.is_cancelled() {
-            return Err(ToolError::Cancelled);
-        }
-        Ok(ToolOutput::new(input.arguments))
     }
 }

@@ -202,12 +202,12 @@ impl LlmProvider for ScriptedProvider {
     }
 }
 
-struct EchoTool {
+struct PassthroughTool {
     spec: ToolSpec,
 }
 
 #[async_trait]
-impl Tool for EchoTool {
+impl Tool for PassthroughTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
     }
@@ -229,7 +229,7 @@ fn echo_registry() -> Arc<dyn ToolRegistry> {
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::Allow);
     registry
         .register(
-            Arc::new(EchoTool {
+            Arc::new(PassthroughTool {
                 spec: ToolSpec::builder()
                     .name("echo")
                     .description("records calls")

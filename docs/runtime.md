@@ -55,6 +55,10 @@ Execution、Ontology 与 Studio 的三个 PostgreSQL URL 都必须显式写端�
   template 文件 seed。
 - `[studio].management_enabled`：只控制 Provider、Model 与 Agent definition 管理 routes。
   启用时 `[api].bind` 必须是 loopback；关闭时 runtime 仍连接并使用 Studio database。
+- `[tools].workspace_root`：`shell` 与 `apply_patch` 共享的默认工作目录。启动时校验为已有
+  目录，服务不自动创建；该目录不承载 AgentRuntime history、event 或 checkpoint。根
+  Compose 镜像内的 `/workspace` 是不挂载宿主目录或 volume 的空白临时目录，容器重建后
+  内容丢失；当前镜像也不把项目源码或完整开发工具链复制进去。
 - `[nats]`：连接与 AgentRuntime-scoped 短 tail 上限——`url`、`stream_name`、
   `subject_prefix`、`replicas`（1..=5）、`max_age_seconds`、`max_bytes`、
   `max_messages`（有限上限 + discard-old）与 `connect_timeout_seconds`。
@@ -158,6 +162,9 @@ canonical definition 复用 AgentId，同 pair 却改变 definition 返回
 `409 agent_version_conflict`，不同 tag 即使 definition 相同也创建不同 AgentId。每次成功 create
 都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned definition，不受后续 Studio 更新或
 删除影响。
+
+启动不会 seed Agent definition；开发阶段通过 Studio 管理 API 或 UI 显式创建，并为 coding
+Agent 选择 `shell` 与 `apply_patch`。既有 runtime 永远不受后续 definition 更新影响。
 
 ## 8. 测试
 

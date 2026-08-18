@@ -8,6 +8,7 @@
 //! commits, logs the terminal failure once with safe fields, and finally
 //! removes only its own claim identity.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use stratum_agent::{
@@ -16,10 +17,13 @@ use stratum_agent::{
 use stratum_core::{
     ChatMessage, ModelConfig, SkillSetVersionId, ToolKind, ToolName, TurnRuntimeSnapshot,
 };
+use stratum_filesystem::{LocalFilesystem, LocalFilesystemConfig};
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::LlmProvider;
 use stratum_postgres::{AgentRuntimeView, ResolvedDefinitionV1};
-use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
+use stratum_tools::{
+    ApplyPatchTool, BuiltinToolRegistry, ShellTool, ToolPermissionMode, ToolRegistry,
+};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -61,26 +65,41 @@ pub(crate) fn decode_definition(view: &AgentRuntimeView) -> Result<ResolvedDefin
 
 /// Builds the builtin tool registry for one definition.
 ///
-/// The registry policy is deliberately minimal: only the `echo` tool exists
-/// and every call requires approval.
+/// The production composition supports only one-shot `shell` and
+/// `apply_patch`; both share the same process-level workspace root and use the
+/// existing approval hook.
 ///
 /// # Errors
 ///
 /// Returns [`ErrorKind::RuntimeUnavailable`] when the definition names a tool
 /// this binary does not provide.
-pub(crate) fn build_tool_registry(tools: &[ToolName]) -> Result<Arc<dyn ToolRegistry>, ApiError> {
+pub(crate) fn build_tool_registry(
+    tools: &[ToolName],
+    workspace_root: &Path,
+) -> Result<Arc<dyn ToolRegistry>, ApiError> {
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
     for name in tools {
-        if name.as_str() != "echo" {
-            return Err(ApiError::new(ErrorKind::RuntimeUnavailable));
+        match name.as_str() {
+            "shell" => registry.register(
+                Arc::new(ShellTool::new(workspace_root.to_path_buf())),
+                ToolKind::Write,
+                stratum_core::DangerLevel::High,
+            ),
+            "apply_patch" => {
+                let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+                    root: workspace_root.to_path_buf(),
+                    max_file_bytes: None,
+                })
+                .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
+                registry.register(
+                    Arc::new(ApplyPatchTool::new(Arc::new(filesystem))),
+                    ToolKind::Write,
+                    stratum_core::DangerLevel::High,
+                )
+            }
+            _ => return Err(ApiError::new(ErrorKind::RuntimeUnavailable)),
         }
-        registry
-            .register(
-                Arc::new(EchoTool::new()),
-                ToolKind::Read,
-                stratum_core::DangerLevel::Low,
-            )
-            .map_err(|source| ApiError::with_source(ErrorKind::Internal, source))?;
+        .map_err(|source| ApiError::with_source(ErrorKind::Internal, source))?;
     }
     Ok(Arc::new(registry))
 }
@@ -267,7 +286,7 @@ mod tests {
                 stratum_core::ModelId::new("openai", "test-model").expect("model id is valid"),
                 serde_json::Map::new(),
             ),
-            tools: vec![ToolName::from("echo")],
+            tools: vec![ToolName::from("shell"), ToolName::from("apply_patch")],
             prompt: "be helpful".to_owned(),
         };
         let value = serde_json::to_value(&definition).expect("definition serializes");
@@ -281,15 +300,82 @@ mod tests {
     }
 
     #[test]
-    fn tool_registry_only_provides_echo_with_required_approval() {
-        let registry = build_tool_registry(&[ToolName::from("echo")]).expect("registry builds");
-        assert!(
-            registry
-                .authorization(&ToolName::from("echo"))
-                .expect("echo is registered")
-                .is_some(),
-            "echo requires approval"
+    fn tool_registry_only_provides_default_tools_with_required_approval() {
+        let root = std::env::current_dir().expect("current directory exists");
+        let registry = build_tool_registry(
+            &[ToolName::from("shell"), ToolName::from("apply_patch")],
+            &root,
+        )
+        .expect("registry builds");
+
+        let names = registry
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![ToolName::from("apply_patch"), ToolName::from("shell")]
         );
-        assert!(build_tool_registry(&[ToolName::from("write_file")]).is_err());
+        for name in names {
+            assert!(
+                registry
+                    .authorization(&name)
+                    .expect("tool is registered")
+                    .is_some(),
+                "default tools use the existing approval hook"
+            );
+        }
+        assert!(build_tool_registry(&[ToolName::from("echo")], &root).is_err());
+    }
+
+    #[tokio::test]
+    async fn default_tools_share_one_workspace_root() {
+        let root =
+            std::env::temp_dir().join(format!("stratum-api-default-tools-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("workspace root is created");
+        let registry = build_tool_registry(
+            &[ToolName::from("shell"), ToolName::from("apply_patch")],
+            &root,
+        )
+        .expect("registry builds");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+
+        registry
+            .call(
+                &ToolName::from("apply_patch"),
+                stratum_tools::ToolInput::new(
+                    stratum_core::CallId::from("patch-1"),
+                    serde_json::json!({
+                        "operation": {
+                            "type": "create_file",
+                            "path": "shared.txt",
+                            "diff": "+shared workspace\n"
+                        }
+                    }),
+                ),
+                &cancellation,
+            )
+            .await
+            .expect("patch creates a file");
+        let output = registry
+            .call(
+                &ToolName::from("shell"),
+                stratum_tools::ToolInput::new(
+                    stratum_core::CallId::from("shell-1"),
+                    serde_json::json!({"command": "cat shared.txt"}),
+                ),
+                &cancellation,
+            )
+            .await
+            .expect("shell reads the patched file");
+
+        assert_eq!(output.result["stdout"], "shared workspace\n");
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("workspace root is removed");
     }
 }

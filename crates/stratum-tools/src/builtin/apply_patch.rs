@@ -8,14 +8,11 @@ use serde_json::json;
 use stratum_core::ToolSpec;
 use stratum_filesystem::{
     ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, Filesystem, FilesystemError,
-    apply_patch,
+    VirtualPath, apply_patch,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    Tool, ToolError, ToolInput, ToolOutput,
-    builtin::filesystem::{display_path, normalize_path},
-};
+use crate::{Tool, ToolError, ToolInput, ToolOutput};
 
 /// Builtin tool that applies file patches through a virtual filesystem.
 pub struct ApplyPatchTool {
@@ -144,6 +141,34 @@ fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolErro
     Ok(ApplyPatchOperation::new(kind, path, raw.diff))
 }
 
+fn normalize_path(path: &str) -> Result<VirtualPath, ToolError> {
+    if path.is_empty() {
+        return Err(ToolError::InvalidPath {
+            path: path.to_owned(),
+            source: stratum_filesystem::VirtualPathError,
+        });
+    }
+
+    let normalized = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    VirtualPath::try_from(normalized.as_str()).map_err(|source| ToolError::InvalidPath {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn display_path(path: &VirtualPath) -> String {
+    let trimmed = path.as_str().trim_start_matches('/');
+    if trimmed.is_empty() {
+        ".".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 fn success_output(kind: ApplyPatchOperationKind, path: &str) -> String {
     match kind {
         ApplyPatchOperationKind::CreateFile => format!("created {path}"),
@@ -155,9 +180,6 @@ fn success_output(kind: ApplyPatchOperationKind, path: &str) -> String {
 
 fn failed_output(error: &ApplyPatchError, path: &str) -> String {
     match error {
-        ApplyPatchError::MissingDiff { operation } => {
-            format!("patch diff is required for {operation}")
-        }
         ApplyPatchError::ContextMismatch { .. } => {
             format!("patch context did not match {path}")
         }

@@ -1,0 +1,101 @@
+name: stratum-tools-preview
+
+services:
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "--store_dir", "/data", "--http_port", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-Y", "off", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - nats-data:/data
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum
+      POSTGRES_DB: stratum
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum -d stratum"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/create-ontology-database.sql:/docker-entrypoint-initdb.d/10-create-ontology-database.sql:ro
+      - ./docker/postgres/create-studio-database.sql:/docker-entrypoint-initdb.d/20-create-studio-database.sql:ro
+
+  postgres-provision:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: stratum
+      PGPASSWORD: stratum
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for database in stratum_ontology stratum_studio; do
+          if ! psql --dbname postgres --tuples-only --no-align --set ON_ERROR_STOP=1 \
+            --command "SELECT 1 FROM pg_database WHERE datname = '$${database}'" \
+            | grep -qx 1; then
+            createdb "$${database}"
+          fi
+        done
+
+  stratum-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      args:
+        PACKAGE: stratum-api
+        BIN: stratum-api
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      postgres-provision:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-fsS", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    ports:
+      - "127.0.0.1:18081:18081"
+    volumes:
+      - ./config.tools-preview.toml:/app/config.toml:ro
+    environment:
+      RUST_LOG: info
+
+  stratum-api-proxy:
+    image: nginx:1.27-alpine
+    network_mode: "service:stratum-api"
+    depends_on:
+      stratum-api:
+        condition: service_started
+    volumes:
+      - ./docker/tools-preview/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  stratum-web:
+    build:
+      context: ./stratum-web
+      dockerfile: Dockerfile.tools-preview
+      args:
+        NEXT_PUBLIC_STRATUM_API_BASE_URL: "http://127.0.0.1:18081"
+    depends_on:
+      stratum-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5174:3000"
+
+volumes:
+  nats-data:
+  postgres-data:

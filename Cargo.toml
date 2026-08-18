@@ -32,6 +32,10 @@ futures-core = "0.3.32"
 futures-util = "0.3.32"
 http = "1.3.1"
 jsonschema = { version = "0.49.2", default-features = false }
+# Process-group termination for the one-shot shell tool. Calling the platform
+# primitive directly avoids a larger process-management crate. `libc` is the
+# Rust ecosystem's maintained FFI package and is MIT/Apache-2.0 licensed.
+libc = "0.2.186"
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
 # LLM API keys in memory (CONSTITUTION §6): Studio write DTOs/storage and
 # provider clients hold keys as secrecy::SecretString so Debug/Display cannot

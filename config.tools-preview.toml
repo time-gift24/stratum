@@ -1,22 +1,16 @@
 [api]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 readiness_timeout_ms = 1000
 allowed_origins = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:5175",
-  "http://127.0.0.1:5175",
+  "http://127.0.0.1:5174",
+  "http://localhost:5174",
 ]
 
 [ontology]
 database_url = "postgres://stratum:stratum@postgres:5432/stratum_ontology"
 
-# Studio 数据库始终用于 runtime；docker 栈只关闭管理 routes。
-# management_enabled = true 要求
-# api.bind 为 loopback（loopback-only 安全边界），而容器需要 0.0.0.0 才能
-# 发布端口，两者冲突。本地直跑（127.0.0.1 bind）时可开启。
 [studio]
-management_enabled = false
+management_enabled = true
 database_url = "postgres://stratum:stratum@postgres:5432/stratum_studio"
 
 [tools]

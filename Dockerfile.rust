@@ -26,6 +26,7 @@ ARG BIN
 WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
+  && mkdir -p /workspace \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/${BIN} /usr/local/bin/app
 ENTRYPOINT ["/usr/local/bin/app"]

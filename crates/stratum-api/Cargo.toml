@@ -33,6 +33,7 @@ tracing-opentelemetry.workspace = true
 stratum-agent.workspace = true
 stratum-config.workspace = true
 stratum-core.workspace = true
+stratum-filesystem.workspace = true
 stratum-infra.workspace = true
 stratum-llm.workspace = true
 stratum-ontology.workspace = true

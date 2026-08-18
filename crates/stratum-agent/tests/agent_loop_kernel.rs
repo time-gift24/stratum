@@ -25,8 +25,7 @@ use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
 use stratum_tools::{
-    BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
-    ToolRegistry,
+    BuiltinToolRegistry, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry,
 };
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -237,6 +236,52 @@ impl Tool for RecordingTool {
     }
 }
 
+struct PassthroughTool {
+    spec: ToolSpec,
+}
+
+impl PassthroughTool {
+    fn new(name: &str) -> Self {
+        Self {
+            spec: ToolSpec::builder()
+                .name(name)
+                .description("returns input arguments")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for PassthroughTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        if input.arguments.is_object() {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidArgument {
+                name: "arguments",
+                reason: "must be an object".into(),
+            })
+        }
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        self.validate(&input)?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        Ok(ToolOutput::new(input.arguments))
+    }
+}
+
 fn test_agent_loop(events: Vec<ChatStreamEvent>) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
     test_agent_loop_with(provider_events(events), LoopLimits::default(), None)
 }
@@ -261,7 +306,11 @@ fn test_agent_loop_with_behaviors(
     let operations = Arc::new(Mutex::new(Vec::new()));
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .register(
+            Arc::new(PassthroughTool::new("echo")),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("echo tool should register");
     build_agent_loop(behaviors, limits, fail_at, Arc::new(registry), operations)
 }
@@ -1913,7 +1962,11 @@ async fn invalid_builtin_tool_input_is_committed_without_execution_start() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
     registry
-        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .register(
+            Arc::new(PassthroughTool::new("echo")),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("echo tool should register");
     let (agent_loop, recorded) = build_agent_loop(
         VecDeque::from([

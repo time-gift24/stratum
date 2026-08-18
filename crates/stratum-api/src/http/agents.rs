@@ -84,7 +84,7 @@ pub(crate) async fn create_agent_runtime(
         .clone()
         .unwrap_or_else(|| template_model.clone());
     validate_model_override(&state, &effective_model).await?;
-    build_tool_registry(&definition.tools)
+    build_tool_registry(&definition.tools, state.tool_workspace_root())
         .map_err(|_| ApiError::new(ErrorKind::InvalidAgentTemplate))?;
 
     let resolved = ResolvedDefinitionV1 {

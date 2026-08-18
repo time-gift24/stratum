@@ -6,7 +6,7 @@
 //! credentials: the only secret-bearing values are write-only request fields
 //! forwarded straight to `stratum-studio`.
 
-use std::sync::Arc;
+use std::{path::Path as FilesystemPath, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -836,8 +836,15 @@ async fn delete_provider_model(
         (status = 500, description = "tool catalog could not be assembled", body = ErrorResponse),
     )
 )]
-async fn list_tools() -> Result<Json<Vec<ToolView>>, ApiError> {
-    let registry = build_tool_registry(&[ToolName::from("echo")])?;
+async fn list_tools(State(state): State<Arc<AppState>>) -> Result<Json<Vec<ToolView>>, ApiError> {
+    Ok(Json(tool_catalog(state.tool_workspace_root())?))
+}
+
+fn tool_catalog(workspace_root: &FilesystemPath) -> Result<Vec<ToolView>, ApiError> {
+    let registry = build_tool_registry(
+        &[ToolName::from("shell"), ToolName::from("apply_patch")],
+        workspace_root,
+    )?;
     let mut tools = Vec::new();
     for spec in registry.specs() {
         let Some((kind, danger_level)) = registry
@@ -853,7 +860,7 @@ async fn list_tools() -> Result<Json<Vec<ToolView>>, ApiError> {
             danger_level: danger_level_view(danger_level)?,
         });
     }
-    Ok(Json(tools))
+    Ok(tools)
 }
 
 fn tool_kind(value: ToolKind) -> Result<ToolKindDto, ApiError> {
@@ -1396,15 +1403,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn tools_endpoint_projects_the_real_echo_catalog() {
-        let Json(tools) = list_tools().await.expect("builtin catalog assembles");
+    #[test]
+    fn tools_catalog_projects_the_real_shell_and_apply_patch_tools() {
+        let root = std::env::current_dir().expect("workspace root exists");
+        let tools = tool_catalog(&root).expect("builtin catalog assembles");
 
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
-        assert_eq!(tools[0].description, "returns input arguments");
-        assert_eq!(tools[0].kind, ToolKindDto::Read);
-        assert_eq!(tools[0].danger_level, DangerLevelDto::Low);
+        assert_eq!(tools.len(), 2);
+        for tool in tools {
+            assert!(matches!(tool.name.as_str(), "shell" | "apply_patch"));
+            assert_eq!(tool.kind, ToolKindDto::Write);
+            assert_eq!(tool.danger_level, DangerLevelDto::High);
+        }
     }
 
     async fn assert_json_error(

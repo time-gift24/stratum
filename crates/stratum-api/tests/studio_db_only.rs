@@ -105,7 +105,7 @@ async fn studio_database_is_the_complete_runtime_catalog() {
                     .expect("static Model id is valid"),
                 serde_json::Map::new(),
             ),
-            tools: vec![ToolName::from("echo")],
+            tools: vec![ToolName::from("shell"), ToolName::from("apply_patch")],
             prompt: "Use only the Studio-backed definition.".to_owned(),
         })
         .await
@@ -299,7 +299,7 @@ async fn management_http_flow_is_versioned_blocking_persistent_and_secret_safe()
             "agent_version": "management-v1",
             "model": MANAGEMENT_MODEL_ID,
             "model_parameters": {},
-            "tools": ["echo"],
+            "tools": ["shell", "apply_patch"],
             "prompt": "Use the managed model.",
         })),
         None,
@@ -341,7 +341,7 @@ async fn management_http_flow_is_versioned_blocking_persistent_and_secret_safe()
             "agent_version": "management-v2",
             "model": MANAGEMENT_MODEL_ID,
             "model_parameters": {},
-            "tools": ["echo"],
+            "tools": ["shell", "apply_patch"],
             "prompt": "Use the persisted managed model.",
         })),
         Some(&created_agent_etag),
@@ -644,6 +644,7 @@ async fn assembled_app_with_url(
 }
 
 fn config(studio_url: &str, management_enabled: bool) -> Config {
+    let workspace_root = std::env::current_dir().expect("tool workspace root exists");
     Config::parse(&format!(
         r#"
 [api]
@@ -658,6 +659,9 @@ database_url = {ontology_url:?}
 [studio]
 database_url = {studio_url:?}
 management_enabled = {management_enabled}
+
+[tools]
+workspace_root = {workspace_root:?}
 "#,
         pg_url = pg_url(),
         ontology_url = ontology_pg_url(),

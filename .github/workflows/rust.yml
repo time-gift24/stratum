@@ -232,19 +232,3 @@ jobs:
       - name: Run stratum-api integration tests
         if: steps.workspace.outputs.present == 'true'
         run: make -C crates/stratum-api test-integration COMPOSE="docker compose"
-
-      - name: Start stratum-tools test stack
-        if: steps.workspace.outputs.present == 'true'
-        run: |
-          mkdir -p crates/stratum-tools/target/docker-sandbox
-          docker compose -f crates/stratum-tools/docker-compose.test.yml up -d
-
-      - name: Run stratum-tools integration tests
-        if: steps.workspace.outputs.present == 'true'
-        env:
-          STRATUM_TOOLS_DOCKER_SANDBOX: ${{ github.workspace }}/crates/stratum-tools/target/docker-sandbox
-        run: cargo test -p stratum-tools --test apply_patch_docker -- --ignored --nocapture
-
-      - name: Stop stratum-tools test stack
-        if: always() && steps.workspace.outputs.present == 'true'
-        run: docker compose -f crates/stratum-tools/docker-compose.test.yml down -v

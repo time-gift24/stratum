@@ -6,12 +6,75 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use serde_json::json;
 use stratum_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSpec};
-use stratum_filesystem::{LocalFilesystem, LocalFilesystemConfig};
-use stratum_tools::{
-    BuiltinToolRegistry, EchoTool, SearchTextTool, Tool, ToolError, ToolInput, ToolOutput,
-    ToolRegistry,
-};
+use stratum_tools::{BuiltinToolRegistry, Tool, ToolError, ToolInput, ToolOutput, ToolRegistry};
 use tokio_util::sync::CancellationToken;
+
+struct TestTool {
+    spec: ToolSpec,
+    reject_empty_query: bool,
+}
+
+impl TestTool {
+    fn passthrough() -> Self {
+        Self::new(false)
+    }
+
+    fn rejecting_empty_query() -> Self {
+        Self::new(true)
+    }
+
+    fn new(reject_empty_query: bool) -> Self {
+        Self {
+            spec: ToolSpec::builder()
+                .name("test_tool")
+                .description("schema validation test tool")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+            reject_empty_query,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for TestTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        if !input.arguments.is_object() {
+            return Err(ToolError::InvalidArgument {
+                name: "arguments",
+                reason: "must be an object".into(),
+            });
+        }
+        if self.reject_empty_query
+            && input
+                .arguments
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(str::is_empty)
+        {
+            return Err(ToolError::InvalidArgument {
+                name: "query",
+                reason: "must not be empty".into(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        self.validate(&input)?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        Ok(ToolOutput::new(input.arguments))
+    }
+}
 
 /// Tool that delegates semantic validation and counts how often it is reached.
 struct CountingTool {
@@ -73,24 +136,24 @@ fn counting_registry(
 
 #[tokio::test]
 async fn schema_rejects_type_error_that_custom_validate_would_miss() {
-    let echo = Arc::new(EchoTool::new());
+    let delegate = Arc::new(TestTool::passthrough());
     let (registry, validate_calls) = counting_registry(
-        "counting_echo",
+        "counting_tool",
         json!({
             "type": "object",
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
-        echo.clone(),
+        delegate.clone(),
     );
     let input = ToolInput::new(CallId::from("call-type"), json!({"message": 42}));
     assert!(
-        echo.validate(&input).is_ok(),
-        "echo's own validate only checks for an object and misses the wrong field type"
+        delegate.validate(&input).is_ok(),
+        "delegate validation only checks for an object and misses the wrong field type"
     );
 
     let error = registry
-        .validate(&ToolName::from("counting_echo"), &input)
+        .validate(&ToolName::from("counting_tool"), &input)
         .expect_err("schema must reject the wrong field type");
 
     assert!(
@@ -117,18 +180,18 @@ async fn schema_rejects_type_error_that_custom_validate_would_miss() {
 #[tokio::test]
 async fn schema_rejects_missing_required_field_without_calling_custom_validate() {
     let (registry, validate_calls) = counting_registry(
-        "counting_echo",
+        "counting_tool",
         json!({
             "type": "object",
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
-        Arc::new(EchoTool::new()),
+        Arc::new(TestTool::passthrough()),
     );
 
     let error = registry
         .validate(
-            &ToolName::from("counting_echo"),
+            &ToolName::from("counting_tool"),
             &ToolInput::new(CallId::from("call-required"), json!({})),
         )
         .expect_err("schema must reject a missing required field");
@@ -144,22 +207,22 @@ async fn schema_rejects_missing_required_field_without_calling_custom_validate()
 #[tokio::test]
 async fn schema_rejects_constraint_violation_without_calling_custom_validate() {
     let (registry, validate_calls) = counting_registry(
-        "counting_echo",
+        "counting_tool",
         json!({
             "type": "object",
             "required": ["message"],
             "properties": {"message": {"type": "string", "minLength": 1}}
         }),
-        Arc::new(EchoTool::new()),
+        Arc::new(TestTool::passthrough()),
     );
     let input = ToolInput::new(CallId::from("call-constraint"), json!({"message": ""}));
 
     let validate_error = registry
-        .validate(&ToolName::from("counting_echo"), &input)
+        .validate(&ToolName::from("counting_tool"), &input)
         .expect_err("schema must reject the minLength violation");
     let call_error = registry
         .call(
-            &ToolName::from("counting_echo"),
+            &ToolName::from("counting_tool"),
             input,
             &CancellationToken::new(),
         )
@@ -174,20 +237,20 @@ async fn schema_rejects_constraint_violation_without_calling_custom_validate() {
 #[tokio::test]
 async fn schema_error_does_not_embed_the_rejected_instance_value() {
     let (registry, _) = counting_registry(
-        "counting_echo",
+        "counting_tool",
         json!({
             "type": "object",
             "required": ["message"],
             "properties": {"message": {"type": "string", "maxLength": 4}}
         }),
-        Arc::new(EchoTool::new()),
+        Arc::new(TestTool::passthrough()),
     );
     // Stands in for a payload carrying file contents or credentials.
     let sensitive = "s3cr3t-api-key-payload";
 
     let error = registry
         .validate(
-            &ToolName::from("counting_echo"),
+            &ToolName::from("counting_tool"),
             &ToolInput::new(
                 CallId::from("call-sensitive"),
                 json!({"message": sensitive}),
@@ -208,27 +271,15 @@ async fn schema_error_does_not_embed_the_rejected_instance_value() {
 
 #[tokio::test]
 async fn custom_validate_still_runs_after_schema_passes() {
-    let root = std::env::temp_dir().join(format!(
-        "stratum-tools-schema-validation-{}",
-        std::process::id()
-    ));
-    tokio::fs::create_dir_all(&root).await.expect("create root");
-    let filesystem = Arc::new(
-        LocalFilesystem::new(LocalFilesystemConfig {
-            root: root.clone(),
-            max_file_bytes: Some(4096),
-        })
-        .expect("filesystem is valid"),
-    );
     let (registry, validate_calls) = counting_registry(
-        "counting_search",
+        "counting_query",
         json!({"type": "object"}),
-        Arc::new(SearchTextTool::new(filesystem)),
+        Arc::new(TestTool::rejecting_empty_query()),
     );
 
     let error = registry
         .validate(
-            &ToolName::from("counting_search"),
+            &ToolName::from("counting_query"),
             &ToolInput::new(
                 CallId::from("call-custom"),
                 json!({"path": "src", "query": ""}),
@@ -245,30 +296,28 @@ async fn custom_validate_still_runs_after_schema_passes() {
         1,
         "schema-valid input must reach the tool's custom validate"
     );
-
-    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]
 async fn schema_valid_input_executes_through_registry() {
     let (registry, validate_calls) = counting_registry(
-        "counting_echo",
+        "counting_tool",
         json!({
             "type": "object",
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
-        Arc::new(EchoTool::new()),
+        Arc::new(TestTool::passthrough()),
     );
 
     let input = ToolInput::new(CallId::from("call-valid"), json!({"message": "hello"}));
     registry
-        .validate(&ToolName::from("counting_echo"), &input)
+        .validate(&ToolName::from("counting_tool"), &input)
         .expect("schema-valid input should pass validation");
 
     let output = registry
         .call(
-            &ToolName::from("counting_echo"),
+            &ToolName::from("counting_tool"),
             input,
             &CancellationToken::new(),
         )
@@ -284,7 +333,7 @@ fn invalid_input_schema_is_rejected_at_registration() {
     let (tool, _) = counting_tool(
         "broken_schema",
         json!({"type": "not_a_real_type"}),
-        Arc::new(EchoTool::new()),
+        Arc::new(TestTool::passthrough()),
     );
     let mut registry = BuiltinToolRegistry::default();
 

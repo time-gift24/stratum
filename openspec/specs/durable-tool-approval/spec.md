@@ -4,7 +4,7 @@
 定义 Tool 审批在 AgentRuntime durable ledger 中的身份、线性化、等待、消费、失效与恢复语义。
 ## Requirements
 ### Requirement: 审批身份与生命周期以 AgentRuntime durable ledger 为唯一真相
-当 `decide_tool_call` 的审批 Handler 判定一个已完成最终复验的 Tool call 需要人工决定时，系统必须（SHALL）由服务端生成 UUIDv7 `ApprovalId`，并把它绑定到 exact AgentRuntimeId、Turn 与 `HookInvocationId`。AgentRuntimeId只由外层 ledger/sink scope 提供，不得（SHALL NOT）加入kernel journal variant；现有Hook journal保持只包含invocation identity、point、iteration、CallId、digest与decision/failure，storage与恢复编排必须（SHALL）通过外层row验证exact AgentRuntime/Session/Turn归属。系统必须（SHALL）在对应 `HookInvocationPending` 已提交后追加 `ToolApprovalRequested`；Requested payload 必须（SHALL）保存 `hook_invocation_id`、最终 `CallId`、Tool name、Echo 的schema-validated user-authored opaque arguments及typed `ToolKind`/`DangerLevel`，使恢复时能够证明用户决定针对的就是Handler所见逻辑调用。当前closed composition不得（SHALL NOT）暴露credential/reference/provider字段或注册credential-aware Tool；未来此类Tool必须先通过独立PATCH定义opaque reference、批准消费后的安全注入与fail-closed result transform。
+当 `decide_tool_call` 的审批 Handler 判定一个已完成最终复验的 Tool call 需要人工决定时，系统必须（SHALL）由服务端生成 UUIDv7 `ApprovalId`，并把它绑定到 exact AgentRuntimeId、Turn 与 `HookInvocationId`。AgentRuntimeId只由外层 ledger/sink scope 提供，不得（SHALL NOT）加入kernel journal variant；现有Hook journal保持只包含invocation identity、point、iteration、CallId、digest与decision/failure，storage与恢复编排必须（SHALL）通过外层row验证exact AgentRuntime/Session/Turn归属。系统必须（SHALL）在对应 `HookInvocationPending` 已提交后追加 `ToolApprovalRequested`；Requested payload 必须（SHALL）保存 `hook_invocation_id`、最终 `CallId`、Tool name、schema-validated opaque arguments及typed `ToolKind`/`DangerLevel`，使恢复时能够证明用户决定针对的就是Handler所见逻辑调用。当前 `shell`/`apply_patch` composition没有credential reference/provider字段；未来需要runtime credential注入的Tool必须先通过独立PATCH定义opaque reference、批准消费后的安全注入与fail-closed result transform。
 
 审批 requester 本身是 durable writer：它必须（SHALL）在开启Requested transaction前持有exact runtime的live dispatcher handle；hosted Handler可以复用bound sink持有的handle，否则只能调用无caller-frontier参数的hub ensure取得handle。missing generation的frontier必须（SHALL）由hub在per-runtime ensure/retirement gate内读取当前committed PG high-water并安装，不得由requester预读或传入。requester随后必须（SHALL）持有同一handle完成transaction并跨过commit，只有commit后才能通过该handle提交receipt。它不得（SHALL NOT）假设此前的Pending仍使某个generation存活，或让receipt在commit后隐式创建generation。
 
@@ -14,13 +14,13 @@
 - **WHEN** 已提交 Pending 的 decide invocation 首次需要人工决定
 - **THEN** requester在开启Requested事务前复用bound handle或通过hub ensure取得live handle，再生成UUIDv7 ApprovalId并追加唯一ToolApprovalRequested；commit后只通过同一handle提交receipt，且Requested引用exact HookInvocationId
 
-#### Scenario: 请求保存当前 Echo 的最终 Tool 调用
+#### Scenario: 请求保存当前 Tool 的最终调用
 - **WHEN** transform_tool_call 修改 arguments 或授权元数据且最终复验通过后进入审批
-- **THEN** ToolApprovalRequested保存审批Handler所见的最终CallId、Tool name、user-authored opaque arguments与typed ToolKind/DangerLevel，而不是provider原始输入或不存在的credential channel
+- **THEN** ToolApprovalRequested保存审批Handler所见的最终CallId、Tool name、opaque arguments与typed ToolKind/DangerLevel，而不是provider原始输入或不存在的credential channel
 
 #### Scenario: Credential-aware Tool 未完成安全 PATCH 前不可注册
 - **WHEN**composition试图注册需要credential reference、provider注入或结果脱敏的Tool
-- **THEN**该Tool不得进入当前runtime registry；本change不把Echo的opaque JSON误报为typed credential安全边界
+- **THEN**该Tool不得进入当前runtime registry；本change不把普通Tool的opaque JSON误报为typed credential安全边界
 
 #### Scenario: 恢复同一逻辑请求
 - **WHEN** 相同 AgentRuntime、Turn 与 HookInvocationId 的 Pending invocation 在恢复后再次进入审批 Handler

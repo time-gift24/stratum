@@ -10,15 +10,11 @@
 //! ledger is the only truth. Cancellation stops the wait without a decision
 //! (the kernel's own cancellation race treats the invocation as aborted).
 //!
-//! No typed secret value can occur in the current closed composition: the
-//! only registered tool is `echo`, its arguments are schema-validated opaque
-//! user-authored JSON, authorization metadata is `(ToolKind, DangerLevel)`,
-//! and there is no runtime credential provider or injection channel. Echo's
-//! result is the same non-runtime-managed JSON and still crosses the kernel's
-//! `AfterToolCall` boundary; the resulting `Keep` is durable-safe for this
-//! composition, not a generic secret-scanning claim. A future credential-aware
-//! tool must add a typed secret/reference boundary and fail a secret-bearing
-//! Requested/result append closed before it can be registered here.
+//! Tool arguments are schema-validated opaque model-authored JSON and
+//! authorization metadata is `(ToolKind, DangerLevel)`. The handler neither
+//! interprets arguments nor acts as a credential scanner; results still cross
+//! the kernel's `AfterToolCall` boundary before they become conversation
+//! messages.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

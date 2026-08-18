@@ -47,10 +47,12 @@
   `stratum-postgres` 的 `read_open_hook_invocation`（`point` + `iteration` + `call_id` 精确地址）
   找到自己的开放调用，再以它为键复用/创建 `Requested`。恢复时重放 `Pending`，同一地址
   命中同一调用，天然复用既有 ApprovalId。
-- 当前组合只注册无凭据通道的 `Echo`；参数/结果是用户创作的
-  不透明对话 JSON，授权只使用类型化的 `ToolKind`/`DangerLevel`，结果仍先经过
-  `AfterToolCall`。这不是通用密钥扫描器/清理器；感知凭据的 Tool 必须先通过独立
-  `PATCH` 定义引用/提供器/故障关闭转换，完成前不得注册。
+- 当前 production 组合只接受 `shell` 与 `apply_patch`，拒绝包括 `echo` 在内的其他
+  Tool 名称。`AppState` 启动时校验并固定 `[tools].workspace_root`，两者共享该 root：
+  `shell` 将它作为默认 cwd，`apply_patch` 将它作为显式注入的虚拟文件系统 root。
+  两者继续复用既有 `ApprovalHandler` 与 `RequireApproval`，不得增加第二个 broker。
+  `ShellTool` 只负责一次性进程语义，不拥有 sandbox；production 部署必须在外层容器/
+  sandbox 边界中运行。
 - `TurnRuntimeSnapshot` 以 `agent_id: AgentId` 固定不可变定义，并在消息准入时构造：`extension_set_version_id` 必须取
   自新建 `ChainHookRuntime` 的计算值（与内核写入 `LoopStarted` 载荷的值一致）；
   `skill_set_version_id` 固定为全零 UUID；Hook 版本列表当前只有审批处理器的固定 UUID 常量

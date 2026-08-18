@@ -67,7 +67,7 @@ runtime snapshot必须（SHALL）从current LoopStarted envelope读取，其`age
 - **THEN**AgentLoop只接收已组装definition runtime、typed events与CancellationToken，不接收`AgentRuntimeId`且不查询PG或registry
 
 ### Requirement: 恢复时 Tool 结果对账
-Tool执行的唯一最终durable结果必须（SHALL）是`MessageAppended(role=tool,tool_call_id=CallId,content=final JSON)`；Tool error同样必须（SHALL）编码为该role=tool message，系统不得（SHALL NOT）增加`ToolExecutionCompleted`。所有Tool output必须（SHALL）先经过`AfterToolCall`再append。当前closed composition只注册Echo，其结果是schema-validated user-authored opaque conversation JSON；`AfterToolCall::Keep`只证明该composition允许持久化该值，不是通用secret扫描或脱敏。需要credential或typed secret处理的Tool不得（SHALL NOT）在本change注册，必须由独立PATCH先定义reference/provider与fail-closed result transform。
+Tool执行的唯一最终durable结果必须（SHALL）是`MessageAppended(role=tool,tool_call_id=CallId,content=final JSON)`；Tool error同样必须（SHALL）编码为该role=tool message，系统不得（SHALL NOT）增加`ToolExecutionCompleted`。所有Tool output必须（SHALL）先经过`AfterToolCall`再append。当前shell/apply_patch composition返回opaque Tool JSON；`AfterToolCall::Keep`只证明该composition保留该值，不是通用secret扫描或脱敏。需要runtime credential或typed secret处理的Tool不得（SHALL NOT）在本change注册，必须由独立PATCH先定义reference/provider与fail-closed result transform。
 
 恢复重建时，committed tool result必须（SHALL）构成紧邻前序assistant `tool_calls`的精确有序前缀。未知CallId、重复result、稀疏result、乱序result或脱离assistant group的result必须（SHALL）作为`durable_state_corrupt` fail closed。`ToolExecutionStarted`存在但同CallId的tool message不存在表示外部结果未知；resume必须（SHALL）以同一CallId按at-least-once语义只重试缺失有序后缀。已有committed result不得（SHALL NOT）重试，runtime也不得（SHALL NOT）发明AttemptId或替外部服务定义通用幂等标准。
 
@@ -91,8 +91,8 @@ Tool执行的唯一最终durable结果必须（SHALL）是`MessageAppended(role=
 - **WHEN**Tool或AfterToolCall产生模型可见错误JSON
 - **THEN**错误作为同CallId的role=tool MessageAppended恢复，不新增另一completion fact
 
-#### Scenario: Echo Result 仍经过 AfterToolCall
-- **WHEN**当前Echo返回user-authored opaque JSON
+#### Scenario: Tool Result 仍经过 AfterToolCall
+- **WHEN**当前shell或apply_patch返回opaque JSON
 - **THEN**结果先经过AfterToolCall再以同CallId提交role=tool MessageAppended，系统不把Keep声称为通用secret sanitizer
 
 ### Requirement: 历史 Terminal Turn 规范化未闭合 Tool Group
