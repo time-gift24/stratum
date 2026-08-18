@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { cloneElement, isValidElement, useRef } from "react"
+import { cloneElement, isValidElement, useRef, useState } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import {
@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Plug,
   Search,
+  Trash2,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -26,6 +27,11 @@ import {
   FieldSet,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import {
   Select,
   SelectContent,
@@ -321,7 +327,11 @@ export function SaveButton({
   )
 }
 
-export function InlineDelete({
+/**
+ * 删除操作：页面头部右上角的幽灵图标钮 + Popover 确认（解释 + 取消/确认）。
+ * 危险操作应该可发现但不诱导——不再是页面底部的大红色区块。
+ */
+export function DeleteAction({
   resourceLabel,
   explanation,
   pending,
@@ -332,31 +342,33 @@ export function InlineDelete({
   pending: boolean
   onDelete: () => void
 }) {
-  const detailsId = `delete-${resourceLabel.replace(/[^a-zA-Z0-9_-]/g, "-")}`
+  const [open, setOpen] = useState(false)
   return (
-    <details className="group rounded-lg border border-destructive/30 px-4 py-3">
-      <summary
-        aria-controls={detailsId}
-        className="flex min-h-9 cursor-pointer list-none items-center rounded-md text-sm font-medium text-destructive outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        aria-label={`删除 ${resourceLabel}`}
+        className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring"
       >
-        删除 {resourceLabel}
-      </summary>
-      <div id={detailsId} className="grid gap-3 pt-2 pb-1">
-        <p className="max-w-[70ch] text-sm leading-6 text-muted-foreground">
-          {explanation}
-        </p>
-        <Button
-          type="button"
-          variant="destructive"
-          size="lg"
-          className="w-fit"
-          disabled={pending}
-          onClick={onDelete}
-        >
-          {pending ? "正在删除" : "确认删除"}
-        </Button>
-      </div>
-    </details>
+        <Trash2 aria-hidden className="size-4" />
+      </PopoverTrigger>
+      <PopoverContent align="end" className="grid w-80 gap-3 p-4 text-sm">
+        <p className="font-medium text-destructive">删除 {resourceLabel}</p>
+        <p className="leading-6 text-muted-foreground">{explanation}</p>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+            取消
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={pending}
+            onClick={onDelete}
+          >
+            {pending ? "正在删除" : "确认删除"}
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -374,38 +386,38 @@ function parentPath(pathname: string): string {
 }
 
 // 模块级接力状态：上一次选中项的视口矩形 + 所在路径。
-// SettingsShell 随页面重挂载，靠它在页签切换时把选中底纹滑过去而不是跳变。
+// SettingsNav 在设置区内常驻不重挂载；只在跨区离开后再回来时重挂载，
+// 靠它把选中底纹从上一位置滑过去而不是跳变。
 let lastIndicator: {
   pathname: string
   rect: { left: number; top: number; width: number; height: number }
 } | null = null
 
 /**
- * 设置区外壳：左侧垂直导航（桌面）/ 顶部横排（移动端）+ 右侧内容。
- * 选中态与全站 rail 同一语言（accent 底 / dark primary tint），
- * 由绝对定位 underlay 承载；同级页签切换时 underlay 从上一位置滑动到位，
- * 内容区做一次快速淡入上浮（prefers-reduced-motion 时全部瞬时）。
+ * 设置区导航（桌面左侧垂直 / 移动端顶部横排），由 settings 区共享 layout
+ * （settings-chrome.tsx）挂载：区内任何导航（Provider ↔ Model 页签、下钻
+ * 编辑器、返回列表）它都不重挂载，只有右侧内容变化。
+ * 选中态由绝对定位 underlay 承载（accent 底 / dark primary tint）：点击即
+ * 乐观滑动，不等路由提交；驻留期间 current 变化时从当前位置滑到目标；
+ * 跨区重挂载时靠模块级矩形接力；prefers-reduced-motion 全部瞬时。
  */
-export function SettingsShell({
+export function SettingsNav({
   current,
   returnTo = "/studio",
-  children,
 }: {
   current: SettingsSection
   returnTo?: string
-  children: React.ReactNode
 }) {
   const pathname = usePathname()
   const navRef = useRef<HTMLElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
+  const mountedRef = useRef(false)
 
   useGSAP(
     () => {
       const nav = navRef.current
       const indicator = indicatorRef.current
-      const content = contentRef.current
-      if (!nav || !indicator || !content) return
+      if (!nav || !indicator) return
 
       const measure = () => {
         const active = nav.querySelector<HTMLElement>('[aria-current="page"]')
@@ -426,9 +438,18 @@ export function SettingsShell({
         }
       }
 
-      const place = (from: typeof lastIndicator) => {
-        const target = measure()
-        if (!target) return
+      const target = measure()
+      if (!target) return
+
+      if (!mountedRef.current) {
+        mountedRef.current = true
+        // 挂载：同级页签接力滑动；跨区到达直接落位
+        const from =
+          lastIndicator !== null &&
+          lastIndicator.pathname !== pathname &&
+          parentPath(lastIndicator.pathname) === parentPath(pathname)
+            ? lastIndicator
+            : null
         if (from && !prefersReducedMotion()) {
           const navRect = nav.getBoundingClientRect()
           gsap.fromTo(
@@ -457,75 +478,90 @@ export function SettingsShell({
             height: target.height,
           })
         }
-        lastIndicator = { pathname, rect: target.viewport }
-      }
-
-      // 只有同级页签切换（父路径相同）才接力滑动；跨区到达直接落位
-      const from =
-        lastIndicator !== null &&
-        parentPath(lastIndicator.pathname) === parentPath(pathname)
-          ? lastIndicator
-          : null
-      place(from)
-
-      const onResize = () => place(null)
-      window.addEventListener("resize", onResize)
-
-      // 内容区进场：快速淡入 + 轻微上浮，软化页签切换的内容替换
-      gsap.fromTo(
-        content,
-        { opacity: 0, y: 6 },
-        {
-          opacity: 1,
-          y: 0,
+      } else {
+        // 驻留期间的页签切换：从当前位置（含乐观滑动后的位置）滑到目标
+        gsap.to(indicator, {
+          x: target.x,
+          y: target.y,
+          width: target.width,
+          height: target.height,
           duration: motionDuration(MOTION_DURATION.fast),
           ease: MOTION_EASE.enter,
-          clearProps: "transform,opacity",
-        }
-      )
+          overwrite: "auto",
+        })
+      }
+      lastIndicator = { pathname, rect: target.viewport }
 
+      const onResize = () => {
+        const next = measure()
+        if (!next) return
+        gsap.set(indicator, {
+          x: next.x,
+          y: next.y,
+          width: next.width,
+          height: next.height,
+        })
+        lastIndicator = { pathname, rect: next.viewport }
+      }
+      window.addEventListener("resize", onResize)
       return () => window.removeEventListener("resize", onResize)
     },
-    { scope: navRef }
+    { scope: navRef, dependencies: [current] }
   )
 
+  // 乐观滑动：点击当下就把 underlay 滑向目标项，不等 RSC 提交
+  const previewSlide = (link: HTMLElement) => {
+    const nav = navRef.current
+    const indicator = indicatorRef.current
+    if (!nav || !indicator || prefersReducedMotion()) return
+    const navRect = nav.getBoundingClientRect()
+    const rect = link.getBoundingClientRect()
+    gsap.to(indicator, {
+      x: rect.left - navRect.left,
+      y: rect.top - navRect.top,
+      width: rect.width,
+      height: rect.height,
+      duration: MOTION_DURATION.fast,
+      ease: MOTION_EASE.enter,
+      overwrite: "auto",
+    })
+  }
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-8">
-      <nav
-        ref={navRef}
-        aria-label="设置"
-        className="relative flex gap-1 self-start lg:sticky lg:top-24 lg:flex-col"
-      >
-        <span
-          ref={indicatorRef}
-          aria-hidden
-          className="pointer-events-none absolute top-0 left-0 rounded-lg bg-accent/60 dark:bg-primary/15"
-        />
-        {SETTINGS_ITEMS.map((item) => {
-          const active = current === item.key
-          const Icon = item.icon
-          return (
-            <Link
-              key={item.key}
-              href={`/studio/settings/${item.key}?${new URLSearchParams({ returnTo })}`}
-              aria-current={active ? "page" : undefined}
-              className={cn(
-                "relative flex h-9 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
-                active
-                  ? "text-accent-foreground dark:text-primary"
-                  : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-              )}
-            >
-              <Icon aria-hidden className="size-4 shrink-0" />
-              {item.label}
-            </Link>
-          )
-        })}
-      </nav>
-      <div ref={contentRef} className="min-w-0">
-        {children}
-      </div>
-    </div>
+    <nav
+      ref={navRef}
+      aria-label="设置"
+      className="relative flex gap-1 self-start lg:sticky lg:top-24 lg:flex-col"
+    >
+      <span
+        ref={indicatorRef}
+        aria-hidden
+        className="pointer-events-none absolute top-0 left-0 rounded-lg bg-accent/60 dark:bg-primary/15"
+      />
+      {SETTINGS_ITEMS.map((item) => {
+        const active = current === item.key
+        const Icon = item.icon
+        return (
+          <Link
+            key={item.key}
+            href={`/studio/settings/${item.key}?${new URLSearchParams({ returnTo })}`}
+            aria-current={active ? "page" : undefined}
+            onClick={(event) => {
+              if (!active) previewSlide(event.currentTarget)
+            }}
+            className={cn(
+              "relative flex h-9 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
+              active
+                ? "text-accent-foreground dark:text-primary"
+                : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            )}
+          >
+            <Icon aria-hidden className="size-4 shrink-0" />
+            {item.label}
+          </Link>
+        )
+      })}
+    </nav>
   )
 }
 

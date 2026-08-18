@@ -10,11 +10,11 @@ import { ToolsSelect } from "@/components/stratum/studio/tools-select"
 import proseStyles from "@/components/stratum/styles/prose-medium.module.css"
 import {
   BlockerList,
+  DeleteAction,
   ErrorState,
   Field,
   FormSection,
   FormStatus,
-  InlineDelete,
   LoadingState,
   NotFoundState,
   PageHeader,
@@ -260,7 +260,16 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
       <PageHeader
         title={isNew ? "新建 Agent" : state.draft.agentName}
         backHref="/studio"
-      />
+      >
+        {!isNew ? (
+          <DeleteAction
+            resourceLabel="Agent definition"
+            explanation="只删除这个 definition。已存在的 runtime Agent、Session 和历史记录不会被删除，但之后不能再用这个名称新建 Agent。"
+            pending={deleting}
+            onDelete={() => void remove()}
+          />
+        ) : null}
+      </PageHeader>
       <form onSubmit={save} className="grid gap-8">
         <div
           className="flex w-fit rounded-lg bg-muted p-1"
@@ -520,17 +529,6 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
           />
         </div>
       </form>
-
-      {!isNew ? (
-        <div className="mt-12">
-          <InlineDelete
-            resourceLabel="Agent definition"
-            explanation="只删除这个 definition。已存在的 runtime Agent、Session 和历史记录不会被删除，但之后不能再用这个名称新建 Agent。"
-            pending={deleting}
-            onDelete={() => void remove()}
-          />
-        </div>
-      ) : null}
     </PageShell>
   )
 }

@@ -72,7 +72,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 - 外壳：PageShell（列表/表单页容器）、PageHeader（标题 + 返回 + 主操作）、SearchRow（列表页搜索行：放大镜即提交钮/回车提交，右侧紧跟图标化新建操作；新建入口不放 PageHeader 文字按钮）
 - 资源展示：ResourceCard（squircle 标识 + 名称 + 状态 chip + 虚线 meta 行，可选 action 槽）、StatusChip（只编码真实 API 状态）
 - 状态页：LoadingState（整页/整区加载的转圈指示；骨架只用于局部内容加载）、ErrorState（加载失败 + 重试）、NotFoundState（资源不存在 + 新建引导）、Pagination（列表分页，单页不渲染）
-- 表单：Field（label 包裹 + 错误/说明）、FormSection（平面 fieldset 分组）、StudioInput / StudioTextarea / StudioSelect、SaveButton、InlineDelete、SettingsShell（设置区垂直导航）、controlClass
+- 表单：Field（label 包裹 + 错误/说明）、FormSection（平面 fieldset 分组）、StudioInput / StudioTextarea / StudioSelect、SaveButton、DeleteAction（头部右上角删除图标钮 + Popover 确认）、SettingsNav（设置区常驻导航，由 settings 共享 layout 挂载）、controlClass
 
 **领域组件 `components/stratum/`**
 

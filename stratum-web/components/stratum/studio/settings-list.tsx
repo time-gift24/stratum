@@ -9,10 +9,8 @@ import {
   ErrorState,
   LoadingState,
   PageHeader,
-  PageShell,
   Pagination,
   ResourceCard,
-  SettingsShell,
   StatusChip,
   StudioInput,
 } from "@/components/stratum/studio/primitives"
@@ -169,7 +167,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
   }
 
   return (
-    <PageShell>
+    <>
       <PageHeader title="设置" backHref={returnTo}>
         <Link
           href={withStudioReturn(`/studio/settings/${kind}/new`, returnTo)}
@@ -179,135 +177,129 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
           新建
         </Link>
       </PageHeader>
-      <SettingsShell current={kind} returnTo={returnTo}>
-        <form
-          role="search"
-          className="relative mb-6 max-w-xl"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const data = new FormData(event.currentTarget)
-            updateQuery(String(data.get("q") ?? ""))
-          }}
-        >
-          <Search
-            aria-hidden
-            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+      <form
+        role="search"
+        className="relative mb-6 max-w-xl"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const data = new FormData(event.currentTarget)
+          updateQuery(String(data.get("q") ?? ""))
+        }}
+      >
+        <Search
+          aria-hidden
+          className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+        />
+        <StudioInput
+          key={query}
+          name="q"
+          defaultValue={query}
+          aria-label={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
+          placeholder={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
+          className="pr-16 pl-9"
+        />
+        <Button type="submit" variant="ghost" className="absolute top-1 right-1">
+          搜索
+        </Button>
+      </form>
+      {error ? (
+        <div className="mb-5">
+          <ErrorState
+            title={`${kind === "providers" ? "Provider" : "Model"} 列表加载失败`}
+            message={error}
+            onRetry={() => void load()}
           />
-          <StudioInput
-            key={query}
-            name="q"
-            defaultValue={query}
-            aria-label={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
-            placeholder={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
-            className="pr-16 pl-9"
-          />
-          <Button
-            type="submit"
-            variant="ghost"
-            className="absolute top-1 right-1"
-          >
-            搜索
-          </Button>
-        </form>
-        {error ? (
-          <div className="mb-5">
-            <ErrorState
-              title={`${kind === "providers" ? "Provider" : "Model"} 列表加载失败`}
-              message={error}
-              onRetry={() => void load()}
-            />
-          </div>
-        ) : null}
-        {items === undefined && !error ? (
-          <LoadingState
-            label={`正在加载 ${kind === "providers" ? "Provider" : "Model"}`}
-          />
-        ) : items?.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
-            <h2 className="font-semibold">
-              {hasQuery && hasResources
-                ? `没有匹配的 ${kind === "providers" ? "Provider" : "Model"}`
-                : kind === "providers"
-                  ? "尚未配置 Provider"
-                  : "尚未配置 Model"}
-            </h2>
-            <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
-              {hasQuery && hasResources
-                ? "调整搜索词，或清除筛选查看全部资源。"
-                : kind === "providers"
-                  ? "创建受支持的 Provider 后，可以继续配置它的 Model。"
-                  : "添加一个真实可用的模型名称。"}
-            </p>
-            {hasQuery && hasResources ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                className="mt-4"
-                onClick={() => updateQuery("")}
-              >
-                清除筛选
-              </Button>
-            ) : null}
-          </div>
-        ) : items ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {kind === "providers"
-              ? (items as readonly ProviderView[]).map((provider) => (
-                  <ResourceCard
-                    key={provider.provider}
-                    href={withStudioReturn(
-                      `/studio/settings/providers/${provider.provider}`,
-                      returnTo
-                    )}
-                    title={provider.provider}
-                    leading={<Plug aria-hidden className="size-5" />}
-                    badge={
-                      provider.credential_configured ? (
-                        <StatusChip tone="ok">已配置</StatusChip>
-                      ) : (
-                        <StatusChip tone="warn">需要凭据</StatusChip>
-                      )
-                    }
-                    meta={[
-                      { icon: Box, text: `${provider.models_count} 个模型` },
-                      {
-                        icon: KeyRound,
-                        text: provider.credential_configured
-                          ? "凭据已配置"
-                          : "未配置凭据",
-                      },
-                    ]}
-                  />
-                ))
-              : (items as readonly ManagedModelView[]).map((model) => (
-                  <ResourceCard
-                    key={model.model_id}
-                    href={withStudioReturn(
-                      `/studio/settings/models/${encodeURIComponent(model.model_id)}`,
-                      returnTo
-                    )}
-                    title={model.name}
-                    leading={<Cpu aria-hidden className="size-5" />}
-                    badge={
-                      model.is_default ? (
-                        <StatusChip tone="neutral">默认</StatusChip>
-                      ) : undefined
-                    }
-                    meta={[{ icon: Plug, text: model.provider }]}
-                  />
-                ))}
-          </div>
-        ) : null}
-        {result ? (
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            onPageChange={(next) => updateQuery(query, next)}
-            label={`${kind === "providers" ? "Provider" : "Model"} 分页`}
-          />
-        ) : null}
-      </SettingsShell>
-    </PageShell>
+        </div>
+      ) : null}
+      {items === undefined && !error ? (
+        <LoadingState
+          label={`正在加载 ${kind === "providers" ? "Provider" : "Model"}`}
+        />
+      ) : items?.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
+          <h2 className="font-semibold">
+            {hasQuery && hasResources
+              ? `没有匹配的 ${kind === "providers" ? "Provider" : "Model"}`
+              : kind === "providers"
+                ? "尚未配置 Provider"
+                : "尚未配置 Model"}
+          </h2>
+          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
+            {hasQuery && hasResources
+              ? "调整搜索词，或清除筛选查看全部资源。"
+              : kind === "providers"
+                ? "创建受支持的 Provider 后，可以继续配置它的 Model。"
+                : "添加一个真实可用的模型名称。"}
+          </p>
+          {hasQuery && hasResources ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              className="mt-4"
+              onClick={() => updateQuery("")}
+            >
+              清除筛选
+            </Button>
+          ) : null}
+        </div>
+      ) : items ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {kind === "providers"
+            ? (items as readonly ProviderView[]).map((provider) => (
+                <ResourceCard
+                  key={provider.provider}
+                  href={withStudioReturn(
+                    `/studio/settings/providers/${provider.provider}`,
+                    returnTo
+                  )}
+                  title={provider.provider}
+                  leading={<Plug aria-hidden className="size-5" />}
+                  badge={
+                    provider.credential_configured ? (
+                      <StatusChip tone="ok">已配置</StatusChip>
+                    ) : (
+                      <StatusChip tone="warn">需要凭据</StatusChip>
+                    )
+                  }
+                  meta={[
+                    { icon: Box, text: `${provider.models_count} 个模型` },
+                    {
+                      icon: KeyRound,
+                      text: provider.credential_configured
+                        ? "凭据已配置"
+                        : "未配置凭据",
+                    },
+                  ]}
+                />
+              ))
+            : (items as readonly ManagedModelView[]).map((model) => (
+                <ResourceCard
+                  key={model.model_id}
+                  href={withStudioReturn(
+                    `/studio/settings/models/${encodeURIComponent(model.model_id)}`,
+                    returnTo
+                  )}
+                  title={model.name}
+                  leading={<Cpu aria-hidden className="size-5" />}
+                  badge={
+                    model.is_default ? (
+                      <StatusChip tone="neutral">默认</StatusChip>
+                    ) : undefined
+                  }
+                  meta={[{ icon: Plug, text: model.provider }]}
+                />
+              ))}
+        </div>
+      ) : null}
+      {result ? (
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          onPageChange={(next) => updateQuery(query, next)}
+          label={`${kind === "providers" ? "Provider" : "Model"} 分页`}
+        />
+      ) : null}
+    </>
   )
 }

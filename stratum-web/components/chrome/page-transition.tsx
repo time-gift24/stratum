@@ -41,7 +41,7 @@ function pageIndex(pathname: string): number {
 /**
  * 同级路径（父目录相同）间的跳转视为页签切换，例如
  * /studio/settings/providers ↔ /studio/settings/models：
- * 不做整页滑入，由局部动效（如 SettingsShell 的选中 underlay）接管。
+ * 不做整页滑入，由局部动效（如 SettingsNav 的选中 underlay）接管。
  */
 function isSiblingSwitch(from: string, to: string): boolean {
   const parent = (p: string) => {
@@ -49,6 +49,15 @@ function isSiblingSwitch(from: string, to: string): boolean {
     return index <= 0 ? "" : p.slice(0, index)
   }
   return from !== to && parent(from) === parent(to)
+}
+
+/**
+ * 设置区（/studio/settings/**）内部导航：共享 layout 常驻左侧导航，
+ * 只有右侧内容变化（页签切换、下钻编辑器、返回列表），整页滑入一律跳过。
+ */
+const SETTINGS_SECTION = "/studio/settings/"
+function isSettingsInternal(from: string, to: string): boolean {
+  return from.startsWith(SETTINGS_SECTION) && to.startsWith(SETTINGS_SECTION)
 }
 
 // 模块级共享状态（应用级单例，仅客户端运行）
@@ -70,7 +79,9 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       // 首屏不播入场：SSR 内容直接可见，不推迟 LCP
       const isFirstPaint = lastPathname === null
       const siblingSwitch =
-        lastPathname !== null && isSiblingSwitch(lastPathname, pathname)
+        lastPathname !== null &&
+        (isSiblingSwitch(lastPathname, pathname) ||
+          isSettingsInternal(lastPathname, pathname))
       let direction: 1 | -1 = 1
       if (armedDirection !== null) {
         direction = armedDirection

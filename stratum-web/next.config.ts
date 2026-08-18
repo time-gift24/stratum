@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     optimizePackageImports: ["@xyflow/react"],
+    // 动态页客户端 router 缓存 30s：默认 0 导致每次导航后视口内全部 Link
+    // （顶导 + 设置页签）重新预取，RSC 响应风暴挤占主线程、切换掉帧
+    staleTimes: { dynamic: 30 },
   },
 }
 

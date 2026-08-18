@@ -5,17 +5,15 @@ import { useEffect, useReducer, useState } from "react"
 
 import {
   BlockerList,
+  DeleteAction,
   ErrorState,
   Field,
   FormSection,
   FormStatus,
-  InlineDelete,
   LoadingState,
   NotFoundState,
   PageHeader,
-  PageShell,
   SaveButton,
-  SettingsShell,
   StudioInput,
   StudioSelect,
   StudioTextarea,
@@ -215,24 +213,24 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
 
   if (loading)
     return (
-      <PageShell>
+      <>
         <LoadingState label="正在加载 Model" />
-      </PageShell>
+      </>
     )
   if (notFound)
     return (
-      <PageShell>
+      <>
         <PageHeader title="Model 不存在" backHref={modelsHref} />
         <NotFoundState
           message="该 Model 不存在或已被删除。可以返回列表，或直接新建一个。"
           createHref={withStudioReturn("/studio/settings/models/new", returnTo)}
           createLabel="新建 Model"
         />
-      </PageShell>
+      </>
     )
   if (loadError)
     return (
-      <PageShell>
+      <>
         <PageHeader title="无法打开 Model" backHref={modelsHref} />
         <ErrorState
           title="Model 加载失败"
@@ -242,109 +240,106 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
             void load()
           }}
         />
-      </PageShell>
+      </>
     )
 
   return (
-    <PageShell>
+    <>
       <PageHeader
         title={isNew ? "新建 Model" : (resource?.name ?? state.draft.modelName)}
         backHref={modelsHref}
         backLabel="返回 Model"
-      />
-      <SettingsShell current="models" returnTo={returnTo}>
-        <form onSubmit={save} className="grid gap-8">
-          <FormSection
-            title="模型"
-            description="Model 挂在 Provider 下，名称与 Provider 创建后不可修改。"
-          >
-            <div className="grid gap-6">
-              <Field label="Provider" error={state.violations.provider}>
-                <StudioSelect
-                  ariaLabel="Provider"
-                  disabled={!isNew}
-                  value={state.draft.provider}
-                  options={providers.map((provider) => ({
-                    value: provider.provider,
-                    label: provider.provider,
-                  }))}
-                  onChange={(next) =>
-                    dispatch({
-                      type: "edit",
-                      draft: {
-                        ...state.draft,
-                        provider: next as ProviderKind,
-                      },
-                    })
-                  }
-                />
-              </Field>
-              <Field label="Model name" error={state.violations.name}>
-                <StudioInput
-                  disabled={!isNew}
-                  autoFocus={isNew}
-                  className="font-mono"
-                  value={state.draft.modelName}
-                  onChange={(event) =>
-                    dispatch({
-                      type: "edit",
-                      draft: { ...state.draft, modelName: event.target.value },
-                    })
-                  }
-                />
-              </Field>
-            </div>
-          </FormSection>
-          {resource ? (
-            <FormSection
-              title="Parameter schema"
-              description="由 Provider adapter 声明，只读。"
-            >
-              <StudioTextarea
-                readOnly
-                rows={18}
-                spellCheck={false}
-                className="font-mono text-sm leading-6"
-                value={encodeModelSchema(resource)}
-              />
-            </FormSection>
-          ) : null}
-          <FormStatus
-            message={state.message}
-            tone={
-              state.phase === "invalid" || state.phase === "conflict"
-                ? "error"
-                : state.message
-                  ? "success"
-                  : "neutral"
-            }
-          />
-          <BlockerList blockers={state.blockers} />
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="lg"
-              onClick={() => {
-                if (confirmNavigation()) router.push(modelsHref)
-              }}
-            >
-              返回列表
-            </Button>
-            {isNew ? <SaveButton saving={state.phase === "saving"} /> : null}
-          </div>
-        </form>
+      >
         {!isNew ? (
-          <div className="mt-12">
-            <InlineDelete
-              resourceLabel="Model"
-              explanation="若此 Model 是默认 Model 或被 Agent definition 引用，系统会列出 blocker 并保持资源不变。"
-              pending={deleting}
-              onDelete={() => void remove()}
-            />
-          </div>
+          <DeleteAction
+            resourceLabel="Model"
+            explanation="若此 Model 是默认 Model 或被 Agent definition 引用，系统会列出 blocker 并保持资源不变。"
+            pending={deleting}
+            onDelete={() => void remove()}
+          />
         ) : null}
-      </SettingsShell>
-    </PageShell>
+      </PageHeader>
+      <form onSubmit={save} className="grid gap-8">
+        <FormSection
+          title="模型"
+          description="Model 挂在 Provider 下，名称与 Provider 创建后不可修改。"
+        >
+          <div className="grid gap-6">
+            <Field label="Provider" error={state.violations.provider}>
+              <StudioSelect
+                ariaLabel="Provider"
+                disabled={!isNew}
+                value={state.draft.provider}
+                options={providers.map((provider) => ({
+                  value: provider.provider,
+                  label: provider.provider,
+                }))}
+                onChange={(next) =>
+                  dispatch({
+                    type: "edit",
+                    draft: {
+                      ...state.draft,
+                      provider: next as ProviderKind,
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="Model name" error={state.violations.name}>
+              <StudioInput
+                disabled={!isNew}
+                autoFocus={isNew}
+                className="font-mono"
+                value={state.draft.modelName}
+                onChange={(event) =>
+                  dispatch({
+                    type: "edit",
+                    draft: { ...state.draft, modelName: event.target.value },
+                  })
+                }
+              />
+            </Field>
+          </div>
+        </FormSection>
+        {resource ? (
+          <FormSection
+            title="Parameter schema"
+            description="由 Provider adapter 声明，只读。"
+          >
+            <StudioTextarea
+              readOnly
+              rows={18}
+              spellCheck={false}
+              className="font-mono text-sm leading-6"
+              value={encodeModelSchema(resource)}
+            />
+          </FormSection>
+        ) : null}
+        <FormStatus
+          message={state.message}
+          tone={
+            state.phase === "invalid" || state.phase === "conflict"
+              ? "error"
+              : state.message
+                ? "success"
+                : "neutral"
+          }
+        />
+        <BlockerList blockers={state.blockers} />
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="lg"
+            onClick={() => {
+              if (confirmNavigation()) router.push(modelsHref)
+            }}
+          >
+            返回列表
+          </Button>
+          {isNew ? <SaveButton saving={state.phase === "saving"} /> : null}
+        </div>
+      </form>
+    </>
   )
 }

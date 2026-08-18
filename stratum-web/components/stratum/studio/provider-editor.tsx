@@ -6,17 +6,15 @@ import { LoaderCircle, PlugZap } from "lucide-react"
 
 import {
   BlockerList,
+  DeleteAction,
   ErrorState,
   Field,
   FormSection,
   FormStatus,
-  InlineDelete,
   LoadingState,
   NotFoundState,
   PageHeader,
-  PageShell,
   SaveButton,
-  SettingsShell,
   StudioInput,
   StudioSelect,
   StudioTextarea,
@@ -208,24 +206,24 @@ export function ProviderEditor({ provider }: { provider?: string }) {
 
   if (loading)
     return (
-      <PageShell>
+      <>
         <LoadingState label="正在加载 Provider" />
-      </PageShell>
+      </>
     )
   if (notFound)
     return (
-      <PageShell>
+      <>
         <PageHeader title="Provider 不存在" backHref={providersHref} />
         <NotFoundState
           message="该 Provider 不存在或已被删除。可以返回列表，或直接新建一个。"
           createHref={withStudioReturn("/studio/settings/providers/new", returnTo)}
           createLabel="新建 Provider"
         />
-      </PageShell>
+      </>
     )
   if (loadError)
     return (
-      <PageShell>
+      <>
         <PageHeader title="无法打开 Provider" backHref={providersHref} />
         <ErrorState
           title="Provider 加载失败"
@@ -235,190 +233,187 @@ export function ProviderEditor({ provider }: { provider?: string }) {
             void load()
           }}
         />
-      </PageShell>
+      </>
     )
 
   return (
-    <PageShell>
+    <>
       <PageHeader
         title={isNew ? "新建 Provider" : state.draft.provider}
         backHref={providersHref}
         backLabel="返回 Provider"
-      />
-      <SettingsShell current="providers" returnTo={returnTo}>
-        <form onSubmit={save} className="grid gap-8">
-          <div
-            className="flex w-fit rounded-lg bg-muted p-1"
-            role="tablist"
-            aria-label="Provider 编辑视图"
-          >
-            {(["structured", "raw"] as const).map((item) => (
-              <button
-                key={item}
-                type="button"
-                role="tab"
-                aria-selected={view === item}
-                onClick={() => setView(item)}
-                className="h-8 rounded-md px-3 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none aria-selected:bg-card aria-selected:shadow-sm"
-              >
-                {item === "structured" ? "结构化" : "Raw config"}
-              </button>
-            ))}
-          </div>
-          {view === "structured" ? (
-            <FormSection
-              title="连接"
-              description="凭据只写不读：已存 secret 永不回显，留空表示保留。"
-            >
-              <div className="grid gap-6">
-                <Field label="Provider kind" error={state.violations.provider}>
-                  <StudioSelect
-                    ariaLabel="Provider kind"
-                    disabled={!isNew}
-                    value={state.draft.provider}
-                    options={[
-                      { value: "openai", label: "OpenAI" },
-                      { value: "deepseek", label: "DeepSeek" },
-                    ]}
-                    onChange={(next) =>
-                      edit({
-                        ...state.draft,
-                        provider: next as ProviderKind,
-                      })
-                    }
-                  />
-                </Field>
-                {!isNew && resource ? (
-                  <p className="text-sm text-muted-foreground">
-                    {resource.credential_configured
-                      ? "凭据已配置。留空会保留现有凭据。"
-                      : "尚未配置凭据。"}
-                  </p>
-                ) : null}
-                <Field
-                  label={isNew ? "API key" : "替换 API key"}
-                  error={state.violations.api_key}
-                  hint="已存 secret 永不回显；这里留空不会清除已有 secret。"
-                >
-                  <StudioInput
-                    type="password"
-                    autoComplete="new-password"
-                    value={state.draft.apiKey}
-                    onChange={(event) =>
-                      edit({ ...state.draft, apiKey: event.target.value })
-                    }
-                  />
-                </Field>
-                {!isNew ? (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="lg"
-                      disabled={
-                        credentialDirty ||
-                        state.phase === "testing" ||
-                        state.phase === "saving"
-                      }
-                      onClick={() => void test()}
-                    >
-                      {state.phase === "testing" ? (
-                        <>
-                          <LoaderCircle
-                            aria-hidden
-                            className="animate-spin motion-reduce:animate-none"
-                          />
-                          测试中
-                        </>
-                      ) : (
-                        <>
-                          <PlugZap aria-hidden />
-                          测试连接
-                        </>
-                      )}
-                    </Button>
-                    {testResult ? (
-                      <FormStatus
-                        message={testResult.message}
-                        tone={testResult.tone}
-                      />
-                    ) : null}
-                    {credentialDirty ? (
-                      <p className="text-sm text-muted-foreground">
-                        请先保存新凭据，再测试连接。
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            </FormSection>
-          ) : (
-            <Field
-              label="脱敏 Provider config"
-              hint="此视图不会包含 secret、掩码、长度或指纹。"
-            >
-              <StudioTextarea
-                readOnly
-                rows={7}
-                spellCheck={false}
-                className="font-mono text-sm leading-6"
-                value={
-                  resource
-                    ? encodeProviderRaw(resource)
-                    : `provider = ${JSON.stringify(state.draft.provider)}\ncredential_configured = false\n`
-                }
-              />
-            </Field>
-          )}
-          <FormStatus
-            message={state.message}
-            tone={
-              state.phase === "invalid" || state.phase === "conflict"
-                ? "error"
-                : state.message
-                  ? "success"
-                  : "neutral"
-            }
-          />
-          <BlockerList blockers={state.blockers} />
-          {state.phase === "conflict" ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              className="w-fit"
-              onClick={() => {
-                if (confirmNavigation()) void load()
-              }}
-            >
-              重新加载
-            </Button>
-          ) : null}
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="lg"
-              onClick={() => {
-                if (confirmNavigation()) router.push(providersHref)
-              }}
-            >
-              取消
-            </Button>
-            <SaveButton saving={state.phase === "saving"} />
-          </div>
-        </form>
+      >
         {!isNew ? (
-          <div className="mt-12">
-            <InlineDelete
-              resourceLabel="Provider"
-              explanation="删除 Provider 会同时移除它的未引用 Models。若它是默认 Model 的来源或被 Agent definition 引用，系统会列出 blocker 并拒绝删除。"
-              pending={deleting}
-              onDelete={() => void remove()}
-            />
-          </div>
+          <DeleteAction
+            resourceLabel="Provider"
+            explanation="删除 Provider 会同时移除它的未引用 Models。若它是默认 Model 的来源或被 Agent definition 引用，系统会列出 blocker 并拒绝删除。"
+            pending={deleting}
+            onDelete={() => void remove()}
+          />
         ) : null}
-      </SettingsShell>
-    </PageShell>
+      </PageHeader>
+      <form onSubmit={save} className="grid gap-8">
+        <div
+          className="flex w-fit rounded-lg bg-muted p-1"
+          role="tablist"
+          aria-label="Provider 编辑视图"
+        >
+          {(["structured", "raw"] as const).map((item) => (
+            <button
+              key={item}
+              type="button"
+              role="tab"
+              aria-selected={view === item}
+              onClick={() => setView(item)}
+              className="h-8 rounded-md px-3 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none aria-selected:bg-card aria-selected:shadow-sm"
+            >
+              {item === "structured" ? "结构化" : "Raw config"}
+            </button>
+          ))}
+        </div>
+        {view === "structured" ? (
+          <FormSection
+            title="连接"
+            description="凭据只写不读：已存 secret 永不回显，留空表示保留。"
+          >
+            <div className="grid gap-6">
+              <Field label="Provider kind" error={state.violations.provider}>
+                <StudioSelect
+                  ariaLabel="Provider kind"
+                  disabled={!isNew}
+                  value={state.draft.provider}
+                  options={[
+                    { value: "openai", label: "OpenAI" },
+                    { value: "deepseek", label: "DeepSeek" },
+                  ]}
+                  onChange={(next) =>
+                    edit({
+                      ...state.draft,
+                      provider: next as ProviderKind,
+                    })
+                  }
+                />
+              </Field>
+              {!isNew && resource ? (
+                <p className="text-sm text-muted-foreground">
+                  {resource.credential_configured
+                    ? "凭据已配置。留空会保留现有凭据。"
+                    : "尚未配置凭据。"}
+                </p>
+              ) : null}
+              <Field
+                label={isNew ? "API key" : "替换 API key"}
+                error={state.violations.api_key}
+                hint="已存 secret 永不回显；这里留空不会清除已有 secret。"
+              >
+                <StudioInput
+                  type="password"
+                  autoComplete="new-password"
+                  value={state.draft.apiKey}
+                  onChange={(event) =>
+                    edit({ ...state.draft, apiKey: event.target.value })
+                  }
+                />
+              </Field>
+              {!isNew ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    disabled={
+                      credentialDirty ||
+                      state.phase === "testing" ||
+                      state.phase === "saving"
+                    }
+                    onClick={() => void test()}
+                  >
+                    {state.phase === "testing" ? (
+                      <>
+                        <LoaderCircle
+                          aria-hidden
+                          className="animate-spin motion-reduce:animate-none"
+                        />
+                        测试中
+                      </>
+                    ) : (
+                      <>
+                        <PlugZap aria-hidden />
+                        测试连接
+                      </>
+                    )}
+                  </Button>
+                  {testResult ? (
+                    <FormStatus
+                      message={testResult.message}
+                      tone={testResult.tone}
+                    />
+                  ) : null}
+                  {credentialDirty ? (
+                    <p className="text-sm text-muted-foreground">
+                      请先保存新凭据，再测试连接。
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </FormSection>
+        ) : (
+          <Field
+            label="脱敏 Provider config"
+            hint="此视图不会包含 secret、掩码、长度或指纹。"
+          >
+            <StudioTextarea
+              readOnly
+              rows={7}
+              spellCheck={false}
+              className="font-mono text-sm leading-6"
+              value={
+                resource
+                  ? encodeProviderRaw(resource)
+                  : `provider = ${JSON.stringify(state.draft.provider)}\ncredential_configured = false\n`
+              }
+            />
+          </Field>
+        )}
+        <FormStatus
+          message={state.message}
+          tone={
+            state.phase === "invalid" || state.phase === "conflict"
+              ? "error"
+              : state.message
+                ? "success"
+                : "neutral"
+          }
+        />
+        <BlockerList blockers={state.blockers} />
+        {state.phase === "conflict" ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            className="w-fit"
+            onClick={() => {
+              if (confirmNavigation()) void load()
+            }}
+          >
+            重新加载
+          </Button>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="lg"
+            onClick={() => {
+              if (confirmNavigation()) router.push(providersHref)
+            }}
+          >
+            取消
+          </Button>
+          <SaveButton saving={state.phase === "saving"} />
+        </div>
+      </form>
+    </>
   )
 }
