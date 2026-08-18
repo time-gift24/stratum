@@ -22,6 +22,12 @@ gsap.registerPlugin(useGSAP)
  * 否则按 pathname 在 PAGE_ORDER 中的索引差推导（浏览器前进/后退也有正确方向）。
  * 时长/缓动走全站统一尺度（lib/motion.ts）：进场 base、退场 fast。
  *
+ * 可见性契约：每次路由提交后容器必须干净可见，与播不播入场无关——
+ * revertOnUpdate 先销毁上一次入场的 context；回调入口 killTweensOf 顶掉
+ * 可能仍在播的手动出场 tween（TransitionLink 的出场不在本 context 内）；
+ * 不播入场的分支显式 clearProps，播入场的分支播完 clearProps（残留
+ * transform 会把 fixed 的 dock 锁进本容器，破坏其视口定位）。
+ *
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
 
@@ -78,6 +84,9 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       armedDirection = null
       lastPathname = pathname
 
+      // 顶掉可能仍在播的手动出场 tween，避免它把容器留在 opacity: 0
+      gsap.killTweensOf(el)
+
       if (!isFirstPaint && !siblingSwitch && !prefersReducedMotion()) {
         gsap.fromTo(
           el,
@@ -87,17 +96,24 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
             opacity: 1,
             duration: MOTION_DURATION.base,
             ease: MOTION_EASE.enter,
-            // 播完清除内联样式：残留 transform 会把 fixed 的 dock 锁进本容器
-            // （transform 使祖先成为 fixed 后代的包含块），破坏其视口定位
+            overwrite: "auto",
             clearProps: "transform,opacity",
           }
         )
+      } else {
+        // 不播入场的提交也要清掉出场残留，保证新页可见
+        gsap.set(el, { clearProps: "transform,opacity" })
       }
       return () => {
         if (pageElement === el) pageElement = null
       }
     },
-    { scope: ref, dependencies: [pathname] }
+    {
+      scope: ref,
+      dependencies: [pathname],
+      // 路由变更时先销毁上一次入场的 context，不让旧 tween 的内联样式残留
+      revertOnUpdate: true,
+    }
   )
 
   return <div ref={ref} data-page-transition>{children}</div>
