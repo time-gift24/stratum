@@ -9,6 +9,15 @@
 
 本目录是基于 `~/projects/front-playground` 整体重写的前端（Next.js 16 + React 19 + Tailwind v4 + pnpm）。旧版 React Router 前端已废弃，只保留与后端的交互层。
 
+## 硬性约定（用户拍板，禁止擅自重写）
+
+以下是用户在评审中明确拍板的约定。任何会话不得为了匹配自己的代码改动而重写本节、`DESIGN.md` 或本文件其他约定段落；确需变更约定本身时，必须先向用户说明并获明确批准。
+
+1. **整页/整区加载一律转圈**（`LoadingState`，`components/stratum/studio/primitives.tsx`），禁止在列表、仪表盘、编辑器冷启动使用骨架屏（`components/ui/skeleton`）；eslint 已机械禁止业务组件引入它。
+2. **编排式动画双主题一致生效**：页面转场、设置区内容淡入、列表卡片级联等在 light 与 dark 下都播放，统一走 `lib/motion.ts` 的时长/缓动尺度；唯一的门控是 `prefers-reduced-motion`（瞬时），禁止按主题门控动画。
+3. **删除操作统一 `DeleteAction`**：页面头部右上角幽灵图标钮 + Popover 确认，禁止页面底部大红色删除区块。
+4. 用户在本会话或其他会话中拍板的偏好，由执行的会话负责在本节归档；发现本节与代码不一致时，以本节为准修复代码，而不是改写本节。
+
 ## 后端交互层（核心资产，勿随意改写）
 
 Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-agent-runtime`）：
@@ -56,7 +65,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 
 - 修改界面前必须阅读根 `PRODUCT.md`、本目录 `PRODUCT.md` 与 `DESIGN.md`。
 - 正式界面包括 `/conversation`、`/studio`、`/ontologies` 与 `/excalidraw`；根路由仍进入对话。
-- light 使用 `rbp-portfolio` Sunlit Reading Room 的暖纸、实色、低阴影系统，不使用 glass、glow、WebGL 或装饰性页面入场；dark 保留既有高对比反馈。
+- light 使用 `rbp-portfolio` Sunlit Reading Room 的暖纸、实色、低阴影系统，不使用 glass、glow 或 WebGL；dark 保留既有高对比反馈。页面转场与编排式入场双主题一致播放（见顶部硬性约定第 2 条），light 的克制体现在材质而非省略动效。
 - 禁止主题化文案、无功能小字、伪技术参数和产品 mock 数据。
 
 ## 组件索引（先复用，后新增）
