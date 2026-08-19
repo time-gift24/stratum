@@ -3,41 +3,52 @@
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useGSAP } from "@gsap/react"
+import gsap from "gsap"
 import { Box, Cpu, KeyRound, Plug, Plus, Search } from "lucide-react"
 
 import {
   ErrorState,
-  LoadingState,
   PageHeader,
   Pagination,
   ResourceCard,
+  ResourceGridSkeleton,
   StatusChip,
   StudioInput,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
-import { studioApi } from "@/features/studio-management/client"
+import { EmptyState } from "@/components/stratum/empty-state"
+import { safeStudioErrorMessage } from "@/features/studio-management/client"
+import {
+  fetchSettingsPage,
+  type SettingsKind,
+  type SettingsPageData,
+} from "@/features/studio-management/settings-data"
 import {
   safeStudioReturn,
   withStudioReturn,
 } from "@/features/studio-management/navigation"
+import { readPageCache, writePageCache } from "@/lib/page-cache"
 import {
-  readPageCache,
-  writePageCache,
-} from "@/lib/page-cache"
+  MOTION_DURATION,
+  MOTION_EASE,
+  motionDuration,
+  shouldAnimateChoreographedMotion,
+} from "@/lib/motion"
 import type {
-  ManagedModelView,
+  ManagedModelSummary,
   PageEnvelope,
   ProviderView,
 } from "@/lib/stratum/api"
 
-const PER_PAGE = 12
+gsap.registerPlugin(useGSAP)
 
 function safePage(value: string | null): number {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 1
 }
 
-export function SettingsList({ kind }: { kind: "providers" | "models" }) {
+export function SettingsList({ kind }: { kind: SettingsKind }) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const query = searchParams.get("q")?.trim() ?? ""
@@ -45,17 +56,17 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
   const returnTo = safeStudioReturn(searchParams.get("returnTo"))
   const cacheKey = `studio-settings:${kind}:${page}:${query}`
   const [cached, setCached] = useState(() =>
-    readPageCache<{
-      result: PageEnvelope<ProviderView> | PageEnvelope<ManagedModelView>
-      hasResources: boolean
-    }>(cacheKey)
+    readPageCache<SettingsPageData>(cacheKey)
   )
   const [providers, setProviders] = useState<PageEnvelope<ProviderView> | null>(
     () => (cached?.result as PageEnvelope<ProviderView> | undefined) ?? null
   )
-  const [models, setModels] = useState<PageEnvelope<ManagedModelView> | null>(
-    () => (cached?.result as PageEnvelope<ManagedModelView> | undefined) ?? null
-  )
+  const [models, setModels] =
+    useState<PageEnvelope<ManagedModelSummary> | null>(
+      () =>
+        (cached?.result as PageEnvelope<ManagedModelSummary> | undefined) ??
+        null
+    )
   const [hasResources, setHasResources] = useState(
     () => cached?.hasResources ?? false
   )
@@ -66,10 +77,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
   const [seenKey, setSeenKey] = useState(cacheKey)
   if (seenKey !== cacheKey) {
     setSeenKey(cacheKey)
-    const next = readPageCache<{
-      result: PageEnvelope<ProviderView> | PageEnvelope<ManagedModelView>
-      hasResources: boolean
-    }>(cacheKey)
+    const next = readPageCache<SettingsPageData>(cacheKey)
     setCached(next)
     if (kind === "providers") {
       setProviders(
@@ -78,7 +86,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
       setModels(null)
     } else {
       setModels(
-        (next?.result as PageEnvelope<ManagedModelView> | undefined) ?? null
+        (next?.result as PageEnvelope<ManagedModelSummary> | undefined) ?? null
       )
       setProviders(null)
     }
@@ -90,57 +98,19 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
     const requestId = ++requestIdRef.current
     setError(null)
     try {
+      const nextCache = await fetchSettingsPage(kind, page, query)
+      if (requestId !== requestIdRef.current) return
+      writePageCache(cacheKey, nextCache)
+      setCached(nextCache)
       if (kind === "providers") {
-        const all = await studioApi.listProviders({ page: 1, perPage: 100 })
-        if (requestId !== requestIdRef.current) return
-        const normalized = query.toLocaleLowerCase()
-        const filtered = all.data.filter(
-          (provider) =>
-            normalized === "" ||
-            provider.provider.toLocaleLowerCase().includes(normalized)
-        )
-        const start = (page - 1) * PER_PAGE
-        const result: PageEnvelope<ProviderView> = {
-          data: filtered.slice(start, start + PER_PAGE),
-          pagination: {
-            page,
-            per_page: PER_PAGE,
-            total: filtered.length,
-          },
-        }
-        const nextCache = {
-          result,
-          hasResources: all.pagination.total > 0,
-        }
-        writePageCache(cacheKey, nextCache)
-        setCached(nextCache)
-        setProviders(result)
-        setHasResources(nextCache.hasResources)
+        setProviders(nextCache.result as PageEnvelope<ProviderView>)
       } else {
-        const [modelPage, providerPage] = await Promise.all([
-          studioApi.listManagedModels({
-            page,
-            perPage: PER_PAGE,
-            search: query,
-          }),
-          studioApi.listProviders({ page: 1, perPage: 100 }),
-        ])
-        if (requestId !== requestIdRef.current) return
-        const nextCache = {
-          result: modelPage,
-          hasResources: providerPage.data.some(
-            (provider) => provider.models_count > 0
-          ),
-        }
-        writePageCache(cacheKey, nextCache)
-        setCached(nextCache)
-        setModels(modelPage)
-        setHasResources(nextCache.hasResources)
+        setModels(nextCache.result as PageEnvelope<ManagedModelSummary>)
       }
+      setHasResources(nextCache.hasResources)
     } catch (caught) {
       if (requestId !== requestIdRef.current) return
-      if (readPageCache(cacheKey) === null)
-        setError(caught instanceof Error ? caught.message : "无法加载设置")
+      setError(safeStudioErrorMessage(caught, "无法加载设置"))
     }
   }, [kind, page, query, cacheKey])
 
@@ -158,6 +128,43 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
       )
     : 1
   const hasQuery = query !== ""
+  const pageOutOfRange =
+    result !== null && result.pagination.total > 0 && page > totalPages
+
+  useEffect(() => {
+    if (!pageOutOfRange) return
+    const params = new URLSearchParams({ returnTo })
+    if (query !== "") params.set("q", query)
+    if (totalPages > 1) params.set("page", String(totalPages))
+    router.replace(`/studio/settings/${kind}?${params}`)
+  }, [kind, pageOutOfRange, query, returnTo, router, totalPages])
+
+  // 加载态 → 数据到达时卡片级联入场；挂载即有数据（缓存/悬停预取命中）
+  // 和后台刷新替换都不播——前者由容器淡入覆盖，后者避免刷新闪动
+  const gridRef = useRef<HTMLDivElement>(null)
+  const prevItemsRef = useRef(items)
+  useGSAP(
+    () => {
+      const arrived = prevItemsRef.current === undefined && items !== undefined
+      prevItemsRef.current = items
+      const grid = gridRef.current
+      if (!arrived || !grid || !shouldAnimateChoreographedMotion()) return
+      gsap.fromTo(
+        grid.children,
+        { opacity: 0, y: 10 },
+        {
+          opacity: 1,
+          y: 0,
+          duration: motionDuration(MOTION_DURATION.fast),
+          ease: MOTION_EASE.enter,
+          stagger: 0.04,
+          overwrite: "auto",
+          clearProps: "transform,opacity",
+        }
+      )
+    },
+    { scope: gridRef, dependencies: [items] }
+  )
 
   const updateQuery = (nextQuery: string, nextPage = 1) => {
     const params = new URLSearchParams({ returnTo })
@@ -171,7 +178,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
       <PageHeader title="设置" backHref={returnTo}>
         <Link
           href={withStudioReturn(`/studio/settings/${kind}/new`, returnTo)}
-          className={buttonVariants({ size: "lg" })}
+          className={buttonVariants({ size: "lg", className: "min-h-11 px-4" })}
         >
           <Plus aria-hidden />
           新建
@@ -198,7 +205,11 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
           placeholder={`搜索 ${kind === "providers" ? "Provider" : "Model"}`}
           className="pr-16 pl-9"
         />
-        <Button type="submit" variant="ghost" className="absolute top-1 right-1">
+        <Button
+          type="submit"
+          variant="ghost"
+          className="absolute top-0 right-0 min-h-11 px-3 sm:top-1 sm:right-1 sm:min-h-7"
+        >
           搜索
         </Button>
       </form>
@@ -212,39 +223,41 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
         </div>
       ) : null}
       {items === undefined && !error ? (
-        <LoadingState
+        <ResourceGridSkeleton
           label={`正在加载 ${kind === "providers" ? "Provider" : "Model"}`}
+          metaRows={2}
         />
-      ) : items?.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
-          <h2 className="font-semibold">
-            {hasQuery && hasResources
+      ) : items?.length === 0 && !pageOutOfRange ? (
+        <EmptyState
+          title={
+            hasQuery && hasResources
               ? `没有匹配的 ${kind === "providers" ? "Provider" : "Model"}`
               : kind === "providers"
                 ? "尚未配置 Provider"
-                : "尚未配置 Model"}
-          </h2>
-          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
-            {hasQuery && hasResources
+                : "尚未配置 Model"
+          }
+          description={
+            hasQuery && hasResources
               ? "调整搜索词，或清除筛选查看全部资源。"
               : kind === "providers"
                 ? "创建受支持的 Provider 后，可以继续配置它的 Model。"
-                : "添加一个真实可用的模型名称。"}
-          </p>
+                : "添加一个真实可用的模型名称。"
+          }
+        >
           {hasQuery && hasResources ? (
             <Button
               type="button"
               variant="outline"
               size="lg"
-              className="mt-4"
+              className="min-h-11"
               onClick={() => updateQuery("")}
             >
               清除筛选
             </Button>
           ) : null}
-        </div>
+        </EmptyState>
       ) : items ? (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div ref={gridRef} className="grid gap-3 sm:grid-cols-2">
           {kind === "providers"
             ? (items as readonly ProviderView[]).map((provider) => (
                 <ResourceCard
@@ -273,7 +286,7 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
                   ]}
                 />
               ))
-            : (items as readonly ManagedModelView[]).map((model) => (
+            : (items as readonly ManagedModelSummary[]).map((model) => (
                 <ResourceCard
                   key={model.model_id}
                   href={withStudioReturn(
@@ -282,11 +295,6 @@ export function SettingsList({ kind }: { kind: "providers" | "models" }) {
                   )}
                   title={model.name}
                   leading={<Cpu aria-hidden className="size-5" />}
-                  badge={
-                    model.is_default ? (
-                      <StatusChip tone="neutral">默认</StatusChip>
-                    ) : undefined
-                  }
                   meta={[{ icon: Plug, text: model.provider }]}
                 />
               ))}

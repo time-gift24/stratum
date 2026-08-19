@@ -33,10 +33,10 @@ futures-util = "0.3.32"
 http = "1.3.1"
 jsonschema = { version = "0.49.2", default-features = false }
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
-# LLM API keys in memory (CONSTITUTION §6): config and provider clients hold
-# keys as secrecy::SecretString so Debug/Display can never expose them; the
-# serde feature keeps TOML config deserialization transparent. MIT/Apache-2.0,
-# maintained by the RustCrypto org, no heavy transitive deps.
+# LLM API keys in memory (CONSTITUTION §6): Studio write DTOs/storage and
+# provider clients hold keys as secrecy::SecretString so Debug/Display cannot
+# expose them; the serde feature supports the write-only JSON boundary.
+# MIT/Apache-2.0, maintained by the RustCrypto org, no heavy transitive deps.
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -50,6 +50,11 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.4", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+# PostgreSQL database-isolation validation must use the same WHATWG URL
+# normalization as SQLx (including encoded dot segments) instead of a second
+# hand-written parser. `url` is already present through SQLx, is maintained by
+# the rust-url project, and is dual MIT/Apache-2.0 licensed.
+url = "2.5.8"
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }

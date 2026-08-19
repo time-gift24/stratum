@@ -17,6 +17,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./create-ontology-test-database.sql:/docker-entrypoint-initdb.d/10-create-ontology-test-database.sql:ro
+      - ./create-studio-test-databases.sql:/docker-entrypoint-initdb.d/20-create-studio-test-databases.sql:ro
 
   nats:
     image: nats:2-alpine

@@ -1,3 +1,0 @@
-version = "alpha-1"
-tools = ["echo"]
-prompt = "You are a helpful assistant."

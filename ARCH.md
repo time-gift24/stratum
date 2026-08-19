@@ -51,12 +51,15 @@ flowchart TB
 
     subgraph Data["数据与事件"]
         Session["长期 Session<br/>图无关 · 多 Agent"]
+        Studio["Studio PostgreSQL<br/>Provider · Model · Credential · Agent Definition"]
         State["Postgres 执行真相<br/>定义 · 薄状态 · durable ledger · 压缩 companion"]
         Artifact["Skill / Extension / Workflow 制品"]
         Tail["NATS 实时 tail<br/>短期 · 可丢失 · 非真相"]
     end
 
     Session --> State
+    Definition --> Studio
+    Studio --> LLM
     Workflow --> Session
     Agent --> State
     Hook --> State
@@ -74,7 +77,7 @@ flowchart TB
 
 `stratum-web` 和 `stratum-api` 对外提供对话、工作流编辑、运行控制、审批、历史查询和 SSE 事件流。
 
-控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。`AgentId` 标识 `agents` 中一个不可变 template 版本，`AgentRuntimeId` 标识 `agent_states` 中一个可跨多个 Turn 的长期运行聚合；多个 runtime 可以 pin 同一个 Agent。AgentRuntime 可以在没有活跃操作时修改自己的 `model_config`；新 Turn 接受后会把该完整 `ModelConfig` 保存为该 runtime 后续使用的值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
+控制面管理 Session 以及 Agent、Workflow、Skill 和 Extension 的定义与发布版本，并负责身份、权限、Secret 引用和能力注册。Provider、Model、credential 与当前 Agent definition 只存在于独立 Studio PostgreSQL；配置和文件不 seed、不覆盖也不回退。`AgentId` 标识 `agents` 中一个不可变 template 版本，`AgentRuntimeId` 标识 `agent_states` 中一个可跨多个 Turn 的长期运行聚合；多个 runtime 可以 pin 同一个 Agent。AgentRuntime 可以在没有活跃操作时修改自己的 `model_config`；新 Turn 接受后会把该完整 `ModelConfig` 保存为该 runtime 后续使用的值。一个 Turn 开始后，其 Agent、Skill 集、Extension 集、Hook Handler 顺序、模型配置和工具集指纹保持不变，恢复也必须使用原 Turn 固定的配置。
 
 Web/API 只负责接入和组合，不实现工作流调度与 Agent 循环。
 
@@ -130,11 +133,12 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 
 ### 5. 文件系统与存储
 
-文件与存储分成三个逻辑域：
+文件与存储分成四个逻辑域：
 
 | 数据域 | Agent 是否可见 | 主要约束 |
 |---|---:|---|
 | Agent 工作区 | 是，通过 `VirtualPath` | 沙箱、权限、容量和路径安全 |
+| Studio authoring catalog | 否 | 独立 PostgreSQL、secret 隔离、显式管理、引用完整性 |
 | 运行时持久化 | 否 | Postgres 四表 durable ledger、事务一致性、幂等和恢复 |
 | 制品存储 | 否 | 不可变版本、内容摘要和分发 |
 
@@ -154,6 +158,10 @@ Hook、Registry、Event 和 Port 不混用：Hook 修改当前流程，Registry 
 - hosting 是进程内 exact `(AgentRuntimeId, TurnId)` registry 的易失观察，永不持久化；进程重启后 registry 为空，恢复靠显式 resume。
 - 持久化顺序固定为 Postgres commit 先于 NATS publish；NATS 只是 AgentRuntime-scoped 的短实时 tail，subject、dispatcher 与 cursor 都用 AgentRuntimeId 分区，发布丢失由 PG snapshot/history 收敛。
 - AgentLoop kernel（`stratum-agent`）只见 scope-free typed durable events 与 `DurableEventSink` / `TelemetryEventSink` 合同；它可以用 `AgentId` 固定 immutable definition，但 Postgres、`AgentRuntimeId`、HTTP、Session hosting、scheduler 与分页永不进入 AgentLoop。`stratum-core` 只提供共享领域身份和上下文类型，Postgres 编排全部放在装配层 `stratum-api`。
+
+### 6.1 Studio PostgreSQL（唯一 authoring/runtime catalog）
+
+concrete `stratum-studio` 拥有独立 database 与 migration history，保存 Provider、credential、Model 与可变 Agent definition。新库合法为空且不做 boot seed；`stratum-api` 无论是否暴露管理 routes 都必须连接它。每次启动新的 LLM work 都从同一事务一致的 Provider/credential/Model 数据构建一次短生命周期 registry snapshot，不维护可漂移的进程热缓存；进行中的 Turn pin 住已捕获 provider `Arc`。AgentRuntime 继续 pin execution Postgres 中的 immutable definition，后续 Turn 则按当时 Studio catalog 解析该 definition 已选择的 Model。Provider endpoint 和 timeout 是闭集 adapter 的代码策略，不属于 deployment config 或 Studio schema。
 
 ### 7. 可观测性与安全
 
@@ -177,6 +185,7 @@ Session → 可选 Workflow Node → Agent Turn → LLM / Tool / Hook
 | LLM Provider | `stratum-llm` |
 | Agent 虚拟工作区 | `stratum-filesystem` |
 | Postgres 执行存储 | `stratum-postgres` |
+| Studio authoring/runtime catalog | `stratum-studio` |
 | 实时 tail 与 kernel sink 合同 | `stratum-infra` |
 | HTTP API 与运行时组合 | `stratum-api` |
 | Web 产品 | `stratum-web` |

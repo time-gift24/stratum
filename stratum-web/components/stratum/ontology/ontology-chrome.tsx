@@ -49,7 +49,7 @@ const pillIcon = "size-4"
 // 顶部 pill 族
 // ---------------------------------------------------------------------------
 
-/** 顶部悬浮 pill 容器：深色圆角全胶囊 + 细边 + 投影 + backdrop-blur */
+/** 顶部悬浮 pill：light 实色平面；dark 保留投影与 backdrop blur。 */
 export function ChromePill({
   className,
   children,
@@ -60,7 +60,7 @@ export function ChromePill({
   return (
     <div
       className={cn(
-        "pointer-events-auto flex h-10 items-center gap-0.5 rounded-full border border-border bg-card/95 px-1.5 shadow-xl backdrop-blur",
+        "pointer-events-auto flex h-10 items-center gap-0.5 rounded-full border border-border bg-card px-1.5 dark:bg-card/95 dark:shadow-xl dark:backdrop-blur",
         className
       )}
     >
@@ -134,7 +134,7 @@ export function PillLinkButton({
             <Link
               href={href}
               aria-label={label}
-              className="flex size-8 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
             />
           }
         >
@@ -172,10 +172,10 @@ export function PrimaryPillButton({
       disabled={disabled || loading}
       onClick={onClick}
       className={cn(
-        "pointer-events-auto h-10 gap-1.5 rounded-full px-4 text-sm font-medium shadow-xl",
+        "pointer-events-auto h-10 gap-1.5 rounded-full px-4 text-sm font-medium dark:shadow-xl",
         actionable
           ? "bg-primary text-primary-foreground hover:bg-primary/90"
-          : "border border-border bg-card/95 text-muted-foreground backdrop-blur"
+          : "border border-border bg-card text-muted-foreground dark:bg-card/95 dark:backdrop-blur"
       )}
     >
       {loading ? (
@@ -199,7 +199,8 @@ type CardTone = "default" | "danger"
 
 const cardToneClass: Record<CardTone, string> = {
   default: "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-  danger: "text-muted-foreground hover:bg-destructive/10 hover:text-destructive",
+  danger:
+    "text-muted-foreground hover:bg-destructive/10 hover:text-destructive",
 }
 
 /** 卡片内小图标动作：size-7 + nodrag（不触发节点拖拽）+ tooltip 向上 */

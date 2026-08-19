@@ -9,7 +9,7 @@ import gsap from "gsap"
 import {
   MOTION_DURATION,
   MOTION_EASE,
-  prefersReducedMotion,
+  shouldAnimateChoreographedMotion,
 } from "@/lib/motion"
 
 gsap.registerPlugin(useGSAP)
@@ -36,6 +36,19 @@ const PAGE_ORDER = ["/conversation", "/studio", "/ontologies", "/excalidraw"]
 /** 子路由归并到一级入口：/studio/agents/x → /studio。 */
 function pageIndex(pathname: string): number {
   return PAGE_ORDER.indexOf(`/${pathname.split("/")[1]}`)
+}
+
+function internalNavigationPath(href: string): string | null {
+  const [rawPath] = href.split(/[?#]/, 1)
+  if (rawPath === undefined || !rawPath.startsWith("/")) return null
+  return rawPath.length > 1 ? rawPath.replace(/\/+$/, "") : rawPath
+}
+
+/** 当前链接及其子路由都向辅助技术暴露当前页状态。 */
+function isCurrentNavigationHref(pathname: string, href: string): boolean {
+  const target = internalNavigationPath(href)
+  if (target === null) return false
+  return pathname === target || pathname.startsWith(`${target}/`)
 }
 
 /**
@@ -98,7 +111,11 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       // 顶掉可能仍在播的手动出场 tween，避免它把容器留在 opacity: 0
       gsap.killTweensOf(el)
 
-      if (!isFirstPaint && !siblingSwitch && !prefersReducedMotion()) {
+      if (
+        !isFirstPaint &&
+        !siblingSwitch &&
+        shouldAnimateChoreographedMotion()
+      ) {
         gsap.fromTo(
           el,
           { x: 40 * direction, opacity: 0 },
@@ -127,7 +144,11 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
     }
   )
 
-  return <div ref={ref} data-page-transition>{children}</div>
+  return (
+    <div ref={ref} data-page-transition>
+      {children}
+    </div>
+  )
 }
 
 /** 带出场转场的 Link：点击 → 当前页滑出 → router.push → 新页滑入。 */
@@ -135,6 +156,7 @@ export function TransitionLink({
   href,
   onClick,
   children,
+  "aria-current": ariaCurrent,
   ...props
 }: React.ComponentProps<typeof Link>) {
   const router = useRouter()
@@ -155,8 +177,10 @@ export function TransitionLink({
     if (to === -1 || to === from) return // 未知页或当前页：交给 Link 默认导航
 
     const el = pageElement
-    if (!el || prefersReducedMotion()) return
+    if (!el || !shouldAnimateChoreographedMotion()) return
 
+    const targetPathname = internalNavigationPath(href)
+    if (targetPathname === null) return
     e.preventDefault()
     const direction = to > from ? 1 : -1
     armedDirection = direction
@@ -173,7 +197,10 @@ export function TransitionLink({
         // 保险丝：导航未提交（如被前进/后退取消）时恢复页面可见，
         // 否则容器会停在透明状态
         setTimeout(() => {
-          if (window.location.pathname !== href && document.contains(el)) {
+          if (
+            window.location.pathname !== targetPathname &&
+            document.contains(el)
+          ) {
             gsap.set(el, { clearProps: "transform,opacity" })
           }
         }, 1500)
@@ -182,7 +209,17 @@ export function TransitionLink({
   }
 
   return (
-    <Link href={href} onClick={handleClick} {...props}>
+    <Link
+      href={href}
+      onClick={handleClick}
+      aria-current={
+        ariaCurrent ??
+        (typeof href === "string" && isCurrentNavigationHref(pathname, href)
+          ? "page"
+          : undefined)
+      }
+      {...props}
+    >
       {children}
     </Link>
   )

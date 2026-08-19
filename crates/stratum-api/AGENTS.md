@@ -8,10 +8,13 @@
 - 托管状态是进程内精确 `(AgentRuntimeId, TurnId)` 注册表的易失观察，永不持久化；注册表的锁只保护内存映射访问，Postgres、NATS、提供器和 Agent 的异步工作必须在锁外完成。
 - 持久化顺序固定为先提交 Postgres，再发布 NATS；每个 AgentRuntime 的分发器按 `event_seq` 从已提交的 PG 行发布产品事件。NATS 发布/通知失败只记录一次安全错误，不回滚 PG、不改变命令或内核结果。
 - 审批完全从持久账本派生：审批处理器是普通的 `decide_tool_call` Hook 处理器，解析器事务复用 `agent_states` 行锁实现线性化；解析与恢复是分离的端点，未托管状态下的解析不会隐式恢复。
-- Postgres 决定核心就绪性；NATS 不可用时 SSE 返回稳定的 `realtime_unavailable`，Web 降级为 PG 对账，核心命令继续可用。
+- 执行、Ontology 与 Studio 三个 PostgreSQL 共同决定核心就绪性；NATS 不可用时 SSE 返回稳定的 `realtime_unavailable`，Web 降级为 PG 对账，核心命令继续可用。
 - `stratum-ontology` 通过具体 `OntologyStore` 进程内装配到 `AppState`；HTTP DTO、ETag/`If-Match`、错误信封、OpenAPI 与 2 MiB route body limit 只属于 `http/ontology.rs`，不得回流领域 crate。执行存储与 Ontology 使用同一 PostgreSQL 服务中的独立 database，隔离各自 SQLx migration history。
-- liveness 不探测外部依赖；readiness 在 `[api].readiness_timeout_ms` 的一个总时限内同时探测执行 Postgres 与 Ontology Postgres。NATS 状态只作为 `realtime` capability 报告，不决定 readiness 结果。
-- `DEEPSEEK_API_KEY` 只在读取配置后的启动边界注入并立即封装为 `SecretString`；不得记录、写回配置或作为 build arg。Compose 必须通过 required expansion 只把它传给 `stratum-api`。
+- liveness 不探测外部依赖；readiness 在 `[api].readiness_timeout_ms` 的一个总时限内同时探测执行、Ontology 与 Studio PostgreSQL。NATS 状态只作为 `realtime` capability 报告，不决定 readiness 结果。
+- Studio PostgreSQL 是 Provider credential、Model 与当前 Agent definition 的唯一运行时目录；API 启动必须连接并校验它，每次新的 LLM work 从事务一致的 Studio 数据组装短生命周期 Provider snapshot，不维护进程热缓存。即使 `management_enabled = false` 也不得回退到 boot config、环境变量或 template 文件；该布尔值只控制 loopback management routes 与对应 OpenAPI fragment。
+- Provider adapter 的官方 endpoint 与显式出站 timeout 是二进制拥有的受信策略，不由 Studio 请求或部署配置覆盖；credential 仅从 StudioStore 以 `SecretString` 进入 adapter 装配，不得记录或返回。
+- `ProviderFactory` 只复用进程级 `reqwest::Client` 传输池；每次 LLM work 仍从 Studio DB 重读 credential 与 Model membership 并重建 manager/adapter。共享连接池不得演变成 Provider catalog 或 credential cache。
+- Model create 的 adapter 校验与 parameter schema 必须在 Studio mutation 前从当时的 DB credential snapshot 组装；Store commit 后只能使用已取得的 schema 与 transaction 内物化的 `Versioned` 构造响应，不得再次读取 Studio 或重建 Provider manager。
 - AgentRuntimeView 对外同时编码十进制字符串 `snapshot_event_seq` 与
   `telemetry_floor_event_seq`；后者是在同一 MVCC 屏障内从账本派生出的最新 `assistant`
   `MessageAppended` 序号，用于冷恢复时拒绝首屏之外、最终事件之前的旧遥测，
@@ -24,7 +27,7 @@
 - 创建、消息和恢复在任何持久化或提供器 I/O 前必须取得原子准入 RAII 守卫，并在等待中的 Postgres/NATS 工作中观察关闭令牌。关闭后的新持久工作返回安全稳定的 503。
 - HTTP 最终错误边界只记录一次安全的结构化操作错误；span 可记录 Agent/Session/Turn/游标等 ID，不得记录消息、提示词、Tool 参数、密钥、SQL 或宿主机路径。
 - 错误映射合同：库错误使用 `thiserror`，HTTP 统一映射为安全信封
-  `{"error":{"code":"...","message":"..."}}` 与约定的 400/404/409/410/412/413/422/428/500/503；
+  `{"error":{"code":"...","message":"..."}}` 与约定的 400/404/409/410/412/413/422/428/500/502/503；
   响应体不暴露 SQL、NATS 主题、宿主机路径、提示词、Tool 参数/结果、提供器正文或凭据。运行时路由的 404 固定为 `agent_runtime_not_found`；目录名称缺失为 `agent_template_not_found`；状态存在但固定的定义缺失或损坏时，必须以 `durable_state_corrupt` 故障关闭。
 - API 文档以 utoipa 生成的 OpenAPI 为唯一权威：每个处理器必须有 `#[utoipa::path]`，DTO 与传输类型必须有 `ToSchema`；每个状态码都显式声明响应体类型（空成功响应使用 `body = ()`）；错误响应只声明该处理器经 `error_response()` 实际可达的状态码；SSE 端点以 `text/event-stream` 与 API 自有的 `AgentRuntimeStreamFrameV1` 描述。`docs/PROTOCOL.md` 已废弃。
 
@@ -37,7 +40,7 @@
   来源序号血缘，供压缩保留指针解析）、`dispatcher.rs`（每个 AgentRuntime 的
   有序具体 PG+NATS 分发器）、
   `approval.rs`（决策阶段的审批 HookHandler + 进程内等待器）、`turn.rs`（运行时
-  重建与受管任务生成）、`templates.rs`（只读热加载目录）、`frames.rs`
+  重建与受管任务生成）、`frames.rs`
   （`AgentRuntimeStreamFrameV1`/`AgentRuntimeProductEventV1`）、`dto.rs`、`error.rs`（`ErrorKind` →
   状态码/代码映射表）、`host_error.rs`（启动错误）、`http/`（路由器 + 处理器 + utoipa）。
 - 审批处理器的 `HookInvocationId` 不由内核传入：内核保证先提交 `Pending`，处理器通过
@@ -86,9 +89,11 @@
   线性化；存在任一活跃生产者句柄时不得退休或丢弃。句柄为零且有界重试耗尽时，只可
   丢弃易失队列/目标，不得修改 PG 真相；下一次 `ensure` 从当时已提交的高水位建立新
   代次，不在进程重启或代次退休后重新灌入旧历史。
-- 测试：单元测试位于各模块的 `#[cfg(test)]`；容器集成测试位于 `tests/api.rs`、
-  `tests/ontology_api.rs` + `tests/common/mod.rs`（`#[ignore]`，`make test-integration`，Compose 项目
-  `stratum-api-test`）。完整集成命令让 Docker/Podman 动态发布 loopback host ports，
+- 测试：单元测试位于各模块的 `#[cfg(test)]`；容器集成测试源码位于 `tests/api.rs`、
+  `tests/ontology_api.rs`、`tests/studio_db_only.rs` + `tests/common/mod.rs`，通过 `lib.rs` 的
+  `#[cfg(test)]` path modules 编译（Cargo `autotests = false`），从而只让 crate-private、test-only
+  `AppState` mock Provider 注入边界服务这些测试，不形成 production API。容器用例保持
+  `#[ignore]`，由 `make test-integration` 运行（Compose 项目 `stratum-api-test`）。完整集成命令让 Docker/Podman 动态发布 loopback host ports，
   再把实际 PG/NATS endpoint 注入测试进程，避免 CI runner 服务或 ephemeral client
   socket 占用固定端口；手动 `make test-up` 仍默认 PG 45433 / NATS 44228，也可通过
   `STRATUM_API_TEST_PG_HOST_PORT` / `STRATUM_API_TEST_NATS_HOST_PORT` 覆盖。

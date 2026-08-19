@@ -78,6 +78,7 @@ export type ResourceRevision<T> = {
 
 export type AgentDefinitionView = {
   agent_name: string
+  agent_version: string
   model: string
   model_parameters: Record<string, unknown>
   tools: readonly string[]
@@ -87,6 +88,7 @@ export type AgentDefinitionView = {
 
 export type AgentDefinitionInput = {
   agent_name?: string
+  agent_version: string
   model: string
   model_parameters: Record<string, unknown>
   tools: readonly string[]
@@ -119,8 +121,12 @@ export type ManagedModelView = {
   name: string
   parameter_schema: unknown
   updated_at: string
-  is_default?: boolean
 }
+
+export type ManagedModelSummary = Pick<
+  ManagedModelView,
+  "model_id" | "provider" | "name"
+>
 
 export type ManagedModelInput = {
   provider: ProviderKind
@@ -398,7 +404,7 @@ export type StratumApi = {
   listTools(): Promise<readonly ToolView[]>
   listManagedModels(
     query?: ListQuery & { provider?: ProviderKind }
-  ): Promise<PageEnvelope<ManagedModelView>>
+  ): Promise<PageEnvelope<ManagedModelSummary>>
   getManagedModel(
     provider: ProviderKind,
     modelName: string
@@ -491,7 +497,9 @@ export async function apiErrorFromResponse(
         body.error.message,
         violations,
         {
-          ...(fieldViolations.length > 0 ? { violations: fieldViolations } : {}),
+          ...(fieldViolations.length > 0
+            ? { violations: fieldViolations }
+            : {}),
           ...(blockers.length > 0 ? { blockers } : {}),
         }
       )
@@ -792,7 +800,9 @@ export function createStratumApi(options: {
     },
     getObjectTypeNeighborhood: (ontologyId, objectTypeId, depth) => {
       const suffix =
-        depth === undefined ? "" : `?${new URLSearchParams({ depth: String(depth) })}`
+        depth === undefined
+          ? ""
+          : `?${new URLSearchParams({ depth: String(depth) })}`
       return request(
         `/v1/ontologies/${ontologyId}/object-types/${objectTypeId}/neighborhood${suffix}`,
         (value) => value as OntologyNeighborhood
@@ -813,6 +823,7 @@ export function createStratumApi(options: {
         jsonInit(
           "PUT",
           {
+            agent_version: input.agent_version,
             model: input.model,
             model_parameters: input.model_parameters,
             tools: input.tools,
@@ -850,38 +861,33 @@ export function createStratumApi(options: {
     listManagedModels: async (query = {}) => {
       const { provider, ...listQuery } = query
       if (provider !== undefined)
-        return request<PageEnvelope<ManagedModelView>>(
+        return request<PageEnvelope<ManagedModelSummary>>(
           `/v1/providers/${provider}/models${listSearch(listQuery)}`,
           asJson
         )
-      const providerPage = await request<PageEnvelope<ProviderView>>(
-        "/v1/providers?per_page=50",
-        asJson
-      )
-      const providerModels = await Promise.all(
-        providerPage.data.map(async (item) => {
-          const first = await request<PageEnvelope<ManagedModelView>>(
-            `/v1/providers/${item.provider}/models?page=1&per_page=100`,
-            asJson
+      const catalog = await request("/v1/models", parseModelsResponse)
+      const models = catalog.models.map((descriptor) => {
+        const separator = descriptor.model.indexOf(":")
+        const provider = descriptor.model.slice(0, separator)
+        const name = descriptor.model.slice(separator + 1)
+        if (
+          separator <= 0 ||
+          name === "" ||
+          (provider !== "openai" && provider !== "deepseek")
+        )
+          throw new ApiError(
+            "invalid_response",
+            200,
+            "the server returned an invalid managed model identity"
           )
-          const totalPages = Math.ceil(
-            first.pagination.total / first.pagination.per_page
-          )
-          if (totalPages <= 1) return [...first.data]
-          const rest = await Promise.all(
-            Array.from({ length: totalPages - 1 }, (_, index) =>
-              request<PageEnvelope<ManagedModelView>>(
-                `/v1/providers/${item.provider}/models?page=${index + 2}&per_page=100`,
-                asJson
-              )
-            )
-          )
-          return [first, ...rest].flatMap((page) => page.data)
-        })
-      )
+        return {
+          model_id: descriptor.model,
+          provider,
+          name,
+        } satisfies ManagedModelSummary
+      })
       const normalizedSearch = query.search?.trim().toLocaleLowerCase()
-      const filtered = providerModels
-        .flat()
+      const filtered = models
         .filter(
           (model) =>
             normalizedSearch === undefined ||

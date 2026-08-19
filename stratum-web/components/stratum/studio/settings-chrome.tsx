@@ -11,7 +11,12 @@ import {
   type SettingsSection,
 } from "@/components/stratum/studio/primitives"
 import { safeStudioReturn } from "@/features/studio-management/navigation"
-import { MOTION_DURATION, MOTION_EASE, motionDuration } from "@/lib/motion"
+import {
+  MOTION_DURATION,
+  MOTION_EASE,
+  motionDuration,
+  shouldAnimateChoreographedMotion,
+} from "@/lib/motion"
 
 gsap.registerPlugin(useGSAP)
 
@@ -38,7 +43,7 @@ export function SettingsChrome({ children }: { children: React.ReactNode }) {
         return
       }
       const el = contentRef.current
-      if (!el) return
+      if (!el || !shouldAnimateChoreographedMotion()) return
       gsap.fromTo(
         el,
         { opacity: 0, y: 6 },

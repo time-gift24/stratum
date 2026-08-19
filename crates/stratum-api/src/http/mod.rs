@@ -120,8 +120,8 @@ struct ApiDoc;
 
 /// Builds the HTTP API router for one assembled state.
 pub fn router(state: Arc<AppState>) -> Router {
-    let studio_enabled = state.studio().is_some();
-    let openapi = openapi(studio_enabled);
+    let management_enabled = state.management_enabled();
+    let openapi = openapi(management_enabled);
     let shutdown = state.shutdown_token();
     let origins = state
         .allowed_origins()
@@ -170,7 +170,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(ontology::routes())
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness));
-    let router = if studio_enabled {
+    let router = if management_enabled {
         router.merge(crate::studio_management::routes())
     } else {
         router
@@ -293,12 +293,13 @@ async fn liveness() -> Json<LivenessResponse> {
     Json(LivenessResponse { status: "ok" })
 }
 
-/// Readiness: execution and Ontology Postgres must answer; NATS only degrades realtime.
+/// Readiness: execution, Ontology, and Studio Postgres must answer; NATS only
+/// degrades realtime.
 #[utoipa::path(
     get,
     path = "/health/ready",
     responses(
-        (status = 200, description = "execution and Ontology Postgres serve; realtime capability is reported", body = ReadinessResponse),
+        (status = 200, description = "execution, Ontology, and Studio Postgres serve; realtime capability is reported", body = ReadinessResponse),
         (status = 503, description = "a required Postgres dependency is unavailable", body = ReadinessResponse),
     )
 )]
@@ -309,11 +310,15 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
         "degraded"
     };
     let probes = tokio::time::timeout(state.readiness_timeout(), async {
-        tokio::join!(state.pg().ping(), state.ontology().is_ready())
+        tokio::join!(
+            state.pg().ping(),
+            state.ontology().is_ready(),
+            state.studio().ping()
+        )
     })
     .await;
     match probes {
-        Ok((Ok(()), true)) => (
+        Ok((Ok(()), true, Ok(()))) => (
             http::StatusCode::OK,
             Json(ReadinessResponse {
                 status: "ok",
@@ -321,10 +326,11 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             }),
         )
             .into_response(),
-        Ok((execution, ontology_ready)) => {
+        Ok((execution, ontology_ready, studio)) => {
             tracing::error!(
                 execution_ready = execution.is_ok(),
                 ontology_ready,
+                studio_ready = studio.is_ok(),
                 "readiness probe failed"
             );
             (
@@ -418,6 +424,8 @@ mod tests {
         let disabled_paths = disabled["paths"].as_object().expect("paths are an object");
         assert!(!disabled_paths.contains_key("/v1/agent-definitions"));
         assert!(!disabled_paths.contains_key("/v1/providers"));
+        assert!(!disabled_paths.contains_key("/v1/providers/{provider}/test"));
+        assert!(!disabled_paths.contains_key("/v1/tools"));
 
         let enabled = serde_json::to_value(openapi(true)).expect("OpenAPI serializes");
         let enabled_paths = enabled["paths"].as_object().expect("paths are an object");
@@ -440,6 +448,8 @@ mod tests {
                 "/v1/providers/{provider}/models/{model_name}",
                 ["get", "delete"].as_slice(),
             ),
+            ("/v1/providers/{provider}/test", ["post"].as_slice()),
+            ("/v1/tools", ["get"].as_slice()),
         ];
 
         for (path, methods) in expected_operations {
@@ -461,6 +471,26 @@ mod tests {
             }
         }
 
+        let response_codes = |path: &str, method: &str| {
+            enabled_paths[path][method]["responses"]
+                .as_object()
+                .expect("responses are documented")
+        };
+        assert!(
+            !response_codes("/v1/agent-definitions/{agent_name}", "delete").contains_key("409")
+        );
+        assert!(
+            response_codes("/v1/providers/{provider}/models/{model_name}", "delete")
+                .contains_key("409")
+        );
+        assert!(response_codes("/v1/providers/{provider}/test", "post").contains_key("500"));
+        assert!(response_codes("/v1/providers/{provider}", "put").contains_key("422"));
+        assert!(response_codes("/v1/providers/{provider}/models", "post").contains_key("404"));
+        assert!(
+            response_codes("/v1/providers/{provider}/models/{model_name}", "delete")
+                .contains_key("422")
+        );
+
         let schemas = enabled["components"]["schemas"]
             .as_object()
             .expect("schemas are an object");
@@ -477,6 +507,13 @@ mod tests {
                 "Studio schema {schema} is documented"
             );
         }
+
+        let error_body = &schemas["ErrorBody"];
+        let error_properties = error_body["properties"]
+            .as_object()
+            .expect("ErrorBody properties are documented");
+        assert!(error_properties.contains_key("violations"));
+        assert!(error_properties.contains_key("blockers"));
     }
 
     fn collect_property_schemas<'a>(

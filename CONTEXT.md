@@ -23,7 +23,7 @@ Studio 数据库中可变的作者记录，为未来 AgentRuntime 选择一个�
 _Avoid_: 用 Studio 记录替代 AgentId、原地改写已发布 template
 
 **Studio catalog**:
-与 execution ledger 分离的 PostgreSQL authoring store，拥有 Provider credential、Model 与 Studio Agent Definition。首次可从 boot config 和只读 templates 导入，之后 Studio DB 是 authoring truth；credential 绝不进入 API 读取响应、事件、NATS 或日志。
+与 execution ledger 分离的 PostgreSQL authoring/runtime store，拥有 Provider credential、Model 与 Studio Agent Definition。它是这些资源的唯一真相；空库保持为空，资源只能经 Studio 管理边界显式创建，不从 boot config、环境变量或 template 文件导入。credential 绝不进入 API 读取响应、事件、NATS 或日志。
 _Avoid_: 文件配置真相、execution table、credential cache
 
 **Ontology context**:

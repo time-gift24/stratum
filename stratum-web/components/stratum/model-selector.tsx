@@ -119,7 +119,7 @@ export const ModelSelector = memo(function ModelSelector({
         disabled={triggerDisabled}
         aria-label={`模型：${triggerLabel}`}
         className={cn(
-          "flex items-center gap-1 rounded-full px-2 py-1 font-sans text-sm text-muted-foreground transition-colors outline-none",
+          "flex min-h-11 items-center gap-1 rounded-full px-2 py-1 font-sans text-sm text-muted-foreground transition-colors outline-none sm:min-h-0",
           "hover:bg-muted/60 hover:text-foreground",
           "focus-visible:ring-2 focus-visible:ring-ring/50",
           "disabled:cursor-not-allowed disabled:opacity-60",

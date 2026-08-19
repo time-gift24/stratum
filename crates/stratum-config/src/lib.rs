@@ -2,23 +2,17 @@
 
 mod error;
 
-use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf};
+use std::{fmt, net::SocketAddr};
 
 pub use error::ConfigError;
-use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
-pub use stratum_core::AgentName;
-use stratum_core::{AgentVersionTag, ModelId, ToolName};
+use serde::Deserialize;
+use url::Url;
 
 /// Top-level Stratum configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-    /// Agent template catalog configuration.
-    pub agent: AgentConfig,
-    /// LLM provider configuration.
-    pub llm: LlmConfig,
     /// HTTP API configuration, when the API is enabled.
     #[serde(default)]
     pub api: Option<ApiConfig>,
@@ -31,18 +25,9 @@ pub struct Config {
     /// Ontology PostgreSQL configuration, required by the API host.
     #[serde(default)]
     pub ontology: Option<OntologyConfig>,
-    /// Optional loopback-only Studio management configuration.
+    /// Studio catalog configuration, required by the API host.
     #[serde(default)]
     pub studio: Option<StudioConfig>,
-}
-
-/// Agent template catalog configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct AgentConfig {
-    /// Read-only root directory of the agent template catalog.
-    pub templates_root: PathBuf,
 }
 
 /// HTTP API configuration.
@@ -133,7 +118,7 @@ const fn default_nats_connect_timeout_seconds() -> u64 {
 }
 
 /// Postgres execution-storage configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PostgresConfig {
@@ -150,7 +135,7 @@ pub struct OntologyConfig {
     pub database_url: String,
 }
 
-/// PostgreSQL settings for the mutable Studio management catalog.
+/// PostgreSQL settings for the mutable Studio catalog.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -158,22 +143,8 @@ pub struct StudioConfig {
     /// Enables loopback-only management routes.
     #[serde(default)]
     pub management_enabled: bool,
-    /// Dedicated Studio database URL, required when management is enabled.
-    #[serde(default)]
-    pub database_url: Option<String>,
-}
-
-impl fmt::Debug for StudioConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StudioConfig")
-            .field("management_enabled", &self.management_enabled)
-            .field(
-                "database_url",
-                &self.database_url.as_ref().map(|_| "[REDACTED]"),
-            )
-            .finish()
-    }
+    /// Dedicated Studio database URL used by every API runtime.
+    pub database_url: String,
 }
 
 impl fmt::Debug for OntologyConfig {
@@ -185,129 +156,23 @@ impl fmt::Debug for OntologyConfig {
     }
 }
 
-/// LLM defaults and supported providers.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct LlmConfig {
-    /// Model used when an agent template does not override it.
-    pub default: ModelId,
-    /// DeepSeek provider configuration.
-    #[serde(default)]
-    pub deepseek: Option<ProviderConfig>,
-    /// OpenAI provider configuration.
-    #[serde(default)]
-    pub openai: Option<ProviderConfig>,
-}
-
-/// Credentials and allowed models for one LLM provider.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ProviderConfig {
-    /// Provider API key; held as a secret in memory (§6) and transferred to
-    /// the provider wrapper without creating an ordinary plaintext `String`.
-    pub api_key: SecretString,
-    /// Provider-local model names available to agents.
-    pub models: Vec<String>,
-    /// Optional base URL override; when absent the provider's well-known
-    /// public endpoint is used by the assembly layer.
-    #[serde(default)]
-    pub base_url: Option<String>,
-    /// TCP connect timeout for provider egress.
-    #[serde(default = "default_llm_connect_timeout_seconds")]
-    pub connect_timeout_seconds: u64,
-    /// Total timeout for a non-streaming chat request.
-    #[serde(default = "default_llm_request_timeout_seconds")]
-    pub request_timeout_seconds: u64,
-    /// Maximum wait for streaming response headers.
-    #[serde(default = "default_llm_first_response_timeout_seconds")]
-    pub first_response_timeout_seconds: u64,
-    /// Maximum silence between streaming response body chunks.
-    #[serde(default = "default_llm_stream_idle_timeout_seconds")]
-    pub stream_idle_timeout_seconds: u64,
-}
-
-const fn default_llm_connect_timeout_seconds() -> u64 {
-    10
-}
-
-const fn default_llm_request_timeout_seconds() -> u64 {
-    120
-}
-
-const fn default_llm_first_response_timeout_seconds() -> u64 {
-    30
-}
-
-const fn default_llm_stream_idle_timeout_seconds() -> u64 {
-    60
-}
-
-// Equality compares the revealed key value in code only; the secret is never
-// Debug/Display exposed (§6).
-impl PartialEq for ProviderConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.api_key.expose_secret() == other.api_key.expose_secret()
-            && self.models == other.models
-            && self.base_url == other.base_url
-            && self.connect_timeout_seconds == other.connect_timeout_seconds
-            && self.request_timeout_seconds == other.request_timeout_seconds
-            && self.first_response_timeout_seconds == other.first_response_timeout_seconds
-            && self.stream_idle_timeout_seconds == other.stream_idle_timeout_seconds
-    }
-}
-
-impl Eq for ProviderConfig {}
-
-// The API key is a credential: Debug never exposes it (§6).
-impl fmt::Debug for ProviderConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ProviderConfig")
-            .field("api_key", &"[redacted]")
-            .field("models", &self.models)
-            .field("base_url", &self.base_url)
-            .field("connect_timeout_seconds", &self.connect_timeout_seconds)
-            .field("request_timeout_seconds", &self.request_timeout_seconds)
-            .field(
-                "first_response_timeout_seconds",
-                &self.first_response_timeout_seconds,
-            )
-            .field(
-                "stream_idle_timeout_seconds",
-                &self.stream_idle_timeout_seconds,
-            )
+impl fmt::Debug for PostgresConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostgresConfig")
+            .field("url", &"[REDACTED]")
             .finish()
     }
 }
 
-/// Validated, self-contained agent definition without provider credentials.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ResolvedAgentDefinition {
-    /// Agent name.
-    pub agent_name: AgentName,
-    /// Author-provided immutable template version tag.
-    pub agent_version: AgentVersionTag,
-    /// Selected model.
-    pub model: ModelId,
-    /// Tools exposed to the agent.
-    pub tools: Vec<ToolName>,
-    /// System prompt.
-    pub prompt: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentTemplate {
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    model: Option<ModelId>,
-    #[serde(default)]
-    tools: Vec<ToolName>,
-    prompt: String,
+impl fmt::Debug for StudioConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StudioConfig")
+            .field("management_enabled", &self.management_enabled)
+            .field("database_url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Config {
@@ -320,62 +185,6 @@ impl Config {
         let config: Self = toml::from_str(input)?;
         config.validate()?;
         Ok(config)
-    }
-
-    /// Replaces the configured DeepSeek credential with a runtime secret.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::MissingSection`] when DeepSeek is not configured,
-    /// or [`ConfigError::EmptyApiKey`] when the supplied secret is blank.
-    pub fn override_deepseek_api_key(&mut self, api_key: SecretString) -> Result<(), ConfigError> {
-        if api_key.expose_secret().trim().is_empty() {
-            return Err(ConfigError::EmptyApiKey {
-                provider: "deepseek",
-            });
-        }
-        let provider = self
-            .llm
-            .deepseek
-            .as_mut()
-            .ok_or(ConfigError::MissingSection {
-                section: "llm.deepseek",
-            })?;
-        provider.api_key = api_key;
-        Ok(())
-    }
-
-    /// Resolves a strict TOML agent template against this configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] if the template is invalid or selects an unconfigured model.
-    pub fn resolve_template(
-        &self,
-        agent_name: AgentName,
-        input: &str,
-    ) -> Result<ResolvedAgentDefinition, ConfigError> {
-        let template: AgentTemplate = toml::from_str(input)?;
-        let version = template
-            .version
-            .ok_or(ConfigError::MissingAgentVersion)?
-            .parse()
-            .map_err(ConfigError::InvalidAgentVersion)?;
-        let prompt = template.prompt.trim();
-        if prompt.is_empty() {
-            return Err(ConfigError::EmptyPrompt);
-        }
-        validate_tools(&template.tools)?;
-        let model = template.model.unwrap_or_else(|| self.llm.default.clone());
-        self.validate_model_configured(&model)?;
-
-        Ok(ResolvedAgentDefinition {
-            agent_name,
-            agent_version: version,
-            model,
-            tools: template.tools,
-            prompt: prompt.to_owned(),
-        })
     }
 
     /// Returns the configured API section.
@@ -422,52 +231,61 @@ impl Config {
         })
     }
 
-    /// Returns Studio configuration when loopback management is enabled.
+    /// Returns the Studio catalog configuration used by the API runtime.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::MissingSection`] when Studio configuration was
-    /// not supplied or management is disabled.
+    /// not supplied. Management route exposure does not affect this runtime
+    /// dependency.
     pub fn require_studio(&self) -> Result<&StudioConfig, ConfigError> {
         self.studio
             .as_ref()
-            .filter(|studio| studio.management_enabled)
             .ok_or(ConfigError::MissingSection { section: "studio" })
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
-        if self.agent.templates_root.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidTemplatesRoot);
-        }
-        validate_provider("deepseek", self.llm.deepseek.as_ref())?;
-        validate_provider("openai", self.llm.openai.as_ref())?;
-        if let Some(postgres) = &self.postgres
-            && postgres.url.trim().is_empty()
+    /// Revalidates a decoded or programmatically mutated configuration.
+    ///
+    /// Host assembly calls this at the security boundary so callers cannot
+    /// bypass loopback management and database-isolation invariants by using
+    /// `Deserialize` directly or mutating public fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when any configured value violates a runtime
+    /// invariant.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let execution_database = self
+            .postgres
+            .as_ref()
+            .map(|postgres| validate_postgres_database_url(&postgres.url))
+            .transpose()?;
+        let ontology_database = self
+            .ontology
+            .as_ref()
+            .map(|ontology| validate_ontology_database_url(&ontology.database_url))
+            .transpose()?;
+        let studio_database = self
+            .studio
+            .as_ref()
+            .map(|studio| validate_studio_database_url(&studio.database_url))
+            .transpose()?;
+        ensure_distinct_databases(
+            execution_database.as_ref(),
+            ontology_database.as_ref(),
+            studio_database.as_ref(),
+        )?;
+        if let Some(studio) = &self.studio
+            && studio.management_enabled
         {
-            return Err(ConfigError::InvalidPostgresConfig { field: "url" });
-        }
-        if let Some(ontology) = &self.ontology {
-            validate_ontology_database_url(&ontology.database_url)?;
-        }
-        if let Some(studio) = &self.studio {
-            if let Some(database_url) = &studio.database_url {
-                validate_studio_database_url(database_url)?;
-            }
-            if studio.management_enabled {
-                let api = self
-                    .api
-                    .as_ref()
-                    .ok_or(ConfigError::MissingSection { section: "api" })?;
-                if !api.bind.ip().is_loopback() {
-                    return Err(ConfigError::InvalidStudioConfig {
-                        field: "management_enabled",
-                    });
-                }
-                if studio.database_url.is_none() {
-                    return Err(ConfigError::InvalidStudioConfig {
-                        field: "database_url",
-                    });
-                }
+            let api = self
+                .api
+                .as_ref()
+                .ok_or(ConfigError::MissingSection { section: "api" })?;
+            if !api.bind.ip().is_loopback() {
+                return Err(ConfigError::InvalidStudioConfig {
+                    field: "management_enabled",
+                });
             }
         }
         if let Some(nats) = &self.nats {
@@ -496,86 +314,121 @@ impl Config {
                 }
             }
         }
-        self.validate_model_configured(&self.llm.default)
+        Ok(())
     }
+}
 
-    /// Validates that a model is declared by its configured provider.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::ModelNotConfigured`] when the provider is absent or does not list
-    /// the model.
-    pub fn validate_model_configured(&self, model: &ModelId) -> Result<(), ConfigError> {
-        let provider = match model.provider_name() {
-            "deepseek" => self.llm.deepseek.as_ref(),
-            "openai" => self.llm.openai.as_ref(),
-            _ => None,
-        };
-        if provider.is_some_and(|config| {
-            config
-                .models
-                .iter()
-                .any(|configured| configured == model.model_name())
-        }) {
-            return Ok(());
-        }
-        Err(ConfigError::ModelNotConfigured {
-            model: model.clone(),
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatabaseIdentity {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn validate_postgres_database_url(value: &str) -> Result<DatabaseIdentity, ConfigError> {
+    database_identity(value, true).ok_or(ConfigError::InvalidPostgresConfig { field: "url" })
+}
+
+fn validate_ontology_database_url(value: &str) -> Result<DatabaseIdentity, ConfigError> {
+    database_identity(value, false).ok_or(ConfigError::InvalidOntologyConfig {
+        field: "database_url",
+    })
+}
+
+fn validate_studio_database_url(value: &str) -> Result<DatabaseIdentity, ConfigError> {
+    database_identity(value, false).ok_or(ConfigError::InvalidStudioConfig {
+        field: "database_url",
+    })
+}
+
+fn database_identity(value: &str, query_allowed: bool) -> Option<DatabaseIdentity> {
+    if value != value.trim() {
+        return None;
+    }
+    // SQLx parses PostgreSQL URLs through `url::Url`; use the same parser so
+    // authority canonicalization and path dot-segment normalization cannot
+    // make two apparently different configuration strings reach one database.
+    let url = Url::parse(value).ok()?;
+    let port = url.port()?;
+    if !matches!(url.scheme(), "postgres" | "postgresql")
+        || url.host_str().is_none_or(str::is_empty)
+        || !url.path().starts_with('/')
+        || url.fragment().is_some()
+        || (!query_allowed && url.query().is_some())
+        || (query_allowed && !execution_query_is_safe(&url))
+    {
+        return None;
+    }
+    // SQLx rejects invalid UTF-8 percent encodings in these components.
+    percent_decode_utf8(url.username())?;
+    if let Some(password) = url.password() {
+        percent_decode_utf8(password)?;
+    }
+    let host = percent_decode_utf8(url.host_str()?)?;
+    // Match SQLx's PostgreSQL URL parser: every leading slash is syntax, not
+    // part of the database name.
+    let path = url.path().trim_start_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    Some(DatabaseIdentity {
+        host: host.to_ascii_lowercase(),
+        port,
+        path: percent_decode_utf8(path)?,
+    })
+}
+
+fn execution_query_is_safe(url: &Url) -> bool {
+    url.query() != Some("")
+        && url.query_pairs().all(|(key, _value)| {
+            matches!(
+                key.as_ref(),
+                "sslmode"
+                    | "ssl-mode"
+                    | "sslrootcert"
+                    | "ssl-root-cert"
+                    | "ssl-ca"
+                    | "sslcert"
+                    | "ssl-cert"
+                    | "sslkey"
+                    | "ssl-key"
+                    | "statement-cache-capacity"
+                    | "application_name"
+                    | "options"
+            ) || (key.starts_with("options[")
+                && key.ends_with(']')
+                && key.len() > "options[]".len())
         })
+}
+
+fn ensure_distinct_databases(
+    execution: Option<&DatabaseIdentity>,
+    ontology: Option<&DatabaseIdentity>,
+    studio: Option<&DatabaseIdentity>,
+) -> Result<(), ConfigError> {
+    if same_database(execution, ontology)
+        || same_database(execution, studio)
+        || same_database(ontology, studio)
+    {
+        Err(ConfigError::DatabaseIdentityConflict)
+    } else {
+        Ok(())
     }
 }
 
-fn validate_ontology_database_url(value: &str) -> Result<(), ConfigError> {
-    validate_database_url(
-        value,
-        ConfigError::InvalidOntologyConfig {
-            field: "database_url",
-        },
-    )
+fn same_database(left: Option<&DatabaseIdentity>, right: Option<&DatabaseIdentity>) -> bool {
+    matches!((left, right), (Some(left), Some(right)) if left == right)
 }
 
-fn validate_studio_database_url(value: &str) -> Result<(), ConfigError> {
-    validate_database_url(
-        value,
-        ConfigError::InvalidStudioConfig {
-            field: "database_url",
-        },
-    )
-}
-
-fn validate_database_url(value: &str, error: ConfigError) -> Result<(), ConfigError> {
-    let uri = value.parse::<http::Uri>();
-    let valid = value == value.trim()
-        && percent_decoding_is_utf8(value)
-        && uri.is_ok_and(|uri| {
-            matches!(uri.scheme_str(), Some("postgres" | "postgresql"))
-                && uri.authority().is_some_and(|authority| {
-                    !authority.host().is_empty() && authority_has_valid_port(authority)
-                })
-                && uri.path().len() > 1
-                && uri.path().starts_with('/')
-                // Query parameters are intentionally unsupported: unknown SQLx
-                // options may be logged together with credential-like values.
-                && uri.query().is_none()
-        });
-    if valid { Ok(()) } else { Err(error) }
-}
-
-fn percent_decoding_is_utf8(value: &str) -> bool {
+fn percent_decode_utf8(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let Some(digits) = bytes.get(index + 1..index + 3) else {
-                return false;
-            };
-            let Some(high) = hex_value(digits[0]) else {
-                return false;
-            };
-            let Some(low) = hex_value(digits[1]) else {
-                return false;
-            };
+            let digits = bytes.get(index + 1..index + 3)?;
+            let high = hex_value(digits[0])?;
+            let low = hex_value(digits[1])?;
             decoded.push((high << 4) | low);
             index += 3;
         } else {
@@ -583,7 +436,7 @@ fn percent_decoding_is_utf8(value: &str) -> bool {
             index += 1;
         }
     }
-    std::str::from_utf8(&decoded).is_ok()
+    String::from_utf8(decoded).ok()
 }
 
 const fn hex_value(byte: u8) -> Option<u8> {
@@ -593,31 +446,6 @@ const fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-fn authority_has_valid_port(authority: &http::uri::Authority) -> bool {
-    let host_and_port = authority
-        .as_str()
-        .rsplit_once('@')
-        .map_or(authority.as_str(), |(_, host_and_port)| host_and_port);
-    let port = if host_and_port.starts_with('[') {
-        let Some((_, suffix)) = host_and_port.split_once(']') else {
-            return false;
-        };
-        if suffix.is_empty() {
-            return true;
-        }
-        let Some(port) = suffix.strip_prefix(':') else {
-            return false;
-        };
-        port
-    } else {
-        let Some((_, port)) = host_and_port.rsplit_once(':') else {
-            return true;
-        };
-        port
-    };
-    !port.is_empty() && port.parse::<u16>().is_ok()
 }
 
 fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
@@ -654,87 +482,24 @@ fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_provider(
-    provider: &'static str,
-    config: Option<&ProviderConfig>,
-) -> Result<(), ConfigError> {
-    let Some(config) = config else {
-        return Ok(());
-    };
-    if config.api_key.expose_secret().trim().is_empty() {
-        return Err(ConfigError::EmptyApiKey { provider });
-    }
-    if config.models.is_empty() {
-        return Err(ConfigError::EmptyModels { provider });
-    }
-    if config
-        .base_url
-        .as_deref()
-        .is_some_and(|base_url| base_url.trim().is_empty())
-    {
-        return Err(ConfigError::InvalidProviderBaseUrl { provider });
-    }
-    for (field, value) in [
-        ("connect_timeout_seconds", config.connect_timeout_seconds),
-        ("request_timeout_seconds", config.request_timeout_seconds),
-        (
-            "first_response_timeout_seconds",
-            config.first_response_timeout_seconds,
-        ),
-        (
-            "stream_idle_timeout_seconds",
-            config.stream_idle_timeout_seconds,
-        ),
-    ] {
-        if value == 0 {
-            return Err(ConfigError::InvalidProviderTimeout { provider, field });
-        }
-    }
-    let mut models = HashSet::with_capacity(config.models.len());
-    for model in &config.models {
-        if !models.insert(model.as_str()) {
-            return Err(ConfigError::DuplicateModel {
-                provider,
-                model: model.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_tools(tools: &[ToolName]) -> Result<(), ConfigError> {
-    let mut names = HashSet::with_capacity(tools.len());
-    for tool in tools {
-        if !names.insert(tool.as_str()) {
-            return Err(ConfigError::DuplicateTool {
-                tool: tool.as_str().to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
 
-    use secrecy::ExposeSecret;
+    use super::{Config, ConfigError};
 
-    use stratum_core::AgentNameParseError;
-
-    use super::{AgentName, Config, ConfigError};
-
+    const EXECUTION_DATABASE_URL: &str =
+        "postgres://stratum:execution-secret@localhost:5432/stratum";
+    const ONTOLOGY_DATABASE_URL: &str =
+        "postgres://ontology:ontology-secret@localhost:5432/stratum_ontology";
+    const STUDIO_DATABASE_URL: &str =
+        "postgresql://studio:studio-secret@localhost:5432/stratum_studio";
+    const STUDIO_SECTION: &str = r#"
+[studio]
+management_enabled = false
+database_url = "postgresql://studio:studio-secret@localhost:5432/stratum_studio"
+"#;
     const VALID_CONFIG: &str = r#"
-[agent]
-templates_root = "./templates"
-
-[llm]
-default = "deepseek:deepseek-v4-flash"
-
-[llm.deepseek]
-api_key = "secret-key"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
-
 [api]
 bind = "127.0.0.1:8080"
 allowed_origins = ["http://localhost:5173"]
@@ -747,58 +512,293 @@ replicas = 1
 max_age_seconds = 3600
 max_bytes = 268435456
 max_messages = 100000
-"#;
 
-    const VALID_TEMPLATE_WITHOUT_MODEL: &str = r#"
-version = "release-1"
-tools = ["read_file", "apply_patch"]
-prompt = "  You are a coding agent.  "
+[postgres]
+url = "postgres://stratum:execution-secret@localhost:5432/stratum"
+
+[ontology]
+database_url = "postgres://ontology:ontology-secret@localhost:5432/stratum_ontology"
+
+[studio]
+management_enabled = false
+database_url = "postgresql://studio:studio-secret@localhost:5432/stratum_studio"
 "#;
 
     #[test]
-    fn parses_complete_config() {
+    fn parses_complete_db_only_config() {
         let config = Config::parse(VALID_CONFIG).expect("config parses");
 
-        assert_eq!(config.agent.templates_root.to_string_lossy(), "./templates");
-        assert_eq!(config.llm.default.as_str(), "deepseek:deepseek-v4-flash");
-        assert_eq!(config.require_api().expect("api exists").bind.port(), 8080);
-        assert_eq!(config.require_nats().expect("nats exists").replicas, 1);
         let api = config.require_api().expect("api exists");
+        assert_eq!(api.bind.port(), 8080);
         assert_eq!(api.shutdown_drain_timeout_seconds, 10);
         assert_eq!(api.sse_keep_alive_seconds, 15);
         assert_eq!(api.dispatcher_idle_timeout_seconds, 60);
+        assert_eq!(api.readiness_timeout_ms, 1000);
         let nats = config.require_nats().expect("nats exists");
+        assert_eq!(nats.replicas, 1);
         assert_eq!(nats.connect_timeout_seconds, 5);
-        let provider = config.llm.deepseek.as_ref().expect("provider exists");
-        assert_eq!(provider.connect_timeout_seconds, 10);
-        assert_eq!(provider.request_timeout_seconds, 120);
-        assert_eq!(provider.first_response_timeout_seconds, 30);
-        assert_eq!(provider.stream_idle_timeout_seconds, 60);
+        assert_eq!(
+            config
+                .require_postgres()
+                .expect("execution postgres exists")
+                .url,
+            EXECUTION_DATABASE_URL
+        );
+        assert_eq!(
+            config
+                .require_ontology()
+                .expect("ontology postgres exists")
+                .database_url,
+            ONTOLOGY_DATABASE_URL
+        );
+        assert_eq!(
+            config
+                .require_studio()
+                .expect("studio postgres exists")
+                .database_url,
+            STUDIO_DATABASE_URL
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_llm_and_agent_sections() {
+        for legacy in [
+            "\n[llm]\ndefault = \"deepseek:deepseek-chat\"\n",
+            "\n[agent]\ntemplates_root = \"./templates\"\n",
+        ] {
+            let input = format!("{VALID_CONFIG}{legacy}");
+            assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
+        }
+    }
+
+    #[test]
+    fn studio_database_url_is_required_inside_section() {
+        let input = VALID_CONFIG.replace(
+            "database_url = \"postgresql://studio:studio-secret@localhost:5432/stratum_studio\"\n",
+            "",
+        );
+
+        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
+    }
+
+    #[test]
+    fn missing_studio_section_fails_when_api_runtime_requires_it() {
+        let input = VALID_CONFIG.replace(STUDIO_SECTION, "");
+        let config = Config::parse(&input).expect("generic config parses");
+
+        assert!(matches!(
+            config.require_studio(),
+            Err(ConfigError::MissingSection { section: "studio" })
+        ));
+    }
+
+    #[test]
+    fn management_disabled_still_requires_and_returns_studio() {
+        let config = Config::parse(VALID_CONFIG).expect("config parses");
+        let studio = config.require_studio().expect("studio remains required");
+
+        assert!(!studio.management_enabled);
+        assert_eq!(studio.database_url, STUDIO_DATABASE_URL);
+    }
+
+    #[test]
+    fn management_disabled_allows_non_loopback_api_bind() {
+        let input = VALID_CONFIG.replace("127.0.0.1:8080", "0.0.0.0:8080");
+        let config = Config::parse(&input).expect("runtime-only API may bind publicly");
+
+        assert!(
+            !config
+                .require_studio()
+                .expect("studio exists")
+                .management_enabled
+        );
+    }
+
+    #[test]
+    fn management_enabled_requires_loopback_api_bind() {
+        let enabled =
+            VALID_CONFIG.replace("management_enabled = false", "management_enabled = true");
+        Config::parse(&enabled).expect("loopback management parses");
+
+        let public = enabled.replace("127.0.0.1:8080", "0.0.0.0:8080");
+        assert!(matches!(
+            Config::parse(&public),
+            Err(ConfigError::InvalidStudioConfig {
+                field: "management_enabled"
+            })
+        ));
+
+        let without_api = r#"
+[studio]
+management_enabled = true
+database_url = "postgres://studio:secret@localhost:5432/studio"
+"#;
+        assert!(matches!(
+            Config::parse(without_api),
+            Err(ConfigError::MissingSection { section: "api" })
+        ));
+    }
+
+    #[test]
+    fn revalidation_rejects_management_enabled_after_programmatic_mutation() {
+        let mut config = Config::parse(&VALID_CONFIG.replace("127.0.0.1:8080", "0.0.0.0:8080"))
+            .expect("public bind is valid while management routes are disabled");
+        config
+            .studio
+            .as_mut()
+            .expect("Studio is configured")
+            .management_enabled = true;
+
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidStudioConfig {
+                field: "management_enabled"
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_studio_database_urls() {
+        for database_url in [
+            "   ",
+            "http://studio:password@localhost/studio",
+            "postgres:///studio",
+            "postgres://localhost/",
+            "postgres://localhost/studio",
+            "postgres://localhost/%zz",
+            "postgres://localhost/%FF",
+            "postgres://localhost:not-a-port/studio",
+            "postgres://localhost:70000/studio",
+            "postgres://localhost/studio?token=supersecret",
+            "not a URL",
+        ] {
+            let input = VALID_CONFIG.replace(STUDIO_DATABASE_URL, database_url);
+            assert!(matches!(
+                Config::parse(&input),
+                Err(ConfigError::InvalidStudioConfig {
+                    field: "database_url"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn studio_database_url_is_redacted_from_debug() {
+        let config = Config::parse(VALID_CONFIG).expect("config parses");
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(STUDIO_DATABASE_URL));
+        assert!(!debug.contains("studio-secret"));
+    }
+
+    #[test]
+    fn rejects_studio_and_execution_using_the_same_database() {
+        let input = VALID_CONFIG.replace(
+            STUDIO_DATABASE_URL,
+            "postgresql://other:collision-secret@LOCALHOST:5432/str%61tum",
+        );
+
+        assert_database_identity_conflict(&input, &["collision-secret", "stratum"]);
+    }
+
+    #[test]
+    fn accepts_the_same_database_path_on_distinct_authorities() {
+        let input = VALID_CONFIG.replace(
+            STUDIO_DATABASE_URL,
+            "postgresql://other:secret@studio.example:6543/stratum",
+        );
+
+        Config::parse(&input).expect("different database authorities are isolated");
+    }
+
+    #[test]
+    fn rejects_execution_query_parameters_that_override_database_identity() {
+        for execution_url in [
+            "postgres://user:secret@localhost/execution?dbname=stratum_studio",
+            "postgres://user:secret@localhost/execution?host=remote.example",
+            "postgres://user:secret@localhost/execution?hostaddr=127.0.0.2",
+            "postgres://user:secret@localhost/execution?port=6543",
+            "postgres://user:secret@localhost/execution?%64bname=stratum_studio",
+        ] {
+            let input = VALID_CONFIG.replace(EXECUTION_DATABASE_URL, execution_url);
+            assert!(matches!(
+                Config::parse(&input),
+                Err(ConfigError::InvalidPostgresConfig { field: "url" })
+            ));
+        }
+    }
+
+    #[test]
+    fn sqlx_equivalent_leading_slashes_cannot_bypass_database_isolation() {
+        let input = VALID_CONFIG.replace(
+            EXECUTION_DATABASE_URL,
+            "postgres://user:secret@localhost:5432//stratum_studio",
+        );
+
+        assert_database_identity_conflict(&input, &["stratum_studio"]);
+    }
+
+    #[test]
+    fn sqlx_normalized_dot_segments_cannot_bypass_database_isolation() {
+        for execution_url in [
+            "postgres://user:secret@localhost:5432/a/../stratum_studio",
+            "postgres://user:secret@localhost:5432/a/%2e%2e/stratum_studio",
+        ] {
+            let input = VALID_CONFIG.replace(EXECUTION_DATABASE_URL, execution_url);
+            assert_database_identity_conflict(&input, &["stratum_studio"]);
+        }
+    }
+
+    #[test]
+    fn rejects_studio_and_ontology_using_the_same_database() {
+        let input = VALID_CONFIG.replace(STUDIO_DATABASE_URL, ONTOLOGY_DATABASE_URL);
+
+        assert_database_identity_conflict(&input, &["ontology-secret", "stratum_ontology"]);
+    }
+
+    #[test]
+    fn rejects_execution_and_ontology_using_the_same_database() {
+        let input = VALID_CONFIG.replace(EXECUTION_DATABASE_URL, ONTOLOGY_DATABASE_URL);
+
+        assert_database_identity_conflict(&input, &["ontology-secret", "stratum_ontology"]);
+    }
+
+    #[test]
+    fn accepts_distinct_execution_ontology_and_studio_databases() {
+        Config::parse(VALID_CONFIG).expect("three distinct database paths parse");
+
+        Config::parse(
+            "[postgres]\nurl = \"postgres://user:secret@localhost:5432/shared?sslmode=require\"\n",
+        )
+        .expect("a standalone execution section parses");
+        Config::parse(
+            "[studio]\ndatabase_url = \"postgres://user:secret@localhost:5432/shared\"\n",
+        )
+        .expect("a standalone Studio section parses");
+    }
+
+    #[test]
+    fn api_bind_defaults_to_loopback_when_omitted() {
+        let input = VALID_CONFIG.replace("bind = \"127.0.0.1:8080\"\n", "");
+        let config = Config::parse(&input).expect("config parses");
+
+        assert_eq!(
+            config.require_api().expect("api exists").bind,
+            "127.0.0.1:8080".parse().expect("default bind parses")
+        );
     }
 
     #[test]
     fn rejects_zero_operational_timeouts() {
         let cases = [
             (
-                VALID_CONFIG.replace(
-                    "[api]\n",
-                    "[api]\nshutdown_drain_timeout_seconds = 0\n",
-                ),
+                VALID_CONFIG.replace("[api]\n", "[api]\nshutdown_drain_timeout_seconds = 0\n"),
                 "api",
             ),
             (
-                VALID_CONFIG.replace(
-                    "[nats]\n",
-                    "[nats]\nconnect_timeout_seconds = 0\n",
-                ),
+                VALID_CONFIG.replace("[nats]\n", "[nats]\nconnect_timeout_seconds = 0\n"),
                 "nats",
-            ),
-            (
-                VALID_CONFIG.replace(
-                    "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
-                    "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]\nstream_idle_timeout_seconds = 0",
-                ),
-                "provider",
             ),
         ];
 
@@ -809,23 +809,10 @@ prompt = "  You are a coding agent.  "
                     (kind, error),
                     ("api", ConfigError::InvalidApiConfig { .. })
                         | ("nats", ConfigError::InvalidNatsConfig { .. })
-                        | ("provider", ConfigError::InvalidProviderTimeout { .. })
                 ),
                 "unexpected timeout error for {kind}"
             );
         }
-    }
-
-    #[test]
-    fn api_bind_defaults_to_loopback_when_omitted() {
-        let input = VALID_CONFIG.replace("bind = \"127.0.0.1:8080\"\n", "");
-
-        let config = Config::parse(&input).expect("config parses");
-
-        assert_eq!(
-            config.require_api().expect("api exists").bind,
-            "127.0.0.1:8080".parse().expect("default bind parses")
-        );
     }
 
     #[test]
@@ -844,381 +831,50 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
-    fn rejects_unknown_config_field() {
-        let input = VALID_CONFIG.replace("[agent]", "[agent]\nunknown = true");
-        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
-    }
-
-    #[test]
-    fn rejects_removed_storage_section() {
-        let input = format!("{VALID_CONFIG}\n[storage]\nbackend = \"postgres\"\n");
-        assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
-    }
-
-    #[test]
-    fn malformed_toml_error_redacts_input_from_entire_source_chain() {
-        let secret = "malformed-secret-key";
-        let input = format!("[agent]\ntemplates_root = \"{secret}");
-        let error = Config::parse(&input).expect_err("malformed TOML is rejected");
-
-        assert_error_chain_redacts(&error, secret);
-    }
-
-    #[test]
-    fn unknown_field_error_redacts_input_from_entire_source_chain() {
-        let secret = "secret-key";
-        let input = VALID_CONFIG.replace("[agent]", "[agent]\nunknown = true");
-        let error = Config::parse(&input).expect_err("unknown field is rejected");
-
-        assert_error_chain_redacts(&error, secret);
-    }
-
-    #[test]
-    fn rejects_duplicate_models() {
-        let input = VALID_CONFIG.replace(
-            "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
-            "models = [\"deepseek-v4-flash\", \"deepseek-v4-flash\"]",
-        );
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::DuplicateModel { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_default_model_not_in_provider_list() {
-        let input = VALID_CONFIG.replace(
-            "default = \"deepseek:deepseek-v4-flash\"",
-            "default = \"deepseek:not-configured\"",
-        );
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::ModelNotConfigured { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_templates_root() {
-        let input = VALID_CONFIG.replace("./templates", "");
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::InvalidTemplatesRoot)
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_provider_api_key() {
-        let input = VALID_CONFIG.replace("api_key = \"secret-key\"", "api_key = \"  \"");
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::EmptyApiKey { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_provider_models() {
-        let input = VALID_CONFIG.replace(
-            "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
-            "models = []",
-        );
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::EmptyModels { .. })
-        ));
-    }
-
-    #[test]
-    fn parses_provider_base_url_override() {
-        let input = VALID_CONFIG.replace(
-            "api_key = \"secret-key\"",
-            "api_key = \"secret-key\"\nbase_url = \"https://llm.internal.example/v1\"",
-        );
-        let config = Config::parse(&input).expect("config parses");
-
-        assert_eq!(
-            config
-                .llm
-                .deepseek
-                .as_ref()
-                .expect("provider exists")
-                .base_url
-                .as_deref(),
-            Some("https://llm.internal.example/v1")
-        );
-    }
-
-    #[test]
-    fn rejects_blank_provider_base_url() {
-        let input = VALID_CONFIG.replace(
-            "api_key = \"secret-key\"",
-            "api_key = \"secret-key\"\nbase_url = \"  \"",
-        );
-        assert!(matches!(
-            Config::parse(&input),
-            Err(ConfigError::InvalidProviderBaseUrl { .. })
-        ));
-    }
-
-    #[test]
-    fn provider_config_debug_redacts_api_key() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let provider = config.llm.deepseek.as_ref().expect("provider exists");
-        let debug = format!("{provider:?}");
-
-        assert!(debug.contains("[redacted]"));
-        assert!(!debug.contains("secret-key"));
-        assert!(!format!("{config:?}").contains("secret-key"));
-    }
-
-    #[test]
-    fn runtime_deepseek_secret_replaces_the_file_placeholder() {
-        let mut config = Config::parse(VALID_CONFIG).expect("config parses");
-
-        config
-            .override_deepseek_api_key("runtime-secret".into())
-            .expect("runtime secret overrides the placeholder");
-
-        let provider = config.llm.deepseek.as_ref().expect("provider exists");
-        assert_eq!(provider.api_key.expose_secret(), "runtime-secret");
-        assert!(!format!("{config:?}").contains("runtime-secret"));
-    }
-
-    #[test]
-    fn runtime_deepseek_secret_rejects_blank_and_missing_provider() {
-        let mut config = Config::parse(VALID_CONFIG).expect("config parses");
-        assert!(matches!(
-            config.override_deepseek_api_key("  ".into()),
-            Err(ConfigError::EmptyApiKey {
-                provider: "deepseek"
-            })
-        ));
-
-        let without_deepseek = VALID_CONFIG
-            .replace("default = \"deepseek:deepseek-v4-flash\"", "default = \"openai:gpt-4.1\"")
-            .replace(
-                "[llm.deepseek]\napi_key = \"secret-key\"\nmodels = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
-                "[llm.openai]\napi_key = \"openai-key\"\nmodels = [\"gpt-4.1\"]",
-            );
-        let mut config = Config::parse(&without_deepseek).expect("openai-only config parses");
-        assert!(matches!(
-            config.override_deepseek_api_key("runtime-secret".into()),
-            Err(ConfigError::MissingSection {
-                section: "llm.deepseek"
-            })
-        ));
-    }
-
-    #[test]
-    fn parses_valid_agent_name() {
-        let name: AgentName = "coding-agent-2".parse().expect("name parses");
-        assert_eq!(name.as_str(), "coding-agent-2");
-    }
-
-    #[test]
-    fn agent_name_accepts_uppercase_underscore_and_flexible_hyphens() {
-        for value in ["CodingAgent", "coding_agent", "a--b", "coding-"] {
-            let name: AgentName = value.parse().expect("name parses");
-            assert_eq!(name.as_str(), value);
+    fn rejects_unknown_config_and_removed_storage_sections() {
+        for section in [
+            "\n[unknown]\nenabled = true\n",
+            "\n[storage]\nbackend = \"postgres\"\n",
+        ] {
+            let input = format!("{VALID_CONFIG}{section}");
+            assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
         }
     }
 
     #[test]
-    fn rejects_invalid_agent_names() {
-        for value in ["", "éagent", "_coding", "-coding"] {
+    fn malformed_and_unknown_toml_errors_redact_input_source_chain() {
+        let secret = "malformed-secret-key";
+        let malformed = format!("[studio]\ndatabase_url = \"{secret}");
+        let error = Config::parse(&malformed).expect_err("malformed TOML is rejected");
+        assert_error_chain_redacts(&error, secret);
+
+        let unknown = format!("[unknown]\ncredential = \"{secret}\"\n");
+        let error = Config::parse(&unknown).expect_err("unknown field is rejected");
+        assert_error_chain_redacts(&error, secret);
+    }
+
+    #[test]
+    fn missing_optional_sections_are_reported_when_required() {
+        let config = Config::parse("").expect("empty generic config parses");
+
+        for (result, section) in [
+            (config.require_api().map(|_| ()), "api"),
+            (config.require_nats().map(|_| ()), "nats"),
+            (config.require_postgres().map(|_| ()), "postgres"),
+            (config.require_ontology().map(|_| ()), "ontology"),
+            (config.require_studio().map(|_| ()), "studio"),
+        ] {
             assert!(matches!(
-                value.parse::<AgentName>(),
-                Err(AgentNameParseError::Empty | AgentNameParseError::InvalidStart)
+                result,
+                Err(ConfigError::MissingSection { section: actual }) if actual == section
             ));
         }
     }
 
     #[test]
-    fn resolves_author_version_tag_without_normalizing_it() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let definition = config
-            .resolve_template(
-                "coding-agent".parse().expect("agent name parses"),
-                VALID_TEMPLATE_WITHOUT_MODEL,
-            )
-            .expect("template resolves");
-
-        assert_eq!(definition.agent_version.as_str(), "release-1");
-        assert_eq!(definition.prompt, "You are a coding agent.");
-        assert_eq!(definition.tools.len(), 2);
-    }
-
-    #[test]
-    fn rejects_missing_or_invalid_author_version_tag() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let cases = [
-            ("tools = []\nprompt = \"hello\"", true),
-            ("version = \"\"\ntools = []\nprompt = \"hello\"", false),
-            (
-                "version = \" release-1\"\ntools = []\nprompt = \"hello\"",
-                false,
-            ),
-            (
-                "version = \"release-1 \"\ntools = []\nprompt = \"hello\"",
-                false,
-            ),
-        ];
-
-        for (template, missing) in cases {
-            let error = config
-                .resolve_template("coding-agent".parse().expect("agent name parses"), template)
-                .expect_err("invalid version is rejected");
-            assert!(
-                if missing {
-                    matches!(error, ConfigError::MissingAgentVersion)
-                } else {
-                    matches!(error, ConfigError::InvalidAgentVersion(_))
-                },
-                "unexpected error: {error}"
-            );
-        }
-
-        let oversized = format!(
-            "version = {:?}\ntools = []\nprompt = \"hello\"",
-            "x".repeat(129)
-        );
-        assert!(matches!(
-            config.resolve_template(
-                "coding-agent".parse().expect("agent name parses"),
-                &oversized,
-            ),
-            Err(ConfigError::InvalidAgentVersion(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_agent_name_longer_than_64_bytes() {
-        let value = "a".repeat(65);
-        assert!(matches!(
-            value.parse::<AgentName>(),
-            Err(AgentNameParseError::TooLong)
-        ));
-    }
-
-    #[test]
-    fn template_without_model_uses_system_default() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let definition = config
-            .resolve_template(name, VALID_TEMPLATE_WITHOUT_MODEL)
-            .expect("template resolves");
-        assert_eq!(definition.model.as_str(), "deepseek:deepseek-v4-flash");
-        assert_eq!(definition.prompt, "You are a coding agent.");
-    }
-
-    #[test]
-    fn template_model_overrides_system_default() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = r#"
-version = "release-2"
-model = "deepseek:deepseek-v4-pro"
-tools = ["read_file"]
-prompt = "Use the requested model."
-"#;
-
-        let definition = config
-            .resolve_template(name, template)
-            .expect("template resolves");
-        assert_eq!(definition.model.as_str(), "deepseek:deepseek-v4-pro");
-    }
-
-    #[test]
-    fn rejects_unconfigured_template_model() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = r#"
-version = "release-invalid-model"
-model = "deepseek:not-configured"
-tools = []
-prompt = "Use the requested model."
-"#;
-
-        assert!(matches!(
-            config.resolve_template(name, template),
-            Err(ConfigError::ModelNotConfigured { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_unknown_template_field() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = format!("{VALID_TEMPLATE_WITHOUT_MODEL}\nunknown = true");
-
-        assert!(matches!(
-            config.resolve_template(name, &template),
-            Err(ConfigError::Toml(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_duplicate_template_tools() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = r#"
-version = "release-duplicate-tools"
-tools = ["read_file", "read_file"]
-prompt = "Use tools."
-"#;
-
-        assert!(matches!(
-            config.resolve_template(name, template),
-            Err(ConfigError::DuplicateTool { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_template_prompt() {
-        let config = Config::parse(VALID_CONFIG).expect("config parses");
-        let name: AgentName = "coding-agent".parse().expect("name parses");
-        let template = "version = \"release-empty-prompt\"\ntools = []\nprompt = \"  \"";
-
-        assert!(matches!(
-            config.resolve_template(name, template),
-            Err(ConfigError::EmptyPrompt)
-        ));
-    }
-
-    #[test]
-    fn missing_optional_sections_are_reported_when_required() {
-        let input = VALID_CONFIG
-            .split("\n[api]")
-            .next()
-            .expect("config has api section");
-        let config = Config::parse(input).expect("base config parses");
-
-        assert!(matches!(
-            config.require_api(),
-            Err(ConfigError::MissingSection { section: "api" })
-        ));
-        assert!(matches!(
-            config.require_nats(),
-            Err(ConfigError::MissingSection { section: "nats" })
-        ));
-        assert!(matches!(
-            config.require_postgres(),
-            Err(ConfigError::MissingSection {
-                section: "postgres"
-            })
-        ));
-        assert!(matches!(
-            config.require_ontology(),
-            Err(ConfigError::MissingSection {
-                section: "ontology"
-            })
-        ));
-    }
-
-    #[test]
     fn parses_and_redacts_valid_ontology_database_url() {
-        let database_url = "postgresql://ontology:secret-password@localhost/ontology";
-        let input = format!("{VALID_CONFIG}\n[ontology]\ndatabase_url = \"{database_url}\"\n");
-
+        let database_url = "postgresql://ontology:secret-password@localhost:5432/ontology";
+        let input = format!("[ontology]\ndatabase_url = \"{database_url}\"\n");
         let config = Config::parse(&input).expect("configured ontology parses");
 
         assert_eq!(
@@ -1241,6 +897,7 @@ prompt = "Use tools."
             "http://ontology:password@localhost/ontology",
             "postgres:///ontology",
             "postgres://localhost/",
+            "postgres://localhost/ontology",
             "postgres://localhost/%zz",
             "postgres://localhost/%FF",
             "postgres://localhost:not-a-port/ontology",
@@ -1248,7 +905,7 @@ prompt = "Use tools."
             "postgres://localhost/ontology?token=supersecret",
             "not a URL",
         ] {
-            let input = format!("{VALID_CONFIG}\n[ontology]\ndatabase_url = {database_url:?}\n");
+            let input = format!("[ontology]\ndatabase_url = {database_url:?}\n");
             assert!(matches!(
                 Config::parse(&input),
                 Err(ConfigError::InvalidOntologyConfig {
@@ -1259,26 +916,31 @@ prompt = "Use tools."
     }
 
     #[test]
-    fn parses_postgres_config() {
-        let input = format!(
-            "{VALID_CONFIG}\n[postgres]\nurl = \"postgres://stratum:secret@db:5432/stratum\"\n"
-        );
-        let config = Config::parse(&input).expect("config parses");
-
+    fn parses_and_validates_postgres_config() {
+        let config =
+            Config::parse("[postgres]\nurl = \"postgres://stratum:secret@db:5432/stratum\"\n")
+                .expect("config parses");
         assert_eq!(
             config.require_postgres().expect("postgres exists").url,
             "postgres://stratum:secret@db:5432/stratum"
         );
-    }
-
-    #[test]
-    fn rejects_blank_postgres_url() {
-        let input = format!("{VALID_CONFIG}\n[postgres]\nurl = \"  \"\n");
 
         assert!(matches!(
-            Config::parse(&input),
+            Config::parse("[postgres]\nurl = \"  \"\n"),
             Err(ConfigError::InvalidPostgresConfig { field: "url" })
         ));
+        assert!(matches!(
+            Config::parse("[postgres]\nurl = \"http://localhost/stratum\"\n"),
+            Err(ConfigError::InvalidPostgresConfig { field: "url" })
+        ));
+        assert!(matches!(
+            Config::parse("[postgres]\nurl = \"postgres://stratum:secret@db/stratum\"\n"),
+            Err(ConfigError::InvalidPostgresConfig { field: "url" })
+        ));
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("stratum:secret"));
     }
 
     #[test]
@@ -1307,18 +969,6 @@ prompt = "Use tools."
         }
     }
 
-    #[test]
-    fn validation_error_does_not_contain_api_key() {
-        let input = VALID_CONFIG.replace(
-            "models = [\"deepseek-v4-flash\", \"deepseek-v4-pro\"]",
-            "models = [\"deepseek-v4-flash\", \"deepseek-v4-flash\"]",
-        );
-        let error = Config::parse(&input).expect_err("duplicate model is rejected");
-
-        assert!(!format!("{error:?}").contains("secret-key"));
-        assert!(!error.to_string().contains("secret-key"));
-    }
-
     fn assert_error_chain_redacts(error: &ConfigError, secret: &str) {
         assert!(!format!("{error:?}").contains(secret));
         assert!(!error.to_string().contains(secret));
@@ -1328,6 +978,14 @@ prompt = "Use tools."
             assert!(!format!("{error:?}").contains(secret));
             assert!(!error.to_string().contains(secret));
             source = error.source();
+        }
+    }
+
+    fn assert_database_identity_conflict(input: &str, sensitive_values: &[&str]) {
+        let error = Config::parse(input).expect_err("duplicate database path is rejected");
+        assert!(matches!(&error, ConfigError::DatabaseIdentityConflict));
+        for sensitive in sensitive_values {
+            assert_error_chain_redacts(&error, sensitive);
         }
     }
 }

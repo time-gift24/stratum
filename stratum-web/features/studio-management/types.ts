@@ -8,6 +8,7 @@ import type {
 
 export type AgentDraft = {
   agentName: string
+  agentVersion: string
   model: string
   parameters: Record<string, unknown>
   tools: string[]
@@ -25,15 +26,11 @@ export type ModelDraft = {
 }
 
 export type FormPhase =
-  | "loaded"
-  | "dirty"
-  | "saving"
-  | "invalid"
-  | "conflict"
-  | "testing"
+  "loaded" | "dirty" | "saving" | "invalid" | "conflict" | "testing"
 
 export type ManagementFormState<T> = {
   phase: FormPhase
+  dirty: boolean
   acknowledged: T
   draft: T
   etag: string

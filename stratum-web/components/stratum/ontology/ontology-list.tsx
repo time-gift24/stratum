@@ -9,6 +9,7 @@ import {
   SearchRow,
 } from "@/components/stratum/studio/primitives"
 import { Button } from "@/components/ui/button"
+import { EmptyState } from "@/components/stratum/empty-state"
 import type { OntologySummary } from "@/features/ontology-editor/types"
 import {
   ONTOLOGY_LIST_PER_PAGE,
@@ -66,7 +67,7 @@ export function OntologyList({
         action={
           <Button
             size="icon-lg"
-            className="size-9 rounded-lg"
+            className="size-11 rounded-lg"
             aria-label="新建本体"
             title="新建本体"
             onClick={onRequestCreate}
@@ -86,32 +87,31 @@ export function OntologyList({
         />
       ) : state.result.data.length === 0 &&
         state.result.pagination.total === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
-          <h2 className="font-semibold">
-            {hasQuery ? "没有匹配的本体" : "尚未创建本体"}
-          </h2>
-          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
-            {hasQuery
+        <EmptyState
+          title={hasQuery ? "没有匹配的本体" : "尚未创建本体"}
+          description={
+            hasQuery
               ? "调整搜索词，或清除筛选查看全部本体。"
-              : "新建一个本体，开始定义对象类型与关系。"}
-          </p>
+              : "新建一个本体，开始定义对象类型与关系。"
+          }
+        >
           {hasQuery ? (
             <Button
               type="button"
               variant="outline"
               size="lg"
-              className="mt-4"
+              className="min-h-11"
               onClick={() => onSearch("")}
             >
               清除筛选
             </Button>
           ) : (
-            <Button size="lg" className="mt-4" onClick={onRequestCreate}>
+            <Button size="lg" className="min-h-11" onClick={onRequestCreate}>
               <Plus aria-hidden />
               新建本体
             </Button>
           )}
-        </div>
+        </EmptyState>
       ) : (
         <>
           <div className="grid gap-3 sm:grid-cols-2">

@@ -221,11 +221,15 @@ impl ConfigurableLlmProvider for DeepSeekProvider {
     }
 
     fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
-        let parameters =
-            serde_json::from_value::<DeepSeekParameters>(Value::Object(parameters.clone()))
-                .map_err(|_| LlmError::InvalidModelParameters {
-                    model: self.model_id(),
-                })?;
+        let parameters = if parameters.is_empty() {
+            default_parameters()
+        } else {
+            parameters.clone()
+        };
+        let parameters = serde_json::from_value::<DeepSeekParameters>(Value::Object(parameters))
+            .map_err(|_| LlmError::InvalidModelParameters {
+                model: self.model_id(),
+            })?;
         let mut configured = self.clone();
         configured.thinking = parameters.thinking.into();
         Ok(Arc::new(configured))

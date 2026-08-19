@@ -12,9 +12,9 @@ mod types;
 pub use error::{DeletionBlocker, StudioError};
 pub use store::StudioStore;
 pub use types::{
-    AgentDefinition, AgentDefinitionInput, ManagedModel, ProviderKind, ProviderKindParseError,
-    ProviderSeed, ProviderSummary, ResourceVersion, ResourceVersionParseError, RuntimeProvider,
-    StudioCatalogSeed, Versioned,
+    AgentDefinition, AgentDefinitionInput, ManagedModel, ModelCatalogSnapshot, ProviderKind,
+    ProviderKindParseError, ProviderSummary, ResourceVersion, ResourceVersionParseError,
+    RuntimeProvider, Versioned,
 };
 
 #[cfg(test)]

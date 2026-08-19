@@ -20,21 +20,36 @@ mod host_error;
 mod http;
 mod management_dto;
 mod provenance;
-mod provider_catalog;
 mod registry;
 mod sink;
 mod state;
 mod studio_management;
 mod telemetry;
-mod templates;
 mod turn;
+
+#[cfg(test)]
+extern crate self as stratum_api;
+
+#[cfg(test)]
+#[path = "../tests/api.rs"]
+mod integration_api;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod integration_common;
+#[cfg(test)]
+#[path = "../tests/ontology_api.rs"]
+mod integration_ontology_api;
+#[cfg(test)]
+#[path = "../tests/studio_db_only.rs"]
+mod integration_studio_db_only;
 
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use stratum_config::{Config, ProviderConfig};
+use secrecy::ExposeSecret;
+use stratum_config::Config;
 use stratum_core::ModelId;
 use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 use stratum_llm::{
@@ -57,36 +72,53 @@ pub use http::router;
 pub use state::AppState;
 pub use telemetry::{TelemetryGuard, init_telemetry};
 
-/// Well-known public OpenAI API endpoint. This is a product constant, not an
-/// environment-specific value; deployments override it via
-/// `[llm.openai].base_url` when routing through a gateway or compatible API.
+/// Well-known public OpenAI API endpoint owned by the built-in adapter.
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-/// Well-known public DeepSeek API endpoint; same product-constant contract as
-/// [`OPENAI_BASE_URL`], overridable via `[llm.deepseek].base_url`.
+/// Well-known public DeepSeek API endpoint owned by the built-in adapter.
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+/// Fixed operational policy shared by the built-in provider adapters.
+const PROVIDER_TIMEOUTS: LlmTimeouts = LlmTimeouts::new(
+    Duration::from_secs(10),
+    Duration::from_secs(120),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+);
+/// Hard bound for the low-side-effect Provider credential probe.
+const PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Non-secret provider construction options retained by the API assembly
-/// layer while Studio owns credentials and model membership.
-#[derive(Clone)]
-pub(crate) struct ProviderFactory {
-    openai: ProviderTransport,
-    deepseek: ProviderTransport,
+/// Safe failure of one transient Provider connection test.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProviderProbeError {
+    /// Studio could not provide the requested credential snapshot.
+    #[error("studio provider snapshot is unavailable")]
+    Studio(#[from] stratum_studio::StudioError),
+    /// The fixed-endpoint request failed, timed out, or was rejected.
+    #[error("provider connection test failed")]
+    Failed,
 }
 
-#[derive(Clone)]
-struct ProviderTransport {
-    base_url: String,
-    timeouts: LlmTimeouts,
+/// Builds trusted adapters for Provider records read from Studio PostgreSQL.
+///
+/// The HTTP client is process-scoped transport state, not catalog state. Its
+/// clones share reqwest's connection pool while every build still binds fresh
+/// DB-derived credentials and model membership into new adapters.
+pub(crate) struct ProviderFactory {
+    runtime_client: reqwest::Client,
+}
+
+impl Default for ProviderFactory {
+    fn default() -> Self {
+        let runtime_client = reqwest::Client::builder()
+            .connect_timeout(PROVIDER_TIMEOUTS.connect())
+            .build()
+            // Invariant: the builder only fails on TLS backend
+            // misconfiguration; setting a connect timeout cannot make it fail.
+            .expect("reqwest client with connect timeout builds");
+        Self { runtime_client }
+    }
 }
 
 impl ProviderFactory {
-    fn from_config(config: &Config) -> Self {
-        Self {
-            openai: transport_for(config.llm.openai.as_ref(), OPENAI_BASE_URL),
-            deepseek: transport_for(config.llm.deepseek.as_ref(), DEEPSEEK_BASE_URL),
-        }
-    }
-
     fn build(
         &self,
         provider_records: Vec<RuntimeProvider>,
@@ -94,31 +126,18 @@ impl ProviderFactory {
         let mut providers = LlmProviderManager::new();
         for provider in provider_records {
             match provider.kind {
-                ProviderKind::Openai => {
-                    let api_key = ApiKey::from(provider.api_key);
-                    for model in provider.models {
-                        let model_id = model_id("openai", &model)?;
-                        providers.register(Arc::new(OpenAICompatibleProvider::new(
-                            &self.openai.base_url,
-                            api_key.clone(),
-                            model_id,
-                            self.openai.timeouts,
-                        )))?;
-                    }
-                }
-                ProviderKind::Deepseek => {
-                    let api_key = ApiKey::from(provider.api_key);
-                    for model in provider.models {
-                        let adapter_model = deepseek_model(&model)?;
-                        providers.register(Arc::new(DeepSeekProvider::new(
-                            &self.deepseek.base_url,
-                            api_key.clone(),
-                            adapter_model,
-                            DeepSeekThinking::Disabled,
-                            self.deepseek.timeouts,
-                        )))?;
-                    }
-                }
+                ProviderKind::Openai => register_openai_models(
+                    &mut providers,
+                    provider,
+                    &self.runtime_client,
+                    OPENAI_BASE_URL,
+                )?,
+                ProviderKind::Deepseek => register_deepseek_models(
+                    &mut providers,
+                    provider,
+                    &self.runtime_client,
+                    DEEPSEEK_BASE_URL,
+                )?,
             }
         }
         Ok(providers)
@@ -136,6 +155,88 @@ impl ProviderFactory {
             }
         }
     }
+
+    async fn probe(&self, provider: RuntimeProvider) -> Result<(), ProviderProbeError> {
+        let endpoint = match provider.kind {
+            ProviderKind::Openai => concat!("https://api.openai.com/v1", "/models"),
+            ProviderKind::Deepseek => concat!("https://api.deepseek.com", "/models"),
+        };
+        let client = reqwest::Client::builder()
+            .connect_timeout(PROVIDER_PROBE_TIMEOUT)
+            .timeout(PROVIDER_PROBE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| ProviderProbeError::Failed)?;
+        probe_endpoint(
+            &client,
+            endpoint,
+            provider.api_key.expose_secret(),
+            PROVIDER_PROBE_TIMEOUT,
+        )
+        .await
+    }
+}
+
+fn register_openai_models(
+    providers: &mut LlmProviderManager,
+    provider: RuntimeProvider,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<(), HostError> {
+    let api_key = ApiKey::from(provider.api_key);
+    for model in provider.models {
+        let model_id = model_id("openai", &model)?;
+        providers.register(Arc::new(
+            OpenAICompatibleProvider::builder()
+                .client(client.clone())
+                .base_url(base_url)
+                .api_key(api_key.clone())
+                .model(model_id)
+                .timeouts(PROVIDER_TIMEOUTS)
+                .build(),
+        ))?;
+    }
+    Ok(())
+}
+
+fn register_deepseek_models(
+    providers: &mut LlmProviderManager,
+    provider: RuntimeProvider,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<(), HostError> {
+    let api_key = ApiKey::from(provider.api_key);
+    for model in provider.models {
+        let adapter_model = deepseek_model(&model)?;
+        providers.register(Arc::new(
+            DeepSeekProvider::builder()
+                .client(client.clone())
+                .base_url(base_url)
+                .api_key(api_key.clone())
+                .model(adapter_model)
+                .thinking(DeepSeekThinking::Disabled)
+                .timeouts(PROVIDER_TIMEOUTS)
+                .build(),
+        ))?;
+    }
+    Ok(())
+}
+
+async fn probe_endpoint(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(), ProviderProbeError> {
+    let response = tokio::time::timeout(timeout, client.get(endpoint).bearer_auth(api_key).send())
+        .await
+        .map_err(|_| ProviderProbeError::Failed)?
+        .map_err(|_| ProviderProbeError::Failed)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(ProviderProbeError::Failed)
+    }
 }
 /// Reads a config file and serves until shutdown.
 ///
@@ -145,19 +246,8 @@ impl ProviderFactory {
 /// listener, or server fails.
 pub async fn run_from_path(path: impl AsRef<Path>) -> Result<(), HostError> {
     let contents = tokio::fs::read_to_string(path).await?;
-    let mut config = Config::parse(&contents)?;
-    apply_deepseek_api_key_environment(&mut config)?;
+    let config = Config::parse(&contents)?;
     serve(config).await
-}
-
-fn apply_deepseek_api_key_environment(config: &mut Config) -> Result<(), HostError> {
-    match std::env::var("DEEPSEEK_API_KEY") {
-        Ok(api_key) => config
-            .override_deepseek_api_key(api_key.into())
-            .map_err(Into::into),
-        Err(std::env::VarError::NotPresent) => Ok(()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidDeepSeekApiKeyEnvironment),
-    }
 }
 
 /// Composes providers, Postgres, the NATS tail, the shared state, and the
@@ -169,30 +259,17 @@ fn apply_deepseek_api_key_environment(config: &mut Config) -> Result<(), HostErr
 /// cannot be initialized. A NATS connection failure degrades realtime and is
 /// not fatal.
 pub async fn serve(config: Config) -> Result<(), HostError> {
+    config.validate()?;
     let api = config.require_api()?.clone();
     let postgres_url = config.require_postgres()?.url.as_str();
     let ontology_url = config.require_ontology()?.database_url.as_str();
+    let studio_url = config.require_studio()?.database_url.as_str();
     let shutdown_drain_bound = Duration::from_secs(api.shutdown_drain_timeout_seconds);
     let pg = PostgresBackend::connect(postgres_url).await?;
     let ontology = OntologyStore::connect(ontology_url).await?;
+    let studio = StudioStore::connect(studio_url).await?;
     let tail = connect_tail(&config).await;
-    let state = if let Some(studio_config) = config
-        .studio
-        .as_ref()
-        .filter(|studio| studio.management_enabled)
-    {
-        // Invariant: `stratum-config` requires this value when management is
-        // enabled and rejects non-loopback binding before host assembly.
-        let database_url = studio_config
-            .database_url
-            .as_deref()
-            .expect("enabled studio has a validated database URL");
-        let studio = StudioStore::connect(database_url).await?;
-        Arc::new(AppState::with_studio(pg, tail, ontology, config, studio).await?)
-    } else {
-        let providers = providers(&config)?;
-        Arc::new(AppState::new(pg, tail, providers, ontology, config).await?)
-    };
+    let state = Arc::new(AppState::with_studio(pg, tail, ontology, config, studio).await?);
 
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
     let shutdown = state.shutdown_token();
@@ -310,64 +387,11 @@ async fn connect_tail(config: &Config) -> Option<NatsAgentRuntimeTail> {
     }
 }
 
-/// Builds the provider registry from `[llm]`.
-///
-/// # Errors
-///
-/// Returns [`HostError`] when a configured model cannot be registered.
-pub fn providers(config: &Config) -> Result<LlmProviderManager, HostError> {
-    let mut provider_records = Vec::with_capacity(2);
-    if let Some(provider) = &config.llm.openai {
-        provider_records.push(RuntimeProvider {
-            kind: ProviderKind::Openai,
-            api_key: provider.api_key.clone(),
-            models: provider.models.clone(),
-        });
-    }
-    if let Some(provider) = &config.llm.deepseek {
-        provider_records.push(RuntimeProvider {
-            kind: ProviderKind::Deepseek,
-            api_key: provider.api_key.clone(),
-            models: provider.models.clone(),
-        });
-    }
-    ProviderFactory::from_config(config).build(provider_records)
-}
-
 async fn providers_from_studio(
     studio: &StudioStore,
     factory: &ProviderFactory,
 ) -> Result<LlmProviderManager, HostError> {
     factory.build(studio.runtime_providers().await?)
-}
-
-fn transport_for(config: Option<&ProviderConfig>, default_base_url: &str) -> ProviderTransport {
-    ProviderTransport {
-        base_url: config
-            .and_then(|config| config.base_url.as_deref())
-            .unwrap_or(default_base_url)
-            .to_owned(),
-        timeouts: config.map_or_else(
-            || {
-                LlmTimeouts::new(
-                    Duration::from_secs(10),
-                    Duration::from_secs(120),
-                    Duration::from_secs(30),
-                    Duration::from_secs(60),
-                )
-            },
-            provider_timeouts,
-        ),
-    }
-}
-
-fn provider_timeouts(config: &ProviderConfig) -> LlmTimeouts {
-    LlmTimeouts::new(
-        Duration::from_secs(config.connect_timeout_seconds),
-        Duration::from_secs(config.request_timeout_seconds),
-        Duration::from_secs(config.first_response_timeout_seconds),
-        Duration::from_secs(config.stream_idle_timeout_seconds),
-    )
 }
 
 fn deepseek_model(model: &str) -> Result<DeepSeekModel, HostError> {
@@ -381,7 +405,7 @@ fn deepseek_model(model: &str) -> Result<DeepSeekModel, HostError> {
 }
 
 fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {
-    ModelId::new(provider, model).map_err(|source| HostError::InvalidConfiguredModel {
+    ModelId::new(provider, model).map_err(|source| HostError::InvalidManagedModel {
         provider,
         model: model.to_owned(),
         source,
@@ -390,38 +414,51 @@ fn model_id(provider: &'static str, model: &str) -> Result<ModelId, HostError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::future::Future;
+    use std::net::SocketAddr;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
-    use super::{HostError, providers, wait_until};
-    use stratum_config::Config;
+    use axum::{
+        Json, Router,
+        body::Body,
+        extract::ConnectInfo,
+        http::StatusCode,
+        response::Response,
+        routing::{get, post},
+    };
+    use serde_json::json;
+    use stratum_llm::ChatRequest;
+
+    use super::{
+        HostError, ProviderFactory, ProviderProbeError, probe_endpoint, register_openai_models,
+        wait_until,
+    };
     use stratum_core::ModelId;
+    use stratum_studio::{ProviderKind, RuntimeProvider};
 
     #[test]
-    fn registers_every_configured_openai_and_deepseek_model() {
-        let config = Config::parse(
-            r#"
-[agent]
-templates_root = "."
+    fn registers_every_database_provider_model() {
+        let records = vec![
+            RuntimeProvider {
+                kind: ProviderKind::Openai,
+                api_key: "openai-key".into(),
+                models: vec!["gpt-4.1-mini".to_owned(), "gpt-4.1".to_owned()],
+            },
+            RuntimeProvider {
+                kind: ProviderKind::Deepseek,
+                api_key: "deepseek-key".into(),
+                models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
+            },
+        ];
 
-[llm]
-default = "openai:gpt-4.1-mini"
-
-[llm.openai]
-api_key = "openai-key"
-models = ["gpt-4.1-mini", "gpt-4.1"]
-
-[llm.deepseek]
-api_key = "deepseek-key"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
-"#,
-        )
-        .expect("config parses");
-
-        let providers = providers(&config).expect("providers compose");
+        let providers = ProviderFactory::default()
+            .build(records)
+            .expect("providers compose");
 
         for model in [
             "openai:gpt-4.1-mini",
@@ -439,25 +476,165 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
     #[test]
     fn rejects_deepseek_models_not_supported_by_the_adapter() {
-        let config = Config::parse(
-            r#"
-[agent]
-templates_root = "."
-
-[llm]
-default = "deepseek:deepseek-v4-flash"
-
-[llm.deepseek]
-api_key = "deepseek-key"
-models = ["deepseek-v4-flash", "deepseek-v3"]
-"#,
-        )
-        .expect("config parses");
+        let records = vec![RuntimeProvider {
+            kind: ProviderKind::Deepseek,
+            api_key: "deepseek-key".into(),
+            models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v3".to_owned()],
+        }];
 
         assert!(matches!(
-            providers(&config),
+            ProviderFactory::default().build(records),
             Err(HostError::UnsupportedDeepSeekModel { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn model_adapters_share_the_factory_http_connection_pool() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("listener has an address");
+        let peers = Arc::new(Mutex::new(BTreeSet::<SocketAddr>::new()));
+        let observed_peers = Arc::clone(&peers);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |ConnectInfo(peer): ConnectInfo<SocketAddr>| {
+                let observed_peers = Arc::clone(&observed_peers);
+                async move {
+                    observed_peers
+                        .lock()
+                        .expect("peer set lock is available")
+                        .insert(peer);
+                    Json(json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("mock provider server runs");
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test client builds");
+        let records = RuntimeProvider {
+            kind: ProviderKind::Openai,
+            api_key: "openai-key".into(),
+            models: vec!["model-a".to_owned(), "model-b".to_owned()],
+        };
+        let mut providers = stratum_llm::LlmProviderManager::new();
+        register_openai_models(
+            &mut providers,
+            records,
+            &client,
+            &format!("http://{address}"),
+        )
+        .expect("providers compose");
+
+        for name in ["openai:model-a", "openai:model-b"] {
+            let model: ModelId = name.parse().expect("model id parses");
+            providers
+                .get(&model)
+                .expect("provider exists")
+                .chat(ChatRequest::new(model))
+                .await
+                .expect("mock provider responds");
+        }
+
+        assert_eq!(
+            peers.lock().expect("peer set lock is available").len(),
+            1,
+            "model adapters must reuse the factory client's connection pool"
+        );
+        server.abort();
+    }
+
+    async fn probe_server(
+        status: StatusCode,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("listener has an address");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/models",
+                get(move || async move {
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(body))
+                        .expect("response builds")
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("mock probe server runs");
+        });
+        (format!("http://{address}/models"), server)
+    }
+
+    #[tokio::test]
+    async fn provider_probe_accepts_success_and_sanitizes_rejection() {
+        let (success_url, success_server) = probe_server(StatusCode::OK, "").await;
+        let client = reqwest::Client::new();
+        probe_endpoint(
+            &client,
+            &success_url,
+            "probe-secret",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("successful status passes");
+        success_server.abort();
+
+        let sentinel = "provider-body-secret-sentinel";
+        let (failure_url, failure_server) = probe_server(StatusCode::UNAUTHORIZED, sentinel).await;
+        let error = probe_endpoint(
+            &client,
+            &failure_url,
+            "probe-secret",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("authentication rejection fails");
+        assert!(matches!(error, ProviderProbeError::Failed));
+        assert!(!format!("{error:?}").contains(sentinel));
+        assert!(!format!("{error:?}").contains("probe-secret"));
+        failure_server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_probe_timeout_is_bounded_and_sanitized() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("listener has an address");
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("probe connects");
+            std::future::pending::<()>().await;
+        });
+        let endpoint = format!("http://{address}/models");
+        let error = probe_endpoint(
+            &reqwest::Client::new(),
+            &endpoint,
+            "timeout-secret",
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("stalled probe times out");
+        assert!(matches!(error, ProviderProbeError::Failed));
+        assert!(!format!("{error:?}").contains("timeout-secret"));
+        server.abort();
     }
 
     struct PendingUntilDropped(Arc<AtomicBool>);

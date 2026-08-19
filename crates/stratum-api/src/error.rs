@@ -15,6 +15,7 @@ use serde::Serialize;
 use stratum_infra::AgentRuntimeTailError;
 use stratum_ontology::{OntologyError, OntologyStoreError, Violation, ViolationCode};
 use stratum_postgres::PostgresError;
+use stratum_studio::{DeletionBlocker, StudioError};
 use utoipa::ToSchema;
 
 /// A persisted non-exhaustive variant that this API binary cannot map to its
@@ -66,10 +67,44 @@ pub struct ErrorBody {
     pub code: String,
     /// Safe human-readable message.
     pub message: String,
-    /// Deterministically ordered Ontology violations, only for schema errors.
+    /// Deterministically ordered schema or field violations, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(ignore)]
-    pub(crate) violations: Option<Vec<ViolationResponse>>,
+    pub(crate) violations: Option<Vec<ApiViolationResponse>>,
+    /// Resources that prevent a requested Studio deletion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blockers: Option<Vec<ResourceBlockerResponse>>,
+}
+
+/// One validation detail in the shared error envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum ApiViolationResponse {
+    Ontology(ViolationResponse),
+    Field(FieldViolationResponse),
+}
+
+/// Stable field-level Studio validation detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub(crate) struct FieldViolationResponse {
+    field: &'static str,
+    code: &'static str,
+    message: &'static str,
+}
+
+/// Stable Studio deletion dependency returned to clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub(crate) struct ResourceBlockerResponse {
+    resource_type: &'static str,
+    name: String,
+}
+
+impl From<DeletionBlocker> for ResourceBlockerResponse {
+    fn from(value: DeletionBlocker) -> Self {
+        Self {
+            resource_type: value.resource,
+            name: value.name,
+        }
+    }
 }
 
 /// OpenAPI response shape for an invalid complete Ontology candidate.
@@ -182,6 +217,10 @@ pub enum ErrorKind {
     AgentRuntimeNotFound,
     /// 404: the addressed agent template does not exist.
     AgentTemplateNotFound,
+    /// 404: the addressed Studio Provider does not exist.
+    ProviderNotFound,
+    /// 404: the addressed Studio Model does not exist.
+    ManagedModelNotFound,
     /// 404: the addressed approval request does not exist.
     ApprovalNotFound,
     /// 409: an author reused one exact name/version tag for another definition.
@@ -228,7 +267,7 @@ pub enum ErrorKind {
     OntologyPayloadTooLarge,
     /// 422: an author-provided Agent template version tag is invalid.
     InvalidAgentVersion,
-    /// 422: the template catalog or one template is unreadable or invalid.
+    /// 422: a Studio Agent definition is invalid.
     InvalidAgentTemplate,
     /// 422: the requested model is not configured.
     ModelNotConfigured,
@@ -258,6 +297,8 @@ pub enum ErrorKind {
     OntologyStoreUnavailable,
     /// 503: Studio PostgreSQL cannot serve the request.
     StudioStoreUnavailable,
+    /// 502: a transient fixed-endpoint Provider test failed.
+    ProviderTestFailed,
 }
 
 impl ErrorKind {
@@ -272,6 +313,8 @@ impl ErrorKind {
             Self::ObjectTypeNotFound => "object_type_not_found",
             Self::AgentRuntimeNotFound => "agent_runtime_not_found",
             Self::AgentTemplateNotFound => "agent_template_not_found",
+            Self::ProviderNotFound => "provider_not_found",
+            Self::ManagedModelNotFound => "managed_model_not_found",
             Self::ApprovalNotFound => "approval_not_found",
             Self::AgentVersionConflict => "agent_version_conflict",
             Self::StaleTurn => "stale_turn",
@@ -310,6 +353,7 @@ impl ErrorKind {
             Self::ServiceShuttingDown => "service_shutting_down",
             Self::OntologyStoreUnavailable => "ontology_store_unavailable",
             Self::StudioStoreUnavailable => "studio_store_unavailable",
+            Self::ProviderTestFailed => "provider_test_failed",
         }
     }
 
@@ -322,6 +366,8 @@ impl ErrorKind {
             }
             Self::AgentRuntimeNotFound
             | Self::AgentTemplateNotFound
+            | Self::ProviderNotFound
+            | Self::ManagedModelNotFound
             | Self::ApprovalNotFound
             | Self::OntologyNotFound
             | Self::ObjectTypeNotFound => StatusCode::NOT_FOUND,
@@ -356,6 +402,7 @@ impl ErrorKind {
                 StatusCode::PRECONDITION_REQUIRED
             }
             Self::DurableStateCorrupt | Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ProviderTestFailed => StatusCode::BAD_GATEWAY,
             Self::StoreUnavailable
             | Self::RuntimeUnavailable
             | Self::RealtimeUnavailable
@@ -376,6 +423,8 @@ impl ErrorKind {
             Self::ObjectTypeNotFound => "object type was not found",
             Self::AgentRuntimeNotFound => "the agent runtime does not exist",
             Self::AgentTemplateNotFound => "the agent template does not exist",
+            Self::ProviderNotFound => "the provider does not exist",
+            Self::ManagedModelNotFound => "the managed model does not exist",
             Self::ApprovalNotFound => "the approval request does not exist",
             Self::AgentVersionConflict => {
                 "the agent version tag is already bound to a different definition"
@@ -424,6 +473,7 @@ impl ErrorKind {
             Self::ServiceShuttingDown => "the service is shutting down",
             Self::OntologyStoreUnavailable => "ontology store is unavailable",
             Self::StudioStoreUnavailable => "studio store is unavailable",
+            Self::ProviderTestFailed => "the provider connection test failed",
         }
     }
 }
@@ -436,7 +486,8 @@ pub struct ApiError {
     kind: ErrorKind,
     #[source]
     source: Option<Box<dyn StdError + Send + Sync + 'static>>,
-    violations: Option<Vec<ViolationResponse>>,
+    violations: Option<Vec<ApiViolationResponse>>,
+    blockers: Option<Vec<ResourceBlockerResponse>>,
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -453,6 +504,7 @@ impl ApiError {
             kind,
             source: None,
             violations: None,
+            blockers: None,
         }
     }
 
@@ -463,6 +515,26 @@ impl ApiError {
             kind,
             source: Some(Box::new(source)),
             violations: None,
+            blockers: None,
+        }
+    }
+
+    /// Creates an error with one safe Studio field-level violation.
+    #[must_use]
+    pub(crate) fn with_field_violation(
+        kind: ErrorKind,
+        field: &'static str,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            kind,
+            source: Some(Box::new(source)),
+            violations: Some(vec![ApiViolationResponse::Field(FieldViolationResponse {
+                field,
+                code: "invalid_field",
+                message: "the field is invalid",
+            })]),
+            blockers: None,
         }
     }
 
@@ -494,7 +566,13 @@ impl ApiError {
             OntologyStoreError::Stale => (ErrorKind::OntologyPreconditionFailed, None),
             OntologyStoreError::Validation(OntologyError::Validation { violations }) => (
                 ErrorKind::InvalidOntologySchema,
-                Some(violations.iter().cloned().map(Into::into).collect()),
+                Some(
+                    violations
+                        .iter()
+                        .cloned()
+                        .map(|violation| ApiViolationResponse::Ontology(violation.into()))
+                        .collect(),
+                ),
             ),
             OntologyStoreError::Connection { .. }
             | OntologyStoreError::Migration { .. }
@@ -508,6 +586,40 @@ impl ApiError {
             kind,
             source: Some(Box::new(source)),
             violations,
+            blockers: None,
+        }
+    }
+
+    /// Maps a Studio error while preserving safe field/blocker details.
+    #[must_use]
+    pub(crate) fn from_studio(kind: ErrorKind, source: StudioError) -> Self {
+        let field = match &source {
+            StudioError::InvalidInput { field } => Some(*field),
+            StudioError::ModelNotConfigured => Some("model"),
+            _ => None,
+        };
+        let violations = field.map(|field| {
+            vec![ApiViolationResponse::Field(FieldViolationResponse {
+                field,
+                code: "invalid_field",
+                message: "the field is invalid",
+            })]
+        });
+        let blockers = match &source {
+            StudioError::DeletionBlocked { blockers } => Some(
+                blockers
+                    .iter()
+                    .cloned()
+                    .map(ResourceBlockerResponse::from)
+                    .collect(),
+            ),
+            _ => None,
+        };
+        Self {
+            kind,
+            source: Some(Box::new(source)),
+            violations,
+            blockers,
         }
     }
 }
@@ -567,6 +679,7 @@ impl IntoResponse for ApiError {
                 code: self.kind.code().to_owned(),
                 message: self.kind.message().to_owned(),
                 violations: self.violations,
+                blockers: self.blockers,
             },
         };
         (status, Json(body)).into_response()
@@ -576,6 +689,43 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_violation_keeps_a_safe_stable_detail() {
+        let error = ApiError::with_field_violation(
+            ErrorKind::InvalidStudioResource,
+            "model_parameters",
+            std::io::Error::other("sensitive source detail"),
+        );
+
+        assert_eq!(error.kind, ErrorKind::InvalidStudioResource);
+        assert_eq!(
+            error.violations,
+            Some(vec![ApiViolationResponse::Field(FieldViolationResponse {
+                field: "model_parameters",
+                code: "invalid_field",
+                message: "the field is invalid",
+            })])
+        );
+    }
+
+    #[test]
+    fn missing_studio_model_keeps_a_stable_model_violation() {
+        let error = ApiError::from_studio(
+            ErrorKind::InvalidStudioResource,
+            StudioError::ModelNotConfigured,
+        );
+
+        assert_eq!(error.kind, ErrorKind::InvalidStudioResource);
+        assert_eq!(
+            error.violations,
+            Some(vec![ApiViolationResponse::Field(FieldViolationResponse {
+                field: "model",
+                code: "invalid_field",
+                message: "the field is invalid",
+            })])
+        );
+    }
 
     #[test]
     fn every_kind_maps_to_its_documented_status_and_code() {
@@ -594,6 +744,12 @@ mod tests {
                 ErrorKind::AgentTemplateNotFound,
                 404,
                 "agent_template_not_found",
+            ),
+            (ErrorKind::ProviderNotFound, 404, "provider_not_found"),
+            (
+                ErrorKind::ManagedModelNotFound,
+                404,
+                "managed_model_not_found",
             ),
             (ErrorKind::ApprovalNotFound, 404, "approval_not_found"),
             (

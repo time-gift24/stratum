@@ -6,5 +6,5 @@ export default async function AgentPage({
   params: Promise<{ agent_name: string }>
 }) {
   const { agent_name: agentName } = await params
-  return <AgentEditor agentName={agentName} />
+  return <AgentEditor key={agentName} agentName={agentName} />
 }

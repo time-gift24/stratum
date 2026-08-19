@@ -1,0 +1,30 @@
+/*
+ * SiteNav is a protected reusable component. Keep the light product shell's
+ * quieter material decision at this business-use boundary so the dark shell
+ * can retain the reusable component's graphite glass treatment.
+ */
+:global(html:not(.dark)) .siteChrome :global([data-nav-desktop]),
+:global(html:not(.dark)) .siteChrome :global([data-nav-mobile]) {
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+:global(html:not(.dark)) .siteChrome :global([data-nav-desktop] > div),
+:global(html:not(.dark)) .siteChrome :global([data-nav-mobile] > div) {
+  background-color: var(--card);
+  border-color: var(--border);
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* SiteNav stays protected; the product shell owns its mobile hit-area policy. */
+.siteChrome :global([data-nav-mobile] button[aria-expanded]) {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.siteChrome :global([data-nav-mobile] a) {
+  min-height: 44px;
+  align-items: center;
+}

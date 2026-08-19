@@ -11,6 +11,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command"
+import { Button } from "@/components/ui/button"
 import {
   Popover,
   PopoverContent,
@@ -68,7 +69,7 @@ export function ToolsSelect({
           aria-invalid={ariaInvalid}
           className={cn(
             controlClass,
-            "flex h-9 w-full items-center justify-between rounded-lg border px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            "flex h-9 min-h-11 w-full items-center justify-between rounded-lg border px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-9"
           )}
         >
           <span className={cn(value.length === 0 && "text-muted-foreground")}>
@@ -112,7 +113,8 @@ export function ToolsSelect({
                         </span>
                       </span>
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {KIND_LABEL[tool.kind]} · {DANGER_LABEL[tool.danger_level]}
+                        {KIND_LABEL[tool.kind]} ·{" "}
+                        {DANGER_LABEL[tool.danger_level]}
                       </span>
                       {selected ? (
                         <Check
@@ -136,14 +138,16 @@ export function ToolsSelect({
               className="flex items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1.5 font-mono text-xs"
             >
               {name}
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-xs"
                 aria-label={`移除 ${name}`}
                 onClick={() => toggle(name)}
-                className="rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                className="text-muted-foreground hover:text-foreground"
               >
                 <X aria-hidden className="size-3.5" />
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

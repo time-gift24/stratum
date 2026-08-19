@@ -36,7 +36,7 @@ export const ThreadListRail = memo(function ThreadListRail({
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [expanded])
 
-  // 开关与列表项共用同一几何：h-8 + px-1.5 + size-5 图标槽，图标列严格对齐
+  // 开关与列表项共用同一几何；窄屏保留 44px 触控目标，桌面收紧为 32px。
   const iconSlot = "flex size-5 shrink-0 items-center justify-center"
 
   const row = (
@@ -55,7 +55,7 @@ export const ThreadListRail = memo(function ThreadListRail({
       title={label}
       onClick={onClick}
       className={cn(
-        "flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/60",
+        "flex h-11 w-full items-center gap-2 rounded-lg px-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/60 sm:h-8",
         active
           ? "bg-accent/60 text-accent-foreground dark:bg-primary/15 dark:text-primary"
           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
@@ -78,7 +78,7 @@ export const ThreadListRail = memo(function ThreadListRail({
       data-slot="thread-list-rail"
       className={cn(
         "absolute top-2 left-3 z-10 flex flex-col gap-1 overflow-hidden rounded-2xl border border-border bg-card p-1.5 shadow-sm transition-[width] duration-300 ease-out dark:bg-card/95 dark:shadow-xl dark:backdrop-blur",
-        expanded ? "w-64" : "w-11",
+        expanded ? "w-64" : "w-14 sm:w-11",
         className
       )}
     >
@@ -87,7 +87,7 @@ export const ThreadListRail = memo(function ThreadListRail({
           type="button"
           aria-label={expanded ? "收起会话列表" : "展开会话列表"}
           onClick={() => setExpanded((v) => !v)}
-          className="flex h-8 items-center gap-2 rounded-lg px-1.5 text-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 dark:hover:text-primary"
+          className="flex h-11 w-full items-center gap-2 rounded-lg px-1.5 text-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 sm:h-8 dark:hover:text-primary"
         >
           <span className={iconSlot}>
             {expanded ? (

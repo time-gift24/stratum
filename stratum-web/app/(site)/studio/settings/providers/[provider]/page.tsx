@@ -10,7 +10,7 @@ export default async function ProviderPage({
   const { provider } = await params
   return (
     <Suspense>
-      <ProviderEditor provider={provider} />
+      <ProviderEditor key={provider} provider={provider} />
     </Suspense>
   )
 }

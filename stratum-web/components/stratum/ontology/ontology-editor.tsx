@@ -460,7 +460,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
         {/* 状态横幅 + 聚焦指示：顶部居中浮层（避开 pill 群与站点导航），有事才出现 */}
         <div className="pointer-events-none absolute inset-x-0 top-32 z-10 flex flex-col items-center gap-2 px-3">
           {state.draftAvailable !== null && (
-            <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-xl border border-border bg-popover/95 px-3 py-2 text-xs shadow-[0_8px_30px] shadow-black/10 backdrop-blur">
+            <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-xl border border-border bg-popover px-3 py-2 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur">
               <span>发现未保存的草稿（上次编辑未完成保存）。</span>
               <Button variant="outline" size="xs" onClick={editor.restoreDraft}>
                 恢复草稿
@@ -473,7 +473,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           {state.saveError !== null && (
             <div
               role="alert"
-              className="pointer-events-auto flex max-w-lg flex-wrap items-center justify-center gap-2 rounded-xl border border-destructive/40 bg-popover/95 px-3 py-2 text-xs text-destructive shadow-[0_8px_30px] shadow-black/10 backdrop-blur"
+              className="pointer-events-auto flex max-w-lg flex-wrap items-center justify-center gap-2 rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
             >
               <CircleAlert aria-hidden className="size-3.5" />
               <span>
@@ -493,7 +493,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           {violations.globalViolations.length > 0 && (
             <div
               role="alert"
-              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover/95 px-3 py-2 text-xs text-destructive shadow-[0_8px_30px] shadow-black/10 backdrop-blur"
+              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
             >
               <p className="font-medium">
                 保存被拒绝（422），以下问题未定位到具体节点：
@@ -511,7 +511,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           {clientViolations !== null && clientViolations.length > 0 && (
             <div
               role="alert"
-              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover/95 px-3 py-2 text-xs text-destructive shadow-[0_8px_30px] shadow-black/10 backdrop-blur"
+              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
             >
               <p className="font-medium">
                 本地校验未通过，已取消本次保存（不会产生必然被拒绝的请求）：
@@ -529,7 +529,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           {notice !== null && (
             <div
               role="status"
-              className="pointer-events-auto flex items-center gap-2 rounded-xl border border-border bg-popover/95 px-3 py-2 text-xs shadow-[0_8px_30px] shadow-black/10 backdrop-blur"
+              className="pointer-events-auto flex items-center gap-2 rounded-xl border border-border bg-popover px-3 py-2 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
             >
               <span>{notice}</span>
               <Button variant="ghost" size="xs" onClick={() => setNotice(null)}>
@@ -538,7 +538,7 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
             </div>
           )}
           {view === "edit" && activeFocus !== null && (
-            <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-popover/95 py-1 pr-1 pl-3 text-xs shadow-[0_8px_30px] shadow-black/10 backdrop-blur">
+            <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-popover py-1 pr-1 pl-3 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur">
               <span>
                 聚焦 {findObjectType(activeFocus.originId)?.display_name ?? ""}
                 （深度 {activeFocus.depth}，基于本地草稿）

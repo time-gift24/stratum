@@ -2,12 +2,7 @@
 
 import { useState, type CSSProperties } from "react"
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react"
-import {
-  CircleAlert,
-  Crosshair,
-  Plus,
-  Trash2Icon,
-} from "lucide-react"
+import { CircleAlert, Crosshair, Plus, Trash2Icon } from "lucide-react"
 
 import { CardIconButton } from "@/components/stratum/ontology/ontology-chrome"
 import { CommitInput } from "@/components/stratum/ontology/form-controls"
@@ -36,8 +31,8 @@ import { cn } from "@/lib/utils"
 import styles from "./ontology-aurora.module.css"
 
 /**
- * Object Type 画布节点（双层结构）：root 相对定位，玻璃背板承载头部
- * （display_name + name + 描述），背板顶部衬一层多色极光
+ * Object Type 画布节点（双层结构）：root 相对定位，背板承载头部
+ * （display_name + name + 描述）；仅 dark 的玻璃背板顶部衬一层多色极光
  * （ontology-aurora.module.css 的 .aurora 三段渐变，色相由节点 ID 稳定散列为
  * --node-hue 注入容器，blur 化开形成磨砂染色，锚定 root 只漫在头部区域）。
  * 节点级操作长在卡片上：头部文本（display_name / name / description）双击
@@ -90,8 +85,14 @@ export function OntologyObjectTypeNode({
   data,
   selected,
 }: NodeProps<ObjectTypeNode>) {
-  const { objectType, violations, propertyMessages, dimmed, propertyActions, objectActions } =
-    data
+  const {
+    objectType,
+    violations,
+    propertyMessages,
+    dimmed,
+    propertyActions,
+    objectActions,
+  } = data
   // 对象级 + 属性级 422 违例合并展示：底部红框首条 + 总数
   const allViolations = [
     ...violations,
@@ -132,7 +133,7 @@ export function OntologyObjectTypeNode({
   return (
     <div
       className={cn(
-        "group relative w-72 rounded-2xl border bg-card/50 p-1.5 text-card-foreground shadow-[0_8px_30px] shadow-black/10 backdrop-blur-xl transition-opacity",
+        "group relative w-72 rounded-2xl border bg-card p-1.5 text-card-foreground transition-opacity dark:bg-card/50 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur-xl",
         selected ? "border-primary ring-2 ring-ring/30" : "border-border",
         hasViolations && "border-destructive ring-2 ring-destructive/30",
         dimmed && "opacity-30"
@@ -140,7 +141,7 @@ export function OntologyObjectTypeNode({
       style={{ "--node-hue": nodeHue(objectType.id) } as CSSProperties}
     >
       <Handle type="target" position={Position.Left} />
-      {/* 顶部极光：锚定 root（relative），blur 化开只漫在头部 */}
+      {/* dark 顶部极光：锚定 root（relative），blur 化开只漫在头部 */}
       <div
         aria-hidden
         className={cn(
@@ -157,7 +158,10 @@ export function OntologyObjectTypeNode({
               value={objectType.display_name}
               validate={validatePropertyDisplayName}
               onCommit={(displayName) => {
-                objectActions.onUpdate({ ...objectType, display_name: displayName })
+                objectActions.onUpdate({
+                  ...objectType,
+                  display_name: displayName,
+                })
                 setEditingField(null)
               }}
             />
@@ -314,7 +318,9 @@ export function OntologyObjectTypeNode({
           <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />
           <span>
             {allViolations[0]}
-            {allViolations.length > 1 ? `（共 ${allViolations.length} 条）` : ""}
+            {allViolations.length > 1
+              ? `（共 ${allViolations.length} 条）`
+              : ""}
           </span>
         </div>
       )}

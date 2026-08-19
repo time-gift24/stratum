@@ -83,7 +83,7 @@ export function ParameterFields({
           return (
             <label
               key={control.key}
-              className="flex min-h-9 items-center gap-3 text-sm font-medium"
+              className="flex min-h-11 items-center gap-3 text-sm font-medium"
             >
               <Checkbox
                 className="size-4"

@@ -19,23 +19,26 @@ import { Clock, Cpu, Plus, Wrench } from "lucide-react"
 
 import {
   ErrorState,
-  LoadingState,
   PageHeader,
   PageShell,
   Pagination,
   ResourceCard,
+  ResourceGridSkeleton,
   SearchRow,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
-import { studioApi } from "@/features/studio-management/client"
+import { EmptyState } from "@/components/stratum/empty-state"
 import {
-  readPageCache,
-  writePageCache,
-} from "@/lib/page-cache"
+  safeStudioErrorMessage,
+  studioApi,
+} from "@/features/studio-management/client"
+import { readPageCache, writePageCache } from "@/lib/page-cache"
 import type { AgentDefinitionView, PageEnvelope } from "@/lib/stratum/api"
 import { modelDisplayName } from "@/lib/stratum/model-config"
+import { cn } from "@/lib/utils"
 
 const PER_PAGE = 12
+const PRESENCE_CACHE_KEY = "studio-agents:presence"
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
@@ -63,7 +66,9 @@ function AgentCard({ agent }: { agent: AgentDefinitionView }) {
       meta={[
         {
           icon: Cpu,
-          text: model.provider ? `${model.provider} / ${model.model}` : model.model,
+          text: model.provider
+            ? `${model.provider} / ${model.model}`
+            : model.model,
         },
         { icon: Wrench, text: `${agent.tools.length} 个工具` },
         { icon: Clock, text: `更新于 ${displayDate(agent.updated_at)}` },
@@ -81,6 +86,9 @@ export function StudioDashboard() {
   const [result, setResult] = useState(() =>
     readPageCache<PageEnvelope<AgentDefinitionView>>(cacheKey)
   )
+  const [hasResources, setHasResources] = useState(() =>
+    readPageCache<boolean>(PRESENCE_CACHE_KEY)
+  )
   const [error, setError] = useState<string | null>(null)
   const [requestKey, setRequestKey] = useState(0)
   const requestIdRef = useRef(0)
@@ -90,6 +98,7 @@ export function StudioDashboard() {
   if (seenKey !== cacheKey) {
     setSeenKey(cacheKey)
     setResult(readPageCache(cacheKey))
+    setHasResources(readPageCache(PRESENCE_CACHE_KEY))
     setError(null)
   }
 
@@ -97,21 +106,32 @@ export function StudioDashboard() {
     const requestId = ++requestIdRef.current
     setError(null)
     try {
-      const next = await studioApi.listAgentDefinitions({
-        page,
-        perPage: PER_PAGE,
-        sort: "-updated_at",
-        search: query,
-      })
+      const [next, unfiltered] = await Promise.all([
+        studioApi.listAgentDefinitions({
+          page,
+          perPage: PER_PAGE,
+          sort: "-updated_at",
+          search: query,
+        }),
+        query.trim() === ""
+          ? Promise.resolve(null)
+          : studioApi.listAgentDefinitions({
+              page: 1,
+              perPage: 1,
+              sort: "-updated_at",
+            }),
+      ])
       // 只接受最后一次发起的请求，避免乱序响应覆盖新状态
       if (requestId !== requestIdRef.current) return
       writePageCache(cacheKey, next)
+      const nextHasResources = (unfiltered ?? next).pagination.total > 0
+      writePageCache(PRESENCE_CACHE_KEY, nextHasResources)
       setResult(next)
+      setHasResources(nextHasResources)
     } catch (caught) {
       if (requestId !== requestIdRef.current) return
-      // 有缓存内容可展示时不刷新错误面板
-      if (readPageCache(cacheKey) === null)
-        setError(caught instanceof Error ? caught.message : "无法加载 Agent")
+      // 缓存仍可用时保留内容，同时明确告知权威刷新失败并提供重试。
+      setError(safeStudioErrorMessage(caught, "无法加载 Agent"))
     }
   }, [page, query, cacheKey])
 
@@ -137,6 +157,16 @@ export function StudioDashboard() {
         )
       : 1)
   const hasQuery = query.trim() !== ""
+  const pageOutOfRange =
+    result !== null && result.pagination.total > 0 && page > totalPages
+
+  useEffect(() => {
+    if (!pageOutOfRange) return
+    const params = new URLSearchParams()
+    if (query.trim() !== "") params.set("q", query.trim())
+    if (totalPages > 1) params.set("page", String(totalPages))
+    router.replace(params.size === 0 ? "/studio" : `/studio?${params}`)
+  }, [pageOutOfRange, query, router, totalPages])
 
   return (
     <PageShell>
@@ -147,22 +177,24 @@ export function StudioDashboard() {
         placeholder="搜索 Agent 名称"
         onSearch={(next) => updateQuery(next)}
         action={
-          <Link
-            href="/studio/agents/new"
-            aria-label="新建 Agent"
-            title="新建 Agent"
-            className={buttonVariants({
-              size: "icon-lg",
-              className: "size-9 rounded-lg",
-            })}
-          >
-            <Plus aria-hidden />
-          </Link>
+          hasResources === false ? undefined : (
+            <Link
+              href="/studio/agents/new"
+              aria-label="新建 Agent"
+              title="新建 Agent"
+              className={cn(
+                buttonVariants({ size: "icon-lg" }),
+                "size-11 rounded-lg"
+              )}
+            >
+              <Plus aria-hidden />
+            </Link>
+          )
         }
       />
 
       {result === null && error === null ? (
-        <LoadingState label="正在加载 Agent" />
+        <ResourceGridSkeleton label="正在加载 Agent" metaRows={3} />
       ) : null}
 
       {error ? (
@@ -181,22 +213,26 @@ export function StudioDashboard() {
         </div>
       ) : null}
 
-      {!error && result && agents.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border p-7 sm:p-10">
-          <h2 className="font-semibold">
-            {hasQuery ? "没有匹配的 Agent" : "尚未创建 Agent"}
-          </h2>
-          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-muted-foreground">
-            {hasQuery
+      {result &&
+      agents.length === 0 &&
+      !pageOutOfRange &&
+      (!hasQuery || hasResources !== null) ? (
+        <EmptyState
+          title={
+            hasQuery && hasResources ? "没有匹配的 Agent" : "尚未创建 Agent"
+          }
+          description={
+            hasQuery && hasResources
               ? "调整搜索词，或清除筛选查看全部 Agent。"
-              : "创建第一个 Agent definition 后，它会显示在这里。"}
-          </p>
-          {hasQuery ? (
+              : "创建第一个 Agent definition 后，它会显示在这里。"
+          }
+        >
+          {hasQuery && hasResources ? (
             <Button
               type="button"
               variant="outline"
               size="lg"
-              className="mt-4"
+              className="min-h-11"
               onClick={() => updateQuery("")}
             >
               清除筛选
@@ -204,13 +240,16 @@ export function StudioDashboard() {
           ) : (
             <Link
               href="/studio/agents/new"
-              className={buttonVariants({ size: "lg", className: "mt-4" })}
+              className={buttonVariants({
+                size: "lg",
+                className: "min-h-11 px-4",
+              })}
             >
               <Plus aria-hidden />
               新建 Agent
             </Link>
           )}
-        </div>
+        </EmptyState>
       ) : null}
 
       {result ? (

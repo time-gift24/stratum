@@ -1,17 +1,3 @@
-[agent]
-templates_root = "/etc/stratum/templates"
-
-[llm]
-default = "deepseek:deepseek-v4-flash"
-
-[llm.deepseek]
-# Overridden at process startup from DEEPSEEK_API_KEY.
-api_key = "injected-at-runtime"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
-# Optional endpoint override (e.g. an LLM gateway); when omitted the
-# provider's well-known public endpoint is used. Blank is rejected.
-# base_url = "https://api.deepseek.com"
-
 [api]
 bind = "0.0.0.0:8080"
 readiness_timeout_ms = 1000
@@ -25,11 +11,13 @@ allowed_origins = [
 [ontology]
 database_url = "postgres://stratum:stratum@postgres:5432/stratum_ontology"
 
-# Studio 编排目录在 docker 栈保持关闭：management_enabled = true 要求
+# Studio 数据库始终用于 runtime；docker 栈只关闭管理 routes。
+# management_enabled = true 要求
 # api.bind 为 loopback（loopback-only 安全边界），而容器需要 0.0.0.0 才能
 # 发布端口，两者冲突。本地直跑（127.0.0.1 bind）时可开启。
 [studio]
 management_enabled = false
+database_url = "postgres://stratum:stratum@postgres:5432/stratum_studio"
 
 [nats]
 url = "nats://nats:4222"

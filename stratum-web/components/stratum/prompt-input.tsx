@@ -199,7 +199,7 @@ export function PromptInput({
         <Button
           variant="ghost"
           size="icon"
-          className="rounded-full"
+          className="size-11 rounded-full sm:size-7"
           aria-label="添加附件"
         >
           <Plus aria-hidden />
@@ -233,7 +233,7 @@ export function PromptInput({
         {running ? (
           <Button
             size="icon"
-            className="rounded-full"
+            className="size-11 rounded-full sm:size-7"
             aria-label={cancelRequested ? "正在取消" : "取消执行"}
             disabled={cancelRequested}
             onClick={onCancel}
@@ -250,7 +250,7 @@ export function PromptInput({
         ) : (
           <Button
             size="icon"
-            className="rounded-full"
+            className="size-11 rounded-full sm:size-7"
             aria-label="发送"
             disabled={!canSend}
             onClick={submit}

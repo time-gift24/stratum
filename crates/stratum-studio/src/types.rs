@@ -182,25 +182,6 @@ pub struct AgentDefinitionInput {
     pub prompt: String,
 }
 
-/// Provider data used once to bootstrap an empty Studio catalog.
-pub struct ProviderSeed {
-    /// Provider identity.
-    pub kind: ProviderKind,
-    /// Credential copied into the isolated Studio database.
-    pub api_key: SecretString,
-    /// Provider-local model names.
-    pub models: Vec<String>,
-}
-
-/// Immutable source data used only when the Studio catalog is empty.
-#[derive(Default)]
-pub struct StudioCatalogSeed {
-    /// Initial provider records.
-    pub providers: Vec<ProviderSeed>,
-    /// Initial Agent authoring definitions.
-    pub agent_definitions: Vec<AgentDefinitionInput>,
-}
-
 /// Secret-bearing provider data only for the trusted runtime assembly boundary.
 pub struct RuntimeProvider {
     /// Provider identity.
@@ -209,4 +190,16 @@ pub struct RuntimeProvider {
     pub api_key: SecretString,
     /// Provider-local models available for future Turn creation.
     pub models: Vec<String>,
+}
+
+/// One catalog-locked view used to pair management Model rows with the exact
+/// credential/model inputs used to derive their adapter schemas.
+///
+/// This type is secret-bearing and must never cross an HTTP serialization
+/// boundary.
+pub struct ModelCatalogSnapshot {
+    /// Versioned, sanitized Model rows.
+    pub models: Vec<Versioned<ManagedModel>>,
+    /// Trusted inputs for building the matching Provider registry.
+    pub runtime_providers: Vec<RuntimeProvider>,
 }

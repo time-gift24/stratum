@@ -2,7 +2,7 @@
 
 ## 职责范围
 
-`stratum-filesystem` 负责 Agent 可见的虚拟文件系统 trait、虚拟路径校验和本地沙箱后端。其保留的职责仅限业务文件操作：`read`/`list`/`write`/`create`/`remove`/`apply-patch`，以及供装配侧使用的只读模板目录访问。执行持久化（CAS、`record`、`get`/`put`、Agent 状态/历史/事件日志）已删除，不得重新引入——Postgres 是唯一的执行存储。
+`stratum-filesystem` 负责 Agent 可见的虚拟文件系统 trait、虚拟路径校验和本地沙箱后端。其保留的职责仅限业务文件操作：`read`/`list`/`write`/`create`/`remove`/`apply-patch`。执行持久化（CAS、`record`、`get`/`put`、Agent 状态/历史/事件日志）与 authoring catalog 均不得重新引入——execution 与 Studio PostgreSQL 分别是唯一的执行和编排存储。
 
 ## 设计规则
 

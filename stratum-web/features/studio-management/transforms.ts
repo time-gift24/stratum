@@ -2,6 +2,7 @@ import type {
   AgentDefinitionInput,
   AgentDefinitionView,
   ManagedModelView,
+  ProviderKind,
   ProviderView,
 } from "@/lib/stratum/api"
 import { parse, stringify, TomlError } from "smol-toml"
@@ -14,6 +15,7 @@ import type {
 export function agentViewToDraft(view: AgentDefinitionView): AgentDraft {
   return {
     agentName: view.agent_name,
+    agentVersion: view.agent_version,
     model: view.model,
     parameters: structuredClone(view.model_parameters),
     tools: [...view.tools],
@@ -23,12 +25,22 @@ export function agentViewToDraft(view: AgentDefinitionView): AgentDraft {
 
 export function agentDraftToInput(draft: AgentDraft): AgentDefinitionInput {
   return {
-    agent_name: draft.agentName.trim(),
+    agent_name: draft.agentName,
+    agent_version: draft.agentVersion,
     model: draft.model,
     model_parameters: structuredClone(draft.parameters),
-    tools: draft.tools.map((tool) => tool.trim()).filter(Boolean),
-    prompt: draft.prompt.trim(),
+    tools: [...draft.tools],
+    prompt: draft.prompt,
   }
+}
+
+export function agentVersionValidationMessage(value: string): string | null {
+  if (value.trim() === "") return "版本标签不能为空"
+  if (value.trim() !== value) return "版本标签首尾不能有空白"
+  if (/\p{Cc}/u.test(value)) return "版本标签不能包含控制字符"
+  if (new TextEncoder().encode(value).length > 128)
+    return "版本标签不能超过 128 字节"
+  return null
 }
 
 export function providerViewToDraft(view: ProviderView): ProviderDraft {
@@ -39,8 +51,19 @@ export function modelViewToDraft(view: ManagedModelView): ModelDraft {
   return { provider: view.provider, modelName: view.name }
 }
 
+export function splitManagedModelId(
+  modelId: string
+): { provider: ProviderKind; modelName: string } | null {
+  const separator = modelId.indexOf(":")
+  if (separator <= 0) return null
+  const provider = modelId.slice(0, separator)
+  if (provider !== "openai" && provider !== "deepseek") return null
+  return { provider, modelName: modelId.slice(separator + 1) }
+}
+
 export function encodeAgentToml(draft: AgentDraft): string {
   return stringify({
+    agent_version: draft.agentVersion,
     model: draft.model,
     tools: draft.tools,
     prompt: draft.prompt,
@@ -53,7 +76,13 @@ export function encodeAgentToml(draft: AgentDraft): string {
 export type RawAgentParseResult =
   { ok: true; draft: AgentDraft } | { ok: false; line: number; message: string }
 
-const AGENT_KEYS = new Set(["model", "model_parameters", "tools", "prompt"])
+const AGENT_KEYS = new Set([
+  "agent_version",
+  "model",
+  "model_parameters",
+  "tools",
+  "prompt",
+])
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" &&
@@ -92,9 +121,10 @@ export function parseAgentToml(source: string): RawAgentParseResult {
         message: `未知字段 ${unknown}`,
       }
 
-    const { model, tools, prompt } = document
+    const { agent_version: agentVersion, model, tools, prompt } = document
     const parameters = document.model_parameters ?? {}
     if (
+      typeof agentVersion !== "string" ||
       typeof model !== "string" ||
       !Array.isArray(tools) ||
       !tools.every((tool) => typeof tool === "string") ||
@@ -103,9 +133,47 @@ export function parseAgentToml(source: string): RawAgentParseResult {
     ) {
       return { ok: false, line: 1, message: "字段类型不符合 Agent 配置" }
     }
+    const versionError = agentVersionValidationMessage(agentVersion)
+    if (versionError)
+      return {
+        ok: false,
+        line: keyLine(source, "agent_version"),
+        message: versionError,
+      }
+    if (model.trim() === "" || model.trim() !== model)
+      return {
+        ok: false,
+        line: keyLine(source, "model"),
+        message: "Model 不能为空或包含首尾空白",
+      }
+    if (prompt.trim() === "")
+      return {
+        ok: false,
+        line: keyLine(source, "prompt"),
+        message: "System prompt 不能为空",
+      }
+    if (tools.some((tool) => tool.trim() === "" || tool.trim() !== tool))
+      return {
+        ok: false,
+        line: keyLine(source, "tools"),
+        message: "Tool 名称不能为空或包含首尾空白",
+      }
+    if (new Set(tools).size !== tools.length)
+      return {
+        ok: false,
+        line: keyLine(source, "tools"),
+        message: "Tool 名称不能重复",
+      }
     return {
       ok: true,
-      draft: { agentName: "", model, tools, prompt, parameters },
+      draft: {
+        agentName: "",
+        agentVersion,
+        model,
+        tools,
+        prompt,
+        parameters,
+      },
     }
   } catch (error) {
     if (

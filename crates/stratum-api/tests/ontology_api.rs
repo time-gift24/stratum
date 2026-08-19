@@ -2,7 +2,7 @@
 //!
 //! Requires this crate's PostgreSQL test container.
 
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fs, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
@@ -24,6 +24,7 @@ use stratum_llm::{
 };
 use stratum_ontology::{OntologyStore, OntologyStoreError};
 use stratum_postgres::PostgresBackend;
+use stratum_studio::StudioStore;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -31,7 +32,6 @@ const DEFAULT_DATABASE_URL: &str =
     "postgres://stratum:stratum@127.0.0.1:45433/stratum_ontology_test";
 
 struct OntologyFixture {
-    root: PathBuf,
     app: Router,
 }
 
@@ -39,20 +39,9 @@ impl OntologyFixture {
     async fn new() -> Self {
         let database_url = database_url();
         let execution_database_url = execution_database_url();
-        let root = std::env::temp_dir().join(format!("stratum-api-ontology-{}", Uuid::now_v7()));
-        fs::create_dir_all(&root).expect("template directory is created");
+        let studio_database_url = studio_database_url();
         let config = Config::parse(&format!(
             r#"
-[agent]
-templates_root = {root:?}
-
-[llm]
-default = "openai:test-model"
-
-[llm.openai]
-api_key = "test-key"
-models = ["test-model"]
-
 [api]
 bind = "127.0.0.1:0"
 allowed_origins = ["http://localhost:5173"]
@@ -63,8 +52,11 @@ database_url = {database_url:?}
 
 [postgres]
 url = {execution_database_url:?}
+
+[studio]
+database_url = {studio_database_url:?}
+management_enabled = false
 "#,
-            root = root.to_string_lossy(),
         ))
         .expect("test configuration parses");
         let model = ModelId::new("openai", "test-model").expect("test model is valid");
@@ -78,14 +70,17 @@ url = {execution_database_url:?}
         let store = OntologyStore::connect(&database_url)
             .await
             .expect("PostgreSQL test container is available");
+        let studio = StudioStore::connect(&studio_database_url)
+            .await
+            .expect("Studio PostgreSQL test database is available");
         let state = Arc::new(
-            AppState::new(pg, None, providers, store, config)
+            AppState::new(pg, None, providers, store, studio, config)
                 .await
                 .expect("state assembles"),
         );
         let app = router(state);
 
-        Self { root, app }
+        Self { app }
     }
 
     async fn request(&self, request: Request<Body>) -> Response {
@@ -121,12 +116,6 @@ url = {execution_database_url:?}
             "ETag must use the documented strong canonical form: {etag}"
         );
         CreatedOntology { id, etag, body }
-    }
-}
-
-impl Drop for OntologyFixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -182,6 +171,12 @@ fn database_url() -> String {
 fn execution_database_url() -> String {
     std::env::var("STRATUM_API_TEST_PG_URL")
         .unwrap_or_else(|_| "postgres://stratum:stratum@127.0.0.1:45433/stratum_test".to_owned())
+}
+
+fn studio_database_url() -> String {
+    std::env::var("STRATUM_API_TEST_STUDIO_PG_URL").unwrap_or_else(|_| {
+        "postgres://stratum:stratum@127.0.0.1:45433/stratum_studio_test".to_owned()
+    })
 }
 
 fn unique_name(prefix: &str) -> String {
@@ -379,22 +374,7 @@ async fn api_startup_rejects_a_missing_ontology_section_before_external_initiali
     let path = root.join("stratum.toml");
     fs::write(
         &path,
-        format!(
-            r#"
-[agent]
-templates_root = {root:?}
-
-[llm]
-default = "openai:test-model"
-
-[llm.openai]
-api_key = "test-key"
-models = ["test-model"]
-
-[llm.deepseek]
-api_key = "test-key"
-models = ["deepseek-v4-flash"]
-
+        r#"
 [api]
 bind = "127.0.0.1:0"
 readiness_timeout_ms = 1000
@@ -410,9 +390,10 @@ max_messages = 100
 
 [postgres]
 url = "postgres://unused:unused@127.0.0.1:1/unused"
+
+[studio]
+database_url = "postgres://unused:unused@127.0.0.1:1/unused_studio"
 "#,
-            root = root.to_string_lossy(),
-        ),
     )
     .expect("test config is written");
 

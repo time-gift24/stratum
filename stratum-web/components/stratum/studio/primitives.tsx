@@ -27,6 +27,7 @@ import {
   FieldSet,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Popover,
   PopoverContent,
@@ -40,6 +41,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { prefetchSettingsLanding } from "@/features/studio-management/settings-data"
 import {
   MOTION_DURATION,
   MOTION_EASE,
@@ -80,7 +82,10 @@ export function StudioSelect({
       <SelectTrigger
         aria-label={ariaLabel}
         aria-invalid={ariaInvalid}
-        className={cn(controlClass, "h-9 w-full px-3 text-sm")}
+        className={cn(
+          controlClass,
+          "h-9 min-h-11 w-full px-3 text-sm sm:min-h-9"
+        )}
       >
         <SelectValue />
       </SelectTrigger>
@@ -89,7 +94,7 @@ export function StudioSelect({
           <SelectItem
             key={option.value}
             value={option.value}
-            className="text-sm"
+            className="min-h-11 text-sm"
           >
             {option.label}
           </SelectItem>
@@ -124,7 +129,7 @@ export function PageHeader({
         {backHref ? (
           <Link
             href={backHref}
-            className="mb-1 inline-flex h-8 items-center gap-1.5 rounded-md text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="mb-1 inline-flex min-h-11 items-center gap-1.5 rounded-md text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             <ArrowLeft aria-hidden className="size-4" />
             {backLabel}
@@ -200,7 +205,10 @@ export function Field({
 
 export function StudioInput(props: React.ComponentProps<typeof Input>) {
   return (
-    <Input {...props} className={cn(controlClass, "h-9", props.className)} />
+    <Input
+      {...props}
+      className={cn(controlClass, "h-11 sm:h-9", props.className)}
+    />
   )
 }
 
@@ -230,20 +238,22 @@ export function SearchRow({
           onSearch(String(data.get("q") ?? ""))
         }}
       >
-        <button
+        <Button
           type="submit"
+          variant="ghost"
+          size="icon"
           aria-label="搜索"
-          className="absolute top-1/2 left-1.5 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          className="absolute top-1/2 left-0 size-11 -translate-y-1/2 text-muted-foreground hover:text-foreground sm:left-1.5 sm:size-7"
         >
           <Search aria-hidden className="size-4" />
-        </button>
+        </Button>
         <StudioInput
           key={defaultValue}
           name="q"
           defaultValue={defaultValue}
           placeholder={placeholder}
           aria-label={placeholder}
-          className="pl-9"
+          className="pl-11 sm:pl-9"
         />
       </form>
       {action}
@@ -311,7 +321,12 @@ export function SaveButton({
   children?: React.ReactNode
 }) {
   return (
-    <Button type="submit" size="lg" disabled={disabled || saving}>
+    <Button
+      type="submit"
+      size="lg"
+      className="min-h-11"
+      disabled={disabled || saving}
+    >
       {saving ? (
         <>
           <LoaderCircle
@@ -335,19 +350,22 @@ export function DeleteAction({
   resourceLabel,
   explanation,
   pending,
+  disabled = false,
   onDelete,
 }: {
   resourceLabel: string
   explanation: string
   pending: boolean
+  disabled?: boolean
   onDelete: () => void
 }) {
   const [open, setOpen] = useState(false)
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
+        disabled={disabled}
         aria-label={`删除 ${resourceLabel}`}
-        className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors outline-none hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
       >
         <Trash2 aria-hidden className="size-4" />
       </PopoverTrigger>
@@ -355,12 +373,18 @@ export function DeleteAction({
         <p className="font-medium text-destructive">删除 {resourceLabel}</p>
         <p className="leading-6 text-muted-foreground">{explanation}</p>
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+          <Button
+            type="button"
+            variant="ghost"
+            className="min-h-11"
+            onClick={() => setOpen(false)}
+          >
             取消
           </Button>
           <Button
             type="button"
             variant="destructive"
+            className="min-h-11"
             disabled={pending}
             onClick={onDelete}
           >
@@ -549,8 +573,16 @@ export function SettingsNav({
             onClick={(event) => {
               if (!active) previewSlide(event.currentTarget)
             }}
+            onPointerEnter={() => {
+              // 悬停/聚焦即预热目标页签数据，切换时多数情况直接命中缓存，
+              // 不再经过加载态
+              if (!active) prefetchSettingsLanding(item.key)
+            }}
+            onFocus={() => {
+              if (!active) prefetchSettingsLanding(item.key)
+            }}
             className={cn(
-              "relative flex h-9 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
+              "relative flex h-11 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
               active
                 ? "text-accent-foreground dark:text-primary"
                 : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
@@ -589,6 +621,7 @@ export function Pagination({
         type="button"
         variant="outline"
         size="lg"
+        className="min-h-11"
         disabled={page <= 1}
         onClick={() => onPageChange(page - 1)}
       >
@@ -601,6 +634,7 @@ export function Pagination({
         type="button"
         variant="outline"
         size="lg"
+        className="min-h-11"
         disabled={page >= totalPages}
         onClick={() => onPageChange(page + 1)}
       >
@@ -610,7 +644,7 @@ export function Pagination({
   )
 }
 
-/** 整页/整区加载：转圈指示。骨架只用于卡片框架已在、局部内容在加载的场景。 */
+/** 非列表整页/整区加载：编辑器等未知内容形态使用转圈指示。 */
 export function LoadingState({ label }: { label: string }) {
   return (
     <div
@@ -622,6 +656,53 @@ export function LoadingState({ label }: { label: string }) {
         className="size-5 animate-spin motion-reduce:animate-none"
       />
       <span className="text-sm">{label}</span>
+    </div>
+  )
+}
+
+/**
+ * ResourceCard 列表冷启动：两列网格、标识、标题与 meta 行都和最终内容同形，
+ * 不用示例文案，也不让全区 spinner 造成布局跳变。
+ */
+export function ResourceGridSkeleton({
+  label,
+  metaRows,
+  count = 4,
+}: {
+  label: string
+  metaRows: number
+  count?: number
+}) {
+  return (
+    <div role="status" aria-label={label}>
+      <span className="sr-only">{label}</span>
+      <div aria-hidden className="grid gap-3 sm:grid-cols-2">
+        {Array.from({ length: count }, (_, cardIndex) => (
+          <div
+            key={cardIndex}
+            className="flex items-start gap-3.5 rounded-2xl border border-border bg-card p-4"
+          >
+            <Skeleton className="size-10 shrink-0 rounded-xl motion-reduce:animate-none" />
+            <div className="min-w-0 flex-1">
+              <Skeleton className="h-4 w-2/3 max-w-40 motion-reduce:animate-none" />
+              <div className="mt-2 grid">
+                {Array.from({ length: metaRows }, (_, rowIndex) => (
+                  <div
+                    key={rowIndex}
+                    className={cn(
+                      "flex items-center gap-2 py-1.5",
+                      rowIndex > 0 && "border-t border-dashed border-border"
+                    )}
+                  >
+                    <Skeleton className="size-3.5 shrink-0 motion-reduce:animate-none" />
+                    <Skeleton className="h-3 w-1/2 motion-reduce:animate-none" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -672,7 +753,7 @@ export function ErrorState({
         type="button"
         variant="outline"
         size="lg"
-        className="mt-4"
+        className="mt-4 min-h-11"
         onClick={onRetry}
       >
         重试
@@ -702,7 +783,7 @@ export function NotFoundState({
       <div className="mt-5">
         <Link
           href={createHref}
-          className={buttonVariants({ size: "lg" })}
+          className={buttonVariants({ size: "lg", className: "min-h-11 px-4" })}
         >
           {createLabel}
         </Link>

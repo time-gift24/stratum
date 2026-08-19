@@ -225,6 +225,10 @@ jobs:
         if: steps.workspace.outputs.present == 'true'
         run: make -C crates/stratum-ontology test-integration COMPOSE="docker compose"
 
+      - name: Run stratum-studio integration tests
+        if: steps.workspace.outputs.present == 'true'
+        run: make -C crates/stratum-studio test-integration COMPOSE="docker compose"
+
       - name: Run stratum-api integration tests
         if: steps.workspace.outputs.present == 'true'
         run: make -C crates/stratum-api test-integration COMPOSE="docker compose"

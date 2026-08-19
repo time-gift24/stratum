@@ -140,7 +140,7 @@ export function OntologyLinkTypeEdge({
             >
               <span
                 className={cn(
-                  "rounded-full border bg-popover px-1.5 py-0.5 text-[0.625rem] leading-none shadow-sm",
+                  "rounded-full border bg-popover px-1.5 py-0.5 text-[0.625rem] leading-none dark:shadow-sm",
                   selected
                     ? "border-primary text-foreground"
                     : "border-border text-popover-foreground"
@@ -149,7 +149,7 @@ export function OntologyLinkTypeEdge({
                 {data.linkType.display_name}
               </span>
               {selected && data.edgeActions !== undefined && (
-                <div className="nodrag pointer-events-auto flex items-center gap-0.5 rounded-full border border-border bg-popover p-0.5 shadow-sm">
+                <div className="nodrag pointer-events-auto flex items-center gap-0.5 rounded-full border border-border bg-popover p-0.5 dark:shadow-sm">
                   <LinkTypeEditAction
                     linkType={data.linkType}
                     source={data.source}
