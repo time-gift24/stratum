@@ -1,14 +1,11 @@
 import type {
   AgentDefinitionInput,
   AgentDefinitionView,
-  ManagedModelView,
-  ProviderKind,
   ProviderView,
 } from "@/lib/stratum/api"
 import { parse, stringify, TomlError } from "smol-toml"
 import type {
   AgentDraft,
-  ModelDraft,
   ProviderDraft,
 } from "@/features/studio-management/types"
 
@@ -45,20 +42,6 @@ export function agentVersionValidationMessage(value: string): string | null {
 
 export function providerViewToDraft(view: ProviderView): ProviderDraft {
   return { provider: view.provider, apiKey: "" }
-}
-
-export function modelViewToDraft(view: ManagedModelView): ModelDraft {
-  return { provider: view.provider, modelName: view.name }
-}
-
-export function splitManagedModelId(
-  modelId: string
-): { provider: ProviderKind; modelName: string } | null {
-  const separator = modelId.indexOf(":")
-  if (separator <= 0) return null
-  const provider = modelId.slice(0, separator)
-  if (provider !== "openai" && provider !== "deepseek") return null
-  return { provider, modelName: modelId.slice(separator + 1) }
 }
 
 export function encodeAgentToml(draft: AgentDraft): string {
@@ -192,8 +175,4 @@ export function parseAgentToml(source: string): RawAgentParseResult {
       message: error instanceof Error ? error.message : "无法解析 TOML",
     }
   }
-}
-
-export function encodeModelSchema(view: ManagedModelView): string {
-  return JSON.stringify(view.parameter_schema, null, 2)
 }

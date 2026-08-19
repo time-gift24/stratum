@@ -55,12 +55,7 @@ export function useStudioProviderEditor(provider?: string) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [testResult, setTestResult] = useState<{
-    tone: "success" | "error"
-    message: string
-  } | null>(null)
   const dirty = state.dirty
-  const credentialDirty = state.draft.apiKey.trim() !== ""
   const { confirmNavigation, leave } = useDirtyGuard(dirty)
 
   const [appliedCacheKey, setAppliedCacheKey] = useState(cacheKey)
@@ -159,29 +154,6 @@ export function useStudioProviderEditor(provider?: string) {
     }
   }
 
-  const test = async () => {
-    if (isNew || credentialDirty) return
-    const restorePhase = dirty ? "dirty" : "loaded"
-    setTestResult(null)
-    dispatch({ type: "test" })
-    try {
-      const result = await studioApi.testProvider(state.draft.provider)
-      setTestResult({
-        tone: result.success ? "success" : "error",
-        message: result.success
-          ? `本次连接成功 · ${result.completed_at}`
-          : (result.message ?? "连接失败"),
-      })
-      dispatch({ type: "settle", restorePhase })
-    } catch (caught) {
-      setTestResult({
-        tone: "error",
-        message: caught instanceof Error ? caught.message : "连接测试失败",
-      })
-      dispatch({ type: "settle", restorePhase })
-    }
-  }
-
   const remove = async () => {
     if (isNew) return
     setDeleting(true)
@@ -202,7 +174,6 @@ export function useStudioProviderEditor(provider?: string) {
     cancel: () => {
       leave(() => router.push(providersHref))
     },
-    credentialDirty,
     deleting,
     edit,
     hasLoadedContent: isNew || resource !== null,
@@ -227,10 +198,7 @@ export function useStudioProviderEditor(provider?: string) {
       setLoading(resource === null)
       void load()
     },
-    returnTo,
     save,
     state,
-    test,
-    testResult,
   }
 }

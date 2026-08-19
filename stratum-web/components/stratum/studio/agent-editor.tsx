@@ -220,18 +220,18 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
                       Model，再回来创建 Agent。
                     </p>
                     <Link
-                      href="/studio/settings/models/new"
+                      href="/studio/settings/providers"
                       className={buttonVariants({
                         size: "lg",
                         className: "min-h-11",
                       })}
                     >
-                      去配置 Model
+                      去配置 Provider 和 Model
                     </Link>
                   </div>
                 ) : (
                   <div className="grid gap-6">
-                    <Field label="Model" error={state.violations.model}>
+                    <Field error={state.violations.model}>
                       <StudioSelect
                         ariaLabel="Model"
                         value={state.draft.model}
@@ -276,7 +276,7 @@ export function AgentEditor({ agentName }: { agentName?: string }) {
                 description="目录来自 host 当前实际可注册的工具。"
               >
                 <div className="grid gap-4">
-                  <Field label="Tools" error={state.violations.tools}>
+                  <Field error={state.violations.tools}>
                     <ToolsSelect
                       catalog={tools}
                       value={state.draft.tools}

@@ -44,7 +44,7 @@ export function parameterControls(schema: unknown): ParameterControlsResult {
         controls.push({
           kind: "thinking",
           key,
-          label: "Thinking",
+          label: "思考",
           options: levels.map((level) => ({ value: level.id, label: level.name })),
         })
       } else requiresRawFallback = true

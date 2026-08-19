@@ -6,7 +6,6 @@ import {
   agentViewToDraft,
   encodeAgentToml,
   parseAgentToml,
-  splitManagedModelId,
 } from "@/features/studio-management/transforms"
 import type { AgentDraft } from "@/features/studio-management/types"
 import type { AgentDefinitionView } from "@/lib/stratum/api"
@@ -125,16 +124,5 @@ prompt = "Research carefully."
 
     expect(parsed.ok).toBe(false)
     if (!parsed.ok) expect(parsed.message).toContain("128 字节")
-  })
-
-  it("preserves literal percent sequences in a decoded Model route identity", () => {
-    expect(splitManagedModelId("openai:gpt%20x")).toEqual({
-      provider: "openai",
-      modelName: "gpt%20x",
-    })
-    expect(splitManagedModelId("openai:foo%bar")).toEqual({
-      provider: "openai",
-      modelName: "foo%bar",
-    })
   })
 })

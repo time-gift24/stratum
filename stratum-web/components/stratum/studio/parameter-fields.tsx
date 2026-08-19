@@ -146,7 +146,7 @@ function RawParameterFields({
 
   return (
     <Field
-      label="Model parameters"
+      label="模型参数"
       error={error ?? undefined}
       hint="该模型包含暂不支持的 schema 形状，请使用 JSON 参数。"
     >

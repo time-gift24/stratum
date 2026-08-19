@@ -1,7 +1,5 @@
 "use client"
 
-import { LoaderCircle, PlugZap } from "lucide-react"
-
 import {
   BlockerList,
   DeleteAction,
@@ -24,7 +22,6 @@ import type { ProviderKind } from "@/lib/stratum/api"
 export function ProviderEditor({ provider }: { provider?: string }) {
   const {
     cancel,
-    credentialDirty,
     deleting,
     edit,
     hasLoadedContent,
@@ -38,11 +35,8 @@ export function ProviderEditor({ provider }: { provider?: string }) {
     remove,
     resource,
     retry,
-    returnTo,
     save,
     state,
-    test,
-    testResult,
   } = useStudioProviderEditor(provider)
 
   if (loading)
@@ -86,7 +80,7 @@ export function ProviderEditor({ provider }: { provider?: string }) {
             resourceLabel="Provider"
             explanation="若没有 Agent definition 引用它的 Model，删除 Provider 会同时删除其 Models 与已存凭据；否则系统会列出 blocker 并保持资源不变。"
             pending={deleting}
-            disabled={state.phase === "saving" || state.phase === "testing"}
+            disabled={state.phase === "saving"}
             onDelete={() => void remove()}
           />
         ) : null}
@@ -102,7 +96,7 @@ export function ProviderEditor({ provider }: { provider?: string }) {
       ) : null}
       <form onSubmit={save} className="grid gap-8">
         <fieldset
-          disabled={state.phase === "saving" || state.phase === "testing"}
+          disabled={state.phase === "saving"}
           className="contents"
         >
           <FormSection
@@ -148,56 +142,8 @@ export function ProviderEditor({ provider }: { provider?: string }) {
                   }
                 />
               </Field>
-              {!isNew ? (
-                <div className="flex flex-wrap items-center gap-3">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    className="min-h-11"
-                    disabled={
-                      credentialDirty ||
-                      state.phase === "testing" ||
-                      state.phase === "saving"
-                    }
-                    onClick={() => void test()}
-                  >
-                    {state.phase === "testing" ? (
-                      <>
-                        <LoaderCircle
-                          aria-hidden
-                          className="animate-spin motion-reduce:animate-none"
-                        />
-                        测试中
-                      </>
-                    ) : (
-                      <>
-                        <PlugZap aria-hidden />
-                        测试连接
-                      </>
-                    )}
-                  </Button>
-                  {testResult ? (
-                    <FormStatus
-                      message={testResult.message}
-                      tone={testResult.tone}
-                    />
-                  ) : null}
-                  {credentialDirty ? (
-                    <p className="text-sm text-muted-foreground">
-                      请先保存新凭据，再测试连接。
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
           </FormSection>
-          {!isNew ? (
-            <ProviderModelsSection
-              provider={state.draft.provider}
-              returnTo={returnTo}
-            />
-          ) : null}
           <FormStatus
             message={state.message}
             tone={
@@ -234,6 +180,11 @@ export function ProviderEditor({ provider }: { provider?: string }) {
           </div>
         </fieldset>
       </form>
+      {!isNew ? (
+        <div className="mt-8">
+          <ProviderModelsSection provider={state.draft.provider} />
+        </div>
+      ) : null}
     </>
   )
 }

@@ -35,24 +35,6 @@ describe("Studio form refresh", () => {
     expect(refreshed.etag).toBe('"v2"')
   })
 
-  it("restores a dirty form after a transient Provider test", () => {
-    const loaded = initialFormState({ apiKey: "" }, '"v1"')
-    const dirty = formReducer(loaded, {
-      type: "edit",
-      draft: { apiKey: "local-only" },
-    })
-    const testing = formReducer(dirty, { type: "test" })
-
-    const settled = formReducer(testing, {
-      type: "settle",
-      restorePhase: "dirty",
-    })
-
-    expect(settled.phase).toBe("dirty")
-    expect(settled.draft.apiKey).toBe("local-only")
-    expect(settled.etag).toBe('"v1"')
-  })
-
   it("only replaces a dirty draft after an explicit reload", () => {
     const loaded = initialFormState({ name: "server-v1" }, '"v1"')
     const dirty = formReducer(loaded, {

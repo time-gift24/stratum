@@ -1,7 +1,6 @@
 import type {
   AgentDefinitionInput,
   AgentDefinitionView,
-  ManagedModelView,
   ProviderKind,
   ProviderView,
 } from "@/lib/stratum/api"
@@ -20,13 +19,7 @@ export type ProviderDraft = {
   apiKey: string
 }
 
-export type ModelDraft = {
-  provider: ProviderKind
-  modelName: string
-}
-
-export type FormPhase =
-  "loaded" | "dirty" | "saving" | "invalid" | "conflict" | "testing"
+export type FormPhase = "loaded" | "dirty" | "saving" | "invalid" | "conflict"
 
 export type ManagementFormState<T> = {
   phase: FormPhase
@@ -46,11 +39,6 @@ export type AgentEditorRecord = {
 
 export type ProviderEditorRecord = {
   resource: ProviderView
-  etag: string
-}
-
-export type ModelEditorRecord = {
-  resource: ManagedModelView
   etag: string
 }
 

@@ -161,22 +161,28 @@ export function Field({
   hint,
   children,
 }: {
-  label: string
+  label?: string
   error?: string
   hint?: string
   children: React.ReactNode
 }) {
+  const control =
+    error && isValidElement(children)
+      ? cloneElement(
+          children as React.ReactElement<Record<string, unknown>>,
+          { "aria-invalid": true }
+        )
+      : children
   return (
     <FieldRoot data-invalid={error ? true : undefined}>
-      <FieldLabel className="w-full flex-col items-start gap-2 text-sm leading-normal font-medium select-text">
-        {label}
-        {error && isValidElement(children)
-          ? cloneElement(
-              children as React.ReactElement<Record<string, unknown>>,
-              { "aria-invalid": true }
-            )
-          : children}
-      </FieldLabel>
+      {label === undefined ? (
+        control
+      ) : (
+        <FieldLabel className="w-full flex-col items-start gap-2 text-sm leading-normal font-medium select-text">
+          {label}
+          {control}
+        </FieldLabel>
+      )}
       {error ? (
         <FieldError className="text-sm">{error}</FieldError>
       ) : hint ? (

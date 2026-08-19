@@ -7,7 +7,6 @@ import type { FieldViolation, ResourceBlocker } from "@/lib/stratum/api"
 export type FormAction<T> =
   | { type: "edit"; draft: T; forceDirty?: boolean }
   | { type: "save" }
-  | { type: "test" }
   | { type: "invalid"; message: string; violations?: readonly FieldViolation[] }
   | { type: "conflict"; message: string }
   | { type: "blocked"; message: string; blockers: readonly ResourceBlocker[] }
@@ -89,8 +88,6 @@ export function formReducer<T>(
     }
     case "save":
       return { ...state, phase: "saving", message: null, blockers: [] }
-    case "test":
-      return { ...state, phase: "testing", message: null }
     case "invalid":
       return {
         ...state,

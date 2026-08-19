@@ -109,12 +109,6 @@ export type ProviderInput = {
   api_key?: string
 }
 
-export type ProviderTestResult = {
-  success: boolean
-  completed_at: string
-  message?: string
-}
-
 /** Model 级真实消息测试结果：后端对该 model 发出一次真实最小 chat 请求。 */
 export type ManagedModelTestResult = {
   latency_ms: number
@@ -405,7 +399,6 @@ export type StratumApi = {
     etag: string
   ): Promise<ResourceRevision<ProviderView>>
   deleteProvider(provider: ProviderKind, etag: string): Promise<void>
-  testProvider(provider: ProviderKind): Promise<ProviderTestResult>
   testManagedModel(
     provider: ProviderKind,
     modelName: string
@@ -862,10 +855,6 @@ export function createStratumApi(options: {
       ),
     deleteProvider: (provider, etag) =>
       remove(`/v1/providers/${provider}`, etag),
-    testProvider: (provider) =>
-      request<ProviderTestResult>(`/v1/providers/${provider}/test`, asJson, {
-        method: "POST",
-      }),
     testManagedModel: (provider, modelName) =>
       request<ManagedModelTestResult>(
         `/v1/providers/${provider}/models/${encodeURIComponent(modelName)}/test`,
