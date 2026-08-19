@@ -19,11 +19,11 @@ import { Clock, Cpu, Plus, Wrench } from "lucide-react"
 
 import {
   ErrorState,
+  LoadingState,
   PageHeader,
   PageShell,
   Pagination,
   ResourceCard,
-  ResourceGridSkeleton,
   SearchRow,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -194,7 +194,7 @@ export function StudioDashboard() {
       />
 
       {result === null && error === null ? (
-        <ResourceGridSkeleton label="正在加载 Agent" metaRows={3} />
+        <LoadingState label="正在加载 Agent" />
       ) : null}
 
       {error ? (

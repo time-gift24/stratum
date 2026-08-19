@@ -15,7 +15,7 @@ import {
   MOTION_DURATION,
   MOTION_EASE,
   motionDuration,
-  shouldAnimateChoreographedMotion,
+  prefersReducedMotion,
 } from "@/lib/motion"
 
 gsap.registerPlugin(useGSAP)
@@ -43,7 +43,7 @@ export function SettingsChrome({ children }: { children: React.ReactNode }) {
         return
       }
       const el = contentRef.current
-      if (!el || !shouldAnimateChoreographedMotion()) return
+      if (!el || prefersReducedMotion()) return
       gsap.fromTo(
         el,
         { opacity: 0, y: 6 },

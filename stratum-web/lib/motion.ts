@@ -32,17 +32,6 @@ export function prefersReducedMotion(): boolean {
   return window.matchMedia(REDUCED_MOTION_QUERY).matches
 }
 
-/**
- * 编排式入场只属于 dark 的 graphite world；light 保持即时、平静的操作反馈。
- * 仅在客户端事件或 effect 中调用。
- */
-export function shouldAnimateChoreographedMotion(): boolean {
-  return (
-    document.documentElement.classList.contains("dark") &&
-    !prefersReducedMotion()
-  )
-}
-
 /** 动效时长：prefers-reduced-motion 时瞬时（0），调用处不再各自写三元 */
 export function motionDuration(seconds: number): number {
   return prefersReducedMotion() ? 0 : seconds

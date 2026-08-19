@@ -9,10 +9,10 @@ import { Box, Cpu, KeyRound, Plug, Plus, Search } from "lucide-react"
 
 import {
   ErrorState,
+  LoadingState,
   PageHeader,
   Pagination,
   ResourceCard,
-  ResourceGridSkeleton,
   StatusChip,
   StudioInput,
 } from "@/components/stratum/studio/primitives"
@@ -33,7 +33,7 @@ import {
   MOTION_DURATION,
   MOTION_EASE,
   motionDuration,
-  shouldAnimateChoreographedMotion,
+  prefersReducedMotion,
 } from "@/lib/motion"
 import type {
   ManagedModelSummary,
@@ -148,7 +148,7 @@ export function SettingsList({ kind }: { kind: SettingsKind }) {
       const arrived = prevItemsRef.current === undefined && items !== undefined
       prevItemsRef.current = items
       const grid = gridRef.current
-      if (!arrived || !grid || !shouldAnimateChoreographedMotion()) return
+      if (!arrived || !grid || prefersReducedMotion()) return
       gsap.fromTo(
         grid.children,
         { opacity: 0, y: 10 },
@@ -223,9 +223,8 @@ export function SettingsList({ kind }: { kind: SettingsKind }) {
         </div>
       ) : null}
       {items === undefined && !error ? (
-        <ResourceGridSkeleton
+        <LoadingState
           label={`正在加载 ${kind === "providers" ? "Provider" : "Model"}`}
-          metaRows={2}
         />
       ) : items?.length === 0 && !pageOutOfRange ? (
         <EmptyState

@@ -194,14 +194,6 @@ export function parseAgentToml(source: string): RawAgentParseResult {
   }
 }
 
-export function encodeProviderRaw(view: ProviderView): string {
-  return stringify({
-    provider: view.provider,
-    credential_configured: view.credential_configured,
-    models_count: view.models_count,
-  })
-}
-
 export function encodeModelSchema(view: ManagedModelView): string {
   return JSON.stringify(view.parameter_schema, null, 2)
 }

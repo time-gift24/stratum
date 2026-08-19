@@ -1,6 +1,5 @@
 "use client"
 
-import { useState } from "react"
 import { LoaderCircle, PlugZap } from "lucide-react"
 
 import {
@@ -16,10 +15,8 @@ import {
   SaveButton,
   StudioInput,
   StudioSelect,
-  StudioTextarea,
 } from "@/components/stratum/studio/primitives"
 import { Button } from "@/components/ui/button"
-import { encodeProviderRaw } from "@/features/studio-management/transforms"
 import { useStudioProviderEditor } from "@/hooks/use-studio-provider-editor"
 import type { ProviderKind } from "@/lib/stratum/api"
 
@@ -45,7 +42,6 @@ export function ProviderEditor({ provider }: { provider?: string }) {
     test,
     testResult,
   } = useStudioProviderEditor(provider)
-  const [view, setView] = useState<"structured" | "raw">("structured")
 
   if (loading)
     return (
@@ -107,132 +103,93 @@ export function ProviderEditor({ provider }: { provider?: string }) {
           disabled={state.phase === "saving" || state.phase === "testing"}
           className="contents"
         >
-          <div
-            className="flex w-fit rounded-lg bg-muted p-1"
-            role="tablist"
-            aria-label="Provider 编辑视图"
+          <FormSection
+            title="连接"
+            description="凭据只写不读：已存 secret 永不回显，留空表示保留。"
           >
-            {(["structured", "raw"] as const).map((item) => (
-              <Button
-                key={item}
-                type="button"
-                variant="ghost"
-                size="lg"
-                role="tab"
-                aria-selected={view === item}
-                onClick={() => setView(item)}
-                className="h-8 min-h-11 rounded-md px-3 text-sm aria-selected:bg-card aria-selected:shadow-sm sm:min-h-8"
+            <div className="grid gap-6">
+              <Field label="Provider kind" error={state.violations.provider}>
+                <StudioSelect
+                  ariaLabel="Provider kind"
+                  disabled={!isNew}
+                  value={state.draft.provider}
+                  options={[
+                    { value: "openai", label: "OpenAI" },
+                    { value: "deepseek", label: "DeepSeek" },
+                  ]}
+                  onChange={(next) =>
+                    edit({
+                      ...state.draft,
+                      provider: next as ProviderKind,
+                    })
+                  }
+                />
+              </Field>
+              {!isNew && resource ? (
+                <p className="text-sm text-muted-foreground">
+                  {resource.credential_configured
+                    ? "凭据已配置。留空会保留现有凭据。"
+                    : "尚未配置凭据。"}
+                </p>
+              ) : null}
+              <Field
+                label={isNew ? "API key" : "替换 API key"}
+                error={state.violations.api_key}
+                hint="已存 secret 永不回显；这里留空不会清除已有 secret。"
               >
-                {item === "structured" ? "结构化" : "Raw config"}
-              </Button>
-            ))}
-          </div>
-          {view === "structured" ? (
-            <FormSection
-              title="连接"
-              description="凭据只写不读：已存 secret 永不回显，留空表示保留。"
-            >
-              <div className="grid gap-6">
-                <Field label="Provider kind" error={state.violations.provider}>
-                  <StudioSelect
-                    ariaLabel="Provider kind"
-                    disabled={!isNew}
-                    value={state.draft.provider}
-                    options={[
-                      { value: "openai", label: "OpenAI" },
-                      { value: "deepseek", label: "DeepSeek" },
-                    ]}
-                    onChange={(next) =>
-                      edit({
-                        ...state.draft,
-                        provider: next as ProviderKind,
-                      })
+                <StudioInput
+                  type="password"
+                  autoComplete="new-password"
+                  value={state.draft.apiKey}
+                  onChange={(event) =>
+                    edit({ ...state.draft, apiKey: event.target.value })
+                  }
+                />
+              </Field>
+              {!isNew ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    className="min-h-11"
+                    disabled={
+                      credentialDirty ||
+                      state.phase === "testing" ||
+                      state.phase === "saving"
                     }
-                  />
-                </Field>
-                {!isNew && resource ? (
-                  <p className="text-sm text-muted-foreground">
-                    {resource.credential_configured
-                      ? "凭据已配置。留空会保留现有凭据。"
-                      : "尚未配置凭据。"}
-                  </p>
-                ) : null}
-                <Field
-                  label={isNew ? "API key" : "替换 API key"}
-                  error={state.violations.api_key}
-                  hint="已存 secret 永不回显；这里留空不会清除已有 secret。"
-                >
-                  <StudioInput
-                    type="password"
-                    autoComplete="new-password"
-                    value={state.draft.apiKey}
-                    onChange={(event) =>
-                      edit({ ...state.draft, apiKey: event.target.value })
-                    }
-                  />
-                </Field>
-                {!isNew ? (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="lg"
-                      className="min-h-11"
-                      disabled={
-                        credentialDirty ||
-                        state.phase === "testing" ||
-                        state.phase === "saving"
-                      }
-                      onClick={() => void test()}
-                    >
-                      {state.phase === "testing" ? (
-                        <>
-                          <LoaderCircle
-                            aria-hidden
-                            className="animate-spin motion-reduce:animate-none"
-                          />
-                          测试中
-                        </>
-                      ) : (
-                        <>
-                          <PlugZap aria-hidden />
-                          测试连接
-                        </>
-                      )}
-                    </Button>
-                    {testResult ? (
-                      <FormStatus
-                        message={testResult.message}
-                        tone={testResult.tone}
-                      />
-                    ) : null}
-                    {credentialDirty ? (
-                      <p className="text-sm text-muted-foreground">
-                        请先保存新凭据，再测试连接。
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            </FormSection>
-          ) : (
-            <Field
-              label="脱敏 Provider config"
-              hint="此视图不会包含 secret、掩码、长度或指纹。"
-            >
-              <StudioTextarea
-                readOnly
-                rows={7}
-                spellCheck={false}
-                className="font-mono text-sm leading-6"
-                value={
-                  resource
-                    ? encodeProviderRaw(resource)
-                    : `provider = ${JSON.stringify(state.draft.provider)}\ncredential_configured = false\n`
-                }
-              />
-            </Field>
-          )}
+                    onClick={() => void test()}
+                  >
+                    {state.phase === "testing" ? (
+                      <>
+                        <LoaderCircle
+                          aria-hidden
+                          className="animate-spin motion-reduce:animate-none"
+                        />
+                        测试中
+                      </>
+                    ) : (
+                      <>
+                        <PlugZap aria-hidden />
+                        测试连接
+                      </>
+                    )}
+                  </Button>
+                  {testResult ? (
+                    <FormStatus
+                      message={testResult.message}
+                      tone={testResult.tone}
+                    />
+                  ) : null}
+                  {credentialDirty ? (
+                    <p className="text-sm text-muted-foreground">
+                      请先保存新凭据，再测试连接。
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </FormSection>
           <FormStatus
             message={state.message}
             tone={

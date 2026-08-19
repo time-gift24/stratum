@@ -27,7 +27,6 @@ import {
   FieldSet,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { Skeleton } from "@/components/ui/skeleton"
 import {
   Popover,
   PopoverContent,
@@ -656,53 +655,6 @@ export function LoadingState({ label }: { label: string }) {
         className="size-5 animate-spin motion-reduce:animate-none"
       />
       <span className="text-sm">{label}</span>
-    </div>
-  )
-}
-
-/**
- * ResourceCard 列表冷启动：两列网格、标识、标题与 meta 行都和最终内容同形，
- * 不用示例文案，也不让全区 spinner 造成布局跳变。
- */
-export function ResourceGridSkeleton({
-  label,
-  metaRows,
-  count = 4,
-}: {
-  label: string
-  metaRows: number
-  count?: number
-}) {
-  return (
-    <div role="status" aria-label={label}>
-      <span className="sr-only">{label}</span>
-      <div aria-hidden className="grid gap-3 sm:grid-cols-2">
-        {Array.from({ length: count }, (_, cardIndex) => (
-          <div
-            key={cardIndex}
-            className="flex items-start gap-3.5 rounded-2xl border border-border bg-card p-4"
-          >
-            <Skeleton className="size-10 shrink-0 rounded-xl motion-reduce:animate-none" />
-            <div className="min-w-0 flex-1">
-              <Skeleton className="h-4 w-2/3 max-w-40 motion-reduce:animate-none" />
-              <div className="mt-2 grid">
-                {Array.from({ length: metaRows }, (_, rowIndex) => (
-                  <div
-                    key={rowIndex}
-                    className={cn(
-                      "flex items-center gap-2 py-1.5",
-                      rowIndex > 0 && "border-t border-dashed border-border"
-                    )}
-                  >
-                    <Skeleton className="size-3.5 shrink-0 motion-reduce:animate-none" />
-                    <Skeleton className="h-3 w-1/2 motion-reduce:animate-none" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   )
 }

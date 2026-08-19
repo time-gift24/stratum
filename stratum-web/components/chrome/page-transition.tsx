@@ -9,7 +9,7 @@ import gsap from "gsap"
 import {
   MOTION_DURATION,
   MOTION_EASE,
-  shouldAnimateChoreographedMotion,
+  prefersReducedMotion,
 } from "@/lib/motion"
 
 gsap.registerPlugin(useGSAP)
@@ -111,11 +111,7 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
       // 顶掉可能仍在播的手动出场 tween，避免它把容器留在 opacity: 0
       gsap.killTweensOf(el)
 
-      if (
-        !isFirstPaint &&
-        !siblingSwitch &&
-        shouldAnimateChoreographedMotion()
-      ) {
+      if (!isFirstPaint && !siblingSwitch && !prefersReducedMotion()) {
         gsap.fromTo(
           el,
           { x: 40 * direction, opacity: 0 },
@@ -177,7 +173,7 @@ export function TransitionLink({
     if (to === -1 || to === from) return // 未知页或当前页：交给 Link 默认导航
 
     const el = pageElement
-    if (!el || !shouldAnimateChoreographedMotion()) return
+    if (!el || prefersReducedMotion()) return
 
     const targetPathname = internalNavigationPath(href)
     if (targetPathname === null) return
