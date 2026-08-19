@@ -48,7 +48,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use secrecy::ExposeSecret;
 use stratum_config::Config;
 use stratum_core::ModelId;
 use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
@@ -83,19 +82,8 @@ const PROVIDER_TIMEOUTS: LlmTimeouts = LlmTimeouts::new(
     Duration::from_secs(30),
     Duration::from_secs(60),
 );
-/// Hard bound for the low-side-effect Provider credential probe.
+/// Hard bound for one transient Provider Model message test.
 const PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Safe failure of one transient Provider connection test.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ProviderProbeError {
-    /// Studio could not provide the requested credential snapshot.
-    #[error("studio provider snapshot is unavailable")]
-    Studio(#[from] stratum_studio::StudioError),
-    /// The fixed-endpoint request failed, timed out, or was rejected.
-    #[error("provider connection test failed")]
-    Failed,
-}
 
 /// Safe failure of one real-message Model test.
 #[derive(Debug, thiserror::Error)]
@@ -177,26 +165,6 @@ impl ProviderFactory {
                 Ok(())
             }
         }
-    }
-
-    async fn probe(&self, provider: RuntimeProvider) -> Result<(), ProviderProbeError> {
-        let endpoint = match provider.kind {
-            ProviderKind::Openai => concat!("https://api.openai.com/v1", "/models"),
-            ProviderKind::Deepseek => concat!("https://api.deepseek.com", "/models"),
-        };
-        let client = reqwest::Client::builder()
-            .connect_timeout(PROVIDER_PROBE_TIMEOUT)
-            .timeout(PROVIDER_PROBE_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| ProviderProbeError::Failed)?;
-        probe_endpoint(
-            &client,
-            endpoint,
-            provider.api_key.expose_secret(),
-            PROVIDER_PROBE_TIMEOUT,
-        )
-        .await
     }
 
     /// Builds the trusted adapter for exactly one model of one Provider
@@ -291,23 +259,6 @@ fn register_deepseek_models(
     Ok(())
 }
 
-async fn probe_endpoint(
-    client: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    timeout: Duration,
-) -> Result<(), ProviderProbeError> {
-    let response = tokio::time::timeout(timeout, client.get(endpoint).bearer_auth(api_key).send())
-        .await
-        .map_err(|_| ProviderProbeError::Failed)?
-        .map_err(|_| ProviderProbeError::Failed)?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(ProviderProbeError::Failed)
-    }
-}
-
 /// Sends one real minimal message through the model's adapter and returns the
 /// round-trip latency in milliseconds. The request carries a single user
 /// message and no tools; the wall clock is bounded by
@@ -338,6 +289,7 @@ fn classify_model_probe_error(error: LlmError) -> ModelProbeError {
         _ => ModelProbeError::Failed,
     }
 }
+
 /// Reads a config file and serves until shutdown.
 ///
 /// # Errors
@@ -521,22 +473,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
-    use std::time::Duration;
 
     use axum::{
-        Json, Router,
-        body::Body,
-        extract::ConnectInfo,
-        http::StatusCode,
-        response::Response,
-        routing::{get, post},
+        Json, Router, body::Body, extract::ConnectInfo, http::StatusCode, response::Response,
+        routing::post,
     };
     use serde_json::json;
     use stratum_llm::ChatRequest;
 
     use super::{
-        HostError, ModelProbeError, ProviderFactory, ProviderProbeError, probe_endpoint,
-        probe_model_chat, register_openai_models, wait_until,
+        HostError, ModelProbeError, ProviderFactory, probe_model_chat, register_openai_models,
+        wait_until,
     };
     use stratum_core::ModelId;
     use stratum_studio::{ProviderKind, RuntimeProvider};
@@ -772,85 +719,6 @@ mod tests {
 
         assert!(matches!(error, ModelProbeError::Failed));
         assert!(!format!("{error:?}").contains("model-probe-secret"));
-        server.abort();
-    }
-
-    async fn probe_server(
-        status: StatusCode,
-        body: &'static str,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener binds");
-        let address = listener.local_addr().expect("listener has an address");
-        let server = tokio::spawn(async move {
-            let app = Router::new().route(
-                "/models",
-                get(move || async move {
-                    Response::builder()
-                        .status(status)
-                        .body(Body::from(body))
-                        .expect("response builds")
-                }),
-            );
-            axum::serve(listener, app)
-                .await
-                .expect("mock probe server runs");
-        });
-        (format!("http://{address}/models"), server)
-    }
-
-    #[tokio::test]
-    async fn provider_probe_accepts_success_and_sanitizes_rejection() {
-        let (success_url, success_server) = probe_server(StatusCode::OK, "").await;
-        let client = reqwest::Client::new();
-        probe_endpoint(
-            &client,
-            &success_url,
-            "probe-secret",
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("successful status passes");
-        success_server.abort();
-
-        let sentinel = "provider-body-secret-sentinel";
-        let (failure_url, failure_server) = probe_server(StatusCode::UNAUTHORIZED, sentinel).await;
-        let error = probe_endpoint(
-            &client,
-            &failure_url,
-            "probe-secret",
-            Duration::from_secs(1),
-        )
-        .await
-        .expect_err("authentication rejection fails");
-        assert!(matches!(error, ProviderProbeError::Failed));
-        assert!(!format!("{error:?}").contains(sentinel));
-        assert!(!format!("{error:?}").contains("probe-secret"));
-        failure_server.abort();
-    }
-
-    #[tokio::test]
-    async fn provider_probe_timeout_is_bounded_and_sanitized() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener binds");
-        let address = listener.local_addr().expect("listener has an address");
-        let server = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.expect("probe connects");
-            std::future::pending::<()>().await;
-        });
-        let endpoint = format!("http://{address}/models");
-        let error = probe_endpoint(
-            &reqwest::Client::new(),
-            &endpoint,
-            "timeout-secret",
-            Duration::from_millis(20),
-        )
-        .await
-        .expect_err("stalled probe times out");
-        assert!(matches!(error, ProviderProbeError::Failed));
-        assert!(!format!("{error:?}").contains("timeout-secret"));
         server.abort();
     }
 

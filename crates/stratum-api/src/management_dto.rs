@@ -198,15 +198,6 @@ pub enum DangerLevelDto {
     High,
 }
 
-/// Result of one transient Provider credential probe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-pub struct ProviderTestResult {
-    /// Always true for this success response; failures use the error envelope.
-    pub success: bool,
-    /// Server completion time of this one probe.
-    pub completed_at: DateTime<Utc>,
-}
-
 /// Result of one real-message Model test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct ModelTestResult {

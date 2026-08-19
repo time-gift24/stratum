@@ -31,13 +31,13 @@ use stratum_studio::{
 use utoipa::OpenApi;
 
 use crate::{
-    ApiError, AppState, ErrorKind, ModelProbeError, ProviderProbeError,
+    ApiError, AppState, ErrorKind, ModelProbeError,
     error::ErrorResponse,
     management_dto::{
         AgentDefinitionView, AgentDefinitionsPage, CreateAgentDefinitionRequest,
         CreateModelRequest, CreateProviderRequest, DangerLevelDto, ModelTestResult, ModelView,
-        ModelsPage, PaginationView, ProviderKindDto, ProviderTestResult, ProviderView,
-        ProvidersPage, ToolKindDto, ToolView, UpdateAgentDefinitionRequest, UpdateProviderRequest,
+        ModelsPage, PaginationView, ProviderKindDto, ProviderView, ProvidersPage, ToolKindDto,
+        ToolView, UpdateAgentDefinitionRequest, UpdateProviderRequest,
     },
     turn::build_tool_registry,
 };
@@ -64,7 +64,6 @@ const MAX_PER_PAGE: usize = 100;
         get_provider,
         update_provider,
         delete_provider,
-        test_provider,
         list_provider_models,
         create_provider_model,
         get_provider_model,
@@ -86,7 +85,6 @@ const MAX_PER_PAGE: usize = 100;
         ModelsPage,
         CreateModelRequest,
         PaginationView,
-        ProviderTestResult,
         ModelTestResult,
         ToolView,
         ToolKindDto,
@@ -149,10 +147,6 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
             get(get_provider)
                 .put(update_provider)
                 .delete(delete_provider),
-        )
-        .route(
-            "/v1/providers/{provider}/test",
-            axum::routing::post(test_provider),
         )
         .route(
             "/v1/providers/{provider}/models",
@@ -570,41 +564,6 @@ async fn update_provider(
         updated.version,
         None,
     )
-}
-
-/// Runs one transient, fixed-endpoint Provider credential test.
-#[utoipa::path(
-    post,
-    path = "/v1/providers/{provider}/test",
-    tag = "Studio",
-    params(("provider" = ProviderKindDto, Path, description = "supported Provider kind")),
-    responses(
-        (status = 200, description = "this Provider probe succeeded", body = ProviderTestResult),
-        (status = 400, description = "Provider path parameter is invalid", body = ErrorResponse),
-        (status = 404, description = "Studio Provider was not found", body = ErrorResponse),
-        (status = 502, description = "Provider rejected or did not answer the probe", body = ErrorResponse),
-        (status = 500, description = "Studio Provider catalog is corrupt", body = ErrorResponse),
-        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
-    )
-)]
-async fn test_provider(
-    State(state): State<Arc<AppState>>,
-    provider: Result<Path<ProviderKindDto>, PathRejection>,
-) -> Result<Json<ProviderTestResult>, ApiError> {
-    let kind: ProviderKind = path(provider)?.into();
-    state
-        .test_studio_provider(kind)
-        .await
-        .map_err(map_provider_probe_error)?;
-    tracing::info!(
-        provider = kind.as_str(),
-        outcome = "success",
-        "provider connection test completed"
-    );
-    Ok(Json(ProviderTestResult {
-        success: true,
-        completed_at: chrono::Utc::now(),
-    }))
 }
 
 /// Deletes a Studio Provider when its strong ETag is current.
@@ -1056,13 +1015,6 @@ fn map_studio_error(error: StudioError, not_found: ErrorKind) -> ApiError {
         _ => ErrorKind::Internal,
     };
     ApiError::from_studio(kind, error)
-}
-
-fn map_provider_probe_error(error: ProviderProbeError) -> ApiError {
-    match error {
-        ProviderProbeError::Studio(error) => map_provider_error(error),
-        ProviderProbeError::Failed => ApiError::with_source(ErrorKind::ProviderTestFailed, error),
-    }
 }
 
 fn map_model_probe_error(error: ModelProbeError) -> ApiError {

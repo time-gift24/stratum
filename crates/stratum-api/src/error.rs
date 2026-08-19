@@ -297,7 +297,7 @@ pub enum ErrorKind {
     OntologyStoreUnavailable,
     /// 503: Studio PostgreSQL cannot serve the request.
     StudioStoreUnavailable,
-    /// 502: a transient fixed-endpoint Provider test failed.
+    /// 502: a transient real-message Provider Model test failed.
     ProviderTestFailed,
 }
 
@@ -473,7 +473,7 @@ impl ErrorKind {
             Self::ServiceShuttingDown => "the service is shutting down",
             Self::OntologyStoreUnavailable => "ontology store is unavailable",
             Self::StudioStoreUnavailable => "studio store is unavailable",
-            Self::ProviderTestFailed => "the provider connection test failed",
+            Self::ProviderTestFailed => "the provider model message test failed",
         }
     }
 }

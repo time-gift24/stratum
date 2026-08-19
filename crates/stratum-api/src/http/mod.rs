@@ -424,7 +424,6 @@ mod tests {
         let disabled_paths = disabled["paths"].as_object().expect("paths are an object");
         assert!(!disabled_paths.contains_key("/v1/agent-definitions"));
         assert!(!disabled_paths.contains_key("/v1/providers"));
-        assert!(!disabled_paths.contains_key("/v1/providers/{provider}/test"));
         assert!(!disabled_paths.contains_key("/v1/providers/{provider}/models/{model_name}/test"));
         assert!(!disabled_paths.contains_key("/v1/tools"));
 
@@ -453,7 +452,6 @@ mod tests {
                 "/v1/providers/{provider}/models/{model_name}/test",
                 ["post"].as_slice(),
             ),
-            ("/v1/providers/{provider}/test", ["post"].as_slice()),
             ("/v1/tools", ["get"].as_slice()),
         ];
 
@@ -488,7 +486,6 @@ mod tests {
             response_codes("/v1/providers/{provider}/models/{model_name}", "delete")
                 .contains_key("409")
         );
-        assert!(response_codes("/v1/providers/{provider}/test", "post").contains_key("500"));
         assert!(response_codes("/v1/providers/{provider}", "put").contains_key("422"));
         assert!(response_codes("/v1/providers/{provider}/models", "post").contains_key("404"));
         assert!(

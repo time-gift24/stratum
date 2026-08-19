@@ -26,9 +26,7 @@ use crate::error::{ApiError, ErrorKind};
 use crate::host_error::HostError;
 use crate::registry::TurnRegistry;
 use crate::turn::build_tool_registry;
-use crate::{
-    ModelProbeError, ProviderFactory, ProviderProbeError, probe_model_chat, providers_from_studio,
-};
+use crate::{ModelProbeError, ProviderFactory, probe_model_chat, providers_from_studio};
 
 /// Process-owned background tasks (dispatchers and SSE tail pumps). Every
 /// spawned task stays in this set until it is joined during normal operation
@@ -335,22 +333,6 @@ impl AppState {
                 source,
             })?;
         Ok(providers.get(&model)?.parameter_schema())
-    }
-
-    /// Runs one transient test against the fixed endpoint using the current
-    /// Studio credential snapshot. No health state is persisted.
-    pub(crate) async fn test_studio_provider(
-        &self,
-        kind: ProviderKind,
-    ) -> Result<(), ProviderProbeError> {
-        let provider = self
-            .studio
-            .runtime_providers()
-            .await?
-            .into_iter()
-            .find(|provider| provider.kind == kind)
-            .ok_or(stratum_studio::StudioError::NotFound)?;
-        self.provider_factory.probe(provider).await
     }
 
     /// Sends one real minimal message through the requested Studio Model's

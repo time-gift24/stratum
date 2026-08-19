@@ -178,14 +178,6 @@ async fn management_http_flow_is_versioned_blocking_persistent_and_secret_safe()
     reset_studio(&studio).await;
     let app = assembled_app(studio.clone(), true).await;
 
-    // A missing Provider test stays local and never reaches the external
-    // adapter probe. Transport success/failure is covered by loopback unit
-    // tests in the API host.
-    let (status, missing_provider) =
-        json_request(&app, "POST", "/v1/providers/openai/test", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(missing_provider["error"]["code"], "provider_not_found");
-
     let (status, provider_headers, provider) = json_request_with_if_match(
         &app,
         "POST",
