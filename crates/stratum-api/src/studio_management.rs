@@ -31,13 +31,13 @@ use stratum_studio::{
 use utoipa::OpenApi;
 
 use crate::{
-    ApiError, AppState, ErrorKind, ProviderProbeError,
+    ApiError, AppState, ErrorKind, ModelProbeError, ProviderProbeError,
     error::ErrorResponse,
     management_dto::{
         AgentDefinitionView, AgentDefinitionsPage, CreateAgentDefinitionRequest,
-        CreateModelRequest, CreateProviderRequest, DangerLevelDto, ModelView, ModelsPage,
-        PaginationView, ProviderKindDto, ProviderTestResult, ProviderView, ProvidersPage,
-        ToolKindDto, ToolView, UpdateAgentDefinitionRequest, UpdateProviderRequest,
+        CreateModelRequest, CreateProviderRequest, DangerLevelDto, ModelTestResult, ModelView,
+        ModelsPage, PaginationView, ProviderKindDto, ProviderTestResult, ProviderView,
+        ProvidersPage, ToolKindDto, ToolView, UpdateAgentDefinitionRequest, UpdateProviderRequest,
     },
     turn::build_tool_registry,
 };
@@ -69,6 +69,7 @@ const MAX_PER_PAGE: usize = 100;
         create_provider_model,
         get_provider_model,
         delete_provider_model,
+        test_provider_model,
         list_tools,
     ),
     components(schemas(
@@ -86,6 +87,7 @@ const MAX_PER_PAGE: usize = 100;
         CreateModelRequest,
         PaginationView,
         ProviderTestResult,
+        ModelTestResult,
         ToolView,
         ToolKindDto,
         DangerLevelDto,
@@ -159,6 +161,10 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/providers/{provider}/models/{model_name}",
             get(get_provider_model).delete(delete_provider_model),
+        )
+        .route(
+            "/v1/providers/{provider}/models/{model_name}/test",
+            axum::routing::post(test_provider_model),
         )
         .route("/v1/tools", get(list_tools))
 }
@@ -789,6 +795,42 @@ async fn get_provider_model(
     versioned_response(StatusCode::OK, view, version, None)
 }
 
+/// Sends one real minimal message through a configured Studio Provider model.
+#[utoipa::path(
+    post,
+    path = "/v1/providers/{provider}/models/{model_name}/test",
+    tag = "Studio",
+    params(
+        ("provider" = ProviderKindDto, Path, description = "supported Provider kind"),
+        ("model_name" = String, Path, description = "Provider-local model name")
+    ),
+    responses(
+        (status = 200, description = "the model answered the real test message", body = ModelTestResult),
+        (status = 400, description = "path is invalid", body = ErrorResponse),
+        (status = 404, description = "Studio Provider or model was not found", body = ErrorResponse),
+        (status = 502, description = "Provider rejected, or did not answer, the test message", body = ErrorResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store or runtime Provider catalog is unavailable", body = ErrorResponse),
+    )
+)]
+async fn test_provider_model(
+    State(state): State<Arc<AppState>>,
+    path_value: Result<Path<(ProviderKindDto, String)>, PathRejection>,
+) -> Result<Json<ModelTestResult>, ApiError> {
+    let (provider, model_name) = path(path_value)?;
+    let kind: ProviderKind = provider.into();
+    let latency_ms = state
+        .test_studio_model(kind, &model_name)
+        .await
+        .map_err(map_model_probe_error)?;
+    tracing::info!(
+        provider = kind.as_str(),
+        outcome = "success",
+        "provider model message test completed"
+    );
+    Ok(Json(ModelTestResult { latency_ms }))
+}
+
 /// Deletes one Studio Provider model when its strong ETag is current.
 #[utoipa::path(
     delete,
@@ -1020,6 +1062,17 @@ fn map_provider_probe_error(error: ProviderProbeError) -> ApiError {
     match error {
         ProviderProbeError::Studio(error) => map_provider_error(error),
         ProviderProbeError::Failed => ApiError::with_source(ErrorKind::ProviderTestFailed, error),
+    }
+}
+
+fn map_model_probe_error(error: ModelProbeError) -> ApiError {
+    match error {
+        ModelProbeError::Studio(error) => map_provider_error(error),
+        ModelProbeError::ModelNotConfigured => {
+            ApiError::with_source(ErrorKind::ManagedModelNotFound, error)
+        }
+        ModelProbeError::Adapter(source) => map_host_error(source),
+        other => ApiError::with_source(ErrorKind::ProviderTestFailed, other),
     }
 }
 
@@ -1325,6 +1378,32 @@ mod tests {
 
         for (error, code) in cases {
             assert_json_error(error.into_response(), StatusCode::NOT_FOUND, code).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn model_probe_errors_keep_stable_statuses_and_codes() {
+        let not_found = [
+            map_model_probe_error(ModelProbeError::Studio(StudioError::NotFound)),
+            map_model_probe_error(ModelProbeError::ModelNotConfigured),
+        ];
+        let expected_codes = ["provider_not_found", "managed_model_not_found"];
+        for (error, code) in not_found.into_iter().zip(expected_codes) {
+            assert_json_error(error.into_response(), StatusCode::NOT_FOUND, code).await;
+        }
+
+        let upstream_failures = [
+            ModelProbeError::Credentials,
+            ModelProbeError::ModelNotAvailable,
+            ModelProbeError::Failed,
+        ];
+        for error in upstream_failures {
+            assert_json_error(
+                map_model_probe_error(error).into_response(),
+                StatusCode::BAD_GATEWAY,
+                "provider_test_failed",
+            )
+            .await;
         }
     }
 

@@ -510,6 +510,53 @@ async fn management_http_flow_is_versioned_blocking_persistent_and_secret_safe()
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
+async fn model_message_test_enforces_catalog_membership_before_any_upstream_call() {
+    let studio = StudioStore::connect(&studio_pg_url())
+        .await
+        .expect("Studio PostgreSQL test database connects");
+    reset_studio(&studio).await;
+    let app = assembled_app(studio.clone(), true).await;
+
+    // A missing Provider stays local and never reaches the upstream adapter.
+    let (status, missing_provider) = json_request(
+        &app,
+        "POST",
+        "/v1/providers/openai/models/any-model/test",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing_provider["error"]["code"], "provider_not_found");
+
+    let (status, _) = json_request(
+        &app,
+        "POST",
+        "/v1/providers",
+        Some(json!({
+            "provider": "openai",
+            "api_key": MANAGEMENT_SECRET,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A model outside the Provider catalog is a managed-model miss and never
+    // reaches the upstream adapter. Transport success/failure for a
+    // configured model is covered by loopback unit tests in the API host.
+    let (status, unknown_model) = json_request(
+        &app,
+        "POST",
+        "/v1/providers/openai/models/unknown-model/test",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown_model["error"]["code"], "managed_model_not_found");
+    assert_secrets_absent(&unknown_model);
+}
+
+#[tokio::test]
+#[ignore = "requires the stratum-api-test compose stack"]
 async fn missing_studio_credential_fails_runtime_assembly_closed() {
     let studio = StudioStore::connect(&corrupt_studio_pg_url())
         .await

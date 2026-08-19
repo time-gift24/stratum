@@ -46,15 +46,15 @@ mod integration_studio_db_only;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use secrecy::ExposeSecret;
 use stratum_config::Config;
 use stratum_core::ModelId;
 use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 use stratum_llm::{
-    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmProviderManager, LlmTimeouts,
-    OpenAICompatibleProvider,
+    ApiKey, ChatMessage, ChatRequest, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError,
+    LlmProvider, LlmProviderManager, LlmTimeouts, OpenAICompatibleProvider,
 };
 use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
@@ -94,6 +94,29 @@ pub(crate) enum ProviderProbeError {
     Studio(#[from] stratum_studio::StudioError),
     /// The fixed-endpoint request failed, timed out, or was rejected.
     #[error("provider connection test failed")]
+    Failed,
+}
+
+/// Safe failure of one real-message Model test.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ModelProbeError {
+    /// Studio could not provide the requested credential snapshot.
+    #[error("studio provider snapshot is unavailable")]
+    Studio(#[from] stratum_studio::StudioError),
+    /// The requested model is not configured under this Provider.
+    #[error("model is not configured for the provider")]
+    ModelNotConfigured,
+    /// The trusted adapter for this model cannot be assembled.
+    #[error("model adapter cannot be assembled")]
+    Adapter(#[from] HostError),
+    /// The provider rejected the credential (401/403).
+    #[error("provider rejected the model test credential")]
+    Credentials,
+    /// The provider does not serve this model (upstream 404).
+    #[error("model is not available at the provider")]
+    ModelNotAvailable,
+    /// The message test timed out, failed in transport, or was rejected.
+    #[error("provider model test failed")]
     Failed,
 }
 
@@ -175,6 +198,61 @@ impl ProviderFactory {
         )
         .await
     }
+
+    /// Builds the trusted adapter for exactly one model of one Provider
+    /// snapshot, reusing the registration-path builder parameters.
+    fn build_model_adapter(
+        &self,
+        provider: RuntimeProvider,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>, HostError> {
+        let api_key = ApiKey::from(provider.api_key);
+        match provider.kind {
+            ProviderKind::Openai => Ok(Arc::new(openai_adapter(
+                &self.runtime_client,
+                OPENAI_BASE_URL,
+                api_key,
+                model,
+            )?)),
+            ProviderKind::Deepseek => Ok(Arc::new(deepseek_adapter(
+                &self.runtime_client,
+                DEEPSEEK_BASE_URL,
+                api_key,
+                model,
+            )?)),
+        }
+    }
+}
+
+fn openai_adapter(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: ApiKey,
+    model: &str,
+) -> Result<OpenAICompatibleProvider, HostError> {
+    Ok(OpenAICompatibleProvider::builder()
+        .client(client.clone())
+        .base_url(base_url)
+        .api_key(api_key)
+        .model(model_id("openai", model)?)
+        .timeouts(PROVIDER_TIMEOUTS)
+        .build())
+}
+
+fn deepseek_adapter(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: ApiKey,
+    model: &str,
+) -> Result<DeepSeekProvider, HostError> {
+    Ok(DeepSeekProvider::builder()
+        .client(client.clone())
+        .base_url(base_url)
+        .api_key(api_key)
+        .model(deepseek_model(model)?)
+        .thinking(DeepSeekThinking::Disabled)
+        .timeouts(PROVIDER_TIMEOUTS)
+        .build())
 }
 
 fn register_openai_models(
@@ -185,16 +263,12 @@ fn register_openai_models(
 ) -> Result<(), HostError> {
     let api_key = ApiKey::from(provider.api_key);
     for model in provider.models {
-        let model_id = model_id("openai", &model)?;
-        providers.register(Arc::new(
-            OpenAICompatibleProvider::builder()
-                .client(client.clone())
-                .base_url(base_url)
-                .api_key(api_key.clone())
-                .model(model_id)
-                .timeouts(PROVIDER_TIMEOUTS)
-                .build(),
-        ))?;
+        providers.register(Arc::new(openai_adapter(
+            client,
+            base_url,
+            api_key.clone(),
+            &model,
+        )?))?;
     }
     Ok(())
 }
@@ -207,17 +281,12 @@ fn register_deepseek_models(
 ) -> Result<(), HostError> {
     let api_key = ApiKey::from(provider.api_key);
     for model in provider.models {
-        let adapter_model = deepseek_model(&model)?;
-        providers.register(Arc::new(
-            DeepSeekProvider::builder()
-                .client(client.clone())
-                .base_url(base_url)
-                .api_key(api_key.clone())
-                .model(adapter_model)
-                .thinking(DeepSeekThinking::Disabled)
-                .timeouts(PROVIDER_TIMEOUTS)
-                .build(),
-        ))?;
+        providers.register(Arc::new(deepseek_adapter(
+            client,
+            base_url,
+            api_key.clone(),
+            &model,
+        )?))?;
     }
     Ok(())
 }
@@ -236,6 +305,37 @@ async fn probe_endpoint(
         Ok(())
     } else {
         Err(ProviderProbeError::Failed)
+    }
+}
+
+/// Sends one real minimal message through the model's adapter and returns the
+/// round-trip latency in milliseconds. The request carries a single user
+/// message and no tools; the wall clock is bounded by
+/// [`PROVIDER_PROBE_TIMEOUT`] independently of the adapter's own policy.
+async fn probe_model_chat(provider: &dyn LlmProvider) -> Result<u64, ModelProbeError> {
+    let request = ChatRequest::new(provider.model_id()).with_message(ChatMessage::user("ping"));
+    let started = Instant::now();
+    let result = tokio::time::timeout(PROVIDER_PROBE_TIMEOUT, provider.chat(request)).await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match result {
+        Ok(Ok(_)) => Ok(latency_ms),
+        Ok(Err(error)) => Err(classify_model_probe_error(error)),
+        Err(_) => Err(ModelProbeError::Failed),
+    }
+}
+
+/// Classifies one chat failure into a safe typed probe error. Provider status
+/// payloads stay inside the discarded source; nothing upstream-derived crosses
+/// into the classification.
+fn classify_model_probe_error(error: LlmError) -> ModelProbeError {
+    match error {
+        LlmError::ProviderStatus(status) if matches!(status.status(), 401 | 403) => {
+            ModelProbeError::Credentials
+        }
+        LlmError::ProviderStatus(status) if status.status() == 404 => {
+            ModelProbeError::ModelNotAvailable
+        }
+        _ => ModelProbeError::Failed,
     }
 }
 /// Reads a config file and serves until shutdown.
@@ -435,8 +535,8 @@ mod tests {
     use stratum_llm::ChatRequest;
 
     use super::{
-        HostError, ProviderFactory, ProviderProbeError, probe_endpoint, register_openai_models,
-        wait_until,
+        HostError, ModelProbeError, ProviderFactory, ProviderProbeError, probe_endpoint,
+        probe_model_chat, register_openai_models, wait_until,
     };
     use stratum_core::ModelId;
     use stratum_studio::{ProviderKind, RuntimeProvider};
@@ -555,6 +655,123 @@ mod tests {
             1,
             "model adapters must reuse the factory client's connection pool"
         );
+        server.abort();
+    }
+
+    async fn chat_completions_server(
+        status: StatusCode,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("listener has an address");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/chat/completions",
+                post(move || async move {
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(body))
+                        .expect("response builds")
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("mock chat server runs");
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn loopback_probe_adapter(base_url: &str) -> Arc<dyn stratum_llm::LlmProvider> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test client builds");
+        let records = RuntimeProvider {
+            kind: ProviderKind::Openai,
+            api_key: "model-probe-secret".into(),
+            models: vec!["model-a".to_owned()],
+        };
+        let mut providers = stratum_llm::LlmProviderManager::new();
+        register_openai_models(&mut providers, records, &client, base_url)
+            .expect("providers compose");
+        providers
+            .get(&"openai:model-a".parse().expect("model id parses"))
+            .expect("provider exists")
+    }
+
+    #[tokio::test]
+    async fn model_probe_reports_latency_for_a_real_message() {
+        let (base_url, server) = chat_completions_server(
+            StatusCode::OK,
+            r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+        )
+        .await;
+        let adapter = loopback_probe_adapter(&base_url);
+
+        let latency_ms = probe_model_chat(adapter.as_ref())
+            .await
+            .expect("mock provider answers the test message");
+
+        assert!(latency_ms < 10_000);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_probe_maps_credential_rejection_without_leaking_secrets() {
+        let sentinel = "model-probe-secret";
+        let (base_url, server) = chat_completions_server(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":{"message":"invalid key model-probe-secret"}}"#,
+        )
+        .await;
+        let adapter = loopback_probe_adapter(&base_url);
+
+        let error = probe_model_chat(adapter.as_ref())
+            .await
+            .expect_err("credential rejection fails");
+
+        assert!(matches!(error, ModelProbeError::Credentials));
+        assert!(!format!("{error:?}").contains(sentinel));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_probe_maps_a_model_unknown_to_the_upstream() {
+        let (base_url, server) = chat_completions_server(
+            StatusCode::NOT_FOUND,
+            r#"{"error":{"message":"model not found"}}"#,
+        )
+        .await;
+        let adapter = loopback_probe_adapter(&base_url);
+
+        let error = probe_model_chat(adapter.as_ref())
+            .await
+            .expect_err("unknown upstream model fails");
+
+        assert!(matches!(error, ModelProbeError::ModelNotAvailable));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn model_probe_timeout_is_bounded_and_sanitized() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("listener has an address");
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("probe connects");
+            std::future::pending::<()>().await;
+        });
+        let adapter = loopback_probe_adapter(&format!("http://{address}"));
+
+        let error = probe_model_chat(adapter.as_ref())
+            .await
+            .expect_err("stalled provider times out");
+
+        assert!(matches!(error, ModelProbeError::Failed));
+        assert!(!format!("{error:?}").contains("model-probe-secret"));
         server.abort();
     }
 

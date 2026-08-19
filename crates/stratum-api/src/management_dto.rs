@@ -206,3 +206,10 @@ pub struct ProviderTestResult {
     /// Server completion time of this one probe.
     pub completed_at: DateTime<Utc>,
 }
+
+/// Result of one real-message Model test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ModelTestResult {
+    /// Round-trip latency of the provider chat call in milliseconds.
+    pub latency_ms: u64,
+}

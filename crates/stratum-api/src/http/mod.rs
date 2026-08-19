@@ -425,6 +425,7 @@ mod tests {
         assert!(!disabled_paths.contains_key("/v1/agent-definitions"));
         assert!(!disabled_paths.contains_key("/v1/providers"));
         assert!(!disabled_paths.contains_key("/v1/providers/{provider}/test"));
+        assert!(!disabled_paths.contains_key("/v1/providers/{provider}/models/{model_name}/test"));
         assert!(!disabled_paths.contains_key("/v1/tools"));
 
         let enabled = serde_json::to_value(openapi(true)).expect("OpenAPI serializes");
@@ -447,6 +448,10 @@ mod tests {
             (
                 "/v1/providers/{provider}/models/{model_name}",
                 ["get", "delete"].as_slice(),
+            ),
+            (
+                "/v1/providers/{provider}/models/{model_name}/test",
+                ["post"].as_slice(),
             ),
             ("/v1/providers/{provider}/test", ["post"].as_slice()),
             ("/v1/tools", ["get"].as_slice()),

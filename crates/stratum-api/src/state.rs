@@ -26,7 +26,9 @@ use crate::error::{ApiError, ErrorKind};
 use crate::host_error::HostError;
 use crate::registry::TurnRegistry;
 use crate::turn::build_tool_registry;
-use crate::{ProviderFactory, ProviderProbeError, providers_from_studio};
+use crate::{
+    ModelProbeError, ProviderFactory, ProviderProbeError, probe_model_chat, providers_from_studio,
+};
 
 /// Process-owned background tasks (dispatchers and SSE tail pumps). Every
 /// spawned task stays in this set until it is joined during normal operation
@@ -349,6 +351,29 @@ impl AppState {
             .find(|provider| provider.kind == kind)
             .ok_or(stratum_studio::StudioError::NotFound)?;
         self.provider_factory.probe(provider).await
+    }
+
+    /// Sends one real minimal message through the requested Studio Model's
+    /// adapter using the current credential snapshot, and returns the
+    /// round-trip latency in milliseconds. The model must be configured under
+    /// this Provider in the Studio catalog; no health state is persisted.
+    pub(crate) async fn test_studio_model(
+        &self,
+        kind: ProviderKind,
+        name: &str,
+    ) -> Result<u64, ModelProbeError> {
+        let provider = self
+            .studio
+            .runtime_providers()
+            .await?
+            .into_iter()
+            .find(|provider| provider.kind == kind)
+            .ok_or(stratum_studio::StudioError::NotFound)?;
+        if !provider.models.iter().any(|model| model == name) {
+            return Err(ModelProbeError::ModelNotConfigured);
+        }
+        let adapter = self.provider_factory.build_model_adapter(provider, name)?;
+        probe_model_chat(adapter.as_ref()).await
     }
 
     /// Validates one prospective Agent definition against the DB-derived
