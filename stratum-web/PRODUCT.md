@@ -8,13 +8,13 @@ web
 
 ## Users
 
-与仓库根 `PRODUCT.md` 一致：主要使用者通过对话委托真实任务；配置 Agent 的开发者与管理员是第二类使用者。Web 前端分别以对话和 Studio 服务两类任务，信息架构与概念必须保持边界。
+与仓库根 `PRODUCT.md` 一致：主要使用者通过对话委托真实任务，也可配置周期触发；配置 Agent 的开发者与管理员是第二类使用者。Web 前端分别以对话、计划任务和 Studio 服务不同任务，信息架构与概念必须保持边界。
 
 ## Product Purpose
 
-Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/conversation` 承载任务执行，`/excalidraw` 承载独立白板，`/studio` 承载 Provider、Model 与 Agent definition 管理；`/` 仍直接重定向到对话。
+Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/conversation` 承载任务执行，`/schedulers` 配置计划任务并下钻触发历史，`/excalidraw` 承载独立白板，`/studio` 承载 Provider、Model 与 Agent definition 管理；`/` 仍直接重定向到对话。
 
-成功标准：发起任务、理解反馈、恢复会话和管理真实 Agent 配置都清晰可信；Studio 的 revision、校验、引用 blocker 和 secret 状态必须如实呈现。
+成功标准：发起任务、理解反馈、恢复会话、追溯计划触发记录和管理真实 Agent 配置都清晰可信；Studio 的 revision、校验、引用 blocker 和 secret 状态必须如实呈现。
 
 ## Positioning
 
@@ -31,7 +31,8 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/
 
 ## Capabilities and Constraints
 
-- 路由分工：`/conversation` 面向最终用户，`/excalidraw` 是沉浸白板，`/studio` 与其子路由面向开发者/管理员；`app/(site)/page.tsx` 只做 `redirect("/conversation")`。
+- 路由分工：`/conversation` 面向最终用户，`/schedulers` 与 `/schedulers/[scheduleId]` 配置并追溯单机计划任务，`/excalidraw` 是沉浸白板，`/studio` 与其子路由面向开发者/管理员；`app/(site)/page.tsx` 只做 `redirect("/conversation")`。
+- 计划任务只配置 Agent 与 cron；cron 按 API 主机本地时区计算，界面按设备时区显示。历史 Session 打开对应对话时以聚焦模式隐藏常规历史栏，并提供返回计划历史的按钮。
 - 数据必须真实：消息、流式草稿、运行/失败状态、连接错误、会话 404 都有可见的对应状态；禁止 mock 数据与演示文案。
 - Studio 首期只管理 Provider、Model 和 Agent definition。Agent-first 仪表盘不显示 Agents 页签、说明区、Prompt 摘要、假指标、健康灯或监控占位；资源管理从顶部导航右端的设置入口进入。
 - 外部/底稿组件隔离：`components/ui`（shadcn 官方）、`components/react-bits`、`components/assistant-ui`（CLI 底稿，只读参考）不改内部实现；适配经 props、组合、包裹层和 token 完成。
@@ -55,7 +56,7 @@ Stratum（Rust-first Agent Runtime + 工作流编排系统）的 Web 前端。`/
 
 ## Product Principles
 
-1. **界面各守任务边界。** 对话完整承载执行；Studio 完整承载配置，不互相泄漏概念。
+1. **界面各守任务边界。** 对话完整承载执行；计划任务完整承载周期配置和记录追溯；Studio 完整承载配置，不互相泄漏概念。
 2. **真实状态胜过演示感。** 一切数据来自真实后端；加载、错误、空态如实描述过程。
 3. **渐进式透明。** 思考与工具执行默认折叠、按需展开；待决审批例外，必须直接可见可操作。
 4. **schema 驱动配置。** 模型能力（含 Thinking 等级）由后端 schema 决定，UI 只解析、不假设。

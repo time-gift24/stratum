@@ -2,14 +2,16 @@
 
 ## 范围
 
-- `stratum-postgres` 是唯一执行存储后端：具体执行存储所有者，承载四张表
+- `stratum-postgres` 是唯一执行存储后端：具体执行存储所有者，承载四张执行表
   `agents`（不可变 Agent 模板版本，`UNIQUE(name,version)`）、`agent_states`
   （每个 AgentRuntime 的精简状态：固定的 Agent、创建幂等键、持久状态、绑定的
   Session/当前 Turn、唯一可变的 `model_config`、`last_event_seq` 高水位）、
   `durable_events`（AgentRuntime 范围的仅追加账本）、
   `transcript_compactions`（压缩摘要伴随记录）。不建 Session 表、消息/审批
   投影表、发件箱或重建元数据；所有视图（AgentRuntimeView、历史、待处理
-  审批、最新用量、最新 `assistant` 遥测下限）都从账本派生读取。
+  审批、最新用量、最新 `assistant` 遥测下限）都从账本派生读取。单机 scheduler 另有两张控制表：
+  `schedules`（Agent 名称 + cron 定义）与 `schedule_runs`（occurrence 到
+  AgentRuntime/Session/Turn 的一向状态索引）；它们不是执行投影、Session 表、租约或分布式 claim。
 - 本 crate 暴露窄的具体命令/查询接口（创建/准入/追加/查询/解析），
   采用单一实现、不引入 trait；存储 DTO、状态类型与错误都在 crate 内，错误集中在独立
   `error.rs`（`thiserror::Error`，保留来源链）。只有装配层 `stratum-api` 允许
@@ -19,7 +21,7 @@
 
 ## 数据库模式与迁移纪律
 
-- 最终基线只有四张核心表；枚举语义用 `TEXT + CHECK` 而非 Postgres 枚举；核心外键
+- 执行基线保持四张核心表，scheduler 迁移追加两张控制表；枚举语义用 `TEXT + CHECK` 而非 Postgres 枚举；核心外键
   一律 `RESTRICT`，不提供核心资产的删除路径。
 - `agents.id` 是不可变定义的 `AgentId`；`agent_states.id` 是长期运行聚合的
   `AgentRuntimeId`，`agent_states.agent_id` 以 RESTRICT 外键永久固定定义。模板
@@ -33,6 +35,10 @@
   WHERE status='running'` 实现当前 Agent 专属 Session 的单活。
 - 数据库模式演进只通过新的迁移文件完成（`sqlx migrate`，文件内嵌于 crate）；已应用的迁移
   文件不得修改。破坏性的测试版切换不保留旧迁移历史，不做原地升级。
+- `schedule_runs` 必须先以 `starting` 写入预分配 `SessionId` 与唯一 idempotency key，且只能一次性转为
+  `accepted` 或 `failed`；`accepted` 必须同时固定 AgentRuntime/Agent/Turn，存储边界在同一事务中验证三者、
+  Session 及已提交的首条用户消息属于同一执行；`failed` 不得伪造 Turn，携带 runtime 时也必须匹配其 Agent。
+  当前数据库不提供 scheduler lease/fencing：同一执行数据库只允许一个调度进程。
 
 ## 事务纪律
 
@@ -80,7 +86,7 @@
   `stratum-postgres-test`，postgres:17-alpine，宿主机端口 45432），并在退出时执行 `down -v`。
   默认使用 `podman compose`，需要 Docker 时用 `COMPOSE="docker compose"` 覆盖；也可
   在执行 `make test-up` 后手动运行 `cargo test -p stratum-postgres -- --ignored --test-threads=1`
-  （测试共用同一数据库并在入口处对四张表执行 `TRUNCATE`，必须单线程运行）。
+  （测试共用同一数据库并在入口处对六张表执行 `TRUNCATE`，必须单线程运行）。
 - 数据库 URL 默认指向 Compose 栈，可用环境变量 `STRATUM_POSTGRES_TEST_URL` 覆盖。
 - 竞态与崩溃窗口（并发写入器、序号无空洞、终止事件唯一、审批身份唯一、
   伴随记录原子性）必须在真实 Postgres 集成测试中验证。
@@ -90,10 +96,14 @@
 - 所有能力都挂在具体的 `PostgresBackend` 上：`create_agent_runtime` / `begin_turn` /
   `append_event` / `resolve_approval` 四个命令，`read_agent_runtime_state` /
   `read_agent_runtime_view` / `read_history_page` / `read_loop_started` / `read_resume_slice` /
-  `read_events_range` / `read_latest_companion` / `read_approval` /
+  `read_events_range` / `read_latest_companion` / `read_approval` / `turn_has_user_message`（scheduler 启动对账严格区分 started-only）/
   `find_agent_runtime_by_idempotency_key`（创建时基于键优先重放判定，先于任何模板读取）/
   `read_open_hook_invocation`（审批处理器按精确地址找到唯一开放日志调用）
-  十个查询，外加 `ping` 就绪性探针。
+  十一个查询，外加 `ping` 就绪性探针。
+- scheduler 控制面同样挂在具体 `PostgresBackend`：`create_schedule` / `begin_schedule_run` /
+  `finish_schedule_run` 三个命令，以及 `read_schedule` / `read_schedules` /
+  `read_schedule_runs` / `read_starting_schedule_runs` 四个有界查询；调度循环另用
+  `read_scheduler_definitions` 通过单条语句的稳定快照一次读取全部定义，避免 OFFSET 扫描在并发创建时重复或漏调度；不新增 trait 或 manager 层。
 - 调用方（装配层）直接构造的命令/查询结构体（`CreateAgentRuntime`、`BeginTurn`、
   `AppendEvent`、`CompactionInput`、`ResolveApproval`、`HistoryQuery`、`ResumeSliceQuery`、
   `HookInvocationLookup`）
@@ -112,5 +122,5 @@
 - 不做投影表与双写；用户可见历史永远直接读取持久账本，压缩不改写原始
   消息，原始历史永久保留。
 - 不做存量文件系统/测试版数据迁移：从空库起步，库内演进由显式版本列与严格解码纪律承担。
-- 持久调度、租约/围栏、多实例所有权与持久取消功能推迟到独立的
-  调度器变更；本 crate 不提前引入跨进程占用抽象。
+- scheduler 定义与 occurrence 索引永久保留、无自动 TTL 或单项删除 API；执行对话按账本“原始历史永久保留”策略处理。需要清理时由管理员对整个测试/部署数据库执行显式生命周期操作。
+- 分布式租约/围栏、多实例所有权、暂停/编辑/删除、错过触发补跑与持久取消仍不实现；出现明确需求前不引入跨进程占用抽象。

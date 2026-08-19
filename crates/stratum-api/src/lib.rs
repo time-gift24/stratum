@@ -21,6 +21,7 @@ mod http;
 mod management_dto;
 mod provenance;
 mod registry;
+mod scheduler;
 mod sink;
 mod state;
 mod studio_management;
@@ -61,8 +62,10 @@ use stratum_studio::{ProviderKind, RuntimeProvider, StudioStore};
 
 pub use dto::{
     AgentRuntimeCreated, AgentRuntimeStatusDto, AgentRuntimeView, AgentTemplateDto,
-    AgentTemplatesResponse, CreateAgentRuntimeRequest, HistoryItemDto, HistoryResponse,
-    LivenessResponse, ModelsResponse, PendingApprovalDto, ReadinessResponse, TurnAccepted,
+    AgentTemplatesResponse, CreateAgentRuntimeRequest, CreateScheduleRequest, HistoryItemDto,
+    HistoryResponse, LivenessResponse, ModelsResponse, Pagination, PendingApprovalDto,
+    ReadinessResponse, ScheduleSessionStatus, ScheduleSessionView, ScheduleSessionsPage,
+    ScheduleView, SchedulesPage, TurnAccepted,
 };
 pub use error::{ApiError, ErrorKind, ErrorResponse};
 pub use frames::{AgentRuntimeProductEventV1, AgentRuntimeStreamFrameV1};
@@ -322,6 +325,10 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     let studio = StudioStore::connect(studio_url).await?;
     let tail = connect_tail(&config).await;
     let state = Arc::new(AppState::with_studio(pg, tail, ontology, config, studio).await?);
+    scheduler::reconcile(&state)
+        .await
+        .map_err(HostError::Scheduler)?;
+    scheduler::start(&state);
 
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
     let shutdown = state.shutdown_token();

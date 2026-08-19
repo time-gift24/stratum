@@ -31,7 +31,13 @@ gsap.registerPlugin(useGSAP)
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
 
-const PAGE_ORDER = ["/conversation", "/studio", "/ontologies", "/excalidraw"]
+const PAGE_ORDER = [
+  "/conversation",
+  "/schedulers",
+  "/studio",
+  "/ontologies",
+  "/excalidraw",
+]
 
 /** 子路由归并到一级入口：/studio/agents/x → /studio。 */
 function pageIndex(pathname: string): number {

@@ -38,6 +38,7 @@
   `AgentLoop` 或预备恢复值。
 - `SessionId` 是长期存活、独立于图的协作空间的 UUIDv7 身份。Session 保持稳定时，
   Agent 和 Workflow 的版本可以发生变化。
+- `ScheduleId` 是装配层单机周期计划的 UUIDv7 身份；core 只提供强类型 ID，不承载 cron、托管或调度行为。
 - 宿主方提供不可变的 `AgentRuntimeContext { session_id, location }`；Agent 创建
   `TurnId`。`AgentLocation` 可以是 `Direct`，也可以是类型化的 `WorkflowNode` 位置。
 - 可恢复的 Turn 固定 `agent_id: AgentId`、已解析的 `ModelConfig`、ToolSet 指纹、

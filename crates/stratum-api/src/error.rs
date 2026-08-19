@@ -209,6 +209,8 @@ pub enum ErrorKind {
     InvalidCursor,
     /// 400: history window arguments are missing, unparsable, or inverted.
     InvalidHistoryQuery,
+    /// 400: a schedule page/sort query is outside the supported boundary.
+    InvalidPagination,
     /// 404: the addressed Ontology does not exist.
     OntologyNotFound,
     /// 404: the addressed Object Type does not exist in the Ontology.
@@ -223,6 +225,8 @@ pub enum ErrorKind {
     ManagedModelNotFound,
     /// 404: the addressed approval request does not exist.
     ApprovalNotFound,
+    /// 404: the addressed recurring schedule does not exist.
+    ScheduleNotFound,
     /// 409: an author reused one exact name/version tag for another definition.
     AgentVersionConflict,
     /// 409: the caller's expected current Turn no longer matches.
@@ -273,6 +277,10 @@ pub enum ErrorKind {
     ModelNotConfigured,
     /// 422: provider-specific parameters failed validation.
     InvalidModelParameters,
+    /// 422: the cron expression is malformed or unsupported.
+    InvalidCronExpression,
+    /// 422: the cron expression cannot produce another occurrence.
+    CronHasNoFutureOccurrence,
     /// 422: a complete Ontology candidate violates the metamodel.
     InvalidOntologySchema,
     /// 422: Studio input violates a catalog invariant.
@@ -309,6 +317,7 @@ impl ErrorKind {
             Self::InvalidRequest => "invalid_request",
             Self::InvalidCursor => "invalid_cursor",
             Self::InvalidHistoryQuery => "invalid_history_query",
+            Self::InvalidPagination => "invalid_pagination",
             Self::OntologyNotFound => "ontology_not_found",
             Self::ObjectTypeNotFound => "object_type_not_found",
             Self::AgentRuntimeNotFound => "agent_runtime_not_found",
@@ -316,6 +325,7 @@ impl ErrorKind {
             Self::ProviderNotFound => "provider_not_found",
             Self::ManagedModelNotFound => "managed_model_not_found",
             Self::ApprovalNotFound => "approval_not_found",
+            Self::ScheduleNotFound => "schedule_not_found",
             Self::AgentVersionConflict => "agent_version_conflict",
             Self::StaleTurn => "stale_turn",
             Self::AgentRuntimeBusy => "agent_runtime_busy",
@@ -341,6 +351,8 @@ impl ErrorKind {
             Self::InvalidAgentTemplate => "invalid_agent_template",
             Self::ModelNotConfigured => "model_not_configured",
             Self::InvalidModelParameters => "invalid_model_parameters",
+            Self::InvalidCronExpression => "invalid_cron_expression",
+            Self::CronHasNoFutureOccurrence => "cron_has_no_future_occurrence",
             Self::InvalidOntologySchema => "invalid_ontology_schema",
             Self::InvalidStudioResource => "invalid_studio_resource",
             Self::OntologyPreconditionRequired => "ontology_precondition_required",
@@ -361,14 +373,16 @@ impl ErrorKind {
     #[must_use]
     pub const fn status(self) -> StatusCode {
         match self {
-            Self::InvalidRequest | Self::InvalidCursor | Self::InvalidHistoryQuery => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidRequest
+            | Self::InvalidCursor
+            | Self::InvalidHistoryQuery
+            | Self::InvalidPagination => StatusCode::BAD_REQUEST,
             Self::AgentRuntimeNotFound
             | Self::AgentTemplateNotFound
             | Self::ProviderNotFound
             | Self::ManagedModelNotFound
             | Self::ApprovalNotFound
+            | Self::ScheduleNotFound
             | Self::OntologyNotFound
             | Self::ObjectTypeNotFound => StatusCode::NOT_FOUND,
             Self::AgentVersionConflict
@@ -396,6 +410,8 @@ impl ErrorKind {
             | Self::InvalidAgentTemplate
             | Self::ModelNotConfigured
             | Self::InvalidModelParameters
+            | Self::InvalidCronExpression
+            | Self::CronHasNoFutureOccurrence
             | Self::InvalidOntologySchema
             | Self::InvalidStudioResource => StatusCode::UNPROCESSABLE_ENTITY,
             Self::OntologyPreconditionRequired | Self::StudioPreconditionRequired => {
@@ -419,6 +435,7 @@ impl ErrorKind {
             Self::InvalidRequest => "the request is invalid",
             Self::InvalidCursor => "the event cursor is invalid",
             Self::InvalidHistoryQuery => "the history query is invalid",
+            Self::InvalidPagination => "the pagination or sort query is invalid",
             Self::OntologyNotFound => "ontology was not found",
             Self::ObjectTypeNotFound => "object type was not found",
             Self::AgentRuntimeNotFound => "the agent runtime does not exist",
@@ -426,6 +443,7 @@ impl ErrorKind {
             Self::ProviderNotFound => "the provider does not exist",
             Self::ManagedModelNotFound => "the managed model does not exist",
             Self::ApprovalNotFound => "the approval request does not exist",
+            Self::ScheduleNotFound => "the schedule does not exist",
             Self::AgentVersionConflict => {
                 "the agent version tag is already bound to a different definition"
             }
@@ -461,11 +479,13 @@ impl ErrorKind {
             Self::InvalidAgentTemplate => "the agent template is invalid",
             Self::ModelNotConfigured => "the model is not configured",
             Self::InvalidModelParameters => "the model parameters are invalid",
+            Self::InvalidCronExpression => "the cron expression is invalid",
+            Self::CronHasNoFutureOccurrence => "the cron expression has no future occurrence",
             Self::InvalidOntologySchema => "ontology schema is invalid",
             Self::InvalidStudioResource => "studio resource is invalid",
             Self::OntologyPreconditionRequired => "ontology precondition is required",
             Self::StudioPreconditionRequired => "studio precondition is required",
-            Self::DurableStateCorrupt => "the durable agent state is corrupt",
+            Self::DurableStateCorrupt => "the durable state is corrupt",
             Self::Internal => "an internal error occurred",
             Self::StoreUnavailable => "the execution store is unavailable",
             Self::RuntimeUnavailable => "a runtime component is unavailable",
@@ -632,6 +652,7 @@ pub(crate) fn kind_of_postgres(source: &PostgresError) -> ErrorKind {
         PostgresError::TurnNotFound { .. } => ErrorKind::DurableStateCorrupt,
         PostgresError::ApprovalNotFound { .. } => ErrorKind::ApprovalNotFound,
         PostgresError::AgentVersionConflict { .. } => ErrorKind::AgentVersionConflict,
+        PostgresError::ScheduleNotFound { .. } => ErrorKind::ScheduleNotFound,
         PostgresError::StaleTurn { .. } => ErrorKind::StaleTurn,
         PostgresError::AgentRuntimeBusy { .. } => ErrorKind::AgentRuntimeBusy,
         PostgresError::SessionMismatch { .. } => ErrorKind::SessionMismatch,
@@ -640,13 +661,16 @@ pub(crate) fn kind_of_postgres(source: &PostgresError) -> ErrorKind {
         PostgresError::ApprovalAlreadyResolved { .. } => ErrorKind::ApprovalAlreadyResolved,
         PostgresError::ApprovalInvalidated { .. } => ErrorKind::ApprovalInvalidated,
         PostgresError::RuntimeIncompatible { .. } => ErrorKind::RuntimeIncompatible,
-        PostgresError::DurableStateCorrupt { .. } => ErrorKind::DurableStateCorrupt,
+        PostgresError::DurableStateCorrupt { .. } | PostgresError::ScheduleStateCorrupt { .. } => {
+            ErrorKind::DurableStateCorrupt
+        }
         PostgresError::Connect(_)
         | PostgresError::Migrate(_)
         | PostgresError::StoreUnavailable(_) => ErrorKind::StoreUnavailable,
         PostgresError::ApprovalAlreadyRequested { .. }
         | PostgresError::ApprovalIdConflict { .. }
         | PostgresError::InvalidCompactionPointer { .. }
+        | PostgresError::InvalidScheduleRunTransition
         | PostgresError::InvalidCommand(_)
         | PostgresError::SequenceOverflow { .. }
         | PostgresError::EventEncode { .. } => ErrorKind::Internal,
@@ -733,6 +757,7 @@ mod tests {
             (ErrorKind::InvalidRequest, 400, "invalid_request"),
             (ErrorKind::InvalidCursor, 400, "invalid_cursor"),
             (ErrorKind::InvalidHistoryQuery, 400, "invalid_history_query"),
+            (ErrorKind::InvalidPagination, 400, "invalid_pagination"),
             (ErrorKind::OntologyNotFound, 404, "ontology_not_found"),
             (ErrorKind::ObjectTypeNotFound, 404, "object_type_not_found"),
             (
@@ -752,6 +777,7 @@ mod tests {
                 "managed_model_not_found",
             ),
             (ErrorKind::ApprovalNotFound, 404, "approval_not_found"),
+            (ErrorKind::ScheduleNotFound, 404, "schedule_not_found"),
             (
                 ErrorKind::AgentVersionConflict,
                 409,
@@ -816,6 +842,16 @@ mod tests {
                 ErrorKind::InvalidModelParameters,
                 422,
                 "invalid_model_parameters",
+            ),
+            (
+                ErrorKind::InvalidCronExpression,
+                422,
+                "invalid_cron_expression",
+            ),
+            (
+                ErrorKind::CronHasNoFutureOccurrence,
+                422,
+                "cron_has_no_future_occurrence",
             ),
             (
                 ErrorKind::InvalidOntologySchema,

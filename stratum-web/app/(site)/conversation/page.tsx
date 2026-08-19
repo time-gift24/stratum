@@ -1,6 +1,9 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { Suspense, useCallback, useMemo, useState } from "react"
+import Link from "next/link"
+import { useSearchParams } from "next/navigation"
+import { ArrowLeft } from "lucide-react"
 
 import { ConversationComposer } from "@/components/stratum/conversation/conversation-composer"
 import {
@@ -38,7 +41,12 @@ const WELCOME = (
   </h1>
 )
 
-export default function ConversationPage() {
+function ConversationPageContent() {
+  const searchParams = useSearchParams()
+  const initialAgentRuntimeId = searchParams.get("agent_runtime_id")
+  const scheduleId = searchParams.get("schedule_id")
+  const scheduledConversation =
+    initialAgentRuntimeId !== null && scheduleId !== null
   const {
     state,
     recentAgentRuntimes,
@@ -51,7 +59,7 @@ export default function ConversationPage() {
     reconnect,
     resolveApproval,
     loadOlderHistory,
-  } = useAgentConversation()
+  } = useAgentConversation({ initialAgentRuntimeId })
 
   const threads = useMemo(
     () =>
@@ -142,12 +150,22 @@ export default function ConversationPage() {
   return (
     <div className="flex h-svh pt-20 font-sans">
       <main className="relative min-w-0 flex-1">
-        <ThreadListRail
-          threads={threads}
-          activeId={state.agentRuntimeId ?? undefined}
-          onSelect={selectAgentRuntime}
-          onNew={handleNewConversation}
-        />
+        {scheduledConversation ? (
+          <Link
+            href={`/schedulers/${encodeURIComponent(scheduleId)}`}
+            className="absolute top-2 left-3 z-10 inline-flex min-h-11 items-center gap-2 rounded-xl bg-background/90 px-3 text-sm text-muted-foreground backdrop-blur-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none sm:left-5"
+          >
+            <ArrowLeft aria-hidden className="size-4" />
+            返回计划会话
+          </Link>
+        ) : (
+          <ThreadListRail
+            threads={threads}
+            activeId={state.agentRuntimeId ?? undefined}
+            onSelect={selectAgentRuntime}
+            onNew={handleNewConversation}
+          />
+        )}
 
         <ConversationThread
           items={items}
@@ -179,5 +197,19 @@ export default function ConversationPage() {
         />
       </main>
     </div>
+  )
+}
+
+export default function ConversationPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-svh items-center justify-center pt-24 text-sm text-muted-foreground sm:pt-28">
+          正在加载对话…
+        </div>
+      }
+    >
+      <ConversationPageContent />
+    </Suspense>
   )
 }

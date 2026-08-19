@@ -4,7 +4,7 @@
 //! stack: `make test-integration` (or `make test-up` plus
 //! `cargo test -p stratum-postgres -- --ignored --test-threads=1`). The
 //! database URL defaults to the compose stack and can be overridden with
-//! `STRATUM_POSTGRES_TEST_URL`. Tests truncate all four tables on entry and
+//! `STRATUM_POSTGRES_TEST_URL`. Tests truncate all execution and scheduler tables on entry and
 //! must run single-threaded to stay deterministic.
 
 use std::sync::Arc;
@@ -15,14 +15,15 @@ use stratum_core::{
     AgentId, AgentRuntimeId, AgentVersionTag, ApprovalDecision, ApprovalId, CallId, ChatMessage,
     DangerLevel, DecideToolCallDecisionRecord, DurableAgentEvent, ExtensionSetVersionId,
     HookDecisionRecord, HookHandlerVersionId, HookInputDigest, HookInvocationId, HookPoint,
-    ModelConfig, ModelId, SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName,
+    ModelConfig, ModelId, ScheduleId, SessionId, SkillSetVersionId, TokenUsage, ToolKind, ToolName,
     ToolSetFingerprint, TurnId, TurnRuntimeSnapshot,
 };
 use stratum_postgres::{
-    AppendEvent, ApprovalLookup, BeginTurn, CompactionInput, CreateAgentRuntime,
-    CreateAgentRuntimeOutcome, EVENT_SEQ_MAX, HistoryQuery, HookInvocationLookup, PostgresBackend,
-    PostgresError, ResolveApproval, ResolveApprovalOutcome, ResolvedDefinitionV1, ResumeSliceQuery,
-    VersionedKind,
+    AppendEvent, ApprovalLookup, BeginScheduleRun, BeginTurn, CompactionInput, CreateAgentRuntime,
+    CreateAgentRuntimeOutcome, CreateSchedule, EVENT_SEQ_MAX, FinishScheduleRun, HistoryQuery,
+    HookInvocationLookup, PostgresBackend, PostgresError, ResolveApproval, ResolveApprovalOutcome,
+    ResolvedDefinitionV1, ResumeSliceQuery, SchedulePageQuery, ScheduleRunStatus,
+    ScheduleRunsQuery, VersionedKind,
 };
 use tokio::sync::Barrier;
 use uuid::Uuid;
@@ -46,7 +47,9 @@ async fn reset_backend() -> PostgresBackend {
         .await
         .expect("postgres backend connects and migrates");
     let pool = raw_pool().await;
-    sqlx::query("TRUNCATE transcript_compactions, durable_events, agent_states, agents")
+    sqlx::query(
+        "TRUNCATE schedule_runs, schedules, transcript_compactions, durable_events, agent_states, agents",
+    )
         .execute(&pool)
         .await
         .expect("tables truncate");
@@ -246,6 +249,8 @@ async fn baseline_applies_and_forbidden_beta_schema_is_absent() {
         "agent_states",
         "durable_events",
         "transcript_compactions",
+        "schedules",
+        "schedule_runs",
     ] {
         assert!(tables.contains(&expected.to_owned()), "missing {expected}");
     }
@@ -275,6 +280,111 @@ async fn baseline_applies_and_forbidden_beta_schema_is_absent() {
         !columns
             .iter()
             .any(|column| column.ends_with(".message_seq"))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the compose Postgres stack"]
+async fn schedule_definitions_and_occurrences_round_trip_with_one_way_status() {
+    let backend = reset_backend().await;
+    let schedule_id = ScheduleId::new();
+    let created = backend
+        .create_schedule(CreateSchedule {
+            schedule_id,
+            agent_name: "agent-a".parse().expect("agent name is valid"),
+            cron_expression: "0 9 * * *".to_owned(),
+        })
+        .await
+        .expect("schedule creates");
+    assert_eq!(created.schedule_id, schedule_id);
+    assert_eq!(
+        backend
+            .read_schedule(schedule_id)
+            .await
+            .expect("schedule reads"),
+        created
+    );
+
+    let session_id = SessionId::new();
+    let idempotency_key = Uuid::now_v7();
+    backend
+        .begin_schedule_run(BeginScheduleRun {
+            schedule_id,
+            session_id,
+            idempotency_key,
+            triggered_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("occurrence starts");
+    let runtime = backend
+        .create_agent_runtime(create_command("agent-a", idempotency_key, None))
+        .await
+        .expect("runtime creates")
+        .runtime()
+        .clone();
+    let test_runtime = TestRuntime {
+        agent_runtime_id: runtime.agent_runtime_id,
+        agent_id: runtime.agent_id,
+    };
+    let (begin, turn_id) = begin_command(test_runtime, None, session_id);
+    backend.begin_turn(begin).await.expect("turn starts");
+    let finish = FinishScheduleRun {
+        schedule_id,
+        session_id,
+        status: ScheduleRunStatus::Accepted,
+        agent_runtime_id: Some(runtime.agent_runtime_id),
+        agent_id: Some(runtime.agent_id),
+        turn_id: Some(turn_id),
+    };
+    assert!(matches!(
+        backend.finish_schedule_run(finish.clone()).await,
+        Err(PostgresError::InvalidScheduleRunTransition)
+    ));
+    append_message(
+        &backend,
+        test_runtime,
+        session_id,
+        turn_id,
+        "scheduled work",
+    )
+    .await;
+    backend
+        .finish_schedule_run(finish.clone())
+        .await
+        .expect("occurrence accepts");
+    assert!(matches!(
+        backend.finish_schedule_run(finish).await,
+        Err(PostgresError::InvalidScheduleRunTransition)
+    ));
+
+    let schedules = backend
+        .read_schedules(SchedulePageQuery {
+            offset: 0,
+            limit: 20,
+        })
+        .await
+        .expect("schedule page reads");
+    assert_eq!(schedules.total, 1);
+    assert_eq!(
+        backend
+            .read_scheduler_definitions()
+            .await
+            .expect("scheduler snapshot reads"),
+        vec![created]
+    );
+    let runs = backend
+        .read_schedule_runs(ScheduleRunsQuery {
+            schedule_id,
+            offset: 0,
+            limit: 20,
+        })
+        .await
+        .expect("occurrence page reads");
+    assert_eq!(runs.total, 1);
+    assert_eq!(runs.items[0].status, ScheduleRunStatus::Accepted);
+    assert_eq!(
+        runs.items[0].agent_runtime_id,
+        Some(runtime.agent_runtime_id)
     );
 }
 

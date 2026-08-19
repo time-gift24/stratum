@@ -5,7 +5,8 @@
 //! never include prompt, message, or tool payload contents.
 
 use stratum_core::{
-    AgentRuntimeId, AgentVersionTag, ApprovalId, HookInvocationId, SessionId, TurnId,
+    AgentNameParseError, AgentRuntimeId, AgentVersionTag, ApprovalId, HookInvocationId, ScheduleId,
+    SessionId, TurnId,
 };
 use thiserror::Error;
 
@@ -70,6 +71,24 @@ pub enum PostgresError {
     AgentVersionConflict {
         /// Conflicting author-supplied tag.
         version: AgentVersionTag,
+    },
+    /// The addressed recurring schedule does not exist.
+    #[error("schedule {schedule_id} not found")]
+    ScheduleNotFound {
+        /// Missing schedule identity.
+        schedule_id: ScheduleId,
+    },
+    /// A schedule occurrence attempted an invalid or repeated lifecycle transition.
+    #[error("invalid schedule run transition")]
+    InvalidScheduleRunTransition,
+    /// Persisted scheduler control state violates its typed shape.
+    #[error("schedule state corrupt: {context}")]
+    ScheduleStateCorrupt {
+        /// Safe invariant description without persisted payload contents.
+        context: &'static str,
+        /// Agent-name parse source, when corruption was discovered there.
+        #[source]
+        source: Option<AgentNameParseError>,
     },
     /// The caller's expected current Turn no longer matches durable state.
     #[error("stale turn expectation for agent runtime {agent_runtime_id}")]

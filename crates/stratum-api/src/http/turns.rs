@@ -87,6 +87,25 @@ pub(crate) async fn post_message(
     let agent_runtime_id = parse_agent_runtime_id(&agent_runtime_id)?;
     Span::current().record("agent_runtime_id", field::display(agent_runtime_id));
     let body = json_request(request)?;
+    let accepted = admit_message(&state, agent_runtime_id, body).await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+/// Admits one first or follow-up user message through the same path used by
+/// the HTTP command and local scheduler.
+///
+/// The caller owns process admission; this function owns the exact Turn claim
+/// and returns only after the first user message is durably committed.
+///
+/// # Errors
+///
+/// Returns a typed API error for stale/busy runtime state, invalid runtime
+/// components, or durable admission failure.
+pub(crate) async fn admit_message(
+    state: &Arc<AppState>,
+    agent_runtime_id: AgentRuntimeId,
+    body: MessageRequest,
+) -> Result<TurnAccepted, ApiError> {
     if body.text.trim().is_empty() {
         return Err(ApiError::new(ErrorKind::InvalidRequest));
     }
@@ -239,16 +258,12 @@ pub(crate) async fn post_message(
         .mark_running(agent_runtime_id, turn_id, claim.claim_id);
     Span::current().record("session_id", field::display(session_id));
     Span::current().record("turn_id", field::display(turn_id));
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(TurnAccepted {
-            agent_runtime_id,
-            agent_id: view.agent_id,
-            session_id,
-            turn_id,
-        }),
-    )
-        .into_response())
+    Ok(TurnAccepted {
+        agent_runtime_id,
+        agent_id: view.agent_id,
+        session_id,
+        turn_id,
+    })
 }
 
 /// Takes over an exact unhosted running Turn.

@@ -21,6 +21,7 @@
 //! assembly layer (`stratum-api`) calls it.
 
 pub mod error;
+pub mod scheduler;
 pub mod types;
 
 mod codec;
@@ -32,6 +33,10 @@ use stratum_core::{AgentId, AgentRuntimeId, HookInvocationId, SessionId, TurnId}
 use uuid::Uuid;
 
 pub use error::{PostgresError, VersionedKind};
+pub use scheduler::{
+    BeginScheduleRun, CreateSchedule, FinishScheduleRun, ScheduleDefinition, SchedulePage,
+    SchedulePageQuery, ScheduleRun, ScheduleRunStatus, ScheduleRunsPage, ScheduleRunsQuery,
+};
 pub use types::{
     AgentRuntimeCreated, AgentRuntimeStateView, AgentRuntimeView, AgentStatus, AppendEvent,
     ApprovalFacts, ApprovalLookup, ApprovalResolution, BeginTurn, CommitReceipt, CompactionInput,
@@ -233,6 +238,31 @@ impl PostgresBackend {
         agent_runtime_id: AgentRuntimeId,
     ) -> Result<AgentRuntimeView, PostgresError> {
         queries::read_agent_runtime_view(&self.pool, agent_runtime_id).await
+    }
+
+    /// Checks whether one exact Turn contains a strictly decoded user message.
+    ///
+    /// This narrow reconciliation query is used by the single-host scheduler
+    /// to distinguish a durably accepted conversation from a crash after
+    /// `LoopStarted` but before the first message commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PostgresError::DurableStateCorrupt`] when a selected message
+    /// row is malformed and [`PostgresError::StoreUnavailable`] on storage failure.
+    pub async fn turn_has_user_message(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        turn_id: TurnId,
+    ) -> Result<bool, PostgresError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(PostgresError::StoreUnavailable)?;
+        let found = queries::turn_has_user_message(&mut tx, agent_runtime_id, turn_id).await?;
+        tx.commit().await.map_err(PostgresError::StoreUnavailable)?;
+        Ok(found)
     }
 
     /// Reads one ascending product-history page from the filtered durable

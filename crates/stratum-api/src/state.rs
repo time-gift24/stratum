@@ -62,6 +62,7 @@ pub struct AppState {
     runtime_tasks: RuntimeTasks,
     sse_keep_alive: Duration,
     readiness_timeout: Duration,
+    scheduler_wake: Notify,
 }
 
 /// Concrete source of Provider adapters for newly-started work.
@@ -149,6 +150,7 @@ impl AppState {
             runtime_tasks,
             sse_keep_alive: Duration::from_secs(api.sse_keep_alive_seconds),
             readiness_timeout: Duration::from_millis(api.readiness_timeout_ms),
+            scheduler_wake: Notify::new(),
         })
     }
 
@@ -409,6 +411,11 @@ impl AppState {
     /// Maximum time for one complete readiness probe.
     pub(crate) const fn readiness_timeout(&self) -> Duration {
         self.readiness_timeout
+    }
+
+    /// Wake signal for schedule creation and scheduler re-evaluation.
+    pub(crate) const fn scheduler_wake(&self) -> &Notify {
+        &self.scheduler_wake
     }
 
     /// Spawns one process-owned background task and opportunistically joins
