@@ -10,7 +10,11 @@ import Link from "next/link"
 import { useCallback, useEffect, useState } from "react"
 import { ChevronRight, LoaderCircle, Play, Plus } from "lucide-react"
 
-import { FormSection, LoadingState } from "@/components/stratum/studio/primitives"
+import {
+  FormSection,
+  LoadingState,
+  useDelayedFlag,
+} from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
   safeStudioErrorMessage,
@@ -82,13 +86,18 @@ export function ProviderModelsSection({
     }
   }
 
+  // 加载指示延迟 150ms：本地接口常在 10ms 内返回，不闪一帧 spinner
+  const showLoading = useDelayedFlag(models === null && error === null)
+
   return (
     <FormSection
       title="Model"
       description="测试会向该 Model 发送一条真实消息，验证它当前可用。"
     >
       {models === null && error === null ? (
-        <LoadingState label="正在加载 Model" />
+        showLoading ? (
+          <LoadingState label="正在加载 Model" />
+        ) : null
       ) : error !== null ? (
         <p className="text-sm text-destructive" role="alert">
           {error}

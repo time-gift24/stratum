@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { cloneElement, isValidElement, useState } from "react"
+import { cloneElement, isValidElement, useEffect, useState } from "react"
 import {
   ArrowLeft,
   ChevronRight,
@@ -444,8 +444,26 @@ export function LoadingState({ label }: { label: string }) {
   )
 }
 
-/** 真实状态 chip：只编码 API 返回的真实状态，不做装饰。 */
-export function StatusChip({
+/**
+ * 加载指示延迟显示：短于 delayMs 的加载不闪 spinner（本地 API 常见 10ms 内
+ * 返回，一帧的 spinner 闪现比没有更糟）。active 关闭在渲染期同步收起。
+ */
+export function useDelayedFlag(active: boolean, delayMs = 150): boolean {
+  const [show, setShow] = useState(false)
+  const [wasActive, setWasActive] = useState(active)
+  if (wasActive !== active) {
+    setWasActive(active)
+    if (!active) setShow(false)
+  }
+  useEffect(() => {
+    if (!active) return
+    const timer = setTimeout(() => setShow(true), delayMs)
+    return () => clearTimeout(timer)
+  }, [active, delayMs])
+  return active && show
+}
+
+/** 真实状态 chip：只编码 API 返回的真实状态，不做装饰。 */export function StatusChip({
   tone,
   children,
 }: {

@@ -15,6 +15,7 @@ import {
   ResourceCard,
   StatusChip,
   StudioInput,
+  useDelayedFlag,
 } from "@/components/stratum/studio/primitives"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { EmptyState } from "@/components/stratum/empty-state"
@@ -113,16 +114,25 @@ export function ProviderList() {
     router.replace(`/studio/settings/providers?${params}`)
   }, [pageOutOfRange, query, returnTo, router, totalPages])
 
-  // 加载态 → 数据到达时卡片级联入场；挂载即有数据（缓存命中）
-  // 和后台刷新替换都不播——前者由容器淡入覆盖，后者避免刷新闪动
+  // 单层入场契约：导航（pathname 变化）时入场由容器淡入/整页转场独占，
+  // 卡片不叠加；级联只在无导航的参数变化（搜索/翻页）后数据到达时播放。
+  // 后台刷新替换（defined → defined）永不播。ref 读写都在 effect 内。
   const gridRef = useRef<HTMLDivElement>(null)
   const prevItemsRef = useRef(items)
+  const prevKeyRef = useRef(cacheKey)
+  const paramArrivalPendingRef = useRef(false)
   useGSAP(
     () => {
+      const keyChanged = prevKeyRef.current !== cacheKey
+      prevKeyRef.current = cacheKey
+      if (keyChanged) paramArrivalPendingRef.current = true
       const arrived = prevItemsRef.current === undefined && items !== undefined
       prevItemsRef.current = items
+      if (!arrived) return
+      const byParamChange = paramArrivalPendingRef.current
+      paramArrivalPendingRef.current = false
       const grid = gridRef.current
-      if (!arrived || !grid || prefersReducedMotion()) return
+      if (!byParamChange || !grid || prefersReducedMotion()) return
       gsap.fromTo(
         grid.children,
         { opacity: 0, y: 10 },
@@ -137,8 +147,11 @@ export function ProviderList() {
         }
       )
     },
-    { scope: gridRef, dependencies: [items] }
+    { scope: gridRef, dependencies: [items, cacheKey] }
   )
+
+  // 加载指示延迟 150ms：本地接口常在 10ms 内返回，不闪一帧 spinner
+  const showLoading = useDelayedFlag(items === undefined && !error)
 
   const updateQuery = (nextQuery: string, nextPage = 1) => {
     const params = new URLSearchParams({ returnTo })
@@ -197,7 +210,7 @@ export function ProviderList() {
         </div>
       ) : null}
       {items === undefined && !error ? (
-        <LoadingState label="正在加载 Provider" />
+        showLoading ? <LoadingState label="正在加载 Provider" /> : null
       ) : items?.length === 0 && !pageOutOfRange ? (
         <EmptyState
           title={
