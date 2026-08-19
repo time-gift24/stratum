@@ -17,6 +17,7 @@ import {
   StudioSelect,
 } from "@/components/stratum/studio/primitives"
 import { Button } from "@/components/ui/button"
+import { ProviderModelsSection } from "@/components/stratum/studio/provider-models"
 import { useStudioProviderEditor } from "@/hooks/use-studio-provider-editor"
 import type { ProviderKind } from "@/lib/stratum/api"
 
@@ -37,6 +38,7 @@ export function ProviderEditor({ provider }: { provider?: string }) {
     remove,
     resource,
     retry,
+    returnTo,
     save,
     state,
     test,
@@ -190,6 +192,12 @@ export function ProviderEditor({ provider }: { provider?: string }) {
               ) : null}
             </div>
           </FormSection>
+          {!isNew ? (
+            <ProviderModelsSection
+              provider={state.draft.provider}
+              returnTo={returnTo}
+            />
+          ) : null}
           <FormStatus
             message={state.message}
             tone={

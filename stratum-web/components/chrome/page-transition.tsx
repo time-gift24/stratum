@@ -54,7 +54,7 @@ function isCurrentNavigationHref(pathname: string, href: string): boolean {
 /**
  * 同级路径（父目录相同）间的跳转视为页签切换，例如
  * /studio/settings/providers ↔ /studio/settings/models：
- * 不做整页滑入，由局部动效（如 SettingsNav 的选中 underlay）接管。
+ * 不做整页滑入，由局部动效（内容淡入、卡片级联）接管。
  */
 function isSiblingSwitch(from: string, to: string): boolean {
   const parent = (p: string) => {

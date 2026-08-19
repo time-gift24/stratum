@@ -1,11 +1,11 @@
 import { Suspense } from "react"
 
-import { SettingsList } from "@/components/stratum/studio/settings-list"
+import { ProviderList } from "@/components/stratum/studio/provider-list"
 
 export default function ProvidersPage() {
   return (
     <Suspense>
-      <SettingsList kind="providers" />
+      <ProviderList />
     </Suspense>
   )
 }

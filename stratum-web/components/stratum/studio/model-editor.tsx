@@ -20,7 +20,13 @@ import { encodeModelSchema } from "@/features/studio-management/transforms"
 import { useStudioModelEditor } from "@/hooks/use-studio-model-editor"
 import type { ProviderKind } from "@/lib/stratum/api"
 
-export function ModelEditor({ modelId }: { modelId?: string }) {
+export function ModelEditor({
+  modelId,
+  provider,
+}: {
+  modelId?: string
+  provider?: ProviderKind
+}) {
   const {
     cancel,
     deleting,
@@ -29,9 +35,10 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
     isNew,
     loadError,
     loading,
-    modelsHref,
     newModelHref,
     notFound,
+    providerHref,
+    providerPreset,
     providers,
     reload,
     remove,
@@ -39,7 +46,7 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
     retry,
     save,
     state,
-  } = useStudioModelEditor(modelId)
+  } = useStudioModelEditor(modelId, provider)
 
   if (loading)
     return (
@@ -50,9 +57,9 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
   if (notFound)
     return (
       <>
-        <PageHeader title="Model 不存在" backHref={modelsHref} />
+        <PageHeader title="Model 不存在" backHref={providerHref} />
         <NotFoundState
-          message="该 Model 不存在或已被删除。可以返回列表，或直接新建一个。"
+          message="该 Model 不存在或已被删除。可以返回所属 Provider，或直接新建一个。"
           createHref={newModelHref}
           createLabel="新建 Model"
         />
@@ -61,7 +68,7 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
   if (loadError && !hasLoadedContent)
     return (
       <>
-        <PageHeader title="无法打开 Model" backHref={modelsHref} />
+        <PageHeader title="无法打开 Model" backHref={providerHref} />
         <ErrorState
           title="Model 加载失败"
           message={loadError}
@@ -74,8 +81,8 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
     <>
       <PageHeader
         title={isNew ? "新建 Model" : (resource?.name ?? state.draft.modelName)}
-        backHref={modelsHref}
-        backLabel="返回 Model"
+        backHref={providerHref}
+        backLabel="返回 Provider"
       >
         {!isNew ? (
           <DeleteAction
@@ -106,7 +113,7 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
               <Field label="Provider" error={state.violations.provider}>
                 <StudioSelect
                   ariaLabel="Provider"
-                  disabled={!isNew}
+                  disabled={!isNew || providerPreset !== undefined}
                   value={state.draft.provider}
                   options={providers.map((provider) => ({
                     value: provider.provider,
@@ -177,7 +184,7 @@ export function ModelEditor({ modelId }: { modelId?: string }) {
               className="min-h-11"
               onClick={cancel}
             >
-              返回列表
+              返回
             </Button>
             {isNew ? (
               <SaveButton

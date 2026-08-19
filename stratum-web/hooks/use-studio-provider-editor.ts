@@ -227,6 +227,7 @@ export function useStudioProviderEditor(provider?: string) {
       setLoading(resource === null)
       void load()
     },
+    returnTo,
     save,
     state,
     test,

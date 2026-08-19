@@ -28,6 +28,7 @@ import {
 import { ApiError } from "@/lib/stratum/api"
 import type {
   ManagedModelView,
+  ProviderKind,
   ProviderView,
   ResourceRevision,
 } from "@/lib/stratum/api"
@@ -35,13 +36,24 @@ import type {
 const EMPTY_DRAFT: ModelDraft = { provider: "openai", modelName: "" }
 
 /** Owns Model editor loading, persistence, cache, and route side effects. */
-export function useStudioModelEditor(modelId?: string) {
+export function useStudioModelEditor(
+  modelId?: string,
+  providerPreset?: ProviderKind
+) {
   const isNew = modelId === undefined
   const router = useRouter()
   const searchParams = useSearchParams()
   const returnTo = safeStudioReturn(searchParams.get("returnTo"))
-  const modelsHref = withStudioReturn("/studio/settings/models", returnTo)
   const parsedId = modelId ? splitManagedModelId(modelId) : null
+  // Model 挂在 Provider 下：返回链路指向所属 Provider 编辑器
+  const ownerProvider = providerPreset ?? parsedId?.provider ?? null
+  const providerHref =
+    ownerProvider === null
+      ? withStudioReturn("/studio/settings/providers", returnTo)
+      : withStudioReturn(
+          `/studio/settings/providers/${ownerProvider}`,
+          returnTo
+        )
   const cacheKey = modelId ? `studio:model:${modelId}` : null
   const cached = cacheKey
     ? readPageCache<ResourceRevision<ManagedModelView>>(cacheKey)
@@ -51,8 +63,11 @@ export function useStudioModelEditor(modelId?: string) {
   )
   const initialDraft = cached
     ? modelViewToDraft(cached.data)
-    : isNew && cachedProviders?.[0]
-      ? { ...EMPTY_DRAFT, provider: cachedProviders[0].provider }
+    : isNew
+      ? {
+          ...EMPTY_DRAFT,
+          provider: providerPreset ?? cachedProviders?.[0]?.provider ?? "openai",
+        }
       : EMPTY_DRAFT
   const [state, dispatch] = useReducer(
     formReducer<ModelDraft>,
@@ -99,7 +114,10 @@ export function useStudioModelEditor(modelId?: string) {
         if (providerList.data[0])
           dispatch({
             type: "refresh",
-            value: { ...EMPTY_DRAFT, provider: providerList.data[0].provider },
+            value: {
+              ...EMPTY_DRAFT,
+              provider: providerPreset ?? providerList.data[0].provider,
+            },
             etag: "",
           })
         return
@@ -144,6 +162,7 @@ export function useStudioModelEditor(modelId?: string) {
       setResource(response.data)
       invalidatePageCache("studio-settings:")
       invalidatePageCache("studio:catalog:models")
+      invalidatePageCache("studio:provider-models:")
       writePageCache(`studio:model:${response.data.model_id}`, {
         data: response.data,
         etag: response.etag,
@@ -181,7 +200,7 @@ export function useStudioModelEditor(modelId?: string) {
         state.etag
       )
       invalidatePageCache()
-      leave(() => router.replace(modelsHref), false)
+      leave(() => router.replace(providerHref), false)
     } catch (caught) {
       dispatchApiError(dispatch, caught, {
         conflict: "Model 已变更，请重新加载后再删除。",
@@ -193,7 +212,7 @@ export function useStudioModelEditor(modelId?: string) {
 
   return {
     cancel: () => {
-      leave(() => router.push(modelsHref))
+      leave(() => router.push(providerHref))
     },
     deleting,
     edit,
@@ -201,9 +220,16 @@ export function useStudioModelEditor(modelId?: string) {
     isNew,
     loadError,
     loading,
-    modelsHref,
-    newModelHref: withStudioReturn("/studio/settings/models/new", returnTo),
+    newModelHref:
+      ownerProvider === null
+        ? withStudioReturn("/studio/settings/providers", returnTo)
+        : withStudioReturn(
+            `/studio/settings/providers/${ownerProvider}/models/new`,
+            returnTo
+          ),
     notFound,
+    providerHref,
+    providerPreset,
     providers,
     reload: () => {
       setLoading(true)

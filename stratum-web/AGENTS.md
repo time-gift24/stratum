@@ -32,8 +32,8 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 
 ## Studio 管理面
 
-- `/studio` 是 Agent-first 仪表盘；Provider 与 Model 从全局 product navigation 最右侧的设置入口进入，不增加 Agents tab、解释区、Prompt 摘要、假指标或监控占位。
-- `/studio/agents/*` 管理 Agent definition；`/studio/settings/providers/*` 与 `/studio/settings/models/*` 管理 DB-only 资源。所有数据必须来自真实 management API。
+- `/studio` 是 Agent-first 仪表盘；Provider 从全局 product navigation 最右侧的设置入口进入，不增加 Agents tab、解释区、Prompt 摘要、假指标或监控占位。
+- `/studio/agents/*` 管理 Agent definition；`/studio/settings/providers/*` 管理 DB-only Provider 资源，Model 挂在 Provider 下（编辑器内列表 + 每模型真实消息测试），Model 编辑器子页为 `/studio/settings/models/{id}`。所有数据必须来自真实 management API。
 - management DTO、分页、错误 envelope 与 ETag helper 统一维护在 `lib/stratum/api.ts`；更新和删除携带最近一次读取的 `If-Match`，412 保留 draft，409 展示 blocker。
 - Provider secret 只允许单向替换：永不回显已存值，留空表示保留；未保存的新凭据不得用于连接测试。
 - Studio 状态机、raw/structured 转换与页面缓存放在 `features/studio-management/` 和 `lib/page-cache.ts`；后台刷新不得覆盖 dirty draft，失败时保留缓存并显示可重试错误。

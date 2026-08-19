@@ -1,16 +1,11 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
-import { cloneElement, isValidElement, useRef, useState } from "react"
-import { useGSAP } from "@gsap/react"
-import gsap from "gsap"
+import { cloneElement, isValidElement, useState } from "react"
 import {
   ArrowLeft,
   ChevronRight,
-  Cpu,
   LoaderCircle,
-  Plug,
   Search,
   Trash2,
 } from "lucide-react"
@@ -40,16 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import { prefetchSettingsLanding } from "@/features/studio-management/settings-data"
-import {
-  MOTION_DURATION,
-  MOTION_EASE,
-  motionDuration,
-  prefersReducedMotion,
-} from "@/lib/motion"
 import { cn } from "@/lib/utils"
-
-gsap.registerPlugin(useGSAP)
 
 export const controlClass =
   "rounded-lg border-border bg-card font-sans text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25"
@@ -392,207 +378,6 @@ export function DeleteAction({
         </div>
       </PopoverContent>
     </Popover>
-  )
-}
-
-const SETTINGS_ITEMS = [
-  { key: "providers", label: "Provider", icon: Plug },
-  { key: "models", label: "Model", icon: Cpu },
-] as const
-
-export type SettingsSection = (typeof SETTINGS_ITEMS)[number]["key"]
-
-/** 父路径：/studio/settings/providers → /studio/settings。 */
-function parentPath(pathname: string): string {
-  const index = pathname.lastIndexOf("/")
-  return index <= 0 ? "" : pathname.slice(0, index)
-}
-
-// 模块级接力状态：上一次选中项的视口矩形 + 所在路径。
-// SettingsNav 在设置区内常驻不重挂载；只在跨区离开后再回来时重挂载，
-// 靠它把选中底纹从上一位置滑过去而不是跳变。
-let lastIndicator: {
-  pathname: string
-  rect: { left: number; top: number; width: number; height: number }
-} | null = null
-
-/**
- * 设置区导航（桌面左侧垂直 / 移动端顶部横排），由 settings 区共享 layout
- * （settings-chrome.tsx）挂载：区内任何导航（Provider ↔ Model 页签、下钻
- * 编辑器、返回列表）它都不重挂载，只有右侧内容变化。
- * 选中态由绝对定位 underlay 承载（accent 底 / dark primary tint）：点击即
- * 乐观滑动，不等路由提交；驻留期间 current 变化时从当前位置滑到目标；
- * 跨区重挂载时靠模块级矩形接力；prefers-reduced-motion 全部瞬时。
- */
-export function SettingsNav({
-  current,
-  returnTo = "/studio",
-}: {
-  current: SettingsSection
-  returnTo?: string
-}) {
-  const pathname = usePathname()
-  const navRef = useRef<HTMLElement>(null)
-  const indicatorRef = useRef<HTMLSpanElement>(null)
-  const mountedRef = useRef(false)
-
-  useGSAP(
-    () => {
-      const nav = navRef.current
-      const indicator = indicatorRef.current
-      if (!nav || !indicator) return
-
-      const measure = () => {
-        const active = nav.querySelector<HTMLElement>('[aria-current="page"]')
-        if (!active) return null
-        const navRect = nav.getBoundingClientRect()
-        const rect = active.getBoundingClientRect()
-        return {
-          x: rect.left - navRect.left,
-          y: rect.top - navRect.top,
-          width: rect.width,
-          height: rect.height,
-          viewport: {
-            left: rect.left,
-            top: rect.top,
-            width: rect.width,
-            height: rect.height,
-          },
-        }
-      }
-
-      const target = measure()
-      if (!target) return
-
-      if (!mountedRef.current) {
-        mountedRef.current = true
-        // 挂载：同级页签接力滑动；跨区到达直接落位
-        const from =
-          lastIndicator !== null &&
-          lastIndicator.pathname !== pathname &&
-          parentPath(lastIndicator.pathname) === parentPath(pathname)
-            ? lastIndicator
-            : null
-        if (from && !prefersReducedMotion()) {
-          const navRect = nav.getBoundingClientRect()
-          gsap.fromTo(
-            indicator,
-            {
-              x: from.rect.left - navRect.left,
-              y: from.rect.top - navRect.top,
-              width: from.rect.width,
-              height: from.rect.height,
-            },
-            {
-              x: target.x,
-              y: target.y,
-              width: target.width,
-              height: target.height,
-              duration: MOTION_DURATION.fast,
-              ease: MOTION_EASE.enter,
-              overwrite: "auto",
-            }
-          )
-        } else {
-          gsap.set(indicator, {
-            x: target.x,
-            y: target.y,
-            width: target.width,
-            height: target.height,
-          })
-        }
-      } else {
-        // 驻留期间的页签切换：从当前位置（含乐观滑动后的位置）滑到目标
-        gsap.to(indicator, {
-          x: target.x,
-          y: target.y,
-          width: target.width,
-          height: target.height,
-          duration: motionDuration(MOTION_DURATION.fast),
-          ease: MOTION_EASE.enter,
-          overwrite: "auto",
-        })
-      }
-      lastIndicator = { pathname, rect: target.viewport }
-
-      const onResize = () => {
-        const next = measure()
-        if (!next) return
-        gsap.set(indicator, {
-          x: next.x,
-          y: next.y,
-          width: next.width,
-          height: next.height,
-        })
-        lastIndicator = { pathname, rect: next.viewport }
-      }
-      window.addEventListener("resize", onResize)
-      return () => window.removeEventListener("resize", onResize)
-    },
-    { scope: navRef, dependencies: [current] }
-  )
-
-  // 乐观滑动：点击当下就把 underlay 滑向目标项，不等 RSC 提交
-  const previewSlide = (link: HTMLElement) => {
-    const nav = navRef.current
-    const indicator = indicatorRef.current
-    if (!nav || !indicator || prefersReducedMotion()) return
-    const navRect = nav.getBoundingClientRect()
-    const rect = link.getBoundingClientRect()
-    gsap.to(indicator, {
-      x: rect.left - navRect.left,
-      y: rect.top - navRect.top,
-      width: rect.width,
-      height: rect.height,
-      duration: MOTION_DURATION.fast,
-      ease: MOTION_EASE.enter,
-      overwrite: "auto",
-    })
-  }
-
-  return (
-    <nav
-      ref={navRef}
-      aria-label="设置"
-      className="relative flex gap-1 self-start lg:sticky lg:top-24 lg:flex-col"
-    >
-      <span
-        ref={indicatorRef}
-        aria-hidden
-        className="pointer-events-none absolute top-0 left-0 rounded-lg bg-accent/60 dark:bg-primary/15"
-      />
-      {SETTINGS_ITEMS.map((item) => {
-        const active = current === item.key
-        const Icon = item.icon
-        return (
-          <Link
-            key={item.key}
-            href={`/studio/settings/${item.key}?${new URLSearchParams({ returnTo })}`}
-            aria-current={active ? "page" : undefined}
-            onClick={(event) => {
-              if (!active) previewSlide(event.currentTarget)
-            }}
-            onPointerEnter={() => {
-              // 悬停/聚焦即预热目标页签数据，切换时多数情况直接命中缓存，
-              // 不再经过加载态
-              if (!active) prefetchSettingsLanding(item.key)
-            }}
-            onFocus={() => {
-              if (!active) prefetchSettingsLanding(item.key)
-            }}
-            className={cn(
-              "relative flex h-11 flex-1 items-center gap-2.5 rounded-lg px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
-              active
-                ? "text-accent-foreground dark:text-primary"
-                : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-            )}
-          >
-            <Icon aria-hidden className="size-4 shrink-0" />
-            {item.label}
-          </Link>
-        )
-      })}
-    </nav>
   )
 }
 

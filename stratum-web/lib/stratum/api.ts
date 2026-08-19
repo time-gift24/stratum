@@ -115,6 +115,11 @@ export type ProviderTestResult = {
   message?: string
 }
 
+/** Model 级真实消息测试结果：后端对该 model 发出一次真实最小 chat 请求。 */
+export type ManagedModelTestResult = {
+  latency_ms: number
+}
+
 export type ManagedModelView = {
   model_id: string
   provider: ProviderKind
@@ -401,6 +406,10 @@ export type StratumApi = {
   ): Promise<ResourceRevision<ProviderView>>
   deleteProvider(provider: ProviderKind, etag: string): Promise<void>
   testProvider(provider: ProviderKind): Promise<ProviderTestResult>
+  testManagedModel(
+    provider: ProviderKind,
+    modelName: string
+  ): Promise<ManagedModelTestResult>
   listTools(): Promise<readonly ToolView[]>
   listManagedModels(
     query?: ListQuery & { provider?: ProviderKind }
@@ -857,6 +866,12 @@ export function createStratumApi(options: {
       request<ProviderTestResult>(`/v1/providers/${provider}/test`, asJson, {
         method: "POST",
       }),
+    testManagedModel: (provider, modelName) =>
+      request<ManagedModelTestResult>(
+        `/v1/providers/${provider}/models/${encodeURIComponent(modelName)}/test`,
+        asJson,
+        { method: "POST" }
+      ),
     listTools: () => request<readonly ToolView[]>("/v1/tools", asJson),
     listManagedModels: async (query = {}) => {
       const { provider, ...listQuery } = query
