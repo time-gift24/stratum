@@ -103,15 +103,17 @@ impl OntologyStore {
     ///
     /// Returns a typed persistence error when PostgreSQL cannot complete the
     /// query or returns an invalid persisted identity.
-    #[tracing::instrument(skip(self), fields(operation = "ontology.list"))]
+    #[tracing::instrument(skip(self, request), fields(operation = "ontology.list"))]
     pub async fn list(
         &self,
         request: ListOntologies,
     ) -> Result<OntologyListPage, OntologyStoreError> {
         let offset = i64::from(request.page.saturating_sub(1)) * i64::from(request.per_page);
+        let search = search_pattern(request.search.as_deref());
         let rows = sqlx::query_as::<_, ListRow>(request.sort.sql())
             .bind(i64::from(request.per_page))
             .bind(offset)
+            .bind(search)
             .fetch_all(&self.pool)
             .await
             .map_err(map_database_error)?;
@@ -281,61 +283,71 @@ impl ListSort {
     }
 }
 
-const LIST_BY_NAME_ASC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY name COLLATE \"C\" ASC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.name COLLATE \"C\" ASC NULLS LAST, page.id ASC NULLS LAST"
+/// Builds the `ILIKE` pattern for one optional search term, escaping the
+/// `%`, `_`, and `\` metacharacters so the term matches literally.
+fn search_pattern(search: Option<&str>) -> Option<String> {
+    let search = search?;
+    let mut pattern = String::with_capacity(search.len() + 2);
+    pattern.push('%');
+    for character in search.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    Some(pattern)
+}
+
+/// Expands to one deterministic list statement. The shared search filter
+/// lives only here: when `$3` is `NULL` every row matches, otherwise `name`
+/// and `display_name` are matched case-insensitively against the pre-escaped
+/// `ILIKE` pattern bound as `$3`.
+macro_rules! list_query {
+    ($page_order:literal, $outer_order:literal) => {
+        concat!(
+            "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies ",
+            "WHERE ($3::text IS NULL OR name ILIKE $3 ESCAPE '\\' OR display_name ILIKE $3 ESCAPE '\\') ",
+            "), page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
+            "WHERE ($3::text IS NULL OR name ILIKE $3 ESCAPE '\\' OR display_name ILIKE $3 ESCAPE '\\') ",
+            "ORDER BY ", $page_order, " LIMIT $1 OFFSET $2) ",
+            "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
+            "FROM total LEFT JOIN page ON TRUE ORDER BY ", $outer_order
+        )
+    };
+}
+
+const LIST_BY_NAME_ASC: &str = list_query!(
+    "name COLLATE \"C\" ASC, id ASC",
+    "page.name COLLATE \"C\" ASC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_NAME_DESC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY name COLLATE \"C\" DESC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.name COLLATE \"C\" DESC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_NAME_DESC: &str = list_query!(
+    "name COLLATE \"C\" DESC, id ASC",
+    "page.name COLLATE \"C\" DESC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_DISPLAY_NAME_ASC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY display_name COLLATE \"C\" ASC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.display_name COLLATE \"C\" ASC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_DISPLAY_NAME_ASC: &str = list_query!(
+    "display_name COLLATE \"C\" ASC, id ASC",
+    "page.display_name COLLATE \"C\" ASC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_DISPLAY_NAME_DESC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY display_name COLLATE \"C\" DESC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.display_name COLLATE \"C\" DESC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_DISPLAY_NAME_DESC: &str = list_query!(
+    "display_name COLLATE \"C\" DESC, id ASC",
+    "page.display_name COLLATE \"C\" DESC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_CREATED_AT_ASC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY created_at ASC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.created_at ASC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_CREATED_AT_ASC: &str = list_query!(
+    "created_at ASC, id ASC",
+    "page.created_at ASC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_CREATED_AT_DESC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.created_at DESC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_CREATED_AT_DESC: &str = list_query!(
+    "created_at DESC, id ASC",
+    "page.created_at DESC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_UPDATED_AT_ASC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY updated_at ASC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.updated_at ASC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_UPDATED_AT_ASC: &str = list_query!(
+    "updated_at ASC, id ASC",
+    "page.updated_at ASC NULLS LAST, page.id ASC NULLS LAST"
 );
-const LIST_BY_UPDATED_AT_DESC: &str = concat!(
-    "WITH total AS (SELECT count(*)::bigint AS total FROM ontologies), ",
-    "page AS (SELECT id, name, display_name, description, created_at, updated_at FROM ontologies ",
-    "ORDER BY updated_at DESC, id ASC LIMIT $1 OFFSET $2) ",
-    "SELECT page.id, page.name, page.display_name, page.description, page.created_at, page.updated_at, total.total ",
-    "FROM total LEFT JOIN page ON TRUE ORDER BY page.updated_at DESC NULLS LAST, page.id ASC NULLS LAST"
+const LIST_BY_UPDATED_AT_DESC: &str = list_query!(
+    "updated_at DESC, id ASC",
+    "page.updated_at DESC NULLS LAST, page.id ASC NULLS LAST"
 );
 
 #[derive(Debug, FromRow)]
@@ -1070,7 +1082,7 @@ fn is_unavailable_sqlstate(code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_unavailable_sqlstate;
+    use super::{is_unavailable_sqlstate, search_pattern};
 
     #[test]
     fn connection_and_shutdown_sqlstates_are_unavailable() {
@@ -1086,5 +1098,26 @@ mod tests {
                 "{code} should not be unavailable"
             );
         }
+    }
+
+    #[test]
+    fn absent_search_disables_the_filter() {
+        assert_eq!(search_pattern(None), None);
+    }
+
+    #[test]
+    fn search_pattern_wraps_plain_terms_as_a_contains_match() {
+        assert_eq!(
+            search_pattern(Some("support")),
+            Some("%support%".to_owned())
+        );
+    }
+
+    #[test]
+    fn search_pattern_escapes_ilike_metacharacters() {
+        assert_eq!(
+            search_pattern(Some("100%_\\")),
+            Some("%100\\%\\_\\\\%".to_owned())
+        );
     }
 }

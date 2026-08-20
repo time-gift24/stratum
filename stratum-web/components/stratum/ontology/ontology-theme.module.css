@@ -62,12 +62,17 @@
 .theme :global(.react-flow__controls) {
   overflow: hidden;
   border-radius: var(--radius);
-  box-shadow: 0 8px 30px color-mix(in oklch, var(--foreground) 12%, transparent);
+  box-shadow: none;
 }
 
 .theme :global(.react-flow__minimap) {
   overflow: hidden;
   border-radius: var(--radius);
+  box-shadow: none;
+}
+
+:global(.dark) .theme :global(.react-flow__controls),
+:global(.dark) .theme :global(.react-flow__minimap) {
   box-shadow: 0 8px 30px color-mix(in oklch, var(--foreground) 12%, transparent);
 }
 

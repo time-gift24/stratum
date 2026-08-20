@@ -74,6 +74,9 @@ importers:
       shadcn:
         specifier: ^4.16.0
         version: 4.16.0(typescript@5.9.3)
+      smol-toml:
+        specifier: ^1.7.0
+        version: 1.7.0
       streamdown:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -5153,6 +5156,10 @@ packages:
   sliced@1.0.1:
     resolution: {integrity: sha512-VZBmZP8WU3sMOZm1bdgTadsQbcscK0UM8oKxKVBs4XAhUo2Xxzm/OFMGBkPusxw9xL3Uy8LrzEqGqJhclsr0yA==}
     deprecated: Unsupported
+
+  smol-toml@1.7.0:
+    resolution: {integrity: sha512-aqVvWoyO21L23mb+drl4RmMXbf6N7FdHjAhTRA9ZBL7apWBgfWC16KjrASI+1p9GAroljyMHj6fK67i0UiTNvQ==}
+    engines: {node: '>= 18'}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -11326,6 +11333,8 @@ snapshots:
   sisteransi@1.0.5: {}
 
   sliced@1.0.1: {}
+
+  smol-toml@1.7.0: {}
 
   source-map-js@1.2.1: {}
 

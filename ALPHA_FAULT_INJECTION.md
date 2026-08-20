@@ -22,13 +22,13 @@
 
 前五类由 `TODO.md` 的 P4a 后续测试基础设施负责；其中 API SIGTERM 必须等 scripted LLM/可观察 Tool 能稳定制造 hosted slow/pending Turn、process controller 能锁定精确进程与边界后再执行，不能继续依赖真实 provider 的偶然时序。production compaction 策略/Hook 由 H5b 设计，producer 与 consumer 的产品/故障验收由 H5c 负责。本文件不得据此把这些场景记为通过，也不得为执行它们增加公开 debug endpoint、生产 failpoint、特殊协议字段或第二套状态。
 
-执行任一 fixture 前，必须先按 [ALPHA_TEST.md](ALPHA_TEST.md) 的“本地 provider secret 配置”生成 Git 忽略的 `.stratum/alpha/config.toml` 与 Compose override。下文每条 Compose 命令都显式传入该 override；缺失文件或空 credential 时不得开始故障注入。
+每一个 fixture 都必须按 [ALPHA_TEST.md](ALPHA_TEST.md) 的“Studio DB-only 资源配置”：先启动该 Compose project 的 PostgreSQL/NATS 基础设施，再经 loopback management API/Studio UI 在该 fixture **自己的** `stratum_studio` database 中按 Provider → Model → Agent definition 建立资源，最后才启动 stock API/Web。新库初始为空，不会从 config、environment 或 template 文件 seed；未配置资源或 credential 时不得开始故障注入。
 
 ## 共同安全边界
 
 1. 只允许使用本文给出的两个精确 Compose project name。执行 `down -v` 前必须先用同一 project name 运行 `podman compose ... ps`，确认目标是本例 fixture。
 2. 同一时刻只启动一个 fixture，避免两个 project 争用 `5173`、`18080`、`4222` 和 `8222` 端口。
-3. 使用合成 prompt、低权限限额测试 provider key 和可丢弃资源。真实 key 只从安全环境变量生成前述本地未跟踪配置，不写入本文、日志或 Git；API 不会直接读取 `DEEPSEEK_API_KEY`。
+3. 使用合成 prompt、低权限限额测试 provider credential 和可丢弃资源。真实 credential 只能经 loopback Studio 管理边界写入 Studio PostgreSQL，不写入 config、environment、template 文件、本文、日志或 Git。
 4. 故障注入前必须记录 Git commit、容器 ID、AgentRuntimeId、AgentId、SessionId、TurnId、当前状态和 `last_event_seq`。
 5. 证据不得包含 prompt、message content、summary、Tool arguments/result、provider body、API key、token、连接字符串或其他凭据。
 6. 每例只施加标题所述的一个故障。不得同时重启其他服务、修改网络、改变 retention、暂停进程、执行 SQL mutation 或修改生产配置。
@@ -55,18 +55,36 @@ ORDER BY event_seq;
 ### 独立 fixture
 
 ```sh
-podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml up -d --build
-podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
+podman compose -p stratum-alpha-fi-nats \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  up -d postgres nats
 ```
 
-等待 Postgres、NATS、API 和 Web 全部健康。在 Web 创建只属于本例的 AgentRuntime，完成一个安全基线 Turn，并记录其 identity、AgentRuntimeView barrier 和 durable event type 清单。保持该对话页面打开。
+按 `ALPHA_TEST.md` 的本地流程，使 loopback management API 连接该 project 的数据库端口，在 Studio UI 完成 Provider → Model → Agent definition，然后停止本地 API/Web 进程。不删除 volume，继续启动 stock API/Web：
+
+```sh
+podman compose -p stratum-alpha-fi-nats \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  up -d --build --wait
+podman compose -p stratum-alpha-fi-nats \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  ps
+```
+
+等待 execution/Ontology/Studio PostgreSQL、NATS、API 和 Web 全部健康，并确认 compatibility catalogs 能看到本 fixture 已写入 Studio database 的 Model 与 Agent definition。stock Docker API 的 management routes 应保持隐藏，但 runtime 仍使用该 Studio database。在 Web 创建只属于本例的 AgentRuntime，完成一个安全基线 Turn，并记录其 identity、AgentRuntimeView barrier 和 durable event type 清单。保持该对话页面打开。
 
 ### 唯一故障
 
 只停止 `nats` 服务：
 
 ```sh
-podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml stop nats
+podman compose -p stratum-alpha-fi-nats \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  stop nats
 ```
 
 不得同时停止或重启 Postgres、API、Web，不得修改 NATS retention 或人为填满队列。
@@ -81,8 +99,8 @@ podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/
 6. 恢复 NATS 并等待容器健康：
 
    ```sh
-   podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml start nats
-   podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
+   podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml start nats
+   podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml ps
    ```
 
 7. readiness 不会主动探测 NATS。先提交一个新的安全 Turn，让 PG commit 后的 publish 成为恢复探针；等待一次成功 publish 后再确认 readiness 的 `realtime: "ok"`，重新建立页面实时连接，并验证该 Turn 最终从 PG 收敛且后续 tail 可用。
@@ -112,8 +130,8 @@ podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/
 ### Cleanup
 
 ```sh
-podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
-podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/compose.override.yml down -v --remove-orphans
+podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml ps
+podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml down -v --remove-orphans
 ```
 
 确认该 project 的容器、network 和两个数据 volume 已清理，再开始 F02。
@@ -123,32 +141,50 @@ podman compose -p stratum-alpha-fi-nats -f docker-compose.yml -f .stratum/alpha/
 ### 独立 fixture
 
 ```sh
-podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml up -d --build
-podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
+podman compose -p stratum-alpha-fi-postgres \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  up -d postgres nats
 ```
 
-等待全部服务健康。在 Web 创建本例专用 AgentRuntime并完成一个安全基线 Turn；记录 AgentRuntimeView、固定 barrier history 和安全 SQL 基线。
+按同一 loopback 管理流程在本 project 的 Studio database 中显式建立 Provider → Model → Agent definition，停止本地 API/Web 进程但保留 volume，然后启动 stock API/Web：
+
+```sh
+podman compose -p stratum-alpha-fi-postgres \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  up -d --build --wait
+podman compose -p stratum-alpha-fi-postgres \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  ps
+```
+
+等待全部服务健康，并确认 readiness 已包含 execution、Ontology 与 Studio 三个 PostgreSQL database。在 Web 创建本例专用 AgentRuntime并完成一个安全基线 Turn；记录 AgentRuntimeView、固定 barrier history 和安全 SQL 基线。
 
 ### 唯一故障
 
 只停止 `postgres` 服务：
 
 ```sh
-podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml stop postgres
+podman compose -p stratum-alpha-fi-postgres \
+  -f docker-compose.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
+  stop postgres
 ```
 
-不得同时停止 NATS、API、Web，不得删除 volume、修改 SQL、改变连接配置或重启 API。
+根 Compose 的 execution、Ontology 与 Studio 三个 database 共用该 PostgreSQL server，因此这一个 server 故障会使三个核心依赖同时不可用。不得同时停止 NATS、API、Web，不得删除 volume、修改 SQL、改变连接配置或重启 API。
 
 ### 操作
 
 1. 确认 Postgres 已停止，NATS、API 和 Web 容器仍在运行。
-2. 请求 `GET /health/live` 与 `GET /health/ready`。API 进程仍存活时 liveness 应为 `200`；readiness 应为 `503` 且 `status: "unavailable"`。
+2. 请求 `GET /health/live` 与 `GET /health/ready`。API 进程仍存活时 liveness 应为 `200`；readiness 应为 `503` 且 `status: "unavailable"`；该结果必须同时覆盖 Studio PostgreSQL，即使 `management_enabled = false` 也不得忽略它。
 3. 分别请求该 AgentRuntime 的 view、history 和一条 command。记录稳定的 `503 store_unavailable`，不得从 NATS 或页面缓存猜测成功状态。
 4. 恢复 Postgres并等待健康：
 
    ```sh
-   podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml start postgres
-   podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml exec -T postgres pg_isready -U stratum -d stratum
+   podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml start postgres
+   podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml exec -T postgres pg_isready -U stratum -d stratum
    ```
 
 5. 等待连接池恢复，重新请求 readiness、view 和原 fixed-barrier history；硬刷新 Web 后从 recent conversation 列表显式重选原 AgentRuntime，确认页面从 PG 恢复。
@@ -157,7 +193,7 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 
 ### Durable oracle
 
-- Postgres 不可用时所有执行真相入口 fail closed；NATS、Web cache 或内存 registry不得替代 durable truth。
+- PostgreSQL server 不可用时，execution durable truth 与 Studio authoring/runtime catalog 都 fail closed；NATS、Web cache、内存 registry、config 或 template 文件不得替代它们。
 - 故障期间返回 `store_unavailable` 的操作不得留下被系统猜测的成功、terminal 或 event sequence 空洞。
 - Postgres 恢复后原 AgentRuntime、pinned Agent、Session 和 Turn identity不变，故障前已提交的 rows 完整存在。
 - 恢复后的下一次成功 append 使用连续的 next `event_seq`；没有重复 row 或已推进但缺 row 的 high-water。
@@ -180,8 +216,8 @@ podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/al
 ### Cleanup
 
 ```sh
-podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml ps
-podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/compose.override.yml down -v --remove-orphans
+podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml ps
+podman compose -p stratum-alpha-fi-postgres -f docker-compose.yml -f .stratum/alpha/postgres-loopback.yml down -v --remove-orphans
 ```
 
 确认该 project 已完全清理，本轮 stock Compose 外部故障即执行完毕。API SIGTERM/drain/restart 的确定性场景由 `TODO.md` P4a 接管。

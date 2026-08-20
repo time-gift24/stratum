@@ -119,7 +119,7 @@ export const ModelSelector = memo(function ModelSelector({
         disabled={triggerDisabled}
         aria-label={`模型：${triggerLabel}`}
         className={cn(
-          "flex items-center gap-1 rounded-full px-2 py-1 font-sans text-sm text-muted-foreground transition-colors outline-none",
+          "flex min-h-11 items-center gap-1 rounded-full px-2 py-1 font-sans text-sm text-muted-foreground transition-colors outline-none sm:min-h-0",
           "hover:bg-muted/60 hover:text-foreground",
           "focus-visible:ring-2 focus-visible:ring-ring/50",
           "disabled:cursor-not-allowed disabled:opacity-60",
@@ -177,7 +177,7 @@ export const ModelSelector = memo(function ModelSelector({
                         "rounded-full px-2 py-0.5 text-xs transition-colors outline-none",
                         "focus-visible:ring-2 focus-visible:ring-ring/50",
                         active
-                          ? "bg-primary/15 text-primary"
+                          ? "bg-accent/60 text-accent-foreground dark:bg-primary/15 dark:text-primary"
                           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                       )}
                     >
@@ -210,7 +210,10 @@ export const ModelSelector = memo(function ModelSelector({
                       {entry.name}
                     </span>
                     {entry.id === selectedModelId ? (
-                      <Check aria-hidden className="size-4 text-primary" />
+                      <Check
+                        aria-hidden
+                        className="size-4 text-accent dark:text-primary"
+                      />
                     ) : null}
                   </CommandItem>
                 ))}

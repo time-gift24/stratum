@@ -2,7 +2,7 @@
 //! stack. Every test is `#[ignore]`d for the default test run; the crate
 //! `Makefile` brings the stack up and runs them with `--test-threads=1`.
 
-mod common;
+use crate::integration_common as common;
 
 use axum::http::StatusCode;
 use common::{
@@ -127,11 +127,13 @@ async fn create_agent_runtime_idempotency_matrix() {
     assert!(agent_view["current_turn_id"].is_null());
     assert_eq!(agent_view["resume_required"], false);
 
-    // Identical replay: same key and request, even after the template changed.
-    fixture.write_template(
-        "agent-a",
-        "version = \"test-v1\"\nprompt = \"A changed prompt.\"\n",
-    );
+    // Identical replay: same key and request, even after the Studio definition changed.
+    fixture
+        .write_definition(
+            "agent-a",
+            "version = \"test-v2\"\nprompt = \"A changed prompt.\"\n",
+        )
+        .await;
     let (status, replay) = create_runtime(&fixture, &key, "agent-a").await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replay, created, "replay returns the identical body");
@@ -151,30 +153,26 @@ async fn create_agent_runtime_idempotency_matrix() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replay, created);
 
-    // A new key cannot reuse the exact tag for changed canonical content.
-    let (status, body) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "agent_version_conflict");
-    fixture.write_template("agent-a", TEMPLATE);
-
-    // A new key creates another runtime while reusing the same immutable
-    // Agent definition; a different author tag creates a new definition.
+    // A new key snapshots the new Studio version; repeated creates reuse that
+    // immutable definition while keeping runtime identities independent.
+    let (status, changed_definition) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
+    assert_eq!(status, StatusCode::CREATED, "{changed_definition}");
+    assert_eq!(changed_definition["agent_version"], "test-v2");
+    assert_ne!(changed_definition["agent_id"], created["agent_id"]);
     let (status, same_definition) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
     assert_eq!(status, StatusCode::CREATED, "{same_definition}");
-    assert_ne!(
-        same_definition["agent_runtime_id"],
-        created["agent_runtime_id"]
-    );
-    assert_eq!(same_definition["agent_id"], created["agent_id"]);
-    fixture.write_template(
-        "agent-a",
-        "version = \"test-v2\"\nprompt = \"You are a helpful test agent.\"\n",
-    );
+    assert_eq!(same_definition["agent_id"], changed_definition["agent_id"]);
+    fixture
+        .write_definition(
+            "agent-a",
+            "version = \"test-v3\"\nprompt = \"You are a helpful test agent.\"\n",
+        )
+        .await;
     let (status, new_version) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
     assert_eq!(status, StatusCode::CREATED, "{new_version}");
-    assert_eq!(new_version["agent_version"], "test-v2");
+    assert_eq!(new_version["agent_version"], "test-v3");
     assert_ne!(new_version["agent_id"], created["agent_id"]);
-    fixture.write_template("agent-a", TEMPLATE);
+    fixture.write_definition("agent-a", TEMPLATE).await;
 
     // A create-time model override initializes runtime state but never
     // changes the immutable Agent definition or creation response shape.
@@ -210,18 +208,7 @@ async fn create_agent_runtime_idempotency_matrix() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_request");
 
-    // Invalid template and model preflight failures.
-    fixture.write_template("broken", "version = \"broken-v1\"\nprompt = 42\n");
-    let (status, body) = create_runtime(&fixture, &uuid_v7(), "broken").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error"]["code"], "invalid_agent_template");
-    fixture.write_template(
-        "bad-model",
-        "version = \"bad-model-v1\"\nmodel = \"openai:not-configured\"\nprompt = \"x\"\n",
-    );
-    let (status, body) = create_runtime(&fixture, &uuid_v7(), "bad-model").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error"]["code"], "model_not_configured");
+    // Provider preflight still rejects parameters outside the adapter schema.
     let (status, body) = fixture
         .json(
             "POST",
@@ -237,16 +224,16 @@ async fn create_agent_runtime_idempotency_matrix() {
 
     // A failed create never consumes the key.
     let retry_key = uuid_v7();
-    let (status, _) = create_runtime(&fixture, &retry_key, "broken").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    fixture.write_template("broken", TEMPLATE);
-    let (status, created) = create_runtime(&fixture, &retry_key, "broken").await;
+    let (status, _) = create_runtime(&fixture, &retry_key, "late-agent").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    fixture.write_definition("late-agent", TEMPLATE).await;
+    let (status, created) = create_runtime(&fixture, &retry_key, "late-agent").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 }
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
-async fn template_catalog_is_all_or_nothing_and_safe() {
+async fn studio_template_projection_is_current_and_safe() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![]).await;
 
     let (status, body) = fixture.json("GET", "/v1/agent-templates", None, None).await;
@@ -261,16 +248,22 @@ async fn template_catalog_is_all_or_nothing_and_safe() {
         !raw.contains("helpful test agent"),
         "prompts never leak: {raw}"
     );
-    assert!(!raw.contains(&fixture.root.to_string_lossy().to_string()));
+    assert!(!raw.contains("test-studio-key"));
 
-    // One invalid template fails the whole catalog.
-    fixture.write_template("broken", "version = \"broken-v1\"\nprompt = 1\n");
+    fixture.write_definition("second", TEMPLATE).await;
     let (status, body) = fixture.json("GET", "/v1/agent-templates", None, None).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error"]["code"], "invalid_agent_template");
-    fixture.remove_template("broken");
-    let (status, _) = fixture.json("GET", "/v1/agent-templates", None, None).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["templates"].as_array().expect("templates list").len(),
+        2
+    );
+    fixture.remove_definition("second").await;
+    let (status, body) = fixture.json("GET", "/v1/agent-templates", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["templates"].as_array().expect("templates list").len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1547,44 +1540,47 @@ async fn health_and_not_found_endpoints() {
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
-async fn startup_fails_when_the_template_root_is_missing() {
-    let missing = std::env::temp_dir().join(format!("stratum-api-missing-{}", uuid_v7()));
-    let config = stratum_config::Config::parse(&format!(
-        r#"
-[agent]
-templates_root = {root:?}
+async fn startup_fails_when_the_studio_database_is_unavailable() {
+    let root = std::env::temp_dir().join(format!("stratum-api-studio-down-{}", uuid_v7()));
+    std::fs::create_dir_all(&root).expect("temporary config directory is created");
+    let path = root.join("stratum.toml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+[api]
+bind = "127.0.0.1:0"
 
-[llm]
-default = "openai:test-model"
-
-[llm.openai]
-api_key = "test-key"
-models = ["test-model"]
+[nats]
+url = {nats_url:?}
+stream_name = "AGENT_RUNTIME_TAIL"
+subject_prefix = "events.agent"
+replicas = 1
+max_age_seconds = 3600
+max_bytes = 67108864
+max_messages = 100000
 
 [postgres]
-url = "postgres://unused:unused@127.0.0.1:1/unused"
+url = {pg_url:?}
+
+[ontology]
+database_url = {ontology_url:?}
+
+[studio]
+database_url = "postgres://stratum:stratum@127.0.0.1:1/unavailable"
 "#,
-        root = missing.to_string_lossy()
-    ))
-    .expect("config parses");
-    let pg = PostgresBackend::connect(&common::pg_url())
-        .await
-        .expect("postgres connects");
-    let ontology = stratum_ontology::OntologyStore::connect(&common::ontology_pg_url())
-        .await
-        .expect("ontology store connects");
-    let result = stratum_api::AppState::new(
-        pg,
-        None,
-        stratum_llm::LlmProviderManager::new(),
-        ontology,
-        config,
+            nats_url = common::nats_url(),
+            pg_url = common::pg_url(),
+            ontology_url = common::ontology_pg_url(),
+        ),
     )
-    .await;
+    .expect("test config is written");
+    let result = stratum_api::run_from_path(&path).await;
     assert!(
-        matches!(result, Err(stratum_api::HostError::TemplatesRoot(_))),
-        "a missing template root fails startup"
+        matches!(result, Err(stratum_api::HostError::Studio(_))),
+        "an unavailable Studio database fails startup: {result:?}"
     );
+    std::fs::remove_dir_all(root).expect("temporary config directory is removed");
 }
 
 #[tokio::test]

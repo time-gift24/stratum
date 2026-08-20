@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::ProviderKind;
-
 /// Failures while reading or changing the Studio management catalog.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -12,7 +10,7 @@ pub enum StudioError {
     /// The Studio database migration history could not be applied.
     #[error("studio database migration failed")]
     Migration(#[from] sqlx::migrate::MigrateError),
-    /// The catalog has not been bootstrapped from the configured read-only sources.
+    /// The required singleton catalog metadata is missing.
     #[error("studio catalog has not been initialized")]
     NotInitialized,
     /// A requested management resource does not exist.
@@ -60,13 +58,6 @@ pub struct DeletionBlocker {
 }
 
 impl DeletionBlocker {
-    pub(crate) fn model(kind: ProviderKind, name: String) -> Self {
-        Self {
-            resource: "model",
-            name: format!("{}:{name}", kind.as_str()),
-        }
-    }
-
     pub(crate) fn agent_definition(name: String) -> Self {
         Self {
             resource: "agent_definition",

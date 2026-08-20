@@ -10,9 +10,11 @@ import { cn } from "@/lib/utils"
 
 /**
  * SiteNav —— 站点顶部导航（reactbits navigation-2 改造）。
- * 全部内容数据驱动：brand / menus（悬停下拉）/ links（直链）/ cta 由调用方传入。
+ * 全部内容数据驱动：brand / menus（悬停下拉）/ links（直链）/ cta / actions（右端图标槽）由调用方传入。
  * 颜色只消费最外层 token（card / foreground / muted / border / primary），随主题切换。
  * 品牌语言来自节点世界：主色状态点 + 字标。
+ * 吸顶状态机：页顶时全宽展开；滚动超过 12px 收缩为居中浮 pill。
+ * 两态同为磨砂质感（bg-card/55 + backdrop-blur-2xl + saturate + hairline + 浅阴影）。
  * 动效全部 GSAP：入场、下拉面板高度展开/收起、菜单项交错、悬停滑动底片。
  * 内部导航链接使用 TransitionLink，页面跳转带方向性转场。
  */
@@ -36,6 +38,8 @@ export interface SiteNavProps {
   menus?: SiteNavMenu[]
   links?: { label: string; href: string }[]
   cta?: { label: string; href: string }
+  /** 右端图标操作槽（如主题切换、设置入口），桌面与移动面板都会渲染 */
+  actions?: React.ReactNode
 }
 
 /** 菜单项卡片：桌面下拉（md）与移动面板（sm）共用，尺寸差异走 prop */
@@ -88,13 +92,30 @@ function NavMenuItemCard({
   )
 }
 
-export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
+export function SiteNav({ brand, menus = [], links = [], cta, actions }: SiteNavProps) {
   const [activeMenu, setActiveMenu] = useState<number | null>(null)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const rootRef = useRef<HTMLElement>(null)
   const desktopPanelRef = useRef<HTMLDivElement>(null)
   const mobilePanelRef = useRef<HTMLDivElement>(null)
   const prevMenuRef = useRef<number | null>(null)
+
+  // 吸顶状态机：页顶 = max-w-6xl 展开条；滚动后 = 居中磨砂浮 pill。
+  // capture 阶段监听：scroll 不冒泡但会捕获，因此 window 与内部滚动容器
+  // （对话线程流等 h-svh 页面，window.scrollY 恒为 0）都能驱动状态切换。
+  const [scrolled, setScrolled] = useState(false)
+  useEffect(() => {
+    const onScroll = (event: Event) => {
+      const target = event.target
+      const top =
+        target instanceof Element && target !== document.documentElement && target !== document.body
+          ? target.scrollTop
+          : window.scrollY
+      setScrolled(top > 12)
+    }
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true })
+    return () => window.removeEventListener("scroll", onScroll, { capture: true })
+  }, [])
 
   const { contextSafe } = useGSAP(
     () => {
@@ -219,7 +240,7 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
   return (
     <nav
       ref={rootRef}
-      className="fixed inset-x-0 top-0 z-50 w-full px-4 py-6 sm:px-6 sm:py-8"
+      className="fixed inset-x-0 top-0 z-50 w-full px-4 py-3 sm:px-6 sm:py-4"
     >
       <div className="mx-auto w-full max-w-[1400px]">
         {/* Desktop Navigation */}
@@ -234,28 +255,36 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
             if (e.key === "Escape") closeDesktopMenu()
           }}
         >
-          {/* Nav Container - Always rounded rectangle */}
-          <div className="mx-auto w-fit overflow-hidden rounded-3xl border border-border bg-card/40 shadow-xl backdrop-blur-2xl">
+          {/* Nav Container：页顶 max-w-6xl 展开，滚动后收缩为 pill；
+              两态都磨砂+边框+阴影；max-width 数值过渡保证收缩/展开丝滑 */}
+          <div
+            className={cn(
+              "mx-auto w-full overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150 transition-[max-width,background-color,border-color,box-shadow] duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+              scrolled ? "max-w-[38rem]" : "max-w-6xl"
+            )}
+          >
             {/* Main Nav Bar */}
-            <div className="flex items-center justify-between gap-2 py-3 pr-3 pl-6">
-              {/* Brand */}
-              <TransitionLink
-                href={brand.href ?? "/"}
-                className="mr-6 flex items-center gap-2 text-xl font-semibold tracking-tight text-foreground"
-              >
-                {brandContent}
-              </TransitionLink>
+            <div className="flex items-center justify-between gap-2 py-2 pr-2.5 pl-5">
+              {/* 左侧：品牌 + 导航链接（文字组靠左，不居中） */}
+              <div className="flex items-center gap-1">
+                {/* Brand */}
+                <TransitionLink
+                  href={brand.href ?? "/"}
+                  className="mr-3 flex items-center gap-2 text-base font-semibold tracking-tight text-foreground"
+                >
+                  {brandContent}
+                </TransitionLink>
 
-              {/* Nav Links */}
-              <div className="relative flex items-center gap-1">
-                <span
-                  data-nav-pill
-                  aria-hidden
-                  className="pointer-events-none absolute top-1/2 left-0 h-8 w-0 -translate-y-1/2 rounded-full bg-muted opacity-0"
-                />
-                {menus.map((menu, index) => {
-                  const menuClass =
-                    "relative flex items-center gap-1 rounded-full px-4 py-2 text-sm font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
+                {/* Nav Links */}
+                <div className="relative flex items-center gap-1">
+                  <span
+                    data-nav-pill
+                    aria-hidden
+                    className="pointer-events-none absolute top-1/2 left-0 h-8 w-0 -translate-y-1/2 rounded-full bg-muted opacity-0"
+                  />
+                  {menus.map((menu, index) => {
+                    const menuClass =
+                      "relative flex items-center gap-1 rounded-full px-4 py-2 text-[0.9375rem] font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
                   const chevron = (
                     <ChevronDown
                       aria-hidden
@@ -304,7 +333,7 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
                   <TransitionLink
                     key={link.label}
                     href={link.href}
-                    className="relative rounded-full px-4 py-2 text-sm font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
+                    className="relative rounded-full px-4 py-2 text-[0.9375rem] font-medium tracking-tight text-muted-foreground no-underline hover:text-foreground"
                     onMouseEnter={(e) => {
                       if (activeMenu !== null) closeDesktopMenu()
                       movePill(e.currentTarget as HTMLElement)
@@ -313,20 +342,24 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
                     {link.label}
                   </TransitionLink>
                 ))}
+                </div>
               </div>
 
               {/* Right Side Actions */}
-              {cta ? (
+              {cta || actions ? (
                 <div className="ml-6 flex items-center gap-2">
-                  <TransitionLink
-                    href={cta.href}
-                    className="rounded-lg bg-primary px-5 py-2 text-sm font-medium tracking-tight text-primary-foreground no-underline hover:bg-primary/80"
-                    onMouseEnter={() =>
-                      activeMenu !== null && closeDesktopMenu()
-                    }
-                  >
-                    {cta.label}
-                  </TransitionLink>
+                  {actions}
+                  {cta ? (
+                    <TransitionLink
+                      href={cta.href}
+                      className="rounded-lg bg-primary px-5 py-2 text-sm font-medium tracking-tight text-primary-foreground no-underline hover:bg-primary/80"
+                      onMouseEnter={() =>
+                        activeMenu !== null && closeDesktopMenu()
+                      }
+                    >
+                      {cta.label}
+                    </TransitionLink>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -352,13 +385,13 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
 
         {/* Mobile Navigation */}
         <div data-nav-mobile className="lg:hidden">
-          <div className="overflow-hidden rounded-3xl border border-border bg-card/40 shadow-xl backdrop-blur-2xl">
+          <div className="overflow-hidden rounded-3xl border border-border/70 bg-card/55 shadow-lg backdrop-blur-2xl backdrop-saturate-150">
             {/* Mobile Nav Bar */}
-            <div className="flex items-center justify-between py-3 pr-3 pl-4">
+            <div className="flex items-center justify-between py-2.5 pr-2.5 pl-4">
               {/* Brand */}
               <TransitionLink
                 href={brand.href ?? "/"}
-                className="flex items-center gap-2 text-xl font-semibold tracking-tight text-foreground"
+                className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground"
               >
                 {brandContent}
               </TransitionLink>
@@ -402,6 +435,13 @@ export function SiteNav({ brand, menus = [], links = [], cta }: SiteNavProps) {
                         ))}
                       </div>
                     )}
+
+                    {/* Mobile Actions（主题切换、设置等图标操作） */}
+                    {actions ? (
+                      <div className="flex items-center gap-2 px-2">
+                        {actions}
+                      </div>
+                    ) : null}
 
                     {/* Mobile CTA */}
                     {cta ? (

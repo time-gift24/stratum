@@ -1,6 +1,5 @@
 //! Configuration errors.
 
-use stratum_core::{AgentVersionTagParseError, ModelId};
 use thiserror::Error;
 
 /// Error returned while parsing or validating Stratum configuration.
@@ -10,51 +9,12 @@ pub enum ConfigError {
     /// TOML input could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[source] toml::de::Error),
-    /// The agent templates root was empty.
-    #[error("agent templates root must not be empty")]
-    InvalidTemplatesRoot,
     /// A configured CORS origin was a wildcard or invalid HTTP header value.
     #[error("api allowed origin is invalid")]
     InvalidAllowedOrigin,
     /// An API operational timeout was zero.
     #[error("invalid api configuration field `{field}`")]
     InvalidApiConfig { field: &'static str },
-    /// A template prompt was empty after trimming.
-    #[error("agent prompt must not be empty")]
-    EmptyPrompt,
-    /// A template omitted its author-provided version tag.
-    #[error("agent version tag is required")]
-    MissingAgentVersion,
-    /// A template version tag violated its validated string boundary.
-    #[error("invalid agent version tag")]
-    InvalidAgentVersion(#[source] AgentVersionTagParseError),
-    /// A template listed the same tool more than once.
-    #[error("duplicate tool `{tool}`")]
-    DuplicateTool { tool: String },
-    /// A provider API key was empty.
-    #[error("api key for provider `{provider}` must not be empty")]
-    EmptyApiKey { provider: &'static str },
-    /// A provider had no configured models.
-    #[error("provider `{provider}` must configure at least one model")]
-    EmptyModels { provider: &'static str },
-    /// A provider base URL override was blank.
-    #[error("base url for provider `{provider}` must not be blank")]
-    InvalidProviderBaseUrl { provider: &'static str },
-    /// A provider operational timeout was zero.
-    #[error("invalid `{field}` for provider `{provider}`")]
-    InvalidProviderTimeout {
-        provider: &'static str,
-        field: &'static str,
-    },
-    /// A provider listed the same model more than once.
-    #[error("duplicate model `{model}` for provider `{provider}`")]
-    DuplicateModel {
-        provider: &'static str,
-        model: String,
-    },
-    /// A selected model was absent from its provider configuration.
-    #[error("model `{model}` is not configured")]
-    ModelNotConfigured { model: ModelId },
     /// A caller required an optional section that was not configured.
     #[error("missing required configuration section `{section}`")]
     MissingSection { section: &'static str },
@@ -67,9 +27,12 @@ pub enum ConfigError {
     /// An Ontology persistence setting was invalid.
     #[error("invalid ontology configuration field `{field}`")]
     InvalidOntologyConfig { field: &'static str },
-    /// A Studio management setting was invalid.
+    /// A Studio catalog setting was invalid.
     #[error("invalid studio configuration field `{field}`")]
     InvalidStudioConfig { field: &'static str },
+    /// Two bounded contexts were configured to use the same PostgreSQL database.
+    #[error("execution, ontology, and studio must use distinct PostgreSQL databases")]
+    DatabaseIdentityConflict,
 }
 
 impl From<toml::de::Error> for ConfigError {

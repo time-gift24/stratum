@@ -81,7 +81,7 @@
 
 - 执行持久化的唯一真相是 Postgres durable ledger，经 `stratum-postgres` 的具体 command/query 接口访问；只有装配层 `stratum-api` 允许调用这些接口，kernel 持久化仍经 `DurableEventSink` 合同、telemetry 仍经 `TelemetryEventSink` 合同。业务 crate 禁止直连 `sqlx`。
 - `stratum-ontology` 与 `stratum-studio` 是上一条的仅有窄化例外：它们只可直接管理各自 bounded context 自有的 PostgreSQL 表、迁移和事务，不得成为其他领域的通用存储入口；各自 SQLx migration history 必须与执行存储及彼此隔离到独立 database。
-- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；作为基础设施后端的 `stratum-postgres` / `stratum-infra` 可以直接使用相应存储驱动，并自行保证崩溃一致性。禁止 filesystem 执行持久化（Agent 状态、历史、durable 事件、checkpoint 一律不得落盘）；`stratum-filesystem` 只保留只读 template catalog 访问与 Agent 可见的业务文件操作。
+- 文件系统访问必须经 `stratum-filesystem`，业务 crate 禁止直接使用 `std::fs` / `tokio::fs`。本条约束 agent 可见的业务文件操作；作为基础设施后端的 `stratum-postgres` / `stratum-infra` 可以直接使用相应存储驱动，并自行保证崩溃一致性。禁止 filesystem 执行持久化或 authoring catalog（Agent 状态、历史、durable 事件、checkpoint、Provider、Model 与 Agent definition 一律不得落盘）；`stratum-filesystem` 只保留 Agent 可见的业务文件操作。
 - Agent realtime 事件只经 `stratum-infra` 的窄 concrete Agent-tail transport 边界；业务代码禁止直连 `async-nats`。
 - 本节所称"业务 crate"指核心层、能力层、组合层；装配层（`stratum-api`）只允许在启动装配阶段（加载配置、创建目录、依赖接线）直连基础设施，运行期请求路径上禁止。
 - 业务文件写操作必须崩溃一致：临时文件 + 原子 rename，或等效保证。append-only 日志在同时满足以下条件时视为等效：写入后做文件与目录双 fsync，读取器容忍截断尾行（含落在多字节 UTF-8 字符中间的撕裂写，按字节解析并丢弃尾部残缺行）。
@@ -96,7 +96,7 @@
 
 ## 6. 安全（强制）
 
-- 密钥（LLM API key、token）在内存中以 `secrecy::Secret` 承载，禁止 `Debug` / `Display` 明文暴露；真实密钥禁止提交入库——仓库只保留 `config.example.toml`，真实值走本地配置或环境变量。
+- 密钥（LLM API key、token）在内存中以 `secrecy::Secret` 承载，禁止 `Debug` / `Display` 明文暴露；真实密钥禁止提交入库。Studio Provider credential 只可经 loopback 管理边界写入 Studio PostgreSQL，禁止写入本地配置、环境变量或 template 文件；其他运维 secret 通过部署环境的 secret 注入机制提供，不得回写 tracked config。
 - 所有 HTTP 外部输入在边界校验（utoipa schema + 反序列化校验）；边界数据尽量在反序列化时完成校验。
 - CORS 必须显式配置白名单，禁止 `allow_any_origin()` 上生产。
 - LLM 出站调用必须显式设置超时；禁止把用户凭据拼入 URL、headers 日志或错误消息。
@@ -197,6 +197,16 @@
 
 ---
 
+## 15. 前端组件纪律（强制）
+
+- 基础组件一律来自 `stratum-web/components/ui/`（shadcn 官方底稿，CLI 添加）：Button、Input、Textarea、Select、Dialog、Popover、Command、Field、Checkbox、Skeleton、Tooltip 等。**禁止手写平行实现**：裸 `<button>`/`<input>`/`<select>` 配自定义样式充当按钮或输入框、自制卡片容器、自制弹层，一律视为违规。
+- 缺组件时先走 shadcn CLI 添加（`pnpm dlx shadcn add ...`）；CLI 没有的按底稿隔离规则 fork 到 `components/stratum/`，数据走 props。`components/ui/`、`components/react-bits/`、`components/assistant-ui/` 只加不改。
+- 跨页面的组合原语（页面外壳、页头、资源卡片、状态 chip、表单分组、空态/404 态）统一维护在 `components/stratum/` 的共享模块，各表面直接复用；禁止每个页面各写一套同职责的卡片/列表行/页头。
+- 沉浸画布内部（Excalidraw、本体 xyflow 节点）的节点级交互元素是唯一豁免：它们属于画布世界的自定义渲染，不属于页面级基础组件。
+- 原生 `<a>`/`<Link>` 导航与表单 label 关联等 HTML 语义元素不算手写组件；本条针对带视觉与交互实现的控件。
+
+---
+
 ## 附录：禁止清单（Red Flags）
 
 以下代码在 Review 中必须一票否决：
@@ -205,7 +215,7 @@
 - [ ] `println!` / `eprintln!` 出现在非 CLI 生产代码中（测试代码豁免）
 - [ ] 密钥、token、用户凭据进入日志、span 字段或错误消息
 - [ ] 领域 ID 以裸字符串（stringly typed）穿越 crate 或 HTTP 边界
-- [ ] 业务 crate 直连 `std::fs` / `tokio::fs`、`sqlx` 或 `async-nats`（作为基础设施后端的 `stratum-postgres` / `stratum-infra`，以及 §5 明确限定的 `stratum-ontology` 持久化除外）
+- [ ] 业务 crate 直连 `std::fs` / `tokio::fs`、`sqlx` 或 `async-nats`（作为基础设施后端的 `stratum-postgres` / `stratum-infra`，以及 §5 明确限定的 `stratum-ontology` / `stratum-studio` 持久化除外）
 - [ ] 在宿主机直接执行 agent 生成的命令
 - [ ] std `MutexGuard` / `RwLock` guard 持有跨越 `.await` 点（为跨 await 串行化而持有 `tokio::sync::Mutex` guard 是允许的，见 §11）
 - [ ] `let _ = ...` 吞掉 `Result` 且无注释说明原因（测试清理代码豁免）
@@ -215,3 +225,5 @@
 - [ ] 真实密钥 / 凭据提交入库
 - [ ] 生产环境 `RUST_LOG=debug` 或 `trace`
 - [ ] 功能专属或单页样式无正当理由堆入 `stratum-web/app/globals.css`
+- [ ] 手写基础组件平行实现（裸 `<button>`/`<input>`/`<select>` 充当控件、自制卡片/弹层）替代 `components/ui/` 既有组件（画布节点内部豁免，见 §15）
+- [ ] 页面级组合件（页头、资源卡片、状态 chip、空态/错误态）绕过 `components/stratum/` 共享原语各写一套

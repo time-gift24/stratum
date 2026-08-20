@@ -34,7 +34,7 @@ pub struct CreateAgentDefinitionRequest {
     /// Stable Agent name.
     pub agent_name: String,
     /// Author-supplied immutable template version tag.
-    pub agent_version: AgentVersionTag,
+    pub agent_version: String,
     /// Canonical model identity.
     pub model: ModelId,
     /// Provider parameters.
@@ -52,7 +52,7 @@ pub struct CreateAgentDefinitionRequest {
 #[serde(deny_unknown_fields)]
 pub struct UpdateAgentDefinitionRequest {
     /// New author-supplied immutable template version tag.
-    pub agent_version: AgentVersionTag,
+    pub agent_version: String,
     /// Canonical model identity.
     pub model: ModelId,
     /// Provider parameters.
@@ -166,4 +166,41 @@ pub struct ModelsPage {
     pub data: Vec<ModelView>,
     /// Page metadata.
     pub pagination: PaginationView,
+}
+
+/// One tool actually available from this host binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ToolView {
+    /// Provider-visible tool name.
+    pub name: String,
+    /// Safe provider-visible description.
+    pub description: String,
+    /// Whether the tool reads or writes external state.
+    pub kind: ToolKindDto,
+    /// Approval risk classification.
+    pub danger_level: DangerLevelDto,
+}
+
+/// Closed wire projection of [`stratum_core::ToolKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolKindDto {
+    Read,
+    Write,
+}
+
+/// Closed wire projection of [`stratum_core::DangerLevel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DangerLevelDto {
+    Low,
+    Medium,
+    High,
+}
+
+/// Result of one real-message Model test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ModelTestResult {
+    /// Round-trip latency of the provider chat call in milliseconds.
+    pub latency_ms: u64,
 }

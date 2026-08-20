@@ -7,8 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::rejection::JsonRejection};
-use stratum_config::AgentName;
-use stratum_core::ModelConfig;
+use stratum_core::{AgentName, ModelConfig};
 use stratum_llm::LlmError;
 use stratum_postgres::{
     AgentRuntimeView as StoredAgentRuntimeView, CreateAgentRuntime, HISTORY_DEFAULT_LIMIT,
@@ -41,7 +40,7 @@ use crate::turn::build_tool_registry;
         (status = 404, description = "agent template not found", body = ErrorResponse),
         (status = 409, description = "the exact template name/version tag conflicts with another immutable definition", body = ErrorResponse),
         (status = 413, description = "request body is too large", body = ErrorResponse),
-        (status = 422, description = "template or model validation failed", body = ErrorResponse),
+        (status = 422, description = "Studio definition or model validation failed", body = ErrorResponse),
         (status = 500, description = "durable state is corrupt or an internal error occurred", body = ErrorResponse),
         (status = 503, description = "store unavailable or service shutting down", body = ErrorResponse),
     )
@@ -55,7 +54,7 @@ pub(crate) async fn create_agent_runtime(
     let idempotency_key = parse_idempotency_key(&headers)?;
     let body = json_request(request)?;
     // Key-first: an idempotent replay answers from the stored record alone,
-    // without reading the template catalog.
+    // without reading the current Studio definition catalog.
     if let Some(existing) = state
         .pg()
         .find_agent_runtime_by_idempotency_key(idempotency_key)
@@ -80,13 +79,11 @@ pub(crate) async fn create_agent_runtime(
     Span::current().record("agent_name", agent_name.as_str());
     let definition = state.resolve_agent_definition(&agent_name).await?;
     let template_model = definition.model.clone();
-    let effective_model = match &body.model_config {
-        Some(overridden) => {
-            validate_model_override(&state, overridden)?;
-            overridden.clone()
-        }
-        None => template_model.clone(),
-    };
+    let effective_model = body
+        .model_config
+        .clone()
+        .unwrap_or_else(|| template_model.clone());
+    validate_model_override(&state, &effective_model).await?;
     build_tool_registry(&definition.tools)
         .map_err(|_| ApiError::new(ErrorKind::InvalidAgentTemplate))?;
 
@@ -141,12 +138,15 @@ fn created_response(
 }
 
 /// Validates a full-replacement model override before any durable mutation.
-pub(crate) fn validate_model_override(
+pub(crate) async fn validate_model_override(
     state: &AppState,
     model_config: &ModelConfig,
 ) -> Result<(), ApiError> {
-    state
+    let providers = state
         .providers()
+        .await
+        .map_err(|error| ApiError::with_source(ErrorKind::RuntimeUnavailable, error))?;
+    providers
         .configure(model_config)
         .map(|_| ())
         .map_err(|error| match error {
@@ -167,13 +167,14 @@ fn parse_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, ApiError> {
     uuid::Uuid::parse_str(value).map_err(|_| ApiError::new(ErrorKind::InvalidRequest))
 }
 
-/// Lists the current valid template catalog (all-or-nothing).
+/// Lists the current Agent definition projection from Studio PostgreSQL.
 #[utoipa::path(
     get,
     path = "/v1/agent-templates",
     responses(
-        (status = 200, description = "current template catalog", body = AgentTemplatesResponse),
-        (status = 422, description = "at least one template is unreadable or invalid", body = ErrorResponse),
+        (status = 200, description = "current Studio Agent definition projection", body = AgentTemplatesResponse),
+        (status = 500, description = "Studio catalog is corrupt", body = ErrorResponse),
+        (status = 503, description = "Studio store is unavailable", body = ErrorResponse),
     )
 )]
 pub(crate) async fn list_agent_templates(
@@ -189,12 +190,19 @@ pub(crate) async fn list_agent_templates(
     path = "/v1/models",
     responses(
         (status = 200, description = "configured model catalog", body = ModelsResponse),
+        (status = 503, description = "Studio catalog is unavailable", body = ErrorResponse),
     )
 )]
-pub(crate) async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
-    Json(ModelsResponse {
-        models: state.providers().models(),
-    })
+pub(crate) async fn list_models(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ModelsResponse>, ApiError> {
+    let providers = state
+        .providers()
+        .await
+        .map_err(|error| ApiError::with_source(ErrorKind::RuntimeUnavailable, error))?;
+    Ok(Json(ModelsResponse {
+        models: providers.models(),
+    }))
 }
 
 /// Cold AgentRuntime view at a fixed Postgres barrier.

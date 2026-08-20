@@ -8,7 +8,6 @@
 #![allow(dead_code)] // helpers are used by a subset of the test cases
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,9 +15,10 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use futures_util::StreamExt;
+use secrecy::SecretString;
 use stratum_api::{AppState, router};
 use stratum_config::Config;
-use stratum_core::{ChatMessage, ModelConfig, ModelId};
+use stratum_core::{AgentName, AgentVersionTag, ChatMessage, ModelConfig, ModelId, ToolName};
 use stratum_infra::{AgentRuntimeTailConfig, NatsAgentRuntimeTail};
 use stratum_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, LlmError,
@@ -26,6 +26,7 @@ use stratum_llm::{
 };
 use stratum_ontology::OntologyStore;
 use stratum_postgres::PostgresBackend;
+use stratum_studio::{AgentDefinitionInput, ProviderKind, StudioError, StudioStore};
 use tower::ServiceExt;
 
 /// Postgres of the test compose stack.
@@ -44,6 +45,53 @@ pub fn ontology_pg_url() -> String {
     })
 }
 
+/// Studio catalog database of the shared Postgres test container.
+pub fn studio_pg_url() -> String {
+    std::env::var("STRATUM_API_TEST_STUDIO_PG_URL").unwrap_or_else(|_| {
+        "postgres://stratum:stratum@127.0.0.1:45433/stratum_studio_test".to_owned()
+    })
+}
+
+/// Deliberately corrupt Studio catalog used only for fail-closed assembly.
+pub fn corrupt_studio_pg_url() -> String {
+    std::env::var("STRATUM_API_TEST_CORRUPT_STUDIO_PG_URL").unwrap_or_else(|_| {
+        "postgres://stratum:stratum@127.0.0.1:45433/stratum_studio_corrupt_test".to_owned()
+    })
+}
+
+/// Studio database that removes a credential during one Model insert.
+pub fn postcommit_studio_pg_url() -> String {
+    std::env::var("STRATUM_API_TEST_POSTCOMMIT_STUDIO_PG_URL").unwrap_or_else(|_| {
+        "postgres://stratum:stratum@127.0.0.1:45433/stratum_studio_postcommit_test".to_owned()
+    })
+}
+
+/// Removes every mutable Studio resource in dependency order.
+pub async fn reset_studio(store: &StudioStore) {
+    for definition in store
+        .list_agent_definitions()
+        .await
+        .expect("Studio definitions list")
+    {
+        store
+            .delete_agent_definition(&definition.value.agent_name, definition.version)
+            .await
+            .expect("Studio definition is deleted");
+    }
+    for model in store.list_models().await.expect("Studio models list") {
+        store
+            .delete_model(model.value.provider, &model.value.name, model.version)
+            .await
+            .expect("Studio model is deleted");
+    }
+    for provider in store.list_providers().await.expect("Studio providers list") {
+        store
+            .delete_provider(provider.value.kind, provider.version)
+            .await
+            .expect("Studio provider is deleted");
+    }
+}
+
 /// NATS of the test compose stack.
 ///
 /// `make test-integration` injects the dynamically published host port. The
@@ -53,7 +101,7 @@ pub fn nats_url() -> String {
         .unwrap_or_else(|_| "nats://127.0.0.1:44228".to_owned())
 }
 
-/// The single mock model every test template uses.
+/// The single mock model every test definition uses.
 pub const TEST_MODEL: &str = "openai:test-model";
 
 /// One scripted LLM call outcome.
@@ -229,36 +277,51 @@ impl ConfigurableLlmProvider for MockProvider {
 
 /// One assembled in-process host against the real compose services.
 pub struct Fixture {
-    pub root: PathBuf,
     pub state: Arc<AppState>,
     pub app: Router,
     pub provider: MockProvider,
+    pub studio: StudioStore,
 }
 
 impl Fixture {
-    /// Assembles a host with the given template files and provider script.
-    pub async fn new(templates: &[(&str, &str)], script: Vec<Script>) -> Self {
-        Self::with_tail(templates, script, default_tail_config().await).await
+    /// Assembles a host with the given Studio definitions and provider script.
+    pub async fn new(definitions: &[(&str, &str)], script: Vec<Script>) -> Self {
+        Self::with_tail(definitions, script, default_tail_config().await).await
     }
 
     /// Assembles a host without NATS (realtime degraded).
-    pub async fn without_nats(templates: &[(&str, &str)], script: Vec<Script>) -> Self {
-        Self::with_tail(templates, script, None).await
+    pub async fn without_nats(definitions: &[(&str, &str)], script: Vec<Script>) -> Self {
+        Self::with_tail(definitions, script, None).await
     }
 
     /// Assembles a host with a caller-supplied tail.
     pub async fn with_tail(
-        templates: &[(&str, &str)],
+        definitions: &[(&str, &str)],
         script: Vec<Script>,
         tail: Option<NatsAgentRuntimeTail>,
     ) -> Self {
-        let root = std::env::temp_dir().join(format!("stratum-api-test-{}", uuid_v7()));
-        std::fs::create_dir_all(&root).expect("temporary template root is created");
-        for (name, contents) in templates {
-            std::fs::write(root.join(format!("{name}.toml")), contents)
-                .expect("template is written");
+        let config = test_config();
+        let studio = StudioStore::connect(&studio_pg_url())
+            .await
+            .expect("studio store connects");
+        reset_studio(&studio).await;
+        studio
+            .create_provider(
+                ProviderKind::Openai,
+                SecretString::from("test-studio-key".to_owned()),
+            )
+            .await
+            .expect("mock provider record is created");
+        studio
+            .create_model(ProviderKind::Openai, "test-model".to_owned())
+            .await
+            .expect("mock model record is created");
+        for (name, contents) in definitions {
+            studio
+                .create_agent_definition(definition_input(name, contents))
+                .await
+                .expect("test Agent definition is created");
         }
-        let config = test_config(&root);
         let provider = Arc::new(MockProvider::new(script));
         let mut providers = LlmProviderManager::new();
         providers
@@ -271,28 +334,57 @@ impl Fixture {
             .await
             .expect("ontology store connects");
         let state = Arc::new(
-            AppState::new(pg, tail, providers, ontology, config)
+            AppState::new(pg, tail, providers, ontology, studio.clone(), config)
                 .await
                 .expect("state assembles"),
         );
         let app = router(Arc::clone(&state));
         Self {
-            root,
             state,
             app,
             provider: provider.as_ref().clone(),
+            studio,
         }
     }
 
-    /// Adds or replaces one template file (hot catalog).
-    pub fn write_template(&self, name: &str, contents: &str) {
-        std::fs::write(self.root.join(format!("{name}.toml")), contents)
-            .expect("template is written");
+    /// Adds or replaces one Studio Agent definition.
+    pub async fn write_definition(&self, name: &str, contents: &str) {
+        let input = definition_input(name, contents);
+        match self.studio.agent_definition(&input.agent_name).await {
+            Ok(current) => {
+                let unchanged = current.value.agent_version == input.agent_version
+                    && current.value.model == input.model
+                    && current.value.tools == input.tools
+                    && current.value.prompt == input.prompt;
+                if !unchanged {
+                    self.studio
+                        .replace_agent_definition(input, current.version)
+                        .await
+                        .expect("test Agent definition is replaced");
+                }
+            }
+            Err(StudioError::NotFound) => {
+                self.studio
+                    .create_agent_definition(input)
+                    .await
+                    .expect("test Agent definition is created");
+            }
+            Err(error) => panic!("test Agent definition lookup failed: {error}"),
+        }
     }
 
-    /// Removes one template file.
-    pub fn remove_template(&self, name: &str) {
-        std::fs::remove_file(self.root.join(format!("{name}.toml"))).expect("template is removed");
+    /// Removes one Studio Agent definition.
+    pub async fn remove_definition(&self, name: &str) {
+        let agent_name: AgentName = name.parse().expect("test Agent name is valid");
+        let definition = self
+            .studio
+            .agent_definition(&agent_name)
+            .await
+            .expect("test Agent definition exists");
+        self.studio
+            .delete_agent_definition(&agent_name, definition.version)
+            .await
+            .expect("test Agent definition is removed");
     }
 
     /// Issues one request against the real router.
@@ -338,17 +430,11 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 /// A second host over the same stores, simulating a process restart (empty
 /// registry, empty dispatchers).
 pub async fn restarted(fixture: &Fixture, script: Vec<Script>) -> Fixture {
     let tail = default_tail_config().await;
-    let config = test_config(&fixture.root);
+    let config = test_config();
     let provider = Arc::new(MockProvider::new(script));
     let mut providers = LlmProviderManager::new();
     providers
@@ -361,16 +447,23 @@ pub async fn restarted(fixture: &Fixture, script: Vec<Script>) -> Fixture {
         .await
         .expect("ontology store connects");
     let state = Arc::new(
-        AppState::new(pg, tail, providers, ontology, config)
-            .await
-            .expect("state assembles"),
+        AppState::new(
+            pg,
+            tail,
+            providers,
+            ontology,
+            fixture.studio.clone(),
+            config,
+        )
+        .await
+        .expect("state assembles"),
     );
     let app = router(Arc::clone(&state));
     Fixture {
-        root: fixture.root.clone(),
         state,
         app,
         provider: provider.as_ref().clone(),
+        studio: fixture.studio.clone(),
     }
 }
 
@@ -381,22 +474,13 @@ pub async fn default_tail_config() -> Option<NatsAgentRuntimeTail> {
     NatsAgentRuntimeTail::connect(config).await.ok()
 }
 
-fn test_config(root: &Path) -> Config {
+fn test_config() -> Config {
     let nats_url = nats_url();
     let pg_url = pg_url();
     let ontology_pg_url = ontology_pg_url();
+    let studio_pg_url = studio_pg_url();
     Config::parse(&format!(
         r#"
-[agent]
-templates_root = {root:?}
-
-[llm]
-default = "openai:test-model"
-
-[llm.openai]
-api_key = "test-key"
-models = ["test-model"]
-
 [api]
 bind = "127.0.0.1:0"
 
@@ -414,10 +498,50 @@ url = {pg_url:?}
 
 [ontology]
 database_url = {ontology_pg_url:?}
+
+[studio]
+database_url = {studio_pg_url:?}
+management_enabled = false
 "#,
-        root = root.to_string_lossy(),
     ))
     .expect("test config parses")
+}
+
+fn definition_input(name: &str, contents: &str) -> AgentDefinitionInput {
+    let version = quoted_field(contents, "version")
+        .expect("test definition has a quoted version")
+        .parse::<AgentVersionTag>()
+        .expect("test definition version is valid");
+    let model = quoted_field(contents, "model")
+        .map_or(TEST_MODEL, |value| value)
+        .parse::<ModelId>()
+        .expect("test definition model is valid");
+    let prompt = quoted_field(contents, "prompt")
+        .expect("test definition has a quoted prompt")
+        .to_owned();
+    let tools = if contents
+        .lines()
+        .any(|line| line.trim() == "tools = [\"echo\"]")
+    {
+        vec![ToolName::from("echo")]
+    } else {
+        Vec::new()
+    };
+    AgentDefinitionInput {
+        agent_name: name.parse().expect("test Agent name is valid"),
+        agent_version: version,
+        model: ModelConfig::new(model, serde_json::Map::new()),
+        tools,
+        prompt,
+    }
+}
+
+fn quoted_field<'a>(contents: &'a str, name: &str) -> Option<&'a str> {
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix(name)?.strip_prefix(" = ")?;
+        value.strip_prefix('"')?.strip_suffix('"')
+    })
 }
 
 pub fn uuid_v7() -> String {

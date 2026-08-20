@@ -8,7 +8,7 @@
 
 本轮人工验收只包含 8 条互相独立的 journey：
 
-1. Compose health、catalog 与 Web；
+1. Compose health、Studio catalog 与 Web；
 2. 普通 LLM Turn；
 3. 浏览器硬刷新后的 Postgres 恢复；
 4. Echo approval 的 approve/reject；
@@ -31,10 +31,10 @@
 
 ## 安全边界
 
-1. 只使用可丢弃的 Alpha Postgres database、NATS stream、Agent template 和 AgentRuntime。不得连接开发共享库、生产库或用户历史。
+1. 只使用可丢弃的 Alpha execution/Ontology/Studio Postgres database、NATS stream、Agent definition 和 AgentRuntime。不得连接开发共享库、生产库或用户历史。
 2. 当前是单进程、单一可信操作者的 Alpha；入站 API 没有 auth/authz 或 tenant isolation。API 只能绑定 loopback/受控私网，或置于带 TLS 与认证的反向代理后。Postgres 与 NATS 端口不得暴露公网。
 3. 只使用合成测试数据。prompt、Echo arguments/result、approval 和完整 conversation 会持久化；当前没有 delete API。真实 LLM 会外发上下文并产生费用，只能使用低权限、限额测试 key。
-4. 真实 provider key、token、数据库连接凭据和本地 secret 配置不得加入 Git。证据中不得出现它们的值。
+4. 真实 provider key、token 和数据库连接凭据不得加入 Git。Provider credential 只能经 loopback Studio 管理边界写入 Studio PostgreSQL，不得写入 TOML、Compose environment 或 template 文件；证据中不得出现其值。
 5. 证据不得保存原始 prompt、assistant 正文、reasoning、Echo arguments/result、provider body、SQL connection string 或 credential。截图必须裁切或遮盖正文，只保留状态、控件和安全 identity。
 6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `TODO.md` 的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F02 扩大范围。
 7. 每条 journey 都创建自己的 fresh AgentRuntime；不得复用其他 journey 的 AgentRuntime、Session、Turn、Approval 或浏览器恢复状态。某条 journey 的结果不得作为另一条的 fixture。
@@ -49,50 +49,59 @@
 
 本文将 Compose 实现统称为“Compose”。仓库本地默认使用 `podman compose`；已安装 Docker CLI 时可以等价使用 `docker compose`。每轮证据必须记录实际命令，不得假定执行机一定安装 Docker。
 
-### 本地 provider secret 配置
+### Studio DB-only 资源配置
 
-根 `docker-compose.yml` 默认挂载带占位 key 的 tracked `config.docker.toml`，而当前配置解析器不会用 `DEEPSEEK_API_KEY` 自动覆盖 TOML。发送真实消息前，必须把已存在于安全运行环境的 key 写入 Git 忽略的 owner-only 配置，并通过本地 Compose override 只读挂载；禁止修改或提交 tracked 示例配置。
+Provider、Model、credential 与 Agent definition 只来自 Studio PostgreSQL。新建的 Studio database 初始为空：启动不会从 tracked config、`DEEPSEEK_API_KEY` 或本地 template 文件 seed 或回退。
 
-以下命令不打印 key，也不把 key 放进子进程参数；如果环境变量为空会直接失败：
+在对一个 fresh Compose volume 执行 journey 前，必须先用一个绑定 loopback、连接**同一** `stratum_studio` database 的 management-enabled API 进程显式配置资源：
 
-```sh
-test -n "${DEEPSEEK_API_KEY:-}" || { echo "DEEPSEEK_API_KEY is required" >&2; exit 1; }
-umask 077
-mkdir -p .stratum/alpha
-python3 - <<'PY'
-import json
-import os
-from pathlib import Path
+1. 在 Studio 设置页 `/studio/settings/providers` 创建 Provider，并在凭据输入框中直接提交低权限、限额测试 credential。不得把 credential 写入本地配置、shell history 或 Compose environment。
+2. 在 `/studio/settings/models` 为该 Provider 创建本轮使用的 Model。
+3. 在 `/studio/agents/new` 创建引用该 Model 的 Agent definition；需要 J04/J05 时再为它选择 `echo` Tool。
+4. 确认管理读取响应只显示 credential 已配置，不回显 credential 值，然后停止 management-enabled 进程。得到的 Studio database/volume 不得在本轮验收中更换。
 
-source = Path("config.docker.toml").read_text(encoding="utf-8")
-placeholder = 'api_key = "replace-with-deepseek-api-key"'
-if source.count(placeholder) != 1:
-    raise SystemExit("expected exactly one Docker API-key placeholder")
-key = os.environ["DEEPSEEK_API_KEY"]
-if not key.strip():
-    raise SystemExit("DEEPSEEK_API_KEY is empty")
-rendered = source.replace(placeholder, f"api_key = {json.dumps(key)}")
-Path(".stratum/alpha/config.toml").write_text(rendered, encoding="utf-8")
-PY
-chmod 600 .stratum/alpha/config.toml
-cat > .stratum/alpha/compose.override.yml <<'YAML'
-services:
-  stratum-api:
-    volumes:
-      - ./.stratum/alpha/config.toml:/app/config.toml:ro
-YAML
-```
+stock `config.docker.toml` 因 API 在容器内绑定 `0.0.0.0` 而设置 `management_enabled = false`；该标志只隐藏管理 routes，runtime 仍必须连接 Studio database 并从中组装 provider registry。不得为了容器端口转发而放宽 loopback 安全检查；如何让一个 loopback 管理进程连接目标 Studio database 由本地/部署网络决定，但凭据写入边界不变。
 
-启动本轮基础 journey 时固定同时传入两个 Compose 文件：
+本地 Alpha 可按以下方式准备同一 Compose volume（Docker 用户只把 `podman` 替换为 `docker`）：
+
+1. 创建 Git 忽略的 `.stratum/alpha/postgres-loopback.yml`，其中只为 disposable PostgreSQL 增加 loopback 端口，不放入任何 provider credential：
+
+   ```yaml
+   services:
+     postgres:
+       ports:
+         - "127.0.0.1:15432:5432"
+   ```
+
+2. 用该 infrastructure-only override 启动本轮的 Postgres 与 NATS：
+
+   ```sh
+   podman compose \
+     -f docker-compose.yml \
+     -f .stratum/alpha/postgres-loopback.yml \
+     up -d postgres nats
+   ```
+
+3. 复制 `config.example.toml` 到 Git 忽略且 owner-only 的 `.stratum/alpha/config.toml`，只做三类 infrastructure 改动：将 API bind 设为 `127.0.0.1:18080`，将三个 PostgreSQL URL 的端口设为 `15432`，将 `management_enabled` 设为 `true`。该文件不得增加 Provider、Model、Agent definition 或 provider credential 字段。
+4. 在一个终端从 `.stratum/alpha` 目录启动 loopback API，在另一个终端启动 Web：
+
+   ```sh
+   (cd .stratum/alpha && cargo run --manifest-path ../../Cargo.toml -p stratum-api)
+   pnpm --dir stratum-web dev -- -p 5173
+   ```
+
+5. 在 `http://localhost:5173/studio` 按 Provider → Model → Agent definition 完成上述显式写入。停止本地 API/Web 进程，但不要删除 Compose volume。
+
+配置完成后启动本轮基础 journey：
 
 ```sh
 podman compose \
   -f docker-compose.yml \
-  -f .stratum/alpha/compose.override.yml \
+  -f .stratum/alpha/postgres-loopback.yml \
   up -d --build --wait
 ```
 
-Docker 用户只把 `podman` 替换为 `docker`。不得运行会输出渲染后配置正文的命令，也不得把 `.stratum/alpha/config.toml` 收入证据；整轮结束后可安全删除本地 `.stratum/alpha/`。
+不得在启动命令、渲染后配置或证据中携带 provider credential。
 
 默认入口：
 
@@ -100,15 +109,15 @@ Docker 用户只把 `podman` 替换为 `docker`。不得运行会输出渲染后
 - API：`http://127.0.0.1:18080`
 - API liveness：`/health/live`
 - API readiness：`/health/ready`
-- Template catalog：`/v1/agent-templates`
-- Model catalog：`/v1/models`
+- Agent definition 兼容 catalog：`/v1/agent-templates`
+- Studio Model catalog：`/v1/models`
 - NATS monitor：`http://127.0.0.1:8222`
 
 每条 journey 开始时都必须：
 
 1. 记录 Git commit、Compose project、四个服务的容器身份与版本。
-2. 独立确认 Postgres、NATS、API 与 Web 健康；不得把 J01 的 PASS 当作后续 journey 的健康证明。
-3. 确认 API 使用有效的低权限 provider credential，但不记录 credential 值。
+2. 独立确认 execution/Ontology/Studio PostgreSQL、NATS、API 与 Web 健康；不得把 J01 的 PASS 当作后续 journey 的健康证明。
+3. 确认 API 只使用 Studio database 中已配置的低权限 provider credential 与 Model，但不记录 credential 值。
 4. 从一个没有 selected runtime 的 Web“新对话”状态开始。J01 是唯一直接调用 create API 的 journey，因此只为 J01 生成新的 UUID `Idempotency-Key`。
 5. J02—J08 不预先调用 create API：当前 Web 会在首条消息中先创建 AgentRuntime、再向它发送首个 message；每个新对话都必须让 Web 生成新的创建 intent/key。J04 和 J08 各使用两个独立的新对话。
 6. runtime 一旦建立，立即记录 `AgentRuntimeId` 与 pinned `AgentId`；后续只操作这一 exact runtime。只有 J01 要求观察纯 create 后的 `idle`、无 Session/current Turn、`last_event_seq=0`；其余 journey 的首次可见 durable 状态可以已经是 `running` 或 terminal。
@@ -131,7 +140,7 @@ Docker 用户只把 `podman` 替换为 `docker`。不得运行会输出渲染后
 | 浏览器 / OS |  |
 | Provider / model（无 key） |  |
 | AgentRuntimeId |  |
-| AgentId / template name / version |  |
+| AgentId / Agent definition name / version |  |
 | SessionId / TurnId |  |
 | ApprovalId（适用时） |  |
 | Evidence 目录或 CI URL |  |
@@ -188,7 +197,7 @@ WHERE actual.event_seq IS NULL;
 
 | ID | Journey | Fresh runtime 数 | 主要验证面 | 结果 |
 |---|---|---:|---|---|
-| J01 | Compose health、catalog 与 Web | 1 | 部署入口与创建 | [x] |
+| J01 | Compose health、Studio catalog 与 Web | 1 | 部署入口与创建 | [x] |
 | J02 | 普通 LLM Turn | 1 | message、SSE、durable terminal | [x] |
 | J03 | 硬刷新后的 Postgres 恢复 | 1 | cold bootstrap 与去重 | [x] |
 | J04 | Echo approval approve/reject | 2 | 两种审批决定 | [x] |
@@ -197,26 +206,27 @@ WHERE actual.event_seq IS NULL;
 | J07 | 超过一页的 history | 1 | 向上分页 | [x] |
 | J08 | 同 AgentId 多 AgentRuntime 隔离 | 2 | identity、ledger、realtime 隔离 | [x] |
 
-## J01 — Compose health、catalog 与 Web
+## J01 — Compose health、Studio catalog 与 Web
 
 ### 独立前置
 
-- 使用当前 commit 启动 disposable Compose stack。
+- 已按“Studio DB-only 资源配置”将 Provider → Model → Agent definition 写入本轮 disposable Studio database。
+- 使用当前 commit 启动连接该 database 的 disposable Compose stack。
 - 按通用约定准备本 journey 专属的 `Idempotency-Key`，但不要预先创建 AgentRuntime。
 
 ### 操作
 
 1. 检查 Postgres 与 NATS container health，以及 API、Web container 状态。
-2. 请求 API liveness 与 readiness；确认 Postgres core ready，NATS realtime 未 degraded。
-3. 读取 template catalog 与 model catalog。
-4. 打开 Web conversation 页面，确认 template/model 可选择且页面没有启动错误。
+2. 请求 API liveness 与 readiness；确认 execution、Ontology 与 Studio PostgreSQL 都 ready，NATS realtime 未 degraded。
+3. 读取 Agent definition 兼容 catalog 与 Model catalog；确认返回本轮显式写入 Studio database 的资源。
+4. 打开 Web conversation 页面，确认 Agent definition/Model 可选择且页面没有启动错误；同时确认 stock Docker API 没有暴露 Studio 管理 routes。
 5. 直接调用 `POST /v1/agent-runtimes` 创建一个 fresh AgentRuntime，并读取其 AgentRuntimeView；不要发送 message。
 
 ### 预期
 
 - 四个服务均健康；API liveness/readiness 与 Web 页面可访问。
-- catalog 至少包含本轮使用的 template `name/version` 与可用 model，且不暴露 prompt、raw TOML、path 或 credential。
-- create response 与 AgentRuntimeView 返回新的 AgentRuntimeId、正确的 pinned AgentId 及 template name/version；Web 只需证明 catalog 与空白 conversation 页面可用，不要求显示内部 UUID。
+- catalog 至少包含本轮使用的 Agent definition `name/version` 与可用 Model，数据只来自 Studio PostgreSQL，且不暴露 prompt、raw TOML、path 或 credential。
+- create response 与 AgentRuntimeView 返回新的 AgentRuntimeId、正确的 pinned AgentId 及 definition name/version；Web 只需证明 catalog 与空白 conversation 页面可用，不要求显示内部 UUID。
 - runtime 保持 `idle`、无 Session/current Turn、`last_event_seq=0`；数据库中不存在该 runtime 的 durable event。
 
 ## J02 — 普通 LLM Turn
@@ -224,7 +234,7 @@ WHERE actual.event_seq IS NULL;
 ### 独立前置
 
 - 独立确认 stack health。
-- 在 Web 打开新的空白对话并选择 template/model；不得预先创建 runtime，也不得使用 J01 的 runtime。
+- 在 Web 打开新的空白对话并选择 Agent definition/Model；不得预先创建 runtime，也不得使用 J01 的 runtime。
 
 ### 操作
 
@@ -269,7 +279,7 @@ WHERE actual.event_seq IS NULL;
 ### 独立前置
 
 - 独立确认 stack health。
-- 准备两个独立的 Web 新对话：一个只用于 approve，一个只用于 reject。两者都选择声明 `echo` Tool 的同一 template，且都不得被其他 journey 使用。
+- 准备两个独立的 Web 新对话：一个只用于 approve，一个只用于 reject。两者都选择声明 `echo` Tool 的同一 Studio Agent definition，且都不得被其他 journey 使用。
 - 每个新对话的首条 Tool 消息分别创建自己的 fresh AgentRuntime；不要预先调用 create API。
 
 ### 操作
@@ -299,8 +309,8 @@ WHERE actual.event_seq IS NULL;
 ### 独立前置
 
 - 独立确认 stack health。
-- 在 Web 打开新的空白对话并选择声明 `echo` Tool 的 template；首条 Tool 消息将创建本 journey 的 fresh AgentRuntime。
-- 本 journey 只重启 `stratum-api`；必须保留相同 Postgres、NATS volumes、template 和 provider 配置。
+- 在 Web 打开新的空白对话并选择声明 `echo` Tool 的 Studio Agent definition；首条 Tool 消息将创建本 journey 的 fresh AgentRuntime。
+- 本 journey 只重启 `stratum-api`；必须保留相同 execution/Ontology/Studio PostgreSQL data 与 NATS volume，不得重建或改写 Studio Provider、Model 或 Agent definition。
 
 ### 操作
 
@@ -371,11 +381,11 @@ WHERE actual.event_seq IS NULL;
 ### 独立前置
 
 - 独立确认 stack health。
-- 在两个浏览器 tab/context 中分别打开 Web 新对话并选择同一 template；不要预先调用 create API。
+- 在两个浏览器 tab/context 中分别打开 Web 新对话并选择同一 Studio Agent definition；不要预先调用 create API。
 
 ### 操作
 
-1. 在两个新对话各发送一条不同的短合成消息，使 Web 以独立创建 intent/key 建立两个 fresh AgentRuntime；从两个页面的 Network/API 记录各自 create response 的 AgentRuntimeId、AgentId、template name/version。
+1. 在两个新对话各发送一条不同的短合成消息，使 Web 以独立创建 intent/key 建立两个 fresh AgentRuntime；从两个页面的 Network/API 记录各自 create response 的 AgentRuntimeId、AgentId、definition name/version。
 2. 确认两个 runtime pin 同一 AgentId，但 AgentRuntimeId 不同。
 3. 允许两个首 Turn 并发运行并分别等待 durable terminal。
 4. 分别观察 SSE、最终 view、history 与安全 ledger sequence。
@@ -383,7 +393,7 @@ WHERE actual.event_seq IS NULL;
 
 ### 预期
 
-- 两个 runtime 共享同一 immutable AgentId/template version，但拥有不同 AgentRuntimeId。
+- 两个 runtime 共享同一 immutable AgentId/Agent version，但拥有不同 AgentRuntimeId。
 - 两边第一次 durable event 都从各自的 `event_seq=1` 开始，sequence 与 status 独立。
 - 任一页面只应用同时匹配自身 AgentRuntimeId 与 pinned AgentId 的 frame/history。
 - 两边的 Session、Turn、draft、approval、terminal、history 和 cursor 不串线。

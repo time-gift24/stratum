@@ -8,9 +8,8 @@ use stratum_core::{AgentName, AgentVersionTag, ModelConfig, ModelId, ToolName};
 use uuid::Uuid;
 
 use crate::{
-    AgentDefinition, AgentDefinitionInput, DeletionBlocker, ManagedModel, ProviderKind,
-    ProviderSeed, ProviderSummary, ResourceVersion, RuntimeProvider, StudioCatalogSeed,
-    StudioError, Versioned,
+    AgentDefinition, AgentDefinitionInput, DeletionBlocker, ManagedModel, ModelCatalogSnapshot,
+    ProviderKind, ProviderSummary, ResourceVersion, RuntimeProvider, StudioError, Versioned,
 };
 
 /// Concrete access to the isolated Studio management database.
@@ -26,6 +25,7 @@ impl StudioStore {
     ///
     /// Returns [`StudioError`] when the database cannot be connected or its
     /// migration history cannot be applied.
+    #[tracing::instrument(skip_all, fields(operation = "studio.connect"))]
     pub async fn connect(database_url: &str) -> Result<Self, StudioError> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -35,48 +35,12 @@ impl StudioStore {
         Ok(Self { pool })
     }
 
-    /// Copies immutable boot sources into the catalog only when it is empty.
-    ///
-    /// Existing Studio data is authoritative and is never overwritten by a
-    /// later process restart or template-file change.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StudioError`] when source data is invalid or the catalog
-    /// cannot be initialized atomically.
-    pub async fn seed_if_empty(&self, seed: StudioCatalogSeed) -> Result<(), StudioError> {
-        validate_seed(&seed)?;
-        let mut transaction = self.pool.begin().await?;
-        let existing = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM studio_catalog WHERE singleton = TRUE)",
-        )
-        .fetch_one(&mut *transaction)
-        .await?;
-        if existing {
-            transaction.commit().await?;
-            return Ok(());
-        }
-
-        sqlx::query("INSERT INTO studio_catalog (singleton, revision) VALUES (TRUE, $1)")
-            .bind(Uuid::now_v7())
-            .execute(&mut *transaction)
-            .await?;
-
-        for provider in seed.providers {
-            insert_seed_provider(&mut transaction, provider).await?;
-        }
-        for definition in seed.agent_definitions {
-            insert_seed_definition(&mut transaction, definition).await?;
-        }
-        transaction.commit().await?;
-        Ok(())
-    }
-
     /// Checks whether the Studio database accepts queries.
     ///
     /// # Errors
     ///
     /// Returns [`StudioError`] when the database is unavailable.
+    #[tracing::instrument(skip_all, fields(operation = "studio.ping"))]
     pub async fn ping(&self) -> Result<(), StudioError> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
@@ -87,6 +51,7 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError`] when the catalog cannot be read.
+    #[tracing::instrument(skip_all, fields(operation = "studio.providers.list"))]
     pub async fn list_providers(&self) -> Result<Vec<Versioned<ProviderSummary>>, StudioError> {
         self.require_catalog().await?;
         let rows = sqlx::query(
@@ -107,6 +72,10 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError::NotFound`] when `kind` is absent.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.provider.get", provider = %kind)
+    )]
     pub async fn provider(
         &self,
         kind: ProviderKind,
@@ -132,6 +101,10 @@ impl StudioStore {
     ///
     /// Returns [`StudioError::AlreadyExists`] when the Provider is present, or
     /// [`StudioError::InvalidInput`] for a blank credential.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.provider.create", provider = %kind)
+    )]
     pub async fn create_provider(
         &self,
         kind: ProviderKind,
@@ -159,8 +132,9 @@ impl StudioStore {
         .execute(&mut *transaction)
         .await?;
         bump_catalog(&mut transaction).await?;
+        let created = provider_in_transaction(&mut transaction, kind).await?;
         transaction.commit().await?;
-        self.provider(kind).await
+        Ok(created)
     }
 
     /// Replaces an existing Provider credential when its version still matches.
@@ -169,6 +143,10 @@ impl StudioStore {
     ///
     /// Returns [`StudioError::PreconditionFailed`] for a stale version and
     /// [`StudioError::NotFound`] when the Provider is absent.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.provider.replace_credential", provider = %kind)
+    )]
     pub async fn replace_provider_credential(
         &self,
         kind: ProviderKind,
@@ -190,16 +168,22 @@ impl StudioStore {
         .await?;
         update_provider_version(&mut transaction, kind).await?;
         bump_catalog(&mut transaction).await?;
+        let updated = provider_in_transaction(&mut transaction, kind).await?;
         transaction.commit().await?;
-        self.provider(kind).await
+        Ok(updated)
     }
 
-    /// Deletes a Provider when it has no managed models or Agent references.
+    /// Deletes a Provider and its managed models when no Agent definition
+    /// selects any of those models.
     ///
     /// # Errors
     ///
-    /// Returns [`StudioError::DeletionBlocked`] when dependent resources must
-    /// be removed first.
+    /// Returns [`StudioError::DeletionBlocked`] when Agent definitions must be
+    /// changed or removed first.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.provider.delete", provider = %kind)
+    )]
     pub async fn delete_provider(
         &self,
         kind: ProviderKind,
@@ -209,28 +193,29 @@ impl StudioStore {
         lock_catalog(&mut transaction).await?;
         require_provider_version(&mut transaction, kind, expected).await?;
 
-        let model_rows = sqlx::query("SELECT name FROM studio_models WHERE provider_kind = $1")
-            .bind(kind.as_str())
-            .fetch_all(&mut *transaction)
-            .await?;
-        let mut blockers = model_rows
+        let agent_rows = sqlx::query(
+            "SELECT definition.agent_name \
+             FROM studio_agent_definitions definition \
+             JOIN studio_models model \
+               ON definition.model_id = model.provider_kind || ':' || model.name \
+             WHERE model.provider_kind = $1 \
+             ORDER BY definition.agent_name",
+        )
+        .bind(kind.as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let blockers = agent_rows
             .into_iter()
-            .map(|row| DeletionBlocker::model(kind, row.get("name")))
+            .map(|row| DeletionBlocker::agent_definition(row.get("agent_name")))
             .collect::<Vec<_>>();
-        let agent_rows =
-            sqlx::query("SELECT agent_name FROM studio_agent_definitions WHERE model_id LIKE $1")
-                .bind(format!("{}:%", kind.as_str()))
-                .fetch_all(&mut *transaction)
-                .await?;
-        blockers.extend(
-            agent_rows
-                .into_iter()
-                .map(|row| DeletionBlocker::agent_definition(row.get("agent_name"))),
-        );
         if !blockers.is_empty() {
             return Err(StudioError::DeletionBlocked { blockers });
         }
 
+        sqlx::query("DELETE FROM studio_models WHERE provider_kind = $1")
+            .bind(kind.as_str())
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query("DELETE FROM studio_provider_credentials WHERE provider_kind = $1")
             .bind(kind.as_str())
             .execute(&mut *transaction)
@@ -249,6 +234,7 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError`] when the catalog cannot be read.
+    #[tracing::instrument(skip_all, fields(operation = "studio.models.list"))]
     pub async fn list_models(&self) -> Result<Vec<Versioned<ManagedModel>>, StudioError> {
         self.require_catalog().await?;
         let rows = sqlx::query(
@@ -265,6 +251,14 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError::NotFound`] when the model is absent.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            operation = "studio.model.get",
+            provider = %kind,
+            model_name = %name
+        )
+    )]
     pub async fn model(
         &self,
         kind: ProviderKind,
@@ -288,6 +282,14 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError::ModelNotConfigured`] when its Provider is absent.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            operation = "studio.model.create",
+            provider = %kind,
+            model_name = %name.as_str()
+        )
+    )]
     pub async fn create_model(
         &self,
         kind: ProviderKind,
@@ -311,8 +313,9 @@ impl StudioStore {
         }
         update_provider_version(&mut transaction, kind).await?;
         bump_catalog(&mut transaction).await?;
+        let created = model_in_transaction(&mut transaction, kind, &name).await?;
         transaction.commit().await?;
-        self.model(kind, &name).await
+        Ok(created)
     }
 
     /// Deletes a model when no Agent definition selects it.
@@ -321,6 +324,14 @@ impl StudioStore {
     ///
     /// Returns [`StudioError::DeletionBlocked`] when Agent definitions still
     /// select the model.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            operation = "studio.model.delete",
+            provider = %kind,
+            model_name = %name
+        )
+    )]
     pub async fn delete_model(
         &self,
         kind: ProviderKind,
@@ -361,6 +372,7 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError`] when a stored value cannot be read or validated.
+    #[tracing::instrument(skip_all, fields(operation = "studio.agent_definitions.list"))]
     pub async fn list_agent_definitions(
         &self,
     ) -> Result<Vec<Versioned<AgentDefinition>>, StudioError> {
@@ -374,11 +386,70 @@ impl StudioStore {
         rows.into_iter().map(agent_definition_from_row).collect()
     }
 
+    /// Reads one deterministic Agent-definition page without loading prompts
+    /// and parameters outside that page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StudioError`] when pagination exceeds the SQL boundary or a
+    /// stored definition is unavailable or corrupt.
+    #[tracing::instrument(skip_all, fields(operation = "studio.agent_definitions.page"))]
+    pub async fn page_agent_definitions(
+        &self,
+        search: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Versioned<AgentDefinition>>, usize), StudioError> {
+        let offset = i64::try_from(offset).map_err(|_| StudioError::InvalidInput {
+            field: "pagination",
+        })?;
+        let limit = i64::try_from(limit).map_err(|_| StudioError::InvalidInput {
+            field: "pagination",
+        })?;
+        let mut transaction = self.pool.begin().await?;
+        lock_catalog_shared(&mut transaction).await?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM studio_agent_definitions \
+             WHERE $1::TEXT IS NULL \
+                OR POSITION(LOWER($1::TEXT) IN LOWER(agent_name)) > 0",
+        )
+        .bind(search)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let rows = sqlx::query(
+            "SELECT agent_name, version, model_id, model_parameters, tools, prompt, \
+                    revision, updated_at \
+             FROM studio_agent_definitions \
+             WHERE $1::TEXT IS NULL \
+                OR POSITION(LOWER($1::TEXT) IN LOWER(agent_name)) > 0 \
+             ORDER BY updated_at DESC, agent_name ASC \
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(search)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let definitions = rows
+            .into_iter()
+            .map(agent_definition_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let total = usize::try_from(total).map_err(|_| StudioError::CatalogCorrupt {
+            field: "agent_definition_count",
+        })?;
+        transaction.commit().await?;
+        Ok((definitions, total))
+    }
+
     /// Reads one Agent authoring definition.
     ///
     /// # Errors
     ///
     /// Returns [`StudioError::NotFound`] when `agent_name` is absent.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.agent_definition.get", agent_name = %agent_name)
+    )]
     pub async fn agent_definition(
         &self,
         agent_name: &AgentName,
@@ -401,6 +472,13 @@ impl StudioStore {
     ///
     /// Returns [`StudioError::AlreadyExists`] when the name is already managed,
     /// or [`StudioError::ModelNotConfigured`] for an absent model.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            operation = "studio.agent_definition.create",
+            agent_name = %definition.agent_name.as_str()
+        )
+    )]
     pub async fn create_agent_definition(
         &self,
         definition: AgentDefinitionInput,
@@ -431,8 +509,9 @@ impl StudioStore {
             return Err(StudioError::AlreadyExists);
         }
         bump_catalog(&mut transaction).await?;
+        let created = agent_definition_in_transaction(&mut transaction, &agent_name).await?;
         transaction.commit().await?;
-        self.agent_definition(&agent_name).await
+        Ok(created)
     }
 
     /// Replaces an Agent definition only with a new author version tag.
@@ -441,6 +520,13 @@ impl StudioStore {
     ///
     /// Returns [`StudioError::AgentVersionUnchanged`] when the behavior would
     /// change under the same immutable version identity.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            operation = "studio.agent_definition.replace",
+            agent_name = %definition.agent_name.as_str()
+        )
+    )]
     pub async fn replace_agent_definition(
         &self,
         definition: AgentDefinitionInput,
@@ -482,8 +568,9 @@ impl StudioStore {
         .execute(&mut *transaction)
         .await?;
         bump_catalog(&mut transaction).await?;
+        let updated = agent_definition_in_transaction(&mut transaction, &agent_name).await?;
         transaction.commit().await?;
-        self.agent_definition(&agent_name).await
+        Ok(updated)
     }
 
     /// Deletes a mutable Agent authoring definition.
@@ -494,6 +581,10 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError::PreconditionFailed`] for a stale version.
+    #[tracing::instrument(
+        skip_all,
+        fields(operation = "studio.agent_definition.delete", agent_name = %agent_name)
+    )]
     pub async fn delete_agent_definition(
         &self,
         agent_name: &AgentName,
@@ -529,36 +620,45 @@ impl StudioStore {
     /// # Errors
     ///
     /// Returns [`StudioError`] when catalog values cannot be safely loaded.
+    #[tracing::instrument(skip_all, fields(operation = "studio.runtime_providers.load"))]
     pub async fn runtime_providers(&self) -> Result<Vec<RuntimeProvider>, StudioError> {
-        self.require_catalog().await?;
-        let rows = sqlx::query(
-            "SELECT p.kind, c.secret FROM studio_providers p \
-             INNER JOIN studio_provider_credentials c ON c.provider_kind = p.kind \
-             ORDER BY p.kind",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut providers = Vec::with_capacity(rows.len());
-        for row in rows {
-            let kind: ProviderKind =
-                row.get::<String, _>("kind")
-                    .parse()
-                    .map_err(|_| StudioError::CatalogCorrupt {
-                        field: "provider_kind",
-                    })?;
-            let model_rows = sqlx::query(
-                "SELECT name FROM studio_models WHERE provider_kind = $1 ORDER BY name",
-            )
-            .bind(kind.as_str())
-            .fetch_all(&self.pool)
-            .await?;
-            providers.push(RuntimeProvider {
-                kind,
-                api_key: SecretString::from(row.get::<String, _>("secret")),
-                models: model_rows.into_iter().map(|row| row.get("name")).collect(),
-            });
-        }
+        let mut transaction = self.pool.begin().await?;
+        lock_catalog_shared(&mut transaction).await?;
+        let providers = runtime_providers_in_transaction(&mut transaction).await?;
+        transaction.commit().await?;
         Ok(providers)
+    }
+
+    /// Reads Model representations and their adapter inputs while holding one
+    /// shared catalog lock.
+    ///
+    /// Management handlers use this boundary so a concurrent Provider/Model
+    /// write cannot combine a Model row from one revision with credentials or
+    /// adapter membership from another revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StudioError`] when the catalog is unavailable or corrupt.
+    #[tracing::instrument(skip_all, fields(operation = "studio.model_catalog.load"))]
+    pub async fn model_catalog_snapshot(&self) -> Result<ModelCatalogSnapshot, StudioError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_catalog_shared(&mut transaction).await?;
+        let rows = sqlx::query(
+            "SELECT provider_kind, name, revision, updated_at FROM studio_models \
+             ORDER BY provider_kind, name",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let models = rows
+            .into_iter()
+            .map(model_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let runtime_providers = runtime_providers_in_transaction(&mut transaction).await?;
+        transaction.commit().await?;
+        Ok(ModelCatalogSnapshot {
+            models,
+            runtime_providers,
+        })
     }
 
     async fn require_catalog(&self) -> Result<(), StudioError> {
@@ -575,56 +675,59 @@ impl StudioStore {
     }
 }
 
-async fn insert_seed_provider(
+async fn runtime_providers_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
-    provider: ProviderSeed,
-) -> Result<(), StudioError> {
-    sqlx::query("INSERT INTO studio_providers (kind, revision) VALUES ($1, $2)")
-        .bind(provider.kind.as_str())
-        .bind(Uuid::now_v7())
-        .execute(&mut **transaction)
-        .await?;
-    sqlx::query("INSERT INTO studio_provider_credentials (provider_kind, secret) VALUES ($1, $2)")
-        .bind(provider.kind.as_str())
-        .bind(provider.api_key.expose_secret())
-        .execute(&mut **transaction)
-        .await?;
-    for name in provider.models {
-        sqlx::query(
-            "INSERT INTO studio_models (provider_kind, name, revision) VALUES ($1, $2, $3)",
-        )
-        .bind(provider.kind.as_str())
-        .bind(name)
-        .bind(Uuid::now_v7())
-        .execute(&mut **transaction)
-        .await?;
+) -> Result<Vec<RuntimeProvider>, StudioError> {
+    let rows = sqlx::query(
+        "SELECT p.kind, c.secret FROM studio_providers p \
+             LEFT JOIN studio_provider_credentials c ON c.provider_kind = p.kind \
+             ORDER BY p.kind",
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut providers = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind: ProviderKind =
+            row.get::<String, _>("kind")
+                .parse()
+                .map_err(|_| StudioError::CatalogCorrupt {
+                    field: "provider_kind",
+                })?;
+        let model_rows =
+            sqlx::query("SELECT name FROM studio_models WHERE provider_kind = $1 ORDER BY name")
+                .bind(kind.as_str())
+                .fetch_all(&mut **transaction)
+                .await?;
+        let secret = row
+            .get::<Option<String>, _>("secret")
+            .ok_or(StudioError::CatalogCorrupt {
+                field: "provider_credential",
+            })?;
+        if secret.trim().is_empty() {
+            return Err(StudioError::CatalogCorrupt {
+                field: "provider_credential",
+            });
+        }
+        providers.push(RuntimeProvider {
+            kind,
+            api_key: SecretString::from(secret),
+            models: model_rows.into_iter().map(|row| row.get("name")).collect(),
+        });
     }
-    Ok(())
+    Ok(providers)
 }
 
-async fn insert_seed_definition(
+async fn lock_catalog_shared(
     transaction: &mut Transaction<'_, Postgres>,
-    definition: AgentDefinitionInput,
 ) -> Result<(), StudioError> {
-    ensure_model_configured(transaction, &definition.model.model).await?;
-    sqlx::query(
-        "INSERT INTO studio_agent_definitions \
-         (agent_name, version, model_id, model_parameters, tools, prompt, revision) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(definition.agent_name.as_str())
-    .bind(definition.agent_version.as_str())
-    .bind(definition.model.model.as_str())
-    .bind(Value::Object(definition.model.parameters))
-    .bind(
-        serde_json::to_value(&definition.tools)
-            .map_err(|_| StudioError::InvalidInput { field: "tools" })?,
-    )
-    .bind(definition.prompt)
-    .bind(Uuid::now_v7())
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    let row = sqlx::query("SELECT revision FROM studio_catalog WHERE singleton = TRUE FOR SHARE")
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if row.is_some() {
+        Ok(())
+    } else {
+        Err(StudioError::NotInitialized)
+    }
 }
 
 async fn lock_catalog(transaction: &mut Transaction<'_, Postgres>) -> Result<(), StudioError> {
@@ -733,6 +836,56 @@ async fn update_provider_version(
     Ok(())
 }
 
+async fn provider_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    kind: ProviderKind,
+) -> Result<Versioned<ProviderSummary>, StudioError> {
+    let row = sqlx::query(
+        "SELECT p.kind, p.revision, p.updated_at, \
+         EXISTS(SELECT 1 FROM studio_provider_credentials c WHERE c.provider_kind = p.kind) \
+             AS credential_configured, \
+         (SELECT COUNT(*) FROM studio_models m WHERE m.provider_kind = p.kind) AS models_count \
+         FROM studio_providers p WHERE p.kind = $1",
+    )
+    .bind(kind.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StudioError::NotFound)?;
+    provider_summary_from_row(row)
+}
+
+async fn model_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    kind: ProviderKind,
+    name: &str,
+) -> Result<Versioned<ManagedModel>, StudioError> {
+    let row = sqlx::query(
+        "SELECT provider_kind, name, revision, updated_at FROM studio_models \
+         WHERE provider_kind = $1 AND name = $2",
+    )
+    .bind(kind.as_str())
+    .bind(name)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StudioError::NotFound)?;
+    model_from_row(row)
+}
+
+async fn agent_definition_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    agent_name: &AgentName,
+) -> Result<Versioned<AgentDefinition>, StudioError> {
+    let row = sqlx::query(
+        "SELECT agent_name, version, model_id, model_parameters, tools, prompt, revision, updated_at \
+         FROM studio_agent_definitions WHERE agent_name = $1",
+    )
+    .bind(agent_name.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StudioError::NotFound)?;
+    agent_definition_from_row(row)
+}
+
 fn provider_summary_from_row(
     row: sqlx::postgres::PgRow,
 ) -> Result<Versioned<ProviderSummary>, StudioError> {
@@ -746,10 +899,16 @@ fn provider_summary_from_row(
     let models_count = usize::try_from(models_count).map_err(|_| StudioError::CatalogCorrupt {
         field: "models_count",
     })?;
+    let credential_configured: bool = row.get("credential_configured");
+    if !credential_configured {
+        return Err(StudioError::CatalogCorrupt {
+            field: "provider_credential",
+        });
+    }
     Ok(Versioned {
         value: ProviderSummary {
             kind,
-            credential_configured: row.get("credential_configured"),
+            credential_configured,
             models_count,
             updated_at: row.get::<DateTime<Utc>, _>("updated_at"),
         },
@@ -819,48 +978,6 @@ fn agent_definition_from_row(
     })
 }
 
-fn validate_seed(seed: &StudioCatalogSeed) -> Result<(), StudioError> {
-    let mut providers = HashSet::with_capacity(seed.providers.len());
-    for provider in &seed.providers {
-        if !providers.insert(provider.kind) {
-            return Err(StudioError::InvalidInput { field: "providers" });
-        }
-        validate_api_key(&provider.api_key)?;
-        let mut models = HashSet::with_capacity(provider.models.len());
-        for model in &provider.models {
-            validate_model_name(provider.kind, model)?;
-            if !models.insert(model) {
-                return Err(StudioError::InvalidInput {
-                    field: "providers.models",
-                });
-            }
-        }
-    }
-    let mut agent_names = HashSet::with_capacity(seed.agent_definitions.len());
-    for definition in &seed.agent_definitions {
-        if !agent_names.insert(definition.agent_name.clone()) {
-            return Err(StudioError::InvalidInput {
-                field: "agent_definitions.agent_name",
-            });
-        }
-        validate_definition(definition)?;
-        let kind = ProviderKind::from_model_id(&definition.model.model)
-            .map_err(|_| StudioError::InvalidInput { field: "model" })?;
-        if !providers.contains(&kind)
-            || !seed.providers.iter().any(|provider| {
-                provider.kind == kind
-                    && provider
-                        .models
-                        .iter()
-                        .any(|model| model == definition.model.model.model_name())
-            })
-        {
-            return Err(StudioError::ModelNotConfigured);
-        }
-    }
-    Ok(())
-}
-
 fn validate_api_key(api_key: &SecretString) -> Result<(), StudioError> {
     if api_key.expose_secret().trim().is_empty() {
         Err(StudioError::InvalidInput { field: "api_key" })
@@ -892,12 +1009,11 @@ fn validate_definition(definition: &AgentDefinitionInput) -> Result<(), StudioEr
 
 #[cfg(test)]
 mod tests {
-    use secrecy::SecretString;
     use serde_json::Map;
     use stratum_core::{AgentName, AgentVersionTag, ModelConfig, ModelId, ToolName};
 
-    use super::{validate_definition, validate_seed};
-    use crate::{AgentDefinitionInput, ProviderKind, ProviderSeed, StudioCatalogSeed, StudioError};
+    use super::validate_definition;
+    use crate::{AgentDefinitionInput, StudioError};
 
     fn definition(version: &str) -> AgentDefinitionInput {
         AgentDefinitionInput {
@@ -910,23 +1026,6 @@ mod tests {
             tools: vec![ToolName::new("filesystem")],
             prompt: "You are a coding assistant.".to_owned(),
         }
-    }
-
-    #[test]
-    fn seed_rejects_an_agent_model_absent_from_its_provider() {
-        let seed = StudioCatalogSeed {
-            providers: vec![ProviderSeed {
-                kind: ProviderKind::Openai,
-                api_key: SecretString::from("test-key"),
-                models: vec!["gpt-4.1".to_owned()],
-            }],
-            agent_definitions: vec![definition("v1")],
-        };
-
-        assert!(matches!(
-            validate_seed(&seed),
-            Err(StudioError::ModelNotConfigured)
-        ));
     }
 
     #[test]

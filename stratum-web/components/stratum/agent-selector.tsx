@@ -35,7 +35,7 @@ export function AgentSelector({
           <Button
             variant="ghost"
             size="icon"
-            className="rounded-full"
+            className="size-11 rounded-full sm:size-7"
             aria-label="选择 Agent"
           />
         }

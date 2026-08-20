@@ -221,7 +221,7 @@ pub struct OntologySummary {
 }
 
 /// One requested Ontology list page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOntologies {
     /// One-based page number.
     pub page: u32,
@@ -229,6 +229,9 @@ pub struct ListOntologies {
     pub per_page: u16,
     /// Supported deterministic ordering.
     pub sort: ListSort,
+    /// Optional case-insensitive substring matched against `name` and
+    /// `display_name`; `None` lists every Ontology.
+    pub search: Option<String>,
 }
 
 impl Default for ListOntologies {
@@ -237,6 +240,7 @@ impl Default for ListOntologies {
             page: 1,
             per_page: 20,
             sort: ListSort::UpdatedAtDesc,
+            search: None,
         }
     }
 }

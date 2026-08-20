@@ -2,13 +2,19 @@
 
 import { useCallback, useMemo, useState } from "react"
 import Link from "next/link"
-import { ArrowLeft, CircleAlert, Loader2, Plus } from "lucide-react"
+import {
+  ArrowLeft,
+  CircleAlert,
+  Loader2,
+  Network,
+  Plus,
+  Save,
+  SquarePen,
+  XIcon,
+} from "lucide-react"
 
 import { Button, buttonVariants } from "@/components/ui/button"
-import {
-  OntologyCanvas,
-  type CanvasSelection,
-} from "@/components/stratum/ontology/ontology-canvas"
+import { OntologyCanvas } from "@/components/stratum/ontology/ontology-canvas"
 import { ConflictDialog } from "@/components/stratum/ontology/conflict-dialog"
 import { NeighborhoodView } from "@/components/stratum/ontology/neighborhood-view"
 import {
@@ -16,14 +22,18 @@ import {
   DeleteObjectTypeDialog,
 } from "@/components/stratum/ontology/object-type-dialogs"
 import {
-  ObjectTypePanel,
-  type PropertyInput,
-} from "@/components/stratum/ontology/object-type-panel"
-import {
-  LinkTypeDialog,
-  LinkTypePanel,
-} from "@/components/stratum/ontology/link-type-dialog"
-import type { ObjectTypePropertyActions } from "@/components/stratum/ontology/ontology-node"
+  ChromePill,
+  PillDivider,
+  PillIconButton,
+  PillLinkButton,
+  PrimaryPillButton,
+} from "@/components/stratum/ontology/ontology-chrome"
+import { LinkTypeDialog } from "@/components/stratum/ontology/link-type-dialog"
+import type {
+  ObjectTypeNodeActions,
+  ObjectTypePropertyActions,
+} from "@/components/stratum/ontology/ontology-node"
+import type { LinkTypeEdgeActions } from "@/components/stratum/ontology/ontology-edge"
 import type { OntologyEditor as OntologyEditorController } from "@/hooks/use-ontology-editor"
 import { computeLocalNeighborhood } from "@/features/ontology-editor/neighborhood"
 import { mapViolations } from "@/features/ontology-editor/violations"
@@ -36,11 +46,11 @@ import type {
   OntologyObjectType,
   OntologyViolation,
 } from "@/features/ontology-editor/types"
-import { cn } from "@/lib/utils"
 
 /**
  * Ontology 画布编辑器主装配：加载相位（loading / missing / error）、
- * 编辑画布、编辑面板、保存状态机 UI（dirty / in_flight / 412 / 422 /
+ * 满铺编辑画布、悬浮 chrome（身份 / 选中工具条 / 全局动作，见
+ * ontology-chrome.tsx）、保存状态机 UI（dirty / in_flight / 412 / 422 /
  * save_unconfirmed）、崩溃恢复草稿、neighborhood 只读视图与本地聚焦。
  * 所有编辑只写 candidate；保存经 hook 的 PUT + If-Match 流程。
  */
@@ -191,29 +201,15 @@ function groupViolations(
   }
 }
 
-function propertyMessagesFor(
-  propertyViolations: ReadonlyMap<string, readonly string[]>,
-  objectTypeId: string
-): ReadonlyMap<string, readonly string[]> {
-  const prefix = `${objectTypeId}/`
-  const result = new Map<string, readonly string[]>()
-  for (const [key, messages] of propertyViolations) {
-    if (key.startsWith(prefix)) result.set(key.slice(prefix.length), messages)
-  }
-  return result
-}
-
 function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
   const { state, dirty, save } = editor
   const candidate = state.candidate
 
-  const [selection, setSelection] = useState<CanvasSelection>(null)
   const [view, setView] = useState<"edit" | "neighborhood">("edit")
   const [focus, setFocus] = useState<{
     originId: string
     depth: number
   } | null>(null)
-  const [focusDepth, setFocusDepth] = useState(1)
   const [addOpen, setAddOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{
     objectType: OntologyObjectType
@@ -287,16 +283,35 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
     ]
   )
 
-  const selectedObjectType =
-    candidate !== null && selection?.kind === "objectType"
-      ? candidate.object_types.find(
-          (objectType) => objectType.id === selection.id
-        )
-      : undefined
-  const selectedLinkType =
-    candidate !== null && selection?.kind === "linkType"
-      ? candidate.link_types.find((linkType) => linkType.id === selection.id)
-      : undefined
+  // 节点级动作：详情更新 / 请求删除（打开确认对话框）/ 聚焦邻域。
+  // 引用稳定（candidate 变化时才重建，与文档派生同步），避免画布无谓重渲染
+  const objectActions = useMemo<ObjectTypeNodeActions>(
+    () => ({
+      onUpdate: editor.updateObjectType,
+      onRequestDelete: (objectType) =>
+        setDeleteTarget({
+          objectType,
+          referencingLinks:
+            candidate?.link_types.filter(
+              (linkType) =>
+                linkType.source_object_type_id === objectType.id ||
+                linkType.target_object_type_id === objectType.id
+            ) ?? [],
+        }),
+      onFocus: (originId, depth) => setFocus({ originId, depth }),
+    }),
+    [candidate, editor.updateObjectType]
+  )
+
+  const updateLinkType = editor.updateLinkType
+  const removeLinkType = editor.removeLinkType
+  const edgeActions = useMemo<LinkTypeEdgeActions>(
+    () => ({
+      onUpdate: updateLinkType,
+      onDelete: (linkType) => removeLinkType(linkType.id),
+    }),
+    [updateLinkType, removeLinkType]
+  )
 
   const findObjectType = useCallback(
     (id: string) =>
@@ -346,180 +361,12 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
     setPendingLink({ sourceId, targetId })
   }
 
-  const requestDeleteObjectType = (objectType: OntologyObjectType) => {
-    setDeleteTarget({
-      objectType,
-      referencingLinks: candidate.link_types.filter(
-        (linkType) =>
-          linkType.source_object_type_id === objectType.id ||
-          linkType.target_object_type_id === objectType.id
-      ),
-    })
-  }
-
   const saveDisabled =
     !dirty || inFlight || state.conflict !== null || view !== "edit"
 
   return (
     <>
-      {/* 工具栏：返回、标题、视图切换、保存状态与动作 */}
-      <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-        <Link
-          href="/ontologies"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          <ArrowLeft data-icon="inline-start" />
-          返回列表
-        </Link>
-        <div className="min-w-0">
-          <h1 className="truncate text-sm font-medium">
-            {candidate.display_name}
-          </h1>
-          <p className="truncate font-mono text-[0.6875rem] text-muted-foreground">
-            {candidate.name}
-          </p>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <span aria-live="polite" className="text-xs text-muted-foreground">
-            {inFlight ? (
-              "保存中…"
-            ) : dirty ? (
-              <span className="text-foreground">未保存</span>
-            ) : (
-              "已保存"
-            )}
-          </span>
-          <div
-            role="group"
-            aria-label="视图切换"
-            className="flex rounded-full border border-border p-0.5"
-          >
-            <button
-              type="button"
-              aria-pressed={view === "edit"}
-              onClick={() => setView("edit")}
-              className={cn(
-                "rounded-full px-2.5 py-1 text-xs transition-colors",
-                view === "edit"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              编辑画布
-            </button>
-            <button
-              type="button"
-              aria-pressed={view === "neighborhood"}
-              onClick={() => setView("neighborhood")}
-              className={cn(
-                "rounded-full px-2.5 py-1 text-xs transition-colors",
-                view === "neighborhood"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              邻域视图
-            </button>
-          </div>
-          {view === "edit" && (
-            <Button variant="outline" size="sm" onClick={openAddDialog}>
-              <Plus data-icon="inline-start" />
-              新增 Object Type
-            </Button>
-          )}
-          <Button
-            size="sm"
-            disabled={saveDisabled}
-            onClick={() => void handleSave()}
-          >
-            {inFlight ? "保存中…" : "保存"}
-          </Button>
-        </div>
-      </header>
-
-      {/* 状态横幅区：草稿恢复 / 保存错误 / 全局违例 / 限制与客户端校验提示 */}
-      <div className="flex flex-col">
-        {state.draftAvailable !== null && (
-          <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/50 px-4 py-2 text-xs">
-            <span>发现未保存的草稿（上次编辑未完成保存）。</span>
-            <Button variant="outline" size="xs" onClick={editor.restoreDraft}>
-              恢复草稿
-            </Button>
-            <Button variant="ghost" size="xs" onClick={editor.discardDraft}>
-              丢弃
-            </Button>
-          </div>
-        )}
-        {state.saveError !== null && (
-          <div
-            role="alert"
-            className="flex flex-wrap items-center gap-2 border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive"
-          >
-            <CircleAlert aria-hidden className="size-3.5" />
-            <span>
-              {SAVE_ERROR_TEXT[state.saveError.code] ??
-                `保存失败：${state.saveError.message}`}
-            </span>
-            <Button
-              variant="outline"
-              size="xs"
-              disabled={inFlight}
-              onClick={() => void handleSave()}
-            >
-              重试保存
-            </Button>
-          </div>
-        )}
-        {violations.globalViolations.length > 0 && (
-          <div
-            role="alert"
-            className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive"
-          >
-            <p className="font-medium">
-              保存被拒绝（422），以下问题未定位到具体节点：
-            </p>
-            <ul className="mt-1 flex flex-col gap-0.5">
-              {violations.globalViolations.map((violation) => (
-                <li key={`${violation.path}:${violation.code}`}>
-                  <span className="font-mono">{violation.path}</span>：
-                  {violation.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {clientViolations !== null && clientViolations.length > 0 && (
-          <div
-            role="alert"
-            className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive"
-          >
-            <p className="font-medium">
-              本地校验未通过，已取消本次保存（不会产生必然被拒绝的请求）：
-            </p>
-            <ul className="mt-1 flex flex-col gap-0.5">
-              {clientViolations.map((violation) => (
-                <li key={`${violation.path}:${violation.code}`}>
-                  <span className="font-mono">{violation.path}</span>：
-                  {violation.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {notice !== null && (
-          <div
-            role="status"
-            className="flex items-center gap-2 border-b border-border bg-muted/50 px-4 py-2 text-xs"
-          >
-            <span>{notice}</span>
-            <Button variant="ghost" size="xs" onClick={() => setNotice(null)}>
-              知道了
-            </Button>
-          </div>
-        )}
-      </div>
-
-      {/* 主区域：编辑画布 / 邻域只读视图 */}
+      {/* 主区域：画布满铺；控制全部收进悬浮 pill（ontology-chrome.tsx） */}
       <div className="relative min-h-0 flex-1">
         {view === "neighborhood" ? (
           <NeighborhoodView
@@ -527,107 +374,187 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
             objectTypes={state.acknowledged?.document.object_types ?? []}
           />
         ) : (
-          <>
-            <OntologyCanvas
-              document={candidate}
-              focus={activeFocus !== null ? focusNeighborhood : null}
-              objectViolations={violations.objectViolations}
-              linkViolations={violations.linkViolations}
-              propertyActions={propertyActions}
-              onSelectionChange={setSelection}
-              onConnectNodes={handleConnect}
-              onNodeDragStop={editor.setPosition}
-            />
-
-            {activeFocus !== null && (
-              <div className="absolute top-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-popover px-3 py-1 text-xs shadow-[0_8px_30px] shadow-black/10">
-                <span>
-                  聚焦：
-                  {findObjectType(activeFocus.originId)?.display_name ?? ""}
-                  （深度 {activeFocus.depth}，基于本地草稿）
-                </span>
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={() => setFocus(null)}
-                >
-                  退出聚焦
-                </Button>
-              </div>
-            )}
-
-            {selectedObjectType !== undefined && (
-              <div className="absolute top-3 right-3 bottom-3 z-10 w-[30rem]">
-                <ObjectTypePanel
-                  objectType={selectedObjectType}
-                  messages={
-                    violations.objectViolations.get(selectedObjectType.id) ?? []
-                  }
-                  propertyMessages={propertyMessagesFor(
-                    violations.propertyViolations,
-                    selectedObjectType.id
-                  )}
-                  canAddProperty={
-                    selectedObjectType.properties.length <
-                      limits.maxPropertiesPerObjectType &&
-                    totalProperties < limits.maxTotalProperties
-                  }
-                  propertyLimitMessage={
-                    selectedObjectType.properties.length >=
-                    limits.maxPropertiesPerObjectType
-                      ? `每个 Object Type 的属性数量已达上限（${limits.maxPropertiesPerObjectType}）`
-                      : totalProperties >= limits.maxTotalProperties
-                        ? `Ontology 总属性数量已达上限（${limits.maxTotalProperties}）`
-                        : null
-                  }
-                  focusDepth={focusDepth}
-                  onFocusDepthChange={setFocusDepth}
-                  onFocus={() =>
-                    setFocus({
-                      originId: selectedObjectType.id,
-                      depth: focusDepth,
-                    })
-                  }
-                  onUpdate={editor.updateObjectType}
-                  onDelete={() => requestDeleteObjectType(selectedObjectType)}
-                  onAddProperty={(input: PropertyInput) =>
-                    editor.addProperty(selectedObjectType.id, input)
-                  }
-                  onUpdateProperty={(property) =>
-                    editor.updateProperty(selectedObjectType.id, property)
-                  }
-                  onRemoveProperty={(propertyId) =>
-                    editor.removeProperty(selectedObjectType.id, propertyId)
-                  }
-                  onClose={() => setSelection(null)}
-                />
-              </div>
-            )}
-            {selectedObjectType === undefined &&
-              selectedLinkType !== undefined && (
-                <div className="absolute top-3 right-3 bottom-3 w-80">
-                  <LinkTypePanel
-                    linkType={selectedLinkType}
-                    source={findObjectType(
-                      selectedLinkType.source_object_type_id
-                    )}
-                    target={findObjectType(
-                      selectedLinkType.target_object_type_id
-                    )}
-                    messages={
-                      violations.linkViolations.get(selectedLinkType.id) ?? []
-                    }
-                    onUpdate={editor.updateLinkType}
-                    onDelete={() => {
-                      editor.removeLinkType(selectedLinkType.id)
-                      setSelection(null)
-                    }}
-                    onClose={() => setSelection(null)}
-                  />
-                </div>
-              )}
-          </>
+          <OntologyCanvas
+            document={candidate}
+            focus={activeFocus !== null ? focusNeighborhood : null}
+            objectViolations={violations.objectViolations}
+            propertyViolations={violations.propertyViolations}
+            linkViolations={violations.linkViolations}
+            propertyActions={propertyActions}
+            objectActions={objectActions}
+            edgeActions={edgeActions}
+            onConnectNodes={handleConnect}
+            onNodeDragStop={editor.setPosition}
+          />
         )}
+
+        {/* 顶部悬浮 pill 群：左 = 返回 + 标题 + 保存状态；
+            右 = 视图切换 / 新增 pill + 独立的保存主操作（有脏数据时实心） */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 px-3 pt-20">
+          <ChromePill className="max-w-[60vw]">
+            <PillLinkButton label="返回列表" href="/ontologies">
+              <ArrowLeft aria-hidden className="size-4" />
+            </PillLinkButton>
+            <PillDivider />
+            <span className="max-w-56 truncate px-1.5 text-xs font-medium">
+              {candidate.display_name}
+            </span>
+            {inFlight ? (
+              <span className="flex items-center gap-1.5 pr-1.5 text-xs text-muted-foreground">
+                <Loader2
+                  aria-hidden
+                  className="size-3.5 animate-spin motion-reduce:animate-none"
+                />
+                保存中
+              </span>
+            ) : dirty ? (
+              <span
+                role="status"
+                className="pr-1.5 text-xs text-muted-foreground"
+              >
+                未保存
+              </span>
+            ) : null}
+          </ChromePill>
+          <div className="flex items-start gap-2">
+            <ChromePill>
+              <PillIconButton
+                label="编辑画布"
+                active={view === "edit"}
+                onClick={() => setView("edit")}
+              >
+                <SquarePen aria-hidden className="size-4" />
+              </PillIconButton>
+              <PillIconButton
+                label="邻域视图"
+                active={view === "neighborhood"}
+                onClick={() => setView("neighborhood")}
+              >
+                <Network aria-hidden className="size-4" />
+              </PillIconButton>
+              {view === "edit" ? (
+                <>
+                  <PillDivider />
+                  <PillIconButton
+                    label="新增 Object Type"
+                    onClick={openAddDialog}
+                  >
+                    <Plus aria-hidden className="size-4" />
+                  </PillIconButton>
+                </>
+              ) : null}
+            </ChromePill>
+            {view === "edit" ? (
+              <PrimaryPillButton
+                label="保存"
+                loading={inFlight}
+                disabled={saveDisabled}
+                onClick={() => void handleSave()}
+              >
+                <Save aria-hidden className="size-4" />
+              </PrimaryPillButton>
+            ) : null}
+          </div>
+        </div>
+
+        {/* 状态横幅 + 聚焦指示：顶部居中浮层（避开 pill 群与站点导航），有事才出现 */}
+        <div className="pointer-events-none absolute inset-x-0 top-32 z-10 flex flex-col items-center gap-2 px-3">
+          {state.draftAvailable !== null && (
+            <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-xl border border-border bg-popover px-3 py-2 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur">
+              <span>发现未保存的草稿（上次编辑未完成保存）。</span>
+              <Button variant="outline" size="xs" onClick={editor.restoreDraft}>
+                恢复草稿
+              </Button>
+              <Button variant="ghost" size="xs" onClick={editor.discardDraft}>
+                丢弃
+              </Button>
+            </div>
+          )}
+          {state.saveError !== null && (
+            <div
+              role="alert"
+              className="pointer-events-auto flex max-w-lg flex-wrap items-center justify-center gap-2 rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
+            >
+              <CircleAlert aria-hidden className="size-3.5" />
+              <span>
+                {SAVE_ERROR_TEXT[state.saveError.code] ??
+                  `保存失败：${state.saveError.message}`}
+              </span>
+              <Button
+                variant="outline"
+                size="xs"
+                disabled={inFlight}
+                onClick={() => void handleSave()}
+              >
+                重试保存
+              </Button>
+            </div>
+          )}
+          {violations.globalViolations.length > 0 && (
+            <div
+              role="alert"
+              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
+            >
+              <p className="font-medium">
+                保存被拒绝（422），以下问题未定位到具体节点：
+              </p>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {violations.globalViolations.map((violation) => (
+                  <li key={`${violation.path}:${violation.code}`}>
+                    <span className="font-mono">{violation.path}</span>：
+                    {violation.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {clientViolations !== null && clientViolations.length > 0 && (
+            <div
+              role="alert"
+              className="pointer-events-auto max-w-lg rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
+            >
+              <p className="font-medium">
+                本地校验未通过，已取消本次保存（不会产生必然被拒绝的请求）：
+              </p>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {clientViolations.map((violation) => (
+                  <li key={`${violation.path}:${violation.code}`}>
+                    <span className="font-mono">{violation.path}</span>：
+                    {violation.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {notice !== null && (
+            <div
+              role="status"
+              className="pointer-events-auto flex items-center gap-2 rounded-xl border border-border bg-popover px-3 py-2 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur"
+            >
+              <span>{notice}</span>
+              <Button variant="ghost" size="xs" onClick={() => setNotice(null)}>
+                知道了
+              </Button>
+            </div>
+          )}
+          {view === "edit" && activeFocus !== null && (
+            <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-popover py-1 pr-1 pl-3 text-xs dark:bg-popover/95 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur">
+              <span>
+                聚焦 {findObjectType(activeFocus.originId)?.display_name ?? ""}
+                （深度 {activeFocus.depth}，基于本地草稿）
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="退出聚焦"
+                className="rounded-full"
+                onClick={() => setFocus(null)}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 对话框 */}
@@ -635,9 +562,8 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
         open={addOpen}
         onOpenChange={setAddOpen}
         onSubmit={(input) => {
-          const id = editor.addObjectType(input)
+          editor.addObjectType(input)
           setAddOpen(false)
-          setSelection({ kind: "objectType", id })
         }}
       />
       <DeleteObjectTypeDialog
@@ -647,7 +573,6 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
           if (deleteTarget !== null)
             editor.removeObjectType(deleteTarget.objectType.id)
           setDeleteTarget(null)
-          setSelection(null)
         }}
       />
       <LinkTypeDialog
@@ -665,13 +590,12 @@ function ReadyEditor({ editor }: { editor: OntologyEditorController }) {
         onCancel={() => setPendingLink(null)}
         onSubmit={(input) => {
           if (pendingLink === null) return
-          const id = editor.addLinkType({
+          editor.addLinkType({
             ...input,
             source_object_type_id: pendingLink.sourceId,
             target_object_type_id: pendingLink.targetId,
           })
           setPendingLink(null)
-          setSelection({ kind: "linkType", id })
         }}
       />
       <ConflictDialog

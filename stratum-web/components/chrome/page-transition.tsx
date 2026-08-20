@@ -22,10 +22,56 @@ gsap.registerPlugin(useGSAP)
  * 否则按 pathname 在 PAGE_ORDER 中的索引差推导（浏览器前进/后退也有正确方向）。
  * 时长/缓动走全站统一尺度（lib/motion.ts）：进场 base、退场 fast。
  *
+ * 可见性契约：每次路由提交后容器必须干净可见，与播不播入场无关——
+ * revertOnUpdate 先销毁上一次入场的 context；回调入口 killTweensOf 顶掉
+ * 可能仍在播的手动出场 tween（TransitionLink 的出场不在本 context 内）；
+ * 不播入场的分支显式 clearProps，播入场的分支播完 clearProps（残留
+ * transform 会把 fixed 的 dock 锁进本容器，破坏其视口定位）。
+ *
  * 注意：新增内部页面必须登记到 PAGE_ORDER，否则跳转无出场、只有入场。
  */
 
-const PAGE_ORDER = ["/conversation", "/excalidraw"]
+const PAGE_ORDER = ["/conversation", "/studio", "/ontologies", "/excalidraw"]
+
+/** 子路由归并到一级入口：/studio/agents/x → /studio。 */
+function pageIndex(pathname: string): number {
+  return PAGE_ORDER.indexOf(`/${pathname.split("/")[1]}`)
+}
+
+function internalNavigationPath(href: string): string | null {
+  const [rawPath] = href.split(/[?#]/, 1)
+  if (rawPath === undefined || !rawPath.startsWith("/")) return null
+  return rawPath.length > 1 ? rawPath.replace(/\/+$/, "") : rawPath
+}
+
+/** 当前链接及其子路由都向辅助技术暴露当前页状态。 */
+function isCurrentNavigationHref(pathname: string, href: string): boolean {
+  const target = internalNavigationPath(href)
+  if (target === null) return false
+  return pathname === target || pathname.startsWith(`${target}/`)
+}
+
+/**
+ * 同级路径（父目录相同）间的跳转视为页签切换，例如
+ * /studio/settings/providers ↔ /studio/settings/models：
+ * 不做整页滑入，由局部动效（内容淡入、卡片级联）接管。
+ */
+function isSiblingSwitch(from: string, to: string): boolean {
+  const parent = (p: string) => {
+    const index = p.lastIndexOf("/")
+    return index <= 0 ? "" : p.slice(0, index)
+  }
+  return from !== to && parent(from) === parent(to)
+}
+
+/**
+ * 设置区（/studio/settings/**）内部导航：共享 layout 常驻左侧导航，
+ * 只有右侧内容变化（页签切换、下钻编辑器、返回列表），整页滑入一律跳过。
+ */
+const SETTINGS_SECTION = "/studio/settings/"
+function isSettingsInternal(from: string, to: string): boolean {
+  return from.startsWith(SETTINGS_SECTION) && to.startsWith(SETTINGS_SECTION)
+}
 
 // 模块级共享状态（应用级单例，仅客户端运行）
 let pageElement: HTMLElement | null = null
@@ -45,23 +91,27 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
 
       // 首屏不播入场：SSR 内容直接可见，不推迟 LCP
       const isFirstPaint = lastPathname === null
+      const siblingSwitch =
+        lastPathname !== null &&
+        (isSiblingSwitch(lastPathname, pathname) ||
+          isSettingsInternal(lastPathname, pathname))
       let direction: 1 | -1 = 1
       if (armedDirection !== null) {
         direction = armedDirection
-      } else if (
-        lastPathname !== null &&
-        PAGE_ORDER.includes(lastPathname) &&
-        PAGE_ORDER.includes(pathname)
-      ) {
-        direction =
-          PAGE_ORDER.indexOf(pathname) > PAGE_ORDER.indexOf(lastPathname)
-            ? 1
-            : -1
+      } else if (lastPathname !== null) {
+        const from = pageIndex(lastPathname)
+        const to = pageIndex(pathname)
+        if (from !== -1 && to !== -1 && from !== to) {
+          direction = to > from ? 1 : -1
+        }
       }
       armedDirection = null
       lastPathname = pathname
 
-      if (!isFirstPaint && !prefersReducedMotion()) {
+      // 顶掉可能仍在播的手动出场 tween，避免它把容器留在 opacity: 0
+      gsap.killTweensOf(el)
+
+      if (!isFirstPaint && !siblingSwitch && !prefersReducedMotion()) {
         gsap.fromTo(
           el,
           { x: 40 * direction, opacity: 0 },
@@ -70,20 +120,31 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
             opacity: 1,
             duration: MOTION_DURATION.base,
             ease: MOTION_EASE.enter,
-            // 播完清除内联样式：残留 transform 会把 fixed 的 dock 锁进本容器
-            // （transform 使祖先成为 fixed 后代的包含块），破坏其视口定位
+            overwrite: "auto",
             clearProps: "transform,opacity",
           }
         )
+      } else {
+        // 不播入场的提交也要清掉出场残留，保证新页可见
+        gsap.set(el, { clearProps: "transform,opacity" })
       }
       return () => {
         if (pageElement === el) pageElement = null
       }
     },
-    { scope: ref, dependencies: [pathname] }
+    {
+      scope: ref,
+      dependencies: [pathname],
+      // 路由变更时先销毁上一次入场的 context，不让旧 tween 的内联样式残留
+      revertOnUpdate: true,
+    }
   )
 
-  return <div ref={ref} data-page-transition>{children}</div>
+  return (
+    <div ref={ref} data-page-transition>
+      {children}
+    </div>
+  )
 }
 
 /** 带出场转场的 Link：点击 → 当前页滑出 → router.push → 新页滑入。 */
@@ -91,6 +152,7 @@ export function TransitionLink({
   href,
   onClick,
   children,
+  "aria-current": ariaCurrent,
   ...props
 }: React.ComponentProps<typeof Link>) {
   const router = useRouter()
@@ -106,13 +168,15 @@ export function TransitionLink({
     // hash 锚点（含跨页锚点）与外链走默认导航，不播转场
     if (href.includes("#") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return
 
-    const from = PAGE_ORDER.indexOf(pathname)
-    const to = PAGE_ORDER.indexOf(href)
+    const from = pageIndex(pathname)
+    const to = pageIndex(href)
     if (to === -1 || to === from) return // 未知页或当前页：交给 Link 默认导航
 
     const el = pageElement
     if (!el || prefersReducedMotion()) return
 
+    const targetPathname = internalNavigationPath(href)
+    if (targetPathname === null) return
     e.preventDefault()
     const direction = to > from ? 1 : -1
     armedDirection = direction
@@ -129,7 +193,10 @@ export function TransitionLink({
         // 保险丝：导航未提交（如被前进/后退取消）时恢复页面可见，
         // 否则容器会停在透明状态
         setTimeout(() => {
-          if (window.location.pathname !== href && document.contains(el)) {
+          if (
+            window.location.pathname !== targetPathname &&
+            document.contains(el)
+          ) {
             gsap.set(el, { clearProps: "transform,opacity" })
           }
         }, 1500)
@@ -138,7 +205,17 @@ export function TransitionLink({
   }
 
   return (
-    <Link href={href} onClick={handleClick} {...props}>
+    <Link
+      href={href}
+      onClick={handleClick}
+      aria-current={
+        ariaCurrent ??
+        (typeof href === "string" && isCurrentNavigationHref(pathname, href)
+          ? "page"
+          : undefined)
+      }
+      {...props}
+    >
       {children}
     </Link>
   )

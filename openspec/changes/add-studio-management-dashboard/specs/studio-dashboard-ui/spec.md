@@ -20,10 +20,10 @@ Stratum Web SHALL 在 `/studio` 提供面向开发者和管理员的 Agent-first
 - **THEN** Studio 不得渲染示例图表、零值指标或“即将推出”占位模块
 
 ### Requirement: 设置入口与信息架构
-Studio SHALL 将 Provider 和 Model 管理放在 header 最右侧设置图标之后，而不是仪表盘一级页签或全局资源配置入口。
+Studio SHALL 将 Provider 和 Model 管理放在全局 product navigation 最右侧设置图标之后，而不是仪表盘一级页签或带“资源配置”文字的一级入口；Studio 页面内不得重复设置按钮。
 
 #### Scenario: 打开设置
-- **WHEN** 用户激活 Studio header 最右侧、具有可访问名称的设置图标
+- **WHEN** 用户激活全局 product navigation 最右侧、具有可访问名称的设置图标
 - **THEN** 应用必须进入 `/studio/settings/providers` 并在 Settings surface 内提供 Provider / Model 二级导航
 
 #### Scenario: 返回仪表盘
@@ -39,11 +39,15 @@ Studio SHALL 以结构化表单作为 Agent、Provider、Model 的默认编辑�
 
 #### Scenario: 编辑 Agent definition
 - **WHEN** 用户创建或编辑 Agent definition
-- **THEN** 表单必须提供名称、Model、schema 驱动 model parameters、tools 和 system prompt，并在名称、引用或参数无效时显示字段级错误
+- **THEN** 表单必须提供名称、author-supplied `agent_version`、Model、schema 驱动 model parameters、tools 和 system prompt；创建与更新请求必须携带 version，更新时必须要求不同于当前值的新 tag，并在名称、version、引用或参数无效时显示字段级错误
 
 #### Scenario: 使用 raw Agent config
 - **WHEN** 用户切换到 Agent raw config
-- **THEN** UI 必须编辑 canonical TOML，只有解析与校验成功后才同步结构化 draft，失败时保留 raw 文本并定位错误
+- **THEN** UI 必须编辑包含 `agent_version` 的 canonical TOML，只有解析与校验成功后才同步结构化 draft，失败时保留 raw 文本并定位错误；`agent_name` 仍由创建字段/资源路径控制，不得借 raw config 改名
+
+#### Scenario: 选择 Agent tools
+- **WHEN** Agent 表单需要展示 tools 选项
+- **THEN** UI 必须从 `GET /v1/tools` 使用 host 真实可注册的 name、description、kind 与 danger level，不得注入示例目录或提供任意自由文本绕过服务端校验
 
 #### Scenario: 查看 Provider raw config
 - **WHEN** 用户查看 Provider raw config
@@ -51,7 +55,7 @@ Studio SHALL 以结构化表单作为 Agent、Provider、Model 的默认编辑�
 
 #### Scenario: 查看 Model schema
 - **WHEN** 用户查看 Model 的高级信息
-- **THEN** UI 必须显示服务端返回的 parameter schema 且不得允许客户端改变 adapter 声明的 schema
+- **THEN** UI 必须显示服务端返回的 parameter schema 且不得允许客户端改变 adapter 声明的 schema；Provider/name identity 只读，改变 Model 必须删除后重建而不是显示无意义的保存/PUT
 
 ### Requirement: 编辑状态与安全反馈
 Studio MUST 对加载、dirty、保存、校验、并发冲突、连接测试和删除结果提供真实且就近的反馈。
@@ -62,7 +66,7 @@ Studio MUST 对加载、dirty、保存、校验、并发冲突、连接测试和
 
 #### Scenario: 保存成功
 - **WHEN** 管理 API 接受更新并返回新 representation 与 ETag
-- **THEN** UI 必须更新本地 acknowledged 状态、清除 dirty 标记，并说明 definition/provider/model 变更只影响后续使用该资源的 Agent
+- **THEN** UI 必须更新本地 acknowledged 状态、清除 dirty 标记，并区分说明：definition 变更只影响之后新建的 AgentRuntime，Provider / Model 变更从下一次 LLM work / Turn 起生效，当前 in-flight Turn 继续使用其捕获的 Provider `Arc`
 
 #### Scenario: revision 冲突
 - **WHEN** API 返回 412 revision conflict
@@ -70,7 +74,7 @@ Studio MUST 对加载、dirty、保存、校验、并发冲突、连接测试和
 
 #### Scenario: 删除被引用资源
 - **WHEN** API 返回 409 resource conflict 与 blocker 列表
-- **THEN** UI 必须展示阻止删除的 Agent definitions 或默认 Model 引用，并保持资源不变
+- **THEN** UI 必须展示阻止删除的 Agent definitions 并保持资源不变；不得声称存在全局 default Model，Provider-owned Models 本身也不得被误报为 blocker
 
 #### Scenario: 测试 Provider 连接
 - **WHEN** 用户主动测试 Provider
@@ -81,7 +85,7 @@ Studio SHALL 支持键盘、屏幕阅读器、中文/英文和窄屏操作，并
 
 #### Scenario: 键盘操作仪表盘
 - **WHEN** 用户只使用键盘浏览卡片、搜索、新建和设置
-- **THEN** 所有动作必须具有可见焦点、合理 tab 顺序、可本地化名称和正确的路由焦点落点
+- **THEN** 仪表盘动作与全局导航最右设置动作都必须具有可见焦点、合理 tab 顺序、可本地化名称和正确的路由焦点落点
 
 #### Scenario: 减少动态效果
 - **WHEN** 用户启用 `prefers-reduced-motion: reduce`

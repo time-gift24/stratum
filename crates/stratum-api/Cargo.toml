@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 async-trait.workspace = true
@@ -27,11 +28,11 @@ uuid.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+reqwest.workspace = true
 tracing-opentelemetry.workspace = true
 stratum-agent.workspace = true
 stratum-config.workspace = true
 stratum-core.workspace = true
-stratum-filesystem.workspace = true
 stratum-infra.workspace = true
 stratum-llm.workspace = true
 stratum-ontology.workspace = true

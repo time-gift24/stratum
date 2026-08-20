@@ -36,3 +36,6 @@
   connection URLs, names, descriptions, candidates, or ETags to tracing.
 - Keep real PostgreSQL tests ignored under `tests/` and run them through this
   crate's `Makefile` and `docker-compose.test.yml`.
+- `OntologyStore::list` accepts an optional case-insensitive `search` term
+  matched against `name`/`display_name` via `ILIKE` with `\`-escaped
+  metacharacters; the term is user input and must stay out of tracing spans.

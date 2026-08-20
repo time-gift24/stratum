@@ -26,9 +26,32 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+    ports:
+      - "127.0.0.1:${STRATUM_PG_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/create-ontology-database.sql:/docker-entrypoint-initdb.d/10-create-ontology-database.sql:ro
+      - ./docker/postgres/create-studio-database.sql:/docker-entrypoint-initdb.d/20-create-studio-database.sql:ro
+
+  postgres-provision:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: stratum
+      PGPASSWORD: stratum
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for database in stratum_ontology stratum_studio; do
+          if ! psql --dbname postgres --tuples-only --no-align --set ON_ERROR_STOP=1 \
+            --command "SELECT 1 FROM pg_database WHERE datname = '$${database}'" \
+            | grep -qx 1; then
+            createdb "$${database}"
+          fi
+        done
 
   stratum-api:
     build:
@@ -42,6 +65,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      postgres-provision:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "--noproxy", "*", "-fsS", "http://127.0.0.1:8080/health/ready"]
       interval: 5s
@@ -51,11 +76,9 @@ services:
     ports:
       - "18080:8080"
     volumes:
-      - ./templates:/etc/stratum/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be set}
 
   stratum-web:
     build:

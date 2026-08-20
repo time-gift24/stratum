@@ -1,0 +1,21 @@
+name: stratum-studio-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: stratum_studio
+      POSTGRES_PASSWORD: stratum_studio
+      POSTGRES_DB: stratum_studio_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum_studio -d stratum_studio_test"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:${STRATUM_STUDIO_TEST_PG_HOST_PORT-45434}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:

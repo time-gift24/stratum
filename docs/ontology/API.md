@@ -92,7 +92,7 @@ GET /v1/ontologies?page=1&per_page=20&sort=-updated_at
 - `per_page` defaults to 20 and accepts 1–100.
 - `sort` defaults to `-updated_at`. Supported fields are `name`, `display_name`, `created_at`, and `updated_at`; prefix with `-` for descending order.
 - Equal sort values are ordered by `id` ascending.
-- MVP has no search or filter query.
+- `search` is optional and matches `name` and `display_name` with a case-insensitive substring (contains) match. Leading and trailing whitespace is ignored, a blank value disables filtering, and a value longer than 100 characters is rejected with `400`. The term is matched literally: `%`, `_`, and `\` carry no wildcard meaning.
 
 `200 OK`:
 

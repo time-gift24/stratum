@@ -5,7 +5,6 @@
 
 use stratum_config::ConfigError;
 use stratum_core::{ModelId, ModelIdParseError};
-use stratum_filesystem::FilesystemError;
 use stratum_llm::LlmError;
 use stratum_ontology::OntologyStoreError;
 use stratum_postgres::PostgresError;
@@ -28,38 +27,32 @@ pub enum HostError {
     /// Ontology PostgreSQL could not connect or migrate.
     #[error("ontology store failed to initialize")]
     Ontology(#[from] OntologyStoreError),
-    /// The isolated Studio catalog could not connect, migrate, or seed.
+    /// The isolated Studio catalog could not connect, migrate, or be read.
     #[error("studio management catalog failed to initialize")]
     Studio(#[from] StudioError),
-    /// The read-only template source could not seed a new Studio catalog.
-    #[error("studio management catalog could not seed templates")]
-    StudioTemplateSeed(#[source] crate::ApiError),
-    /// The template catalog root is missing, not a directory, or unreadable.
-    #[error("agent template catalog root is not a readable directory")]
-    TemplatesRoot(#[from] FilesystemError),
     /// LLM provider registration failed.
     #[error("llm provider registration failed")]
     Llm(#[from] LlmError),
-    /// A configured provider model name could not form a model id.
-    #[error("invalid configured model for provider {provider}")]
-    InvalidConfiguredModel {
+    /// An injected adapter registry does not match Studio Model identities.
+    #[error("provider registry does not match studio catalog")]
+    ProviderCatalogMismatch,
+    /// A Studio-managed Provider model name could not form a model id.
+    #[error("invalid managed model for provider {provider}")]
+    InvalidManagedModel {
         /// Provider whose model failed to parse.
         provider: &'static str,
-        /// Configured model name.
+        /// Persisted Provider-local model name.
         model: String,
         /// Parse failure.
         #[source]
         source: ModelIdParseError,
     },
-    /// A DeepSeek model is configured but unsupported by the adapter.
+    /// A persisted DeepSeek model is unsupported by the built-in adapter.
     #[error("unsupported deepseek model: {model}")]
     UnsupportedDeepSeekModel {
-        /// Configured model identity.
+        /// Persisted model identity.
         model: ModelId,
     },
-    /// `DEEPSEEK_API_KEY` was present but could not be represented as UTF-8.
-    #[error("deepseek API key environment variable is not valid UTF-8")]
-    InvalidDeepSeekApiKeyEnvironment,
     /// The tracing subscriber or OTLP exporter could not be initialized.
     #[error("telemetry initialization failed")]
     Telemetry(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),

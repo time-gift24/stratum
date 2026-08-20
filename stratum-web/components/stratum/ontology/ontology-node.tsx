@@ -2,8 +2,9 @@
 
 import { useState, type CSSProperties } from "react"
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react"
-import { CircleAlert, Plus, Trash2Icon } from "lucide-react"
+import { CircleAlert, Crosshair, Plus, Trash2Icon } from "lucide-react"
 
+import { CardIconButton } from "@/components/stratum/ontology/ontology-chrome"
 import { CommitInput } from "@/components/stratum/ontology/form-controls"
 import {
   Select,
@@ -18,9 +19,11 @@ import type {
   OntologyPropertyValueType,
 } from "@/features/ontology-editor/types"
 import { nodeHue } from "@/features/ontology-editor/hue"
+import { MAX_NEIGHBORHOOD_DEPTH } from "@/features/ontology-editor/neighborhood"
 import {
   nextPropertyName,
   PROPERTY_VALUE_TYPES,
+  validatePropertyDisplayName,
   validatePropertyName,
 } from "@/features/ontology-editor/property"
 import { cn } from "@/lib/utils"
@@ -28,15 +31,17 @@ import { cn } from "@/lib/utils"
 import styles from "./ontology-aurora.module.css"
 
 /**
- * Object Type 画布节点（双层结构）：玻璃背板承载头部（display_name + name +
- * 描述），背板顶部衬一层多色极光（ontology-aurora.module.css 的 .aurora 三段
- * 渐变，色相由节点 ID 稳定散列为 --node-hue 注入容器，每节点不同，blur 化开
- * 形成磨砂染色，仅漫在头部区域）；内层实心面板承载属性列表——属性行内直接
- * 增删改（改名失焦提交、value_type shadcn Select、必填勾选、悬停删除、
- * 底部虚线「添加属性」行）。
- * 422 违例挂红框与首条消息（完整列表在编辑面板内联展示）；聚焦模式下非邻域
- * 节点淡出。编辑画布经 propertyActions 传入增删改回调；邻域只读画布省略，
- * 属性行退化为只读。
+ * Object Type 画布节点（双层结构）：root 相对定位，背板承载头部
+ * （display_name + name + 描述）；仅 dark 的玻璃背板顶部衬一层多色极光
+ * （ontology-aurora.module.css 的 .aurora 三段渐变，色相由节点 ID 稳定散列为
+ * --node-hue 注入容器，blur 化开形成磨砂染色，锚定 root 只漫在头部区域）。
+ * 节点级操作长在卡片上：头部文本（display_name / name / description）双击
+ * 即行内编辑（失焦提交 + 校验）；头部右侧动作组只剩 聚焦（图标 + 深度直选，
+ * 选中即聚焦，无弹窗）与 删除，悬停或选中时显现，nodrag 不抢拖拽。
+ * 内层实心面板承载属性列表——属性单行两列（name mono 与 display_name
+ * 各自点击行内编辑，失焦提交+校验，两者独立）+ value_type 深色瓦片
+ * Select + 必填勾选 + 悬停删除 + 底部虚线「添加属性」行。对象级与属性级 422 违例合并为底部红框首条 + 总数；
+ * 聚焦模式下非邻域节点淡出。邻域只读画布省略全部动作。
  */
 
 export type ObjectTypePropertyDraft = {
@@ -55,12 +60,23 @@ export type ObjectTypePropertyActions = {
   onRemoveProperty(objectTypeId: string, propertyId: string): void
 }
 
+/** 节点级动作回调（详情更新 / 请求删除 / 聚焦邻域） */
+export type ObjectTypeNodeActions = {
+  onUpdate(next: OntologyObjectType): void
+  onRequestDelete(objectType: OntologyObjectType): void
+  onFocus(objectTypeId: string, depth: number): void
+}
+
 export type ObjectTypeNodeData = {
   objectType: OntologyObjectType
   violations: readonly string[]
+  /** 属性级 422 违例：property.id → 消息列表 */
+  propertyMessages: ReadonlyMap<string, readonly string[]>
   dimmed: boolean
   /** 编辑画布传入；邻域只读画布省略（属性行只读、无添加行） */
   propertyActions?: ObjectTypePropertyActions
+  /** 编辑画布传入；邻域只读画布省略（无头部动作组） */
+  objectActions?: ObjectTypeNodeActions
 }
 
 export type ObjectTypeNode = Node<ObjectTypeNodeData, "ontologyObjectType">
@@ -69,11 +85,36 @@ export function OntologyObjectTypeNode({
   data,
   selected,
 }: NodeProps<ObjectTypeNode>) {
-  const { objectType, violations, dimmed, propertyActions } = data
-  const hasViolations = violations.length > 0
+  const {
+    objectType,
+    violations,
+    propertyMessages,
+    dimmed,
+    propertyActions,
+    objectActions,
+  } = data
+  // 对象级 + 属性级 422 违例合并展示：底部红框首条 + 总数
+  const allViolations = [
+    ...violations,
+    ...objectType.properties.flatMap(
+      (property) => propertyMessages.get(property.id) ?? []
+    ),
+  ]
+  const hasViolations = allViolations.length > 0
   const addPropertyDisabledReason =
     propertyActions?.getAddPropertyDisabledReason(objectType) ?? null
-  const [renamingId, setRenamingId] = useState<string | null>(null)
+  /** 属性行内编辑：{ id, field }——name 与 display_name 两列各自独立编辑 */
+  const [editingProperty, setEditingProperty] = useState<{
+    id: string
+    field: "name" | "display_name"
+  } | null>(null)
+  /** 头部文本的双击行内编辑：display_name / name / description */
+  const [editingField, setEditingField] = useState<
+    "display_name" | "name" | "description" | null
+  >(null)
+  const editableHeader = objectActions !== undefined
+  const startEdit = (field: "display_name" | "name" | "description") =>
+    editableHeader ? () => setEditingField(field) : undefined
 
   const addProperty = () => {
     if (propertyActions === undefined || addPropertyDisabledReason !== null)
@@ -86,13 +127,13 @@ export function OntologyObjectTypeNode({
       required: false,
     })
     // 新建后直接进入行内改名
-    setRenamingId(id)
+    setEditingProperty({ id, field: "name" })
   }
 
   return (
     <div
       className={cn(
-        "w-64 rounded-2xl border bg-card/50 p-1.5 text-card-foreground shadow-[0_8px_30px] shadow-black/10 backdrop-blur-xl transition-opacity",
+        "group relative w-72 rounded-2xl border bg-card p-1.5 text-card-foreground transition-opacity dark:bg-card/50 dark:shadow-[0_8px_30px] dark:shadow-black/10 dark:backdrop-blur-xl",
         selected ? "border-primary ring-2 ring-ring/30" : "border-border",
         hasViolations && "border-destructive ring-2 ring-destructive/30",
         dimmed && "opacity-30"
@@ -100,7 +141,7 @@ export function OntologyObjectTypeNode({
       style={{ "--node-hue": nodeHue(objectType.id) } as CSSProperties}
     >
       <Handle type="target" position={Position.Left} />
-      {/* 顶部极光：色相按节点 ID 散列（--node-hue），blur 化开只漫在头部 */}
+      {/* dark 顶部极光：锚定 root（relative），blur 化开只漫在头部 */}
       <div
         aria-hidden
         className={cn(
@@ -108,19 +149,125 @@ export function OntologyObjectTypeNode({
           styles.aurora
         )}
       />
-      <header className="relative px-1.5 pt-0.5 pb-1.5">
-        <p className="truncate text-sm font-medium">
-          {objectType.display_name}
-        </p>
-        <p className="truncate font-mono text-[0.6875rem] text-muted-foreground">
-          {objectType.name}
-        </p>
-        {objectType.description !== undefined &&
-          objectType.description !== "" && (
-            <p className="truncate text-[0.6875rem] text-muted-foreground">
-              {objectType.description}
+      <header className="relative flex items-start gap-1 px-1.5 pt-0.5 pb-1.5">
+        <div className="min-w-0 flex-1">
+          {editingField === "display_name" && editableHeader ? (
+            <CommitInput
+              autoFocus
+              ariaLabel="Object Type 显示名"
+              value={objectType.display_name}
+              validate={validatePropertyDisplayName}
+              onCommit={(displayName) => {
+                objectActions.onUpdate({
+                  ...objectType,
+                  display_name: displayName,
+                })
+                setEditingField(null)
+              }}
+            />
+          ) : (
+            <p
+              onDoubleClick={startEdit("display_name")}
+              title={editableHeader ? "双击修改显示名" : undefined}
+              className="truncate text-sm font-medium"
+            >
+              {objectType.display_name}
             </p>
           )}
+          {editingField === "name" && editableHeader ? (
+            <CommitInput
+              mono
+              autoFocus
+              ariaLabel="Object Type 名称"
+              value={objectType.name}
+              validate={validatePropertyName}
+              onCommit={(name) => {
+                objectActions.onUpdate({ ...objectType, name })
+                setEditingField(null)
+              }}
+            />
+          ) : (
+            <p
+              onDoubleClick={startEdit("name")}
+              title={editableHeader ? "双击修改名称" : undefined}
+              className="truncate font-mono text-[0.6875rem] text-muted-foreground"
+            >
+              {objectType.name}
+            </p>
+          )}
+          {editingField === "description" && editableHeader ? (
+            <CommitInput
+              autoFocus
+              ariaLabel="Object Type 描述"
+              value={objectType.description ?? ""}
+              onCommit={(description) => {
+                objectActions.onUpdate({
+                  ...objectType,
+                  description: description === "" ? undefined : description,
+                })
+                setEditingField(null)
+              }}
+            />
+          ) : objectType.description !== undefined &&
+            objectType.description !== "" ? (
+            <p
+              onDoubleClick={startEdit("description")}
+              title={editableHeader ? "双击修改描述" : undefined}
+              className="truncate text-[0.6875rem] text-muted-foreground"
+            >
+              {objectType.description}
+            </p>
+          ) : null}
+        </div>
+        {objectActions !== undefined && (
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-0.5 transition-opacity motion-reduce:transition-none",
+              selected
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+            )}
+          >
+            {/* 聚焦邻域：图标 + 深度直选，选中即聚焦，无弹窗 */}
+            <div className="flex items-center">
+              <Crosshair
+                aria-hidden
+                className="size-3.5 shrink-0 text-muted-foreground"
+              />
+              <Select
+                onValueChange={(depth) => {
+                  if (typeof depth === "number")
+                    objectActions.onFocus(objectType.id, depth)
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  aria-label="聚焦邻域：选择深度"
+                  className="nodrag nowheel h-7 w-auto min-w-[3.5rem] gap-0.5 border-0 bg-transparent px-1 text-xs shadow-none"
+                >
+                  <SelectValue>聚焦</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {Array.from(
+                    { length: MAX_NEIGHBORHOOD_DEPTH + 1 },
+                    (_, depth) => (
+                      <SelectItem key={depth} value={depth}>
+                        深度 {depth}
+                      </SelectItem>
+                    )
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+            <CardIconButton
+              label="删除该 Object Type"
+              tone="danger"
+              onClick={() => objectActions.onRequestDelete(objectType)}
+            >
+              <Trash2Icon aria-hidden className="size-3.5" />
+            </CardIconButton>
+          </div>
+        )}
       </header>
       <div className="nodrag relative flex flex-col gap-0.5 rounded-xl border border-border/50 bg-popover px-1.5 py-1.5 text-popover-foreground">
         {objectType.properties.length === 0 && (
@@ -132,9 +279,13 @@ export function OntologyObjectTypeNode({
           <NodePropertyRow
             key={property.id}
             property={property}
-            renaming={renamingId === property.id}
-            onStartRename={() => setRenamingId(property.id)}
-            onFinishRename={() => setRenamingId(null)}
+            editing={
+              editingProperty?.id === property.id ? editingProperty.field : null
+            }
+            onStartEdit={(field) =>
+              setEditingProperty({ id: property.id, field })
+            }
+            onFinishEdit={() => setEditingProperty(null)}
             onUpdate={
               propertyActions === undefined
                 ? undefined
@@ -166,8 +317,10 @@ export function OntologyObjectTypeNode({
         <div className="flex items-start gap-1 px-1.5 pt-1.5 pb-0.5 text-xs text-destructive">
           <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />
           <span>
-            {violations[0]}
-            {violations.length > 1 ? `（共 ${violations.length} 条）` : ""}
+            {allViolations[0]}
+            {allViolations.length > 1
+              ? `（共 ${allViolations.length} 条）`
+              : ""}
           </span>
         </div>
       )}
@@ -177,24 +330,23 @@ export function OntologyObjectTypeNode({
 }
 
 /**
- * 属性行：display_name 主文本 + mono value_type + 必填标记。
- * 有 onUpdate/onRemove（编辑画布）时行内可改：点名字进入失焦提交的改名输入，
- * value_type shadcn Select、必填 checkbox、删除按钮悬停显现；否则整行只读。
- * 节点层改名以 name 为准（需通过命名校验），display_name 同步为同值；
- * 两者需要不同时走编辑面板分别修改。
+ * 属性行（单行两列）：name（mono）与 display_name 两列都可点击行内编辑
+ * （失焦提交 + 校验，两者独立、不再强制同值）；右侧 value_type 深色瓦片
+ * Select + 必填勾选 + 悬停删除。无 onUpdate/onRemove（邻域只读画布）时
+ * 整行只读。
  */
 function NodePropertyRow({
   property,
-  renaming,
-  onStartRename,
-  onFinishRename,
+  editing,
+  onStartEdit,
+  onFinishEdit,
   onUpdate,
   onRemove,
 }: {
   property: OntologyProperty
-  renaming: boolean
-  onStartRename(): void
-  onFinishRename(): void
+  editing: "name" | "display_name" | null
+  onStartEdit(field: "name" | "display_name"): void
+  onFinishEdit(): void
   onUpdate?(next: OntologyProperty): void
   onRemove?(): void
 }) {
@@ -219,8 +371,8 @@ function NodePropertyRow({
   }
 
   return (
-    <div className="group flex items-center gap-1 px-1 py-0.5">
-      {renaming ? (
+    <div className="group/row flex items-center gap-1 rounded-md px-1 py-0.5">
+      {editing === "name" ? (
         <div className="min-w-0 flex-1">
           <CommitInput
             mono
@@ -229,8 +381,8 @@ function NodePropertyRow({
             value={property.name}
             validate={validatePropertyName}
             onCommit={(name) => {
-              onUpdate({ ...property, name, display_name: name })
-              onFinishRename()
+              onUpdate({ ...property, name })
+              onFinishEdit()
             }}
           />
         </div>
@@ -238,10 +390,34 @@ function NodePropertyRow({
         <button
           type="button"
           aria-label={`重命名属性 ${property.name}`}
-          onClick={onStartRename}
+          onClick={() => onStartEdit("name")}
           className="min-w-0 flex-1 truncate rounded px-0.5 text-left font-mono text-xs hover:bg-accent"
         >
           {property.name}
+        </button>
+      )}
+      {editing === "display_name" ? (
+        <div className="min-w-0 flex-1">
+          <CommitInput
+            autoFocus
+            ariaLabel={`属性 ${property.name} 显示名`}
+            value={property.display_name}
+            validate={validatePropertyDisplayName}
+            onCommit={(displayName) => {
+              onUpdate({ ...property, display_name: displayName })
+              onFinishEdit()
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label={`修改属性 ${property.name} 显示名`}
+          title="点击修改显示名"
+          onClick={() => onStartEdit("display_name")}
+          className="min-w-0 flex-1 truncate rounded px-0.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          {property.display_name}
         </button>
       )}
       <Select
@@ -256,7 +432,7 @@ function NodePropertyRow({
         <SelectTrigger
           size="sm"
           aria-label={`属性 ${property.name} 值类型`}
-          className="nodrag nowheel w-auto shrink-0 gap-1 px-1.5 py-0 font-mono text-[0.625rem]"
+          className="nodrag nowheel h-7 w-[5.25rem] shrink-0 gap-1 rounded-md border-0 bg-muted/70 px-1.5 font-mono text-[0.625rem] shadow-none"
         >
           <SelectValue />
         </SelectTrigger>
@@ -285,7 +461,7 @@ function NodePropertyRow({
         type="button"
         aria-label={`删除属性 ${property.display_name}`}
         onClick={onRemove}
-        className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-destructive focus-visible:opacity-100 motion-safe:transition-opacity"
+        className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover/row:opacity-100 hover:text-destructive focus-visible:opacity-100 motion-safe:transition-opacity"
       >
         <Trash2Icon aria-hidden className="size-3.5" />
       </button>

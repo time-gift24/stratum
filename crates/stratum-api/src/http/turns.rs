@@ -137,13 +137,16 @@ pub(crate) async fn post_message(
     // Model, provider, and tool preflight before any durable mutation.
     let effective_model = match &body.model_config {
         Some(overridden) => {
-            super::agents::validate_model_override(&state, overridden)?;
+            super::agents::validate_model_override(&state, overridden).await?;
             overridden.clone()
         }
         None => view.model_config.clone(),
     };
-    let provider = state
+    let providers = state
         .providers()
+        .await
+        .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
+    let provider = providers
         .configure(&effective_model)
         .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
     let registry = build_tool_registry(&definition.tools)?;
@@ -386,8 +389,11 @@ async fn resume_preflight_and_spawn(
     }
 
     // Reconstruct the exact runtime pinned by the snapshot.
-    let provider = state
+    let providers = state
         .providers()
+        .await
+        .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
+    let provider = providers
         .configure(&snapshot.model)
         .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
     let registry = build_tool_registry(&definition.tools)?;

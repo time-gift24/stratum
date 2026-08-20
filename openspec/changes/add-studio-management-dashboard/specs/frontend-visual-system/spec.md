@@ -17,14 +17,14 @@
 
 #### Scenario: 查看 Studio
 - **WHEN** 用户访问 `/studio`
-- **THEN** 应用必须呈现面向开发者/管理员的 Agent-first 仪表盘，并通过最右设置图标进入 Provider/Model 设置
+- **THEN** 应用必须呈现面向开发者/管理员的 Agent-first 仪表盘，并通过全局 product navigation 最右设置图标进入 Provider/Model 设置
 
 #### Scenario: 访问旧路由
 - **WHEN** 用户尝试使用已移除的 `/longzhong` 或 `/chat`
 - **THEN** 应用不得将其作为当前产品页面或一级导航入口
 
 ### Requirement: 全局与页面导航分层
-Stratum Web MUST 由根 Layout 渲染唯一的全局导航，并由具体页面按任务需要提供会话动作、沉浸控制或 Studio 设置动作。
+Stratum Web MUST 由根 Layout 渲染唯一的全局导航，并由具体页面按任务需要提供会话动作或沉浸控制；Studio 设置是全局 product navigation 最右侧的 product action，不在 Studio 页面 header 重复。
 
 #### Scenario: 全局导航
 - **WHEN** 用户在对话、白板或 Studio 之间导航
@@ -34,9 +34,9 @@ Stratum Web MUST 由根 Layout 渲染唯一的全局导航，并由具体页面�
 - **WHEN** `/conversation` 渲染会话动作
 - **THEN** 垂直导航必须作为视口覆盖层存在，不参与消息列或 Composer 的宽度计算，并且只提供唯一的新建对话入口与按需历史入口
 
-#### Scenario: Studio 设置动作
-- **WHEN** `/studio` 渲染 header
-- **THEN** 设置图标必须位于 header 最右侧并进入 Studio Settings，不得把 Provider/Model 提升为全局或仪表盘一级页签
+#### Scenario: 全局 Studio 设置动作
+- **WHEN** 根 Layout 渲染全局 product navigation
+- **THEN** 设置图标必须位于全局导航最右侧并进入 Studio Settings，不得显示“资源配置”文字入口、把 Provider/Model 提升为一级页签，或在 Studio page header 重复同一动作
 
 #### Scenario: 窄屏导航
 - **WHEN** 视口不足以显示桌面导航形态
@@ -102,7 +102,7 @@ Stratum Web MUST 只借鉴 `rbp-portfolio` 中适合 Operate surface 的视觉�
 
 #### Scenario: 全局导航需要双主题形态
 - **WHEN** 既有复用导航无法满足实色浅色与玻璃深色的主题差异
-- **THEN** 实现必须在 `components/stratum/chrome/` 或使用方建立产品导航，不得直接修改 `components/react-bits/*`
+- **THEN** 产品编排与主题差异必须保留在 `components/chrome/site-chrome.tsx` 或使用方；允许已确认的 `components/react-bits/SiteNav` 窄 `actions` prop 扩展以承载最右 product actions，但不得把 Studio 路由逻辑、主题特例或其他产品行为下沉到底稿
 
 #### Scenario: Composer glow
 - **WHEN** PromptInput 在 light 主题获得焦点

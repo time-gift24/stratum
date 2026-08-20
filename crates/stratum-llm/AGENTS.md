@@ -29,9 +29,11 @@
 - 在调用方需要之前，不得添加 DeepSeek 定价、并发、缓存命中用量或旧模型拒绝代码。
 - 提供方负责校验自己的参数对象；调用方接收 `LlmError::InvalidModelParameters`，无需重复提供方
   模式或校验规则。
+- DeepSeek 的空参数对象表示省略 provider-specific 配置，必须应用 `parameter_schema` 声明的
+  disabled-thinking 默认值；非空对象仍按严格 shape 校验，未知或不完整字段不得回退到默认值。
 - LLM 出站的连接建立、非流式请求总时长、流式首响应、流式数据块空闲四个超时，由
-  `stratum-config::ProviderConfig` 显式传入 `LlmTimeouts`；不得新增不生效的配置，也不得在适配器
-  内硬编码。长时间流式响应不设总时长，但任一数据块的静默时间不得超过空闲上限。
+  `stratum-api` 的可信 adapter policy 显式传入 `LlmTimeouts`；它们不属于部署配置或 Studio
+  资源，不得新增不生效的配置。长时间流式响应不设总时长，但任一数据块的静默时间不得超过空闲上限。
 - OpenAI 兼容协议与 DeepSeek 共用有界响应体读取器：非流式成功响应体和提供方错误响应体分别使用
   固定的安全字节上限，并逐数据块监测空闲超时；流式请求的非成功错误响应体还受请求总时长约束，
   禁止通过低速滴流长期占住 Turn。发生超时、传输错误或超限时立即丢弃部分响应体，错误和日志不得

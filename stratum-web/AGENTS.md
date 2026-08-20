@@ -9,60 +9,73 @@
 
 本目录是基于 `~/projects/front-playground` 整体重写的前端（Next.js 16 + React 19 + Tailwind v4 + pnpm）。旧版 React Router 前端已废弃，只保留与后端的交互层。
 
+## 硬性约定（用户拍板，禁止擅自重写）
+
+以下是用户在评审中明确拍板的约定。任何会话不得为了匹配自己的代码改动而重写本节、`DESIGN.md` 或本文件其他约定段落；确需变更约定本身时，必须先向用户说明并获明确批准。
+
+1. **整页/整区加载一律转圈**（`LoadingState`，`components/stratum/studio/primitives.tsx`），禁止在列表、仪表盘、编辑器冷启动使用骨架屏（`components/ui/skeleton`）；eslint 已机械禁止业务组件引入它。
+2. **编排式动画双主题一致生效**：页面转场、设置区内容淡入、列表卡片级联等在 light 与 dark 下都播放，统一走 `lib/motion.ts` 的时长/缓动尺度；唯一的门控是 `prefers-reduced-motion`（瞬时），禁止按主题门控动画。
+3. **删除操作统一 `DeleteAction`**：页面头部右上角幽灵图标钮 + Popover 确认，禁止页面底部大红色删除区块。
+4. 用户在本会话或其他会话中拍板的偏好，由执行的会话负责在本节归档；发现本节与代码不一致时，以本节为准修复代码，而不是改写本节。
+
 ## 后端交互层（核心资产，勿随意改写）
 
 Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-agent-runtime`）：
 
 - `lib/stratum/api.ts`——REST 客户端和全部协议类型（`AgentRuntimeView` / `AgentRuntimeProductEventV1` / `AgentRuntimeDurableRecordV1` / `AgentRuntimeStreamFrameV1` / `LlmTelemetryEventV1` / `ChatMessage` / `HistoryPage`）。基础 URL 为 `process.env.NEXT_PUBLIC_STRATUM_API_BASE_URL ?? "http://127.0.0.1:18080"`。所有事件序号都是无符号十进制字符串，`compareEventSeq` 使用 `BigInt` 比较，禁止转换为 JavaScript `number`。
 - `lib/stratum/event-stream.ts`——SSE 解析、`AgentRuntimeStreamFrameV1` 校验（未知 `protocol_version`、`kind` 或事件变体一律拒绝），以及 `subscribeToAgentRuntimeEvents`（没有 cursor 时从新的短尾流开始；页面内续传只使用 `after_cursor` 查询参数）。
-- `lib/stratum/model-config.ts`、`lib/stratum/recent-agents.ts`——模型配置辅助函数与最近 AgentRuntime（会话）的 `localStorage` 持久化；最近记录的键必须是 `AgentRuntimeId`，不能使用可被多个运行实例复用的 `AgentId`。SSE cursor 只保存在当前页面内存中（hook 的 `Map`），禁止写入 `localStorage`。模型参数（如 Thinking 等级）一律从各模型自己的 `parameters_schema` 动态解析（`thinkingLevels` / `currentThinkingLevel` / `withThinkingLevel`），禁止在界面或 hook 中硬编码等级。
+- `lib/stratum/model-config.ts`、`lib/stratum/recent-agents.ts`——模型配置辅助函数与最近 AgentRuntime 的 `localStorage` 持久化；最近记录的键必须是 `AgentRuntimeId`。SSE cursor 只保存在当前页面内存中，禁止写入 `localStorage`。模型参数一律从各模型自己的 `parameters_schema` 动态解析，禁止在界面或 hook 中硬编码等级。
 - `features/agent-conversation/{types,reducer,recovery}.ts`——负责把事件流归约为会话状态，以及恢复流程（冷启动、短尾流续传、增量收敛、向上分页），不包含界面逻辑。
-- `hooks/use-agent-conversation.ts`——自包含 hook（不依赖任何外壳）：拉取模板和模型、管理最近 AgentRuntime 与页面内存 cursor、驱动 reducer/recovery，并暴露 `state`、`createConversation`、`sendMessage`、`cancel`、`resume`、`resolveApproval`、`reconnect`、`loadOlderHistory`。
-- `/conversation` 是唯一连接真实后端的页面：状态到 `ConversationItem[]` 的映射在该页完成，会话组件保持数据驱动且不接入运行时。
-- 推理过程与 Tool call/approval 在消息正文上方渲染：`components/stratum/conversation/reasoning.tsx`（三态折叠 + GSAP 手风琴）、`tool-call.tsx` / `tool-group.tsx`（默认折叠）。审批操作入口是输入区上方的浮层 `approval-dock.tsx`（GSAP 进出场，按钮调用 hook 的 `resolveApproval`，页面负责提交中和已决终态）；内联审批区只读，卡片内容与浮层共享 `approval-card.tsx`。历史消息中的 Tool 结果从 `state.tools[callId]` 配对，无法配对时只渲染名称和参数。
-- 消息列条目（`ConversationItem`）由普通消息、`compaction-marker.tsx`（`TranscriptCompacted` 的可折叠“上下文已压缩”标记，展开显示完整摘要，不伪装为系统消息）和 `terminal-marker.tsx`（安全的失败/取消标记）组成。连接、命令、缺失资源等运行错误绝不能伪装成 assistant 消息或写入正文；它们统一由 `notices.tsx` 在输入区上方展示，成功命令或 PG reconcile 证明恢复后用 GSAP 退场再卸载。`notices.tsx` 还承载恢复提示（`resume_required` 只是建议状态，必须显式点击，绝不自动恢复）与实时降级提示。
-- 模型/Thinking 选择器为 `components/stratum/model-selector.tsx`（基于 assistant-ui model-selector 底稿的数据驱动分支，不接入其 runtime/ModelContext）：搜索、provider 筛选项、分组列表和 Thinking 分段行经 `composerConfiguration` 与 hook 接线，并通过 `PromptInput` 的 `trailing` 插槽挂载。
+- `hooks/use-agent-conversation.ts`——自包含 hook：拉取 definitions/models、管理最近 AgentRuntime 与页面内存 cursor、驱动 reducer/recovery，并暴露会话命令。
+- `/conversation` 是面向最终用户的真实 runtime 页面；状态到 `ConversationItem[]` 的映射在该页完成，会话组件保持数据驱动且不接入运行时。
+- 推理过程与 Tool call/approval 在消息正文上方渲染；连接、命令、缺失资源等运行错误不得伪装成 assistant 消息或写入正文。
 
-## Ontology 管理（前端按契约实现，后端联调不属于本 change）
+## Studio 管理面
 
-- 契约：`docs/ontology/API.md`。`lib/stratum/api.ts` 的 ontology 方法组：`listOntologies` / `createOntology` / `getOntology` / `replaceOntology`（ETag 整文档替换）/ `deleteOntology` / `getObjectTypeNeighborhood`；ETag 经响应头读取，缺失视为契约破坏；`ApiError` 携带 422 `violations`。
-- `features/ontology-editor/{types,reducer,save,violations,validation,pointer,ids,recovery,layout,neighborhood}.ts` — UI 无关内核：编辑器状态 reducer、保存副作用编排（`save.ts`）、422 violations 到节点/边的映射、命名校验、指针路径、id 生成、IndexedDB 崩溃恢复草稿、布局与只读邻域计算。
-- 保存状态机不变量：`acknowledged`（服务端确认的最近文档 + ETag）/ `candidate`（画布展示的可变本地文档）/ `in_flight`（已发出的保存快照）。412 时重读远端交用户显式调和，绝不静默换新 ETag 重试；422 时 candidate 原样保留，violations 必须按实际提交的 in-flight 快照定位。
-- `hooks/use-ontology-editor.ts` / `hooks/use-ontology-list.ts` — 编辑器与列表的自包含 hook，api 经依赖注入。创建成功时以一次性 client-navigation handoff 把 POST 返回的文档与 ETag 交给编辑器，完整刷新才回退 GET；运行时始终连接真实后端，mock 只允许通过测试注入。
-- 路由 `/ontologies`（列表）与 `/ontologies/[id]`（编辑器）位于 `app/(site)/ontologies/`，组件集中在 `components/stratum/ontology/`；SiteNav 挂「本体」入口。
-- 已接受依赖：`@xyflow/react`（画布）与 `vitest`（`features/` 纯逻辑单测，`pnpm test`）（均为 MIT 许可证）。
+- `/studio` 是 Agent-first 仪表盘；Provider 从全局 product navigation 最右侧的设置入口进入，不增加 Agents tab、解释区、Prompt 摘要、假指标或监控占位。
+- `/studio/agents/*` 管理 Agent definition；`/studio/settings/providers/*` 管理 DB-only Provider 资源，Model 挂在 Provider 编辑器内行内管理（添加/删除/真实消息测试），无独立 Model 页面。所有数据必须来自真实 management API。
+- management DTO、分页、错误 envelope 与 ETag helper 统一维护在 `lib/stratum/api.ts`；更新和删除携带最近一次读取的 `If-Match`，412 保留 draft，409 展示 blocker。
+- Provider secret 只允许单向替换：永不回显已存值，留空表示保留；未保存的新凭据不得用于连接测试。
+- Studio 状态机、raw/structured 转换与页面缓存放在 `features/studio-management/` 和 `lib/page-cache.ts`；后台刷新不得覆盖 dirty draft，失败时保留缓存并显示可重试错误。
+- Agent definition 保存成功只影响之后新建的 AgentRuntime；Provider/Model 变更从下一次 LLM work / Turn 起生效，当前 in-flight Turn 保留捕获的 Provider。
+
+## Ontology 管理
+
+- `/ontologies` 与 `/ontologies/[id]` 连接真实 Ontology API；编辑候选、in-flight snapshot、ETag、422 violations 与 412 显式调和由 `features/ontology-editor/` 和对应 hooks 管理。
+- 画布交互集中在 `components/stratum/ontology/`；light 主题使用平面实色和 hairline，glass、blur、黑色阴影与 aurora 只允许出现在 dark。
 
 ## 运行时协议投影
 
-- 持久化身份是 `(agentRuntimeId, eventSeq)`，其中 `eventSeq` 是十进制字符串。每个帧的 `agent_runtime_id` 必须匹配当前运行实例，固定的 `agent_id` 必须匹配当前 `AgentRuntimeView`；任一不匹配都要关闭流，并进行无 cursor 冷启动。新视图仍不一致时，停止自动重连并报告协议身份错误。可见序号允许有间隔（内部 Hook/Tool 事件不发布），不能据此判断丢帧。遥测身份是 `(agentRuntimeId, llmCallId, telemetrySeq)`：低于期望值表示重复并忽略，高于期望值则把草稿标为不完整并等待持久化终稿收敛。每条遥测另带 `durable_before_event_seq` 顺序水位；PG 先收敛 assistant 最终消息 F 时，丢弃水位低于 F 的旧短尾流，但允许水位不低于 F 的下一次调用建立草稿。有 `acceptedTurnId` 时只接收该精确 Turn 的遥测；否则只接收运行中 `AgentRuntimeView` 的 `current_turn_id`，上一 Turn 的 NATS 积压不得复活草稿。
-- 冷启动顺序固定为：建立 SSE 缓冲区并等待 `stream_ready` → 获取 AgentRuntimeView 和 `through=snapshot_event_seq` 的最新历史页 → 应用快照，并使用受 barrier 管理的 `AgentRuntimeView.telemetry_floor_event_seq` 初始化已收敛的 assistant 最终消息下限（不能只依赖最新历史页）→ 只把 `event_seq > barrier` 的已缓冲持久化帧放入未确认映射 → 丢弃全部已缓冲遥测 → 提交最新 cursor 并进入实时模式。AgentRuntimeView/历史读取与 SSE 共用 reset 和 AgentRuntime 切换的 abort 链，旧 generation 的结果不得写入新会话。
-- SSE cursor 是不透明的 NATS 传输位置：只保存在页面内存中，不与 `event_seq`/`telemetry_seq` 比较，也不跨刷新持久化。收到 410 或 `stream_reset` 后，必须丢弃缓冲区、草稿与 cursor，并从无 cursor 冷启动重来。
-- 浏览器冷启动的持久化缓冲区与 SSE 单帧解析器都必须有硬上限；溢出时必须 fail closed 并走 reset/冷恢复，禁止无界积累。
-- `pgConfirmedEventSeq` 只能由 PG 快照/收敛推进，NATS product 只进入按 `event_seq` 索引的未确认映射。reconcile 固定读取完整公开 product `(B,T]`，以 view@T 为基线，再从当前映射重放全部 `>T` 帧，并按重建后的精确 Turn、状态和最终消息下限处理遥测，完成后才原子提交。reconcile 必须单飞；定时器、窗口聚焦和命令完成只合并一次补跑，不得取消当前慢分页。只有 AgentRuntime 切换、硬重置或卸载可以取消；向上分页请求仍可在 AgentRuntime 切换时取消。
-- 命令合同：create 只向 `/v1/agent-runtimes` 发送 `agent_name` 与可选的完整 `model_config`，并携带客户端 UUID `Idempotency-Key`。结果不确定时，待定意图复用同一 key；key 命中后无条件返回原运行实例，且不重读模板。message 携带显式可空的 `expected_current_turn_id` CAS（`stale_turn` 只触发 reconcile，绝不静默创建第二个 Turn）。若响应不确定，同一 AgentRuntime、原文和完整模型配置的待定消息重试必须复用原 `expected_current_turn_id`，任一输入改变才形成新意图。message 的 202 响应所携精确 Turn 必须保留，直到 AgentRuntimeView 或同一 Turn 的精确持久化 `loop_started`/terminal 帧提供证明，并驱动 ready 后立即 reconcile 和低频轮询。cancel 202 只显示“取消请求已发送”；approval resolve（204）先移除待审批项再 reconcile；resume 与 resolve 是独立命令。
-- 实时降级（503 `realtime_unavailable`，或已经建立 PG 快照/实时身份后的 SSE EOF/error）：显示克制的降级提示，保持 ready，并由 PG reconcile 收敛；核心命令不受影响。冷启动完成前的普通连接失败仍进入 `connection_error`。
+- 持久化身份是 `(agentRuntimeId, eventSeq)`，`eventSeq` 是十进制字符串；帧的 runtime/agent identity 必须与当前视图一致，不一致时 fail closed 并冷启动。
+- 冷启动顺序固定为 subscribe-before-snapshot：等待 `stream_ready`，读取 view 与 barrier 历史，再应用 `event_seq > barrier` 的缓冲帧并进入实时模式。
+- SSE cursor 是不透明的 NATS 传输位置，只保存在页面内存中，不与 `event_seq` / `telemetry_seq` 比较，也不跨刷新持久化。
+- PG snapshot 是持久化真相；NATS product/telemetry 只做实时增量，reconcile 必须单飞并由 PG 原子收敛。
+- create/message/cancel/approval/resume 必须保持各自 idempotency、CAS 与显式恢复语义；实时降级不得阻断核心 PG 命令。
 
-## 工具类优先宪章
+## 工具类与组件纪律
 
-1. **`app/globals.css` 只定义系统，不实现页面。** 只允许依赖导入、shadcn 语义 Token、Tailwind `@theme` 映射、字体、基础元素样式和全局无障碍规则。
-2. **具体样式写在组件的 Tailwind 工具类中。** 禁止用 `@apply` 把工具类包装成传统 CSS 类。
-3. **复用依靠组件边界。** 重复模式提取为 `components/stratum/` 下的模块级 React 组件。
-4. **颜色只消费语义 Token。** 不写 Hex、RGB 或同义颜色变量；状态优先使用 `data-*` / ARIA 变体。
-5. **优先使用 Tailwind v4 标准能力。** 任意值仅用于 Token 无法表达的真实约束；重复的任意值提升为 `@theme` Token。
-6. **React 结构必须可维护。** 不在组件函数内部声明子组件；可推导的值不另建 state；effect 依赖保持稳定；仅对真实昂贵计算 memoize。不要用 ref 缓存上一次渲染的值（当前 `react-hooks` lint 禁止渲染期读 `ref.current`，包括 `useMemo` 内）；需要"上一次已提交值"时用 derive-during-render（参照 `site-chrome.tsx` / `ontology-canvas.tsx` 的既有模式）。
-7. **外部组件保持隔离。** `components/ui/`、`components/react-bits/`、`components/assistant-ui/` 的适配通过 props、utility class、CSS 变量或包裹组件完成，不改供应组件内部实现。
+1. `app/globals.css` 只定义全局 reset/base、设计 token、主题和真正跨页面规则；功能样式放使用方或 CSS Module。
+2. 具体样式写 Tailwind utilities；重复模式提取到 `components/stratum/` 的有职责组件。
+3. 颜色只消费语义 token；优先 Tailwind v4 标准能力，重复任意值提升为 token。
+4. 不在组件函数内部声明子组件；可推导值不建 state；effect 只用于外部同步；无依赖异步工作并行启动。
+5. `components/ui/`、`components/react-bits/`、`components/assistant-ui/` 只加不改；适配通过 props、utility class、CSS 变量或业务 wrapper 完成。
+6. 重型且非首屏必需的模块使用静态可分析的动态 import；避免无收益的 barrel import 与整包加载。
 
 ## 设计上下文
 
-- 修改界面前必须阅读本目录 `PRODUCT.md` 与 `DESIGN.md`（均来自 front-playground）。
-- 产品当前有三组页面：对话 `/conversation`（`/` 经 `app/(site)/page.tsx` 调 `redirect` 进入）、本体管理 `/ontologies` + `/ontologies/[id]`、白板 `/excalidraw`；showcase 页面（首页、canvas、markdown）及其专用组件已全部删除。本体页前端按 `docs/ontology/API.md` 契约实现；真实后端属于独立 change，不计入此前前端 change 的交付范围。
-- 禁止用主题化文案、无功能小字、伪技术参数制造产品感。
+- 修改界面前必须阅读根 `PRODUCT.md`、本目录 `PRODUCT.md` 与 `DESIGN.md`。
+- 正式界面包括 `/conversation`、`/studio`、`/ontologies` 与 `/excalidraw`；根路由仍进入对话。
+- light 使用 `rbp-portfolio` Sunlit Reading Room 的暖纸、实色、低阴影系统，不使用 glass、glow 或 WebGL；dark 保留既有高对比反馈。页面转场与编排式入场双主题一致播放（见顶部硬性约定第 2 条），light 的克制体现在材质而非省略动效。
+- 禁止主题化文案、无功能小字、伪技术参数和产品 mock 数据。
 
-## 动效
+## 组件索引（先复用，后新增）
 
-- 所有动效必须提供 `prefers-reduced-motion` 最终态，不做装饰性循环或滚动劫持。
+- 基础控件：`components/ui/`（shadcn 官方底稿）。
+- 页面/管理组合原语：`components/stratum/studio/primitives.tsx` 与 `components/stratum/studio/*`。
+- 对话：`components/stratum/conversation/*`；白板：`components/stratum/excalidraw/*`；本体：`components/stratum/ontology/*`。
+- react-bits 只作为受保护底稿；业务定制落在 `components/chrome/` 或 `components/stratum/`。
 
 ## 验证
 
-- 协议层（`lib/stratum/`）、纯逻辑 feature（`features/agent-conversation/`、`features/ontology-editor/`）及 Ontology hook 允许新增 Vitest 单元测试（`*.test.ts`，纯 Node.js 环境、离线 mock），通过 `pnpm test` 运行；仍禁止新增 UI/组件测试文件。
-- 前端变更至少运行 `pnpm typecheck` 与 `pnpm build`；提交前跑 `pnpm lint` 与 `pnpm test`。
+- 协议层、纯逻辑 feature 与 hook 允许新增 Vitest 单元测试（`*.test.ts`，Node 环境、离线 mock）；仍禁止为视觉细节制造脆弱的组件快照测试。
+- 前端变更必须运行 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与 `pnpm build`。

@@ -42,23 +42,30 @@ schema/config/NATS，不能只回滚应用。
 ## 2. 配置
 
 完整可注释样例见根目录 `config.example.toml`；配置解析严格拒绝未知字段。
+Execution、Ontology 与 Studio 的三个 PostgreSQL URL 都必须显式写端口（例如 `:5432`），
+不会从 `PGPORT` 补隐式连接身份；三者必须指向彼此隔离的 database。
 
 - `[postgres].url`：必填，缺失或为空即启动失败（fail closed）。Postgres 不可用则
   启动失败、readiness 503。
-- `[agent].templates_root`：只读 Agent template catalog 目录。启动时校验存在、是目录
-  且可读（空目录允许）；服务绝不自动创建该目录。
+- `[ontology].database_url`：必填，指向独立的 Ontology PostgreSQL database；连接或
+  migration 失败同样使启动 fail closed。
+- `[studio].database_url`：必填，指向与 execution ledger 隔离的 Studio PostgreSQL database。
+  Provider、Model、credential 与 Agent definition 只从这里读取；缺失、连接失败、migration
+  失败或 catalog 损坏都使启动 fail closed。空 database 合法且保持为空，不从配置、环境变量或
+  template 文件 seed。
+- `[studio].management_enabled`：只控制 Provider、Model 与 Agent definition 管理 routes。
+  启用时 `[api].bind` 必须是 loopback；关闭时 runtime 仍连接并使用 Studio database。
 - `[nats]`：连接与 AgentRuntime-scoped 短 tail 上限——`url`、`stream_name`、
   `subject_prefix`、`replicas`（1..=5）、`max_age_seconds`、`max_bytes`、
   `max_messages`（有限上限 + discard-old）与 `connect_timeout_seconds`。
-- `[llm]`：默认模型与各 provider 的 `api_key`/`models`；默认模型与 template 选择的
-  模型必须属于对应 provider 的 `models` 列表。每个 provider 显式配置 connect、
-  non-stream request、stream first-response 与 stream chunk-idle timeout；长流允许持续，
-  但任一 chunk 静默超过 idle bound 会以 typed transport error 结束。非流成功体、provider
-  error body 与单个 SSE event 另有固定安全 byte cap，避免无限聚合；不限制长流累计长度。
 - `[api]`：`bind`（省略时固定 `127.0.0.1:8080`）与 `allowed_origins`（CORS，拒绝
   `*`），以及 shutdown drain、SSE keepalive 与 dispatcher idle timeout。approval 的
   fallback reread tick 是进程内固定上限，不是用户配置。所有配置化 timeout 是正秒数，
   零值启动失败。所有 JSON request body 硬限制 64 KiB。
+
+旧 `[agent]` 与 `[llm]` 配置会被严格解析器作为未知字段拒绝。Provider endpoint 与四个出站
+timeout 是闭集 adapter 的可信代码策略，不是部署配置或 Studio 可写资源；credential 与 Model
+必须经 loopback Studio 管理 API 显式建立。
 
 ## 3. 健康检查与 readiness 语义
 
@@ -68,14 +75,21 @@ schema/config/NATS，不能只回滚应用。
 podman compose up -d --build --wait
 ```
 
+Compose 的一次性 `postgres-provision` 服务会在 API 启动前检查并创建缺失的
+`stratum_ontology` 与 `stratum_studio` database。它对已有 database 不做修改，因此从旧
+`postgres-data` volume 升级时会保留 execution ledger，只补齐缺失的独立 database；无需
+`down -v`。`/docker-entrypoint-initdb.d` 脚本仍只负责全新 volume 的首次初始化。
+
 默认暴露 Web `http://127.0.0.1:5173`、API `http://127.0.0.1:18080` 与 NATS
 监控端口 `http://127.0.0.1:8222`；Postgres 只在 compose 网络内可达。样例
-`config.docker.toml` 使用占位 LLM key，只可用于 catalog/create/view 等不调用 provider 的
-烟测，发送真实消息前必须替换为受限测试凭据。
+`config.docker.toml` 的 API 绑定 `0.0.0.0`，因此按安全合同关闭 management routes，但 runtime
+仍只使用 `stratum_studio`。全新空库不会自动生成 Provider、Model 或 Agent definition；首次
+provision 应使用绑定 loopback 的 API 进程连接同一 Studio database，经管理界面或 API 按
+Provider → Model → Agent definition 建立资源。不要为容器端口转发放宽 loopback 校验。
 
 - `GET /health/live`：进程存活即 200。
-- `GET /health/ready`：**Postgres 是核心依赖**——可达则 200，不可达则 503。NATS
-  只影响 realtime capability：不可用时 readiness 仍 200，但响应体
+- `GET /health/ready`：execution、Ontology 与 Studio 三个 PostgreSQL database 都是核心依赖；
+  任一不可达则 503。NATS 只影响 realtime capability：不可用时 readiness 仍 200，但响应体
   `realtime = "degraded"`；此时 SSE 返回稳定的 `503 realtime_unavailable`，而
   create/read/history/message/resume/cancel/approval 等核心 command 继续可用。
 
@@ -130,18 +144,20 @@ creation generation 与 stream sequence，是不透明 NATS 位置，不得与 `
   draft 与 cursor 重新 cold bootstrap；
 - 无 cursor：从当前 tail 起点开始，不从 NATS history 起点开始。
 
-## 7. Template 热读规则
+## 7. Studio definition 与 immutable runtime 版本
 
-`templates_root` 下的 TOML template 在**每次 catalog 读取与每次 AgentRuntime 创建时**热读
-并全量校验（all-or-nothing：任一模板非法则 `GET /v1/agent-templates` 整体 422）。每份
-template 必须由作者提供 `version` 字符串 tag；tag 为原值比较、大小写敏感、UTF-8
-`1..=128` bytes、无控制字符与首尾空白，不做 trim、Unicode normalization、SemVer 解析或
-排序。create request 不接收 version。
+`GET /v1/agent-templates` 是 Studio Agent definitions 的只读兼容投影，不读取本地文件。
+definition 的 version tag 保持作者命名、原值比较、大小写敏感、UTF-8 `1..=128` bytes、无控制
+字符与首尾空白，不做 trim、Unicode normalization、SemVer 解析或排序。Studio definition 的
+管理 create/update 都必须显式提交 tag，update 必须使用不同的新 tag；下述 AgentRuntime create
+request 不接收、选择或覆盖 version。
 
-`POST /v1/agent-runtimes` 在 idempotency key 未命中时物化 exact `(name, version)`：同 pair
-与相同 canonical definition 复用 AgentId，同 pair 却改变 definition 返回
-`409 agent_version_conflict`，不同 tag 即使 definition 相同也创建不同 AgentId。每次成功
-create 都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned definition，永不重读模板。
+`POST /v1/agent-runtimes` 在 idempotency key 未命中时读取 Studio database 的当前 definition，
+再把 exact `(name, version)` 物化到 execution ledger 的 immutable `agents` row：同 pair 与相同
+canonical definition 复用 AgentId，同 pair 却改变 definition 返回
+`409 agent_version_conflict`，不同 tag 即使 definition 相同也创建不同 AgentId。每次成功 create
+都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned definition，不受后续 Studio 更新或
+删除影响。
 
 ## 8. 测试
 
@@ -152,8 +168,11 @@ create 都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned de
   端口：
   - `make -C crates/stratum-postgres test-integration`（Postgres 17，端口 45432）；
   - `make -C crates/stratum-infra test-integration`（NATS `-js`）；
-  - `make -C crates/stratum-api test-integration`（Postgres + NATS 动态发布 loopback
-    host ports 并注入测试进程，`tests/api.rs` 以 `--test-threads=1` 运行；手动
+  - `make -C crates/stratum-studio test-integration`（独立 Studio PostgreSQL，覆盖事务回滚、
+    Provider cascade/blocker、version CHECK 与损坏 credential fail-closed）；
+  - `make -C crates/stratum-api test-integration`（execution、Ontology、Studio 三个独立
+    PostgreSQL database + NATS 动态发布 loopback host ports 并注入测试进程，`tests/api.rs`
+    以 `--test-threads=1` 运行；手动
     `test-up` 默认仍为 45433 / 44228）。
 - 细节见 `crates/stratum-api/TESTING.md` 与各 crate `AGENTS.md` 的测试章节。
 
@@ -166,6 +185,6 @@ create 都创建独立 AgentRuntimeId；既有 runtime 永久使用其 pinned de
   Session 协调。当前 hosting 判定是 process-local 的，因此**不声明任何多实例部署
   保证**；引入第二实例前必须完成 scheduler change。届时 `resume_required` 的判定
   来源由 scheduler ownership/placement 替换，API 字段保留。
-- **template 管理**：catalog CRUD、显式版本浏览/发布/提升/回滚、Agent definition 列表
-  （`GET /v1/agents` / `GET /v1/agents/{agent_id}`）与既有 AgentRuntime upgrade。当前只有
-  只读 `templates_root` 热读 catalog和create时自动物化/复用immutable版本。
+- **发布与升级管理**：immutable Agent version 历史浏览、显式发布/提升/回滚与既有
+  AgentRuntime upgrade。当前 Studio 只管理未来 runtime 使用的可变 Agent definition；创建时
+  自动物化/复用 immutable execution version，历史 runtime 永不热升级。

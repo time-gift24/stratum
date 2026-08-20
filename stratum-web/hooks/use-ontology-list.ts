@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import type { OntologyListPage } from "@/features/ontology-editor/types"
+import { readPageCache, writePageCache } from "@/lib/page-cache"
 import { ApiError, type StratumApi } from "@/lib/stratum/api"
 import { resolveOntologyApi } from "@/lib/stratum/ontology-api"
 
@@ -18,7 +19,11 @@ export type OntologyListState =
 export type OntologyList = {
   state: OntologyListState
   api: StratumApi
+  /** 当前生效的搜索词（trim 后；空串表示不过滤） */
+  search: string
   loadPage(page: number): void
+  /** 更新搜索词并回到第一页 */
+  setSearch(query: string): void
   reload(): void
 }
 
@@ -33,8 +38,9 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
   const api = useMemo(() => resolveOntologyApi(apiOption), [apiOption])
 
   const [page, setPage] = useState(1)
+  const [search, setSearchState] = useState("")
   const [reloadVersion, setReloadVersion] = useState(0)
-  const requestKey = `${page}:${reloadVersion}`
+  const requestKey = `${page}:${search}:${reloadVersion}`
   const [settled, setSettled] = useState<SettledResult | null>(null)
 
   useEffect(() => {
@@ -45,8 +51,10 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
         page,
         perPage: ONTOLOGY_LIST_PER_PAGE,
         sort: ONTOLOGY_LIST_SORT,
+        search: search === "" ? undefined : search,
       })
       .then((result) => {
+        writePageCache(`ontologies:${page}:${search}`, result)
         if (!cancelled) setSettled({ key, ok: true, page, result })
       })
       .catch((error: unknown) => {
@@ -62,10 +70,15 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
     return () => {
       cancelled = true
     }
-  }, [api, page, requestKey])
+  }, [api, page, search, requestKey])
 
   const loadPage = useCallback((nextPage: number) => {
     setPage(Math.max(1, nextPage))
+  }, [])
+
+  const setSearch = useCallback((query: string) => {
+    setPage(1)
+    setSearchState(query.trim())
   }, [])
 
   const reload = useCallback(() => {
@@ -73,11 +86,19 @@ export function useOntologyList(options?: { api?: StratumApi }): OntologyList {
   }, [])
 
   const state: OntologyListState =
-    settled === null || settled.key !== requestKey
-      ? { phase: "loading" }
-      : settled.ok
+    settled !== null && settled.key === requestKey
+      ? settled.ok
         ? { phase: "ready", page: settled.page, result: settled.result }
         : { phase: "error", page: settled.page, message: settled.message }
+      : // 新请求在途：先展示该页缓存，没有缓存才是 loading
+        (() => {
+          const cached = readPageCache<OntologyListPage>(
+            `ontologies:${page}:${search}`
+          )
+          return cached
+            ? { phase: "ready", page, result: cached }
+            : { phase: "loading" }
+        })()
 
-  return { state, api, loadPage, reload }
+  return { state, api, search, loadPage, setSearch, reload }
 }

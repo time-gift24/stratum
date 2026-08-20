@@ -562,6 +562,8 @@ impl From<ListSortDto> for ListSort {
     }
 }
 
+const MAX_SEARCH_CHARACTERS: usize = 100;
+
 #[derive(Debug, Deserialize, IntoParams, ToSchema)]
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
@@ -575,6 +577,11 @@ pub(crate) struct ListOntologiesQuery {
     #[param(default = "-updated_at")]
     #[serde(default)]
     sort: Option<ListSortDto>,
+    /// Optional case-insensitive substring matched against `name` and
+    /// `display_name`; at most 100 characters.
+    #[param(max_length = 100)]
+    #[serde(default)]
+    search: Option<String>,
 }
 
 impl TryFrom<ListOntologiesQuery> for ListOntologies {
@@ -586,10 +593,19 @@ impl TryFrom<ListOntologiesQuery> for ListOntologies {
         if page == 0 || !(1..=100).contains(&per_page) {
             return Err(ApiError::new(ErrorKind::InvalidRequest));
         }
+        let search = value
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|search| !search.is_empty());
+        if search.is_some_and(|search| search.chars().count() > MAX_SEARCH_CHARACTERS) {
+            return Err(ApiError::new(ErrorKind::InvalidRequest));
+        }
         Ok(Self {
             page,
             per_page,
             sort: value.sort.map_or(ListSort::UpdatedAtDesc, Into::into),
+            search: search.map(ToOwned::to_owned),
         })
     }
 }
@@ -643,7 +659,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     params(ListOntologiesQuery),
     responses(
         (status = 200, description = "one Ontology summary page", body = OntologyListResponse),
-        (status = 400, description = "pagination or sort is invalid", body = ErrorResponse),
+        (status = 400, description = "pagination, sort, or search query is invalid", body = ErrorResponse),
         (status = 500, description = "Ontology metadata could not be read", body = ErrorResponse),
         (status = 503, description = "Ontology storage is unavailable", body = ErrorResponse),
     )
@@ -1068,6 +1084,57 @@ mod tests {
             parse_canonical_etag(tag, OntologyId::new()),
             None,
             "a canonical tag for another resource is stale"
+        );
+    }
+
+    #[test]
+    fn list_query_trims_and_maps_a_valid_search_term() {
+        let query = ListOntologiesQuery {
+            page: None,
+            per_page: None,
+            sort: None,
+            search: Some("  support  ".to_owned()),
+        };
+
+        let request = ListOntologies::try_from(query).expect("valid search is accepted");
+
+        assert_eq!(request.search, Some("support".to_owned()));
+        assert_eq!(request.page, 1);
+        assert_eq!(request.per_page, 20);
+        assert_eq!(request.sort, ListSort::UpdatedAtDesc);
+    }
+
+    #[test]
+    fn list_query_treats_a_blank_search_term_as_absent() {
+        for search in ["", "   "] {
+            let query = ListOntologiesQuery {
+                page: None,
+                per_page: None,
+                sort: None,
+                search: Some(search.to_owned()),
+            };
+
+            let request = ListOntologies::try_from(query).expect("blank search is accepted");
+
+            assert_eq!(request.search, None, "{search:?} must disable filtering");
+        }
+    }
+
+    #[test]
+    fn list_query_rejects_an_overlong_search_term() {
+        let query = ListOntologiesQuery {
+            page: None,
+            per_page: None,
+            sort: None,
+            search: Some("x".repeat(MAX_SEARCH_CHARACTERS + 1)),
+        };
+
+        assert!(
+            matches!(
+                ListOntologies::try_from(query),
+                Err(error) if error.kind() == ErrorKind::InvalidRequest
+            ),
+            "an overlong search term must be rejected"
         );
     }
 

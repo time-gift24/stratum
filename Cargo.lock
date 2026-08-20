@@ -2815,13 +2815,13 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
  "stratum-agent",
  "stratum-config",
  "stratum-core",
- "stratum-filesystem",
  "stratum-infra",
  "stratum-llm",
  "stratum-ontology",
@@ -2846,13 +2846,10 @@ name = "stratum-config"
 version = "0.1.0"
 dependencies = [
  "http",
- "secrecy",
  "serde",
- "serde_json",
- "sha2 0.10.9",
- "stratum-core",
  "thiserror",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -2959,6 +2956,7 @@ dependencies = [
  "stratum-core",
  "thiserror",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

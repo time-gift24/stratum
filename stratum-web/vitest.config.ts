@@ -14,6 +14,7 @@ export default defineConfig({
     include: [
       "lib/stratum/**/*.test.ts",
       "features/agent-conversation/**/*.test.ts",
+      "features/studio-management/**/*.test.ts",
       "features/ontology-editor/**/*.test.ts",
       "hooks/use-ontology-editor.test.ts",
       "components/stratum/**/*.test.ts",

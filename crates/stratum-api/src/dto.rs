@@ -179,21 +179,21 @@ pub struct AgentRuntimeView {
     pub resume_required: bool,
 }
 
-/// One safe template catalog entry.
+/// One safe compatibility projection of a Studio Agent definition.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct AgentTemplateDto {
-    /// Template name.
+    /// Studio Agent definition name.
     pub agent_name: String,
     /// Author-provided immutable template version tag.
     pub version: AgentVersionTag,
-    /// Provider default model configuration of the template's model.
+    /// Default model configuration stored by the definition.
     pub model_config: ModelConfig,
 }
 
-/// Template catalog response.
+/// Studio definition catalog exposed under the compatibility route.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct AgentTemplatesResponse {
-    /// All currently valid templates.
+    /// All currently valid Studio definitions.
     pub templates: Vec<AgentTemplateDto>,
 }
 

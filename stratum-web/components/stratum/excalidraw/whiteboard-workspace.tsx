@@ -33,7 +33,7 @@ export function WhiteboardWorkspace() {
   return (
     <div
       data-slot="whiteboard-workspace"
-      className={cn("h-full w-full bg-background", styles.theme)}
+      className={cn("h-full w-full bg-background", styles.theme, styles.verticalTools)}
     >
       <WhiteboardEditor />
     </div>
