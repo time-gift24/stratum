@@ -2,12 +2,14 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use stratum_config::Config;
 use stratum_core::{AgentName, AgentVersionTag, ModelConfig, ModelId, ToolName};
+use stratum_filesystem::{LocalFilesystem, LocalFilesystemConfig};
 use stratum_infra::NatsAgentRuntimeTail;
 use stratum_llm::{LlmError, LlmProviderManager};
 use stratum_ontology::OntologyStore;
@@ -56,6 +58,7 @@ pub struct AppState {
     management_enabled: bool,
     ontology: OntologyStore,
     waiters: Arc<ApprovalWaiters>,
+    tool_workspace_root: PathBuf,
     allowed_origins: Vec<String>,
     shutdown: CancellationToken,
     admission: AdmissionGate,
@@ -84,8 +87,6 @@ impl AppState {
     ///
     /// # Errors
     ///
-    /// Returns [`HostError`] when the required Studio configuration is absent
-    /// or the persisted Agent definitions do not match the injected registry.
     #[cfg(test)]
     pub(crate) async fn new(
         pg: PostgresBackend,
@@ -95,8 +96,10 @@ impl AppState {
         studio: StudioStore,
         config: Config,
     ) -> Result<Self, HostError> {
+        config.validate()?;
+        let tool_workspace_root = tool_workspace_root(&config)?;
         validate_studio_models(&studio, &providers).await?;
-        validate_studio_definitions(&studio, &providers).await?;
+        validate_studio_definitions(&studio, &providers, &tool_workspace_root).await?;
         Self::assemble(
             pg,
             tail,
@@ -117,7 +120,7 @@ impl AppState {
         provider_source: ProviderSource,
         provider_factory: ProviderFactory,
     ) -> Result<Self, HostError> {
-        config.validate()?;
+        let tool_workspace_root = tool_workspace_root(&config)?;
         let management_enabled = config.require_studio()?.management_enabled;
         let shutdown = CancellationToken::new();
         let runtime_tasks = Arc::new(Mutex::new(JoinSet::new()));
@@ -143,6 +146,7 @@ impl AppState {
             management_enabled,
             ontology,
             waiters: Arc::new(ApprovalWaiters::default()),
+            tool_workspace_root,
             allowed_origins,
             shutdown,
             admission: AdmissionGate::default(),
@@ -155,7 +159,8 @@ impl AppState {
     /// Assembles state with Provider adapters derived exclusively from Studio.
     ///
     /// An empty Studio Provider/model catalog is valid and produces an empty
-    /// runtime registry. No configuration or filesystem source is imported.
+    /// runtime registry. Provider and Agent definition data never comes from
+    /// configuration or the filesystem.
     ///
     /// # Errors
     ///
@@ -168,10 +173,12 @@ impl AppState {
         config: Config,
         studio: StudioStore,
     ) -> Result<Self, HostError> {
+        config.validate()?;
+        let tool_workspace_root = tool_workspace_root(&config)?;
         let factory = ProviderFactory::default();
         let providers = providers_from_studio(&studio, &factory).await?;
         validate_studio_models(&studio, &providers).await?;
-        validate_studio_definitions(&studio, &providers).await?;
+        validate_studio_definitions(&studio, &providers, &tool_workspace_root).await?;
         Self::assemble(
             pg,
             tail,
@@ -370,7 +377,7 @@ impl AppState {
             .map_err(|error| ApiError::with_source(ErrorKind::RuntimeUnavailable, error))?;
         validate_model_config(&providers, &definition.model)
             .map_err(studio_model_validation_error)?;
-        build_tool_registry(&definition.tools).map_err(|error| {
+        build_tool_registry(&definition.tools, self.tool_workspace_root()).map_err(|error| {
             ApiError::with_field_violation(ErrorKind::InvalidStudioResource, "tools", error)
         })?;
         Ok(())
@@ -384,6 +391,11 @@ impl AppState {
     /// Process-local approval waiters.
     pub(crate) fn waiters(&self) -> &Arc<ApprovalWaiters> {
         &self.waiters
+    }
+
+    /// Default workspace shared by builtin code-editing tools.
+    pub(crate) fn tool_workspace_root(&self) -> &Path {
+        &self.tool_workspace_root
     }
 
     /// Browser origins allowed to call the API.
@@ -462,9 +474,10 @@ impl AppState {
 async fn validate_studio_definitions(
     studio: &StudioStore,
     providers: &LlmProviderManager,
+    tool_workspace_root: &Path,
 ) -> Result<(), HostError> {
     for definition in studio.list_agent_definitions().await? {
-        if build_tool_registry(&definition.value.tools).is_err() {
+        if build_tool_registry(&definition.value.tools, tool_workspace_root).is_err() {
             return Err(StudioError::CatalogCorrupt {
                 field: "agent_definition.tools",
             }
@@ -473,6 +486,16 @@ async fn validate_studio_definitions(
         validate_model_config(providers, &definition.value.model)?;
     }
     Ok(())
+}
+
+fn tool_workspace_root(config: &Config) -> Result<PathBuf, HostError> {
+    let root = config.require_tools()?.workspace_root.clone();
+    LocalFilesystem::new(LocalFilesystemConfig {
+        root: root.clone(),
+        max_file_bytes: None,
+    })
+    .map_err(HostError::ToolWorkspace)?;
+    Ok(root)
 }
 
 async fn validate_studio_models(

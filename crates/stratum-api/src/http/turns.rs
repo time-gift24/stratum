@@ -149,7 +149,7 @@ pub(crate) async fn post_message(
     let provider = providers
         .configure(&effective_model)
         .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
-    let registry = build_tool_registry(&definition.tools)?;
+    let registry = build_tool_registry(&definition.tools, state.tool_workspace_root())?;
 
     let turn_id = TurnId::new();
     let ids = TurnIds {
@@ -396,7 +396,7 @@ async fn resume_preflight_and_spawn(
     let provider = providers
         .configure(&snapshot.model)
         .map_err(|source| ApiError::with_source(ErrorKind::RuntimeUnavailable, source))?;
-    let registry = build_tool_registry(&definition.tools)?;
+    let registry = build_tool_registry(&definition.tools, state.tool_workspace_root())?;
     let fingerprint = registry
         .fingerprint()
         .map_err(|source| ApiError::with_source(ErrorKind::Internal, source))?;

@@ -11,7 +11,7 @@
 1. Compose health、Studio catalog 与 Web；
 2. 普通 LLM Turn；
 3. 浏览器硬刷新后的 Postgres 恢复；
-4. Echo approval 的 approve/reject；
+4. Shell approval 的 approve/reject；
 5. approval pending 时重启 API，再 refresh、resolve 与显式 resume；
 6. hosted running Turn 的 pending cancel；
 7. 超过一页的 history 向上加载；
@@ -33,14 +33,14 @@
 
 1. 只使用可丢弃的 Alpha execution/Ontology/Studio Postgres database、NATS stream、Agent definition 和 AgentRuntime。不得连接开发共享库、生产库或用户历史。
 2. 当前是单进程、单一可信操作者的 Alpha；入站 API 没有 auth/authz 或 tenant isolation。API 只能绑定 loopback/受控私网，或置于带 TLS 与认证的反向代理后。Postgres 与 NATS 端口不得暴露公网。
-3. 只使用合成测试数据。prompt、Echo arguments/result、approval 和完整 conversation 会持久化；当前没有 delete API。真实 LLM 会外发上下文并产生费用，只能使用低权限、限额测试 key。
+3. 只使用合成测试数据。prompt、Shell arguments/result、approval 和完整 conversation 会持久化；当前没有 delete API。真实 LLM 会外发上下文并产生费用，只能使用低权限、限额测试 credential。
 4. 真实 provider key、token 和数据库连接凭据不得加入 Git。Provider credential 只能经 loopback Studio 管理边界写入 Studio PostgreSQL，不得写入 TOML、Compose environment 或 template 文件；证据中不得出现其值。
-5. 证据不得保存原始 prompt、assistant 正文、reasoning、Echo arguments/result、provider body、SQL connection string 或 credential。截图必须裁切或遮盖正文，只保留状态、控件和安全 identity。
+5. 证据不得保存原始 prompt、assistant 正文、reasoning、Shell arguments/result、provider body、SQL connection string 或 credential。截图必须裁切或遮盖正文，只保留状态、控件和安全 identity。
 6. 本清单禁止直接修改 SQL、删除 NATS stream、缩短 retention、安装 trigger、增加 failpoint/debug endpoint，或修改生产 buffer 常量。这些精确测试能力尚未实现，统一延期到 `TODO.md` 的 P4a；production compaction 策略/Hook 与其产品故障验收分别延期到 H5b/H5c，不得借 F01—F02 扩大范围。
 7. 每条 journey 都创建自己的 fresh AgentRuntime；不得复用其他 journey 的 AgentRuntime、Session、Turn、Approval 或浏览器恢复状态。某条 journey 的结果不得作为另一条的 fixture。
 8. J04 的 approve 与 reject 分别使用两个 fresh AgentRuntime，避免第一条路径留下的 Turn/history 影响第二条。
 9. journey 之间可以复用同一健康的 disposable Compose stack，但开始前必须重新确认服务身份与 health；任何被手工篡改或发生未知状态的 stack 都必须丢弃重建。
-10. 当前只注册无 credential 通道的 `echo` Tool。不得为 Alpha 验收注册 credential-aware Tool，也不得在宿主机执行 agent 生成的命令。
+10. J04/J05 使用的 Studio Agent definition 只选择 `shell` 与 `apply_patch`。本清单只允许要求 `shell` 执行固定的合成 `printf` 命令；命令必须在 Compose 的 `stratum-api` 容器内执行，不得把宿主目录或凭据挂载为 Tool workspace。
 11. crash 后的 running Turn 需要显式 resume。approval resolve 与 resume 是两个动作；resolve 不得隐式接管 Turn。
 12. cancel `202` 只表示本进程内的 cancellation token 已 signal；在 durable terminal 提交前不得把 UI 或证据写成 `cancelled`。正常完成可以赢得竞态。
 13. 本清单不测试或承诺 scheduler lease/fencing、多实例接管、rolling deploy、自动 resume、durable cancel、并发 Tool、通用 Tool 幂等、Workflow 协调或 NATS durable backlog。
@@ -57,7 +57,7 @@ Provider、Model、credential 与 Agent definition 只来自 Studio PostgreSQL�
 
 1. 在 Studio 设置页 `/studio/settings/providers` 创建 Provider，并在凭据输入框中直接提交低权限、限额测试 credential。不得把 credential 写入本地配置、shell history 或 Compose environment。
 2. 在 `/studio/settings/models` 为该 Provider 创建本轮使用的 Model。
-3. 在 `/studio/agents/new` 创建引用该 Model 的 Agent definition；需要 J04/J05 时再为它选择 `echo` Tool。
+3. 在 `/studio/agents/new` 创建引用该 Model 的 Agent definition；需要 J04/J05 时选择 `shell` 与 `apply_patch`。
 4. 确认管理读取响应只显示 credential 已配置，不回显 credential 值，然后停止 management-enabled 进程。得到的 Studio database/volume 不得在本轮验收中更换。
 
 stock `config.docker.toml` 因 API 在容器内绑定 `0.0.0.0` 而设置 `management_enabled = false`；该标志只隐藏管理 routes，runtime 仍必须连接 Studio database 并从中组装 provider registry。不得为了容器端口转发而放宽 loopback 安全检查；如何让一个 loopback 管理进程连接目标 Studio database 由本地/部署网络决定，但凭据写入边界不变。
@@ -123,7 +123,7 @@ podman compose \
 6. runtime 一旦建立，立即记录 `AgentRuntimeId` 与 pinned `AgentId`；后续只操作这一 exact runtime。只有 J01 要求观察纯 create 后的 `idle`、无 Session/current Turn、`last_event_seq=0`；其余 journey 的首次可见 durable 状态可以已经是 `running` 或 terminal。
 7. journey 完成后停止继续写入该 runtime，避免证据屏障变化。
 
-如果 journey 因 provider 时序或输出而没有进入所需状态，例如 cancel 请求到达前 Turn 已结束，或模型没有产生所要求的 Echo Tool call，应把本次尝试记为未执行，并用另一个 fresh AgentRuntime 重试；不得在旧 runtime 上伪造前置状态，也不得用临时 Hook/mock 冒充 production composition。
+如果 journey 因 provider 时序或输出而没有进入所需状态，例如 cancel 请求到达前 Turn 已结束，或模型没有产生所要求的 Shell Tool call，应把本次尝试记为未执行，并用另一个 fresh AgentRuntime 重试；不得在旧 runtime 上伪造前置状态，也不得用临时 Hook/mock 冒充 production composition。
 
 ## 统一证据模板
 
@@ -197,14 +197,14 @@ WHERE actual.event_seq IS NULL;
 
 | ID | Journey | Fresh runtime 数 | 主要验证面 | 结果 |
 |---|---|---:|---|---|
-| J01 | Compose health、Studio catalog 与 Web | 1 | 部署入口与创建 | [x] |
-| J02 | 普通 LLM Turn | 1 | message、SSE、durable terminal | [x] |
-| J03 | 硬刷新后的 Postgres 恢复 | 1 | cold bootstrap 与去重 | [x] |
-| J04 | Echo approval approve/reject | 2 | 两种审批决定 | [x] |
-| J05 | Pending approval 跨 API 重启恢复 | 1 | refresh、resolve、explicit resume | [x] |
-| J06 | Pending cancel 等待 durable terminal | 1 | 内存级 cancel 语义 | [x] |
-| J07 | 超过一页的 history | 1 | 向上分页 | [x] |
-| J08 | 同 AgentId 多 AgentRuntime 隔离 | 2 | identity、ledger、realtime 隔离 | [x] |
+| J01 | Compose health、Studio catalog 与 Web | 1 | 部署入口与创建 | [ ] |
+| J02 | 普通 LLM Turn | 1 | message、SSE、durable terminal | [ ] |
+| J03 | 硬刷新后的 Postgres 恢复 | 1 | cold bootstrap 与去重 | [ ] |
+| J04 | Shell approval approve/reject | 2 | 两种审批决定 | [ ] |
+| J05 | Pending approval 跨 API 重启恢复 | 1 | refresh、resolve、explicit resume | [ ] |
+| J06 | Pending cancel 等待 durable terminal | 1 | 内存级 cancel 语义 | [ ] |
+| J07 | 超过一页的 history | 1 | 向上分页 | [ ] |
+| J08 | 同 AgentId 多 AgentRuntime 隔离 | 2 | identity、ledger、realtime 隔离 | [ ] |
 
 ## J01 — Compose health、Studio catalog 与 Web
 
@@ -274,25 +274,25 @@ WHERE actual.event_seq IS NULL;
 - 在无新写入时，刷新前后 `last_event_seq` 相同且 ledger 连续。
 - 新页面生命周期不复用刷新前的内存 buffer 或 page cursor。
 
-## J04 — Echo approval approve/reject
+## J04 — Shell approval approve/reject
 
 ### 独立前置
 
 - 独立确认 stack health。
-- 准备两个独立的 Web 新对话：一个只用于 approve，一个只用于 reject。两者都选择声明 `echo` Tool 的同一 Studio Agent definition，且都不得被其他 journey 使用。
+- 准备两个独立的 Web 新对话：一个只用于 approve，一个只用于 reject。两者都选择声明 `shell` 与 `apply_patch` 的同一 Studio Agent definition，且都不得被其他 journey 使用。
 - 每个新对话的首条 Tool 消息分别创建自己的 fresh AgentRuntime；不要预先调用 create API。
 
 ### 操作
 
 #### J04-A：Approve
 
-1. 在 approve 新对话发送明确要求调用一次 `echo` 的合成消息，并记录由该首发创建的 AgentRuntimeId。
+1. 在 approve 新对话发送明确要求调用一次 `shell`、且命令只能是 `printf stratum-alpha-approve` 的合成消息，并记录由该首发创建的 AgentRuntimeId。
 2. 等待 Web 显示 pending approval，记录 ApprovalId、CallId、SessionId 与 TurnId。
 3. 点击 approve 一次，等待 Turn 继续并到达 durable terminal。
 
 #### J04-R：Reject
 
-1. 在 reject 新对话发送明确要求调用一次 `echo` 的合成消息，并记录由该首发创建的 AgentRuntimeId。
+1. 在 reject 新对话发送明确要求调用一次 `shell`、且命令只能是 `printf stratum-alpha-reject` 的合成消息，并记录由该首发创建的 AgentRuntimeId。
 2. 等待 Web 显示 pending approval并记录安全 identity。
 3. 点击 reject 一次，等待模型收到 blocked Tool result 后继续到 durable terminal。
 
@@ -300,21 +300,21 @@ WHERE actual.event_seq IS NULL;
 
 - 两条路径各自只有一个 `ToolApprovalRequested` 与一个 `ToolApprovalResolved`，pending UI 在 resolve 后消失。
 - approve 路径存在同 CallId 的 `ToolExecutionStarted`，随后提交 Tool result message并继续。
-- reject 路径不出现 `ToolExecutionStarted`；拒绝作为模型可见的安全 Tool result 继续，不执行 Echo。
+- reject 路径不出现 `ToolExecutionStarted`；拒绝作为模型可见的安全 Tool result 继续，不执行 Shell。
 - 两条路径都只产生一个 terminal，且各自的 approval、Turn 与 event sequence 不跨 runtime 混用。
-- 页面可以为当前可信操作者展示合成的 Echo arguments/result；截图、日志摘录和其他持久证据必须裁切或遮盖这些正文。
+- 页面可以为当前可信操作者展示合成的 Shell arguments/result；截图、日志摘录和其他持久证据必须裁切或遮盖这些正文。
 
 ## J05 — Pending approval 跨 API 重启恢复
 
 ### 独立前置
 
 - 独立确认 stack health。
-- 在 Web 打开新的空白对话并选择声明 `echo` Tool 的 Studio Agent definition；首条 Tool 消息将创建本 journey 的 fresh AgentRuntime。
+- 在 Web 打开新的空白对话并选择声明 `shell` 与 `apply_patch` 的 Studio Agent definition；首条 Tool 消息将创建本 journey 的 fresh AgentRuntime。
 - 本 journey 只重启 `stratum-api`；必须保留相同 execution/Ontology/Studio PostgreSQL data 与 NATS volume，不得重建或改写 Studio Provider、Model 或 Agent definition。
 
 ### 操作
 
-1. 发送明确要求调用一次 `echo` 的合成消息。
+1. 发送明确要求调用一次 `shell`、且命令只能是 `printf stratum-alpha-resume` 的合成消息。
 2. 等待 pending approval 出现，记录 AgentRuntimeId、AgentId、SessionId、TurnId、ApprovalId 与当前 high-water；不要 resolve。
 3. 重启 API 服务并等待重启后的 API process ready；记录 Compose 是复用原 container 还是重新创建，不把 container ID 必须变化当作通过条件。
 4. 硬刷新 Web 页面，从左侧 recent conversation 列表显式重新选择并进入同一 AgentRuntime。
@@ -405,18 +405,18 @@ WHERE actual.event_seq IS NULL;
 
 | ID | Commit | AgentRuntimeId | 结果（PASS/FAIL/BLOCKED） | Evidence | Issue / 备注 |
 |---|---|---|---|---|---|
-| J01 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M01 |
-| J02 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M02 |
-| J03 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M03 |
-| J04-A | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M04 approve |
-| J04-R | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M04 reject |
-| J05 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M05 |
-| J06 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M06 |
-| J07 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M07 |
-| J08-A | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M08 runtime A |
-| J08-B | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | 对应原 M08 runtime B |
-| F01 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | NATS stop/recover |
-| F02 | 本次提交工作树 | 未提交 | PASS | 本任务中的人工确认 | Postgres stop/recover |
+| J01 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M01 |
+| J02 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M02 |
+| J03 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M03 |
+| J04-A | 待重跑 | 待生成 | PENDING | Tool composition 已切换为 Shell | 对应原 M04 approve |
+| J04-R | 待重跑 | 待生成 | PENDING | Tool composition 已切换为 Shell | 对应原 M04 reject |
+| J05 | 待重跑 | 待生成 | PENDING | Tool composition 已切换为 Shell | 对应原 M05 |
+| J06 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M06 |
+| J07 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M07 |
+| J08-A | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M08 runtime A |
+| J08-B | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | 对应原 M08 runtime B |
+| F01 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | NATS stop/recover |
+| F02 | 待重跑 | 待生成 | PENDING | Studio/tool rebased head 未验收 | Postgres stop/recover |
 
 ## 本清单结束条件
 
@@ -426,7 +426,7 @@ WHERE actual.event_seq IS NULL;
 2. 每条 journey 使用自己的 fresh AgentRuntime；J04 approve/reject 与 J08 两个 runtime 的证据分别可追踪。
 3. J02 证明普通 LLM Turn 从 Web command、realtime 到 durable terminal 完整收敛。
 4. J03 证明硬刷新从 Postgres 恢复且没有重复 message 或 ghost draft。
-5. J04-A 与 J04-R 分别证明 Echo approve 和 reject 路径。
+5. J04-A 与 J04-R 分别证明 Shell approve 和 reject 路径。
 6. J05 证明 pending approval 跨 API 重启恢复，resolve 不隐式 resume，显式 resume 沿用原 identity。
 7. J06 证明 cancel `202` 不伪造 terminal，最终只接受一个 durable outcome。
 8. J07 证明真实 Web 可以按需加载超过一页的 history。

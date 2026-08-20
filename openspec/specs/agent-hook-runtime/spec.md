@@ -193,7 +193,7 @@ Hook decision 必须（SHALL）只通过 `HookRuntime` 返回值影响当前 Age
 
 #### Scenario: 审批请求使用最终参数
 - **WHEN** transform_tool_call 修改 arguments 或授权元数据且最终复验通过
-- **THEN** 当前Echo composition的ToolApprovalRequested保存decide Handler所见的最终CallId、Tool name、user-authored opaque arguments与typed ToolKind/DangerLevel；不存在credential reference/provider通道，未来credential-aware Tool必须先完成独立安全PATCH才能注册
+- **THEN** 当前shell/apply_patch composition的ToolApprovalRequested保存decide Handler所见的最终CallId、Tool name、opaque arguments与typed ToolKind/DangerLevel；不存在credential reference/provider通道，未来credential-aware Tool必须先完成独立安全PATCH才能注册
 
 #### Scenario: Pending 后才允许请求审批
 - **WHEN** 一个 decide_tool_call invocation 需要人工审批

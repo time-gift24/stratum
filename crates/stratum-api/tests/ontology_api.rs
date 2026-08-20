@@ -40,6 +40,7 @@ impl OntologyFixture {
         let database_url = database_url();
         let execution_database_url = execution_database_url();
         let studio_database_url = studio_database_url();
+        let workspace_root = std::env::current_dir().expect("tool workspace root exists");
         let config = Config::parse(&format!(
             r#"
 [api]
@@ -56,6 +57,9 @@ url = {execution_database_url:?}
 [studio]
 database_url = {studio_database_url:?}
 management_enabled = false
+
+[tools]
+workspace_root = {workspace_root:?}
 "#,
         ))
         .expect("test configuration parses");

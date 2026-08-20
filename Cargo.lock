@@ -2822,6 +2822,7 @@ dependencies = [
  "stratum-agent",
  "stratum-config",
  "stratum-core",
+ "stratum-filesystem",
  "stratum-infra",
  "stratum-llm",
  "stratum-ontology",
@@ -2966,6 +2967,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "jsonschema",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.10.9",

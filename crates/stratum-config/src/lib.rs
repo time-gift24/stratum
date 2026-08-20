@@ -2,7 +2,7 @@
 
 mod error;
 
-use std::{fmt, net::SocketAddr};
+use std::{fmt, net::SocketAddr, path::PathBuf};
 
 pub use error::ConfigError;
 use serde::Deserialize;
@@ -28,8 +28,19 @@ pub struct Config {
     /// Studio catalog configuration, required by the API host.
     #[serde(default)]
     pub studio: Option<StudioConfig>,
+    /// Tool execution configuration, required by the API host.
+    #[serde(default)]
+    pub tools: Option<ToolConfig>,
 }
 
+/// Tool execution configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ToolConfig {
+    /// Default filesystem root exposed to workspace tools.
+    pub workspace_root: PathBuf,
+}
 /// HTTP API configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -244,6 +255,18 @@ impl Config {
             .ok_or(ConfigError::MissingSection { section: "studio" })
     }
 
+    /// Returns the configured tool execution section.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::MissingSection`] when no tool configuration was
+    /// supplied.
+    pub fn require_tools(&self) -> Result<&ToolConfig, ConfigError> {
+        self.tools
+            .as_ref()
+            .ok_or(ConfigError::MissingSection { section: "tools" })
+    }
+
     /// Revalidates a decoded or programmatically mutated configuration.
     ///
     /// Host assembly calls this at the security boundary so callers cannot
@@ -275,6 +298,13 @@ impl Config {
             ontology_database.as_ref(),
             studio_database.as_ref(),
         )?;
+        if let Some(tools) = &self.tools
+            && tools.workspace_root.as_os_str().is_empty()
+        {
+            return Err(ConfigError::InvalidToolConfig {
+                field: "workspace_root",
+            });
+        }
         if let Some(studio) = &self.studio
             && studio.management_enabled
         {
@@ -484,7 +514,7 @@ fn validate_nats(config: &NatsConfig) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as StdError;
+    use std::{error::Error as StdError, path::PathBuf};
 
     use super::{Config, ConfigError};
 
@@ -522,6 +552,9 @@ database_url = "postgres://ontology:ontology-secret@localhost:5432/stratum_ontol
 [studio]
 management_enabled = false
 database_url = "postgresql://studio:studio-secret@localhost:5432/stratum_studio"
+
+[tools]
+workspace_root = "./workspace"
 "#;
 
     #[test]
@@ -557,6 +590,13 @@ database_url = "postgresql://studio:studio-secret@localhost:5432/stratum_studio"
                 .expect("studio postgres exists")
                 .database_url,
             STUDIO_DATABASE_URL
+        );
+        assert_eq!(
+            config
+                .require_tools()
+                .expect("tool configuration exists")
+                .workspace_root,
+            PathBuf::from("./workspace")
         );
     }
 
@@ -842,6 +882,18 @@ database_url = "postgres://studio:secret@localhost:5432/studio"
     }
 
     #[test]
+    fn rejects_empty_tool_workspace_root() {
+        let input =
+            VALID_CONFIG.replace("workspace_root = \"./workspace\"", "workspace_root = \"\"");
+        assert!(matches!(
+            Config::parse(&input),
+            Err(ConfigError::InvalidToolConfig {
+                field: "workspace_root"
+            })
+        ));
+    }
+
+    #[test]
     fn malformed_and_unknown_toml_errors_redact_input_source_chain() {
         let secret = "malformed-secret-key";
         let malformed = format!("[studio]\ndatabase_url = \"{secret}");
@@ -863,6 +915,7 @@ database_url = "postgres://studio:secret@localhost:5432/studio"
             (config.require_postgres().map(|_| ()), "postgres"),
             (config.require_ontology().map(|_| ()), "ontology"),
             (config.require_studio().map(|_| ()), "studio"),
+            (config.require_tools().map(|_| ()), "tools"),
         ] {
             assert!(matches!(
                 result,

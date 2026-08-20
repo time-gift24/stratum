@@ -166,7 +166,7 @@ impl MockProvider {
                 ChatStreamEvent::ToolCallDelta(stratum_core::ToolCallDelta {
                     index: 0,
                     call_id: Some(stratum_core::CallId::from(call_id)),
-                    name: Some("echo".to_owned()),
+                    name: Some("shell".to_owned()),
                     arguments_delta: arguments.to_owned(),
                 }),
                 ChatStreamEvent::Finished {
@@ -479,6 +479,7 @@ fn test_config() -> Config {
     let pg_url = pg_url();
     let ontology_pg_url = ontology_pg_url();
     let studio_pg_url = studio_pg_url();
+    let workspace_root = std::env::current_dir().expect("tool workspace root exists");
     Config::parse(&format!(
         r#"
 [api]
@@ -502,6 +503,9 @@ database_url = {ontology_pg_url:?}
 [studio]
 database_url = {studio_pg_url:?}
 management_enabled = false
+
+[tools]
+workspace_root = {workspace_root:?}
 "#,
     ))
     .expect("test config parses")
@@ -521,9 +525,9 @@ fn definition_input(name: &str, contents: &str) -> AgentDefinitionInput {
         .to_owned();
     let tools = if contents
         .lines()
-        .any(|line| line.trim() == "tools = [\"echo\"]")
+        .any(|line| line.trim() == "tools = [\"shell\", \"apply_patch\"]")
     {
-        vec![ToolName::from("echo")]
+        vec![ToolName::from("shell"), ToolName::from("apply_patch")]
     } else {
         Vec::new()
     };

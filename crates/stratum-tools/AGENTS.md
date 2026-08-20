@@ -9,12 +9,13 @@
 - Tool names are provider-visible identities.
 - Filesystem-mutating builtin tools require explicit filesystem injection.
 - Do not auto-register filesystem-mutating tools in `BuiltinToolRegistry`.
-- Filesystem-backed read-only builtin tools also require explicit filesystem injection.
-- Keep filesystem-backed agent code workflow tools small and provider-visible by capability: `read_file_lines`, `list_dir`, `file_metadata`, and `search_text`.
-- `search_text` is a controlled literal search over the injected virtual filesystem; do not expose shell or `rg` directly through this tool.
+- `ShellTool` receives its default working directory explicitly. Every call starts a fresh non-login `bash -c`, captures complete stdout/stderr, and retains no cwd, environment, process, or session handle for a later call.
+- `shell` accepts only `command`, optional `workdir`, and optional `timeout_ms`. It does not own background jobs, persistence, sandbox policy, approval policy, caller-configurable environment injection, stdin, output spill, or truncation.
+- Every shell call inherits the host environment afresh; changes made by one call do not carry to another.
+- Non-zero exit, signal, and timeout are structured successful tool results so the model receives the diagnostics; parse, spawn, wait, terminate, and explicit cancellation failures remain typed `ToolError`s.
 - Recoverable tool-domain failures should return structured tool output when the caller can act on them.
 - Keep concrete builtin implementations separate from registry code.
-- Do not add remote tool adapters, MCP adapters, shell tools, or approval flows until a concrete caller needs them.
+- Do not add remote tool adapters, MCP adapters, or new approval flows until a concrete caller needs them.
 
 ## Tool Permissions
 

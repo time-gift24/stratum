@@ -20,8 +20,8 @@ const TEMPLATE: &str = r#"version = "test-v1"
 prompt = "You are a helpful test agent."
 "#;
 
-const TOOL_TEMPLATE: &str = r#"version = "test-tools-v1"
-tools = ["echo"]
+const TOOL_TEMPLATE: &str = r#"version = "test-tools-v2"
+tools = ["shell", "apply_patch"]
 prompt = "You are a helpful test agent with tools."
 "#;
 
@@ -30,7 +30,7 @@ fn tool_call_events(call_id: &str, arguments: &str) -> Script {
         stratum_llm::ChatStreamEvent::ToolCallDelta(stratum_core::ToolCallDelta {
             index: 0,
             call_id: Some(stratum_core::CallId::from(call_id)),
-            name: Some("echo".to_owned()),
+            name: Some("shell".to_owned()),
             arguments_delta: arguments.to_owned(),
         }),
         stratum_llm::ChatStreamEvent::Finished {
@@ -519,8 +519,8 @@ async fn approval_request_resolve_consume_lifecycle() {
     let fixture = Fixture::new(
         &[("agent-a", TOOL_TEMPLATE)],
         vec![
-            tool_call_events("call-1", r#"{"text":"hello"}"#),
-            tool_call_events("call-2", r#"{"text":"again"}"#),
+            tool_call_events("call-1", r#"{"command":"printf hello"}"#),
+            tool_call_events("call-2", r#"{"command":"printf again"}"#),
             Script::Events(vec![
                 stratum_llm::ChatStreamEvent::TextDelta {
                     delta: "tool done".to_owned(),
@@ -542,7 +542,7 @@ async fn approval_request_resolve_consume_lifecycle() {
         .as_str()
         .expect("agent runtime id")
         .to_owned();
-    let (status, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
+    let (status, accepted) = send_message(&fixture, &agent_id, "run shell", Value::Null).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
@@ -562,8 +562,8 @@ async fn approval_request_resolve_consume_lifecycle() {
         .expect("approval id")
         .to_owned();
     assert_eq!(approval["call_id"], "call-1");
-    assert_eq!(approval["tool_name"], "echo");
-    assert_eq!(approval["arguments"], json!({ "text": "hello" }));
+    assert_eq!(approval["tool_name"], "shell");
+    assert_eq!(approval["arguments"], json!({ "command": "printf hello" }));
     assert!(approval.get("hook_invocation_id").is_none());
     assert_eq!(pending["resume_required"], false);
 
@@ -690,7 +690,11 @@ async fn approval_request_resolve_consume_lifecycle() {
 async fn reject_maps_to_a_blocked_tool_result_and_the_turn_continues() {
     let fixture = Fixture::new(
         &[("agent-a", TOOL_TEMPLATE)],
-        MockProvider::tool_call_then_text("call-9", r#"{"text":"x"}"#, "continued after block"),
+        MockProvider::tool_call_then_text(
+            "call-9",
+            r#"{"command":"printf x"}"#,
+            "continued after block",
+        ),
     )
     .await;
     let (_, created) = create_runtime(&fixture, &uuid_v7(), "agent-a").await;
@@ -698,7 +702,7 @@ async fn reject_maps_to_a_blocked_tool_result_and_the_turn_continues() {
         .as_str()
         .expect("agent runtime id")
         .to_owned();
-    let (_, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
+    let (_, accepted) = send_message(&fixture, &agent_id, "run shell", Value::Null).await;
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
     let pending = wait_until(10, || async {
@@ -831,8 +835,8 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
             stratum_llm::ChatStreamEvent::ToolCallDelta(stratum_core::ToolCallDelta {
                 index: 0,
                 call_id: Some(stratum_core::CallId::from("call-1")),
-                name: Some("echo".to_owned()),
-                arguments_delta: r#"{"text":"hello"}"#.to_owned(),
+                name: Some("shell".to_owned()),
+                arguments_delta: r#"{"command":"printf hello"}"#.to_owned(),
             }),
             stratum_llm::ChatStreamEvent::Finished {
                 finish_reason: stratum_llm::FinishReason::ToolCalls,
@@ -846,7 +850,7 @@ async fn resume_after_crash_reuses_approval_and_journal_without_reasking() {
         .as_str()
         .expect("agent runtime id")
         .to_owned();
-    let (_, accepted) = send_message(&fixture, &agent_id, "run echo", Value::Null).await;
+    let (_, accepted) = send_message(&fixture, &agent_id, "run shell", Value::Null).await;
     let turn_id = accepted["turn_id"].as_str().expect("turn id").to_owned();
 
     let pending = wait_until(10, || async {
@@ -988,7 +992,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
                     usage: None,
                 },
             ]),
-            tool_call_events("call-1", r#"{"text":"two"}"#),
+            tool_call_events("call-1", r#"{"command":"printf two"}"#),
             Script::Pending,
         ],
     )
@@ -1012,7 +1016,7 @@ async fn history_paginates_and_exposes_compaction_markers_safely() {
         .await;
     let second_turn = second["turn_id"].as_str().expect("turn id").to_owned();
 
-    // The second turn parks on the echo approval, so a compaction can be
+    // The second turn parks on the shell approval, so a compaction can be
     // committed into the running turn directly through the store.
     let _pending = wait_until(10, || async {
         let latest = view(&fixture, &agent_id).await;
@@ -1568,6 +1572,9 @@ database_url = {ontology_url:?}
 
 [studio]
 database_url = "postgres://stratum:stratum@127.0.0.1:1/unavailable"
+
+[tools]
+workspace_root = {root:?}
 "#,
             nats_url = common::nats_url(),
             pg_url = common::pg_url(),

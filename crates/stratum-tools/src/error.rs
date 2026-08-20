@@ -1,10 +1,10 @@
 //! Error types for tool operations.
 
 use std::borrow::Cow;
-use std::string::FromUtf8Error;
+use std::io;
 
 use stratum_core::ToolName;
-use stratum_filesystem::{FilesystemError, VirtualPathError};
+use stratum_filesystem::VirtualPathError;
 use thiserror::Error;
 
 /// Error returned by tool registry or execution operations.
@@ -71,26 +71,13 @@ pub enum ToolError {
         /// Schema rejection reason.
         reason: String,
     },
-    /// File content is not valid UTF-8.
-    #[error("file is not valid utf-8: {path}")]
-    InvalidUtf8 {
-        /// File path.
-        path: String,
-        /// UTF-8 conversion source.
+    /// A shell process could not be spawned, waited for, or terminated.
+    #[error("shell process operation failed: {operation}")]
+    Process {
+        /// Process operation that failed.
+        operation: &'static str,
+        /// Operating-system failure source.
         #[source]
-        source: FromUtf8Error,
+        source: io::Error,
     },
-    /// Filesystem operation failed.
-    #[error("filesystem operation failed")]
-    Filesystem {
-        /// Filesystem failure source.
-        #[source]
-        source: FilesystemError,
-    },
-}
-
-impl From<FilesystemError> for ToolError {
-    fn from(source: FilesystemError) -> Self {
-        Self::Filesystem { source }
-    }
 }

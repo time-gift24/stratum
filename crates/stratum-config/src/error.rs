@@ -30,6 +30,9 @@ pub enum ConfigError {
     /// A Studio catalog setting was invalid.
     #[error("invalid studio configuration field `{field}`")]
     InvalidStudioConfig { field: &'static str },
+    /// A tool execution setting was invalid.
+    #[error("invalid tool configuration field `{field}`")]
+    InvalidToolConfig { field: &'static str },
     /// Two bounded contexts were configured to use the same PostgreSQL database.
     #[error("execution, ontology, and studio must use distinct PostgreSQL databases")]
     DatabaseIdentityConflict,

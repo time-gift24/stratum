@@ -180,7 +180,7 @@ Postgres query API必须（SHALL）从固定 high-water 的 `durable_events` 读
 ### Requirement: Filesystem Execution 与旧 Store 彻底退出
 生产workspace必须（SHALL）删除整个 `stratum-store` 与 `stratum-agent-builtin` crate、`AgentStore`、`FilesystemAgentStore`、filesystem durable/history/state/checkpoint、旧backend selector/fallback、旧beta migration以及 `session_operation_claims`、`agent_messages`、`tool_approvals`。`stratum-filesystem` 必须（SHALL）删除`cas.rs`、`record.rs`、get/put、record version、CAS errors与`LocalFilesystem`内存version state，但保留`VirtualPath`、sandboxed read/list/write/create/remove/apply-patch等真实业务文件能力和只读template读取。
 
-配置必须（SHALL）使用直接的 `[postgres]` 与 `[agent].templates_root`，不得（SHALL NOT）保留`storage_root` alias、自动execution目录或writable agent-data volume。部署必须（SHALL）删除旧beta migration并建立单一最终baseline；既有数据库连同sqlx migration history必须重建，旧物理filesystem数据不迁移、不读取，也不由程序自动删除。
+配置必须（SHALL）使用直接的 `[postgres]`、`[agent].templates_root` 与 `[agent].workspace_root`，不得（SHALL NOT）保留`storage_root` alias、自动execution目录或把 workspace 误作 writable agent-data volume。`workspace_root`只供 Agent 可见 Tool 文件操作，不得承载AgentRuntime history、event或checkpoint。部署必须（SHALL）删除旧beta migration并建立单一最终baseline；既有数据库连同sqlx migration history必须重建，旧物理filesystem执行数据不迁移、不读取，也不由程序自动删除。
 
 #### Scenario: Postgres 不可用时启动失败
 - **WHEN** execution store无法连接、迁移或通过core readiness
