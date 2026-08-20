@@ -168,6 +168,11 @@ Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现
 - 即使内部还在演进，公共 API 也要看起来稳定、克制。
 - 保留用户在工作区中的改动，不要回滚无关文件。
 
+## 前端开发模式
+
+- 前端本地开发一律在 `stratum-web/` 下用 `pnpm dev` 直接跑 dev server；禁止在 dev 模式下把前端编译进容器执行——镜像构建慢且丢失 HMR，迭代效率不可接受。容器部署只用于演示和类生产验证。
+- dev server（默认 `http://localhost:3000`）直连本地或容器映射出的后端 API；前后端跨域通过后端配置 `api.allowed_origins` 加入 `http://localhost:3000` / `http://127.0.0.1:3000` 解决（见 `config.example.toml`），不要在前端引入反向代理层或关闭浏览器安全校验。
+
 ## 前端组件约束
 
 - `app/components/ui/*`、`app/components/react-bits/*`、`app/components/ai-elements/*` 视为外部/可复用组件，未经允许不得直接修改其内部实现。
