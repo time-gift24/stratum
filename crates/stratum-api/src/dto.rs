@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use stratum_core::{
     AgentId, AgentRuntimeId, AgentVersionTag, ApprovalDecision, ApprovalId, CallId, DangerLevel,
-    ModelConfig, SessionId, TokenUsage, ToolKind, ToolName, TurnId,
+    ModelConfig, ScheduleId, SessionId, TokenUsage, ToolKind, ToolName, TurnId,
 };
 use stratum_llm::ModelDescriptor;
 use utoipa::ToSchema;
@@ -108,6 +108,98 @@ pub struct TurnAccepted {
     pub session_id: SessionId,
     /// Current Turn identity.
     pub turn_id: TurnId,
+}
+
+/// Create-schedule request body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateScheduleRequest {
+    /// Agent definition resolved afresh for every occurrence.
+    pub agent_name: String,
+    /// Five-, six-, or seven-field cron expression.
+    pub cron_expression: String,
+}
+
+/// Public projection of one recurring schedule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ScheduleView {
+    /// Stable schedule identity.
+    pub schedule_id: ScheduleId,
+    /// Agent definition name.
+    pub agent_name: String,
+    /// Canonical cron expression.
+    pub cron_expression: String,
+    /// Definition creation time.
+    pub created_at: DateTime<Utc>,
+    /// Next occurrence, evaluated in the host's local timezone.
+    pub next_run_at: DateTime<Utc>,
+}
+
+/// User-facing status of one scheduled conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ScheduleSessionStatus {
+    /// Runtime creation or first-message admission is in progress.
+    Starting,
+    /// The admitted Turn is running.
+    Running,
+    /// The admitted Turn finished successfully.
+    Finished,
+    /// Scheduling or execution failed.
+    Failed,
+    /// The admitted Turn was cancelled.
+    Cancelled,
+}
+
+/// One schedule occurrence linked to its AgentRuntime conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ScheduleSessionView {
+    /// Owning schedule.
+    pub schedule_id: ScheduleId,
+    /// Preallocated Session identity.
+    pub session_id: SessionId,
+    /// Created AgentRuntime, absent when creation failed.
+    pub agent_runtime_id: Option<AgentRuntimeId>,
+    /// Immutable Agent definition pinned by the runtime, when created.
+    pub agent_id: Option<AgentId>,
+    /// Current scheduler/execution status.
+    pub status: ScheduleSessionStatus,
+    /// Whether the occurrence has durable conversation history to open.
+    pub conversation_available: bool,
+    /// Occurrence start time.
+    pub triggered_at: DateTime<Utc>,
+    /// Last scheduler state update.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Standard page metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub struct Pagination {
+    /// One-based page number.
+    pub page: u32,
+    /// Requested bounded page size.
+    pub per_page: u32,
+    /// Total matching resources.
+    pub total: u64,
+}
+
+/// Paginated schedule list response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SchedulesPage {
+    /// Schedule rows.
+    pub data: Vec<ScheduleView>,
+    /// Page metadata.
+    pub pagination: Pagination,
+}
+
+/// Paginated occurrence history response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ScheduleSessionsPage {
+    /// Occurrence rows.
+    pub data: Vec<ScheduleSessionView>,
+    /// Page metadata.
+    pub pagination: Pagination,
 }
 
 /// Durable Agent status.

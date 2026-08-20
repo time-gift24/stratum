@@ -32,6 +32,7 @@ uuid_identity!(
     AgentRuntimeId,
     "Identity of one long-lived Agent runtime aggregate."
 );
+uuid_identity!(ScheduleId, "Identity of one recurring Agent schedule.");
 uuid_identity!(
     WorkflowVersionId,
     "Identity of one immutable published workflow version."
@@ -1230,6 +1231,7 @@ mod tests {
         assert_identity!(SessionId);
         assert_identity!(AgentId);
         assert_identity!(AgentRuntimeId);
+        assert_identity!(ScheduleId);
         assert_identity!(WorkflowVersionId);
         assert_identity!(SkillSetVersionId);
         assert_identity!(ExtensionSetVersionId);

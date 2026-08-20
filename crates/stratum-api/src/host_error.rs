@@ -56,4 +56,7 @@ pub enum HostError {
     /// The tracing subscriber or OTLP exporter could not be initialized.
     #[error("telemetry initialization failed")]
     Telemetry(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// Persisted scheduler state could not be reconciled safely at startup.
+    #[error("scheduler failed to initialize")]
+    Scheduler(#[source] crate::ApiError),
 }

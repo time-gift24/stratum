@@ -39,6 +39,16 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 - Studio 状态机、raw/structured 转换与页面缓存放在 `features/studio-management/` 和 `lib/page-cache.ts`；后台刷新不得覆盖 dirty draft，失败时保留缓存并显示可重试错误。
 - Agent definition 保存成功只影响之后新建的 AgentRuntime；Provider/Model 变更从下一次 LLM work / Turn 起生效，当前 in-flight Turn 保留捕获的 Provider。
 
+## 计划任务
+
+- `/schedulers` 创建并分页展示真实计划，`/schedulers/[scheduleId]` 展示该计划创建的真实
+  Session；列表项只在后端确认可打开对话时才可下钻。
+- 计划只指定 Agent 与 cron。cron 由 API 主机本地时区计算，前端明确说明该约束，并将时间按
+  当前设备时区格式化；首期不提供暂停、编辑、删除、补跑或分布式调度。
+- 从计划 Session 打开 `/conversation?agent_runtime_id=...&schedule_id=...` 时，conversation
+  进入聚焦运行时模式：不展示左侧历史，只保留返回计划历史的明确入口。这个 query 模式仍使用
+  同一真实 REST/SSE 会话协议，不得复制 conversation state machine。
+
 ## Ontology 管理
 
 - `/ontologies` 与 `/ontologies/[id]` 连接真实 Ontology API；编辑候选、in-flight snapshot、ETag、422 violations 与 412 显式调和由 `features/ontology-editor/` 和对应 hooks 管理。
@@ -64,7 +74,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 ## 设计上下文
 
 - 修改界面前必须阅读根 `PRODUCT.md`、本目录 `PRODUCT.md` 与 `DESIGN.md`。
-- 正式界面包括 `/conversation`、`/studio`、`/ontologies` 与 `/excalidraw`；根路由仍进入对话。
+- 正式界面包括 `/conversation`、`/schedulers`、`/studio`、`/ontologies` 与 `/excalidraw`；根路由仍进入对话。
 - light 使用 `rbp-portfolio` Sunlit Reading Room 的暖纸、实色、低阴影系统，不使用 glass、glow 或 WebGL；dark 保留既有高对比反馈。页面转场与编排式入场双主题一致播放（见顶部硬性约定第 2 条），light 的克制体现在材质而非省略动效。
 - 禁止主题化文案、无功能小字、伪技术参数和产品 mock 数据。
 
@@ -72,7 +82,7 @@ Postgres 优先的 Agent 运行时协议（OpenSpec 变更 `complete-postgres-ag
 
 - 基础控件：`components/ui/`（shadcn 官方底稿）。
 - 页面/管理组合原语：`components/stratum/studio/primitives.tsx` 与 `components/stratum/studio/*`。
-- 对话：`components/stratum/conversation/*`；白板：`components/stratum/excalidraw/*`；本体：`components/stratum/ontology/*`。
+- 对话：`components/stratum/conversation/*`；计划任务：`components/stratum/scheduler/*`；白板：`components/stratum/excalidraw/*`；本体：`components/stratum/ontology/*`。
 - react-bits 只作为受保护底稿；业务定制落在 `components/chrome/` 或 `components/stratum/`。
 
 ## 验证

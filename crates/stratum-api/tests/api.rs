@@ -268,6 +268,87 @@ async fn studio_template_projection_is_current_and_safe() {
 
 #[tokio::test]
 #[ignore = "requires the stratum-api-test compose stack"]
+async fn schedule_http_crud_and_session_drilldown_contract() {
+    let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![]).await;
+
+    let (status, body) = fixture
+        .json(
+            "POST",
+            "/v1/schedules",
+            Some(json!({
+                "agent_name": "agent-a",
+                "cron_expression": "not a cron"
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_cron_expression");
+
+    let (status, created) = fixture
+        .json(
+            "POST",
+            "/v1/schedules",
+            Some(json!({
+                "agent_name": "agent-a",
+                "cron_expression": "*/5 * * * *"
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let schedule_id = created["schedule_id"]
+        .as_str()
+        .expect("schedule id")
+        .to_owned();
+    assert_eq!(created["agent_name"], "agent-a");
+    assert_eq!(created["cron_expression"], "*/5 * * * *");
+    assert!(created["next_run_at"].is_string());
+
+    let (status, page) = fixture
+        .json(
+            "GET",
+            "/v1/schedules?page=1&per_page=20&sort=-created_at",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(
+        page["data"]
+            .as_array()
+            .expect("schedule page")
+            .iter()
+            .any(|schedule| schedule["schedule_id"] == schedule_id)
+    );
+
+    let (status, detail) = fixture
+        .json("GET", &format!("/v1/schedules/{schedule_id}"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["schedule_id"], schedule_id);
+
+    let (status, sessions) = fixture
+        .json(
+            "GET",
+            &format!("/v1/schedules/{schedule_id}/sessions?page=1&per_page=20&sort=-triggered_at"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sessions}");
+    assert_eq!(sessions["data"], json!([]));
+    assert_eq!(sessions["pagination"]["total"], 0);
+
+    let (status, body) = fixture
+        .json("GET", "/v1/schedules?sort=created_at", None, None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_pagination");
+}
+
+#[tokio::test]
+#[ignore = "requires the stratum-api-test compose stack"]
 async fn models_endpoint_lists_configured_models_with_schemas() {
     let fixture = Fixture::new(&[("agent-a", TEMPLATE)], vec![]).await;
     let (status, body) = fixture.json("GET", "/v1/models", None, None).await;

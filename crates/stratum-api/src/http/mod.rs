@@ -1,10 +1,11 @@
 //! HTTP surface: router, OpenAPI document, health endpoints, and shared
 //! request helpers.
 
-mod agents;
+pub(crate) mod agents;
 mod events;
 mod ontology;
-mod turns;
+mod schedules;
+pub(crate) mod turns;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +56,10 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         ontology::replace_ontology,
         ontology::delete_ontology,
         ontology::get_neighborhood,
+        schedules::create,
+        schedules::list,
+        schedules::get,
+        schedules::list_sessions,
         liveness,
         readiness,
     ),
@@ -82,6 +87,14 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
         crate::frames::LlmTelemetryEventV1,
         LivenessResponse,
         ReadinessResponse,
+        crate::dto::CreateScheduleRequest,
+        crate::dto::ScheduleView,
+        crate::dto::ScheduleSessionStatus,
+        crate::dto::ScheduleSessionView,
+        crate::dto::Pagination,
+        crate::dto::SchedulesPage,
+        crate::dto::ScheduleSessionsPage,
+        schedules::PageParams,
         ErrorResponse,
         crate::error::ErrorBody,
         crate::error::OntologyValidationErrorResponse,
@@ -167,6 +180,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/agent-runtimes/{agent_runtime_id}/events",
             get(events::get_events),
         )
+        .merge(schedules::routes())
         .merge(ontology::routes())
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness));
@@ -197,6 +211,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                         agent_id = field::Empty,
                         session_id = field::Empty,
                         turn_id = field::Empty,
+                        schedule_id = field::Empty,
                         ontology_id = field::Empty,
                         object_type_id = field::Empty,
                         ontology_depth = field::Empty,
@@ -397,6 +412,9 @@ mod tests {
             "/v1/ontologies",
             "/v1/ontologies/{ontology_id}",
             "/v1/ontologies/{ontology_id}/object-types/{object_type_id}/neighborhood",
+            "/v1/schedules",
+            "/v1/schedules/{schedule_id}",
+            "/v1/schedules/{schedule_id}/sessions",
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -408,6 +426,8 @@ mod tests {
         assert!(schemas.contains_key("AgentRuntimeCreated"));
         assert!(schemas.contains_key("AgentRuntimeView"));
         assert!(schemas.contains_key("AgentRuntimeStreamFrameV1"));
+        assert!(schemas.contains_key("ScheduleView"));
+        assert!(schemas.contains_key("ScheduleSessionView"));
 
         let frame = &schemas["AgentRuntimeStreamFrameV1"];
         for field in ["event_seq", "durable_before_event_seq", "telemetry_seq"] {

@@ -43,6 +43,10 @@
   重建与受管任务生成）、`frames.rs`
   （`AgentRuntimeStreamFrameV1`/`AgentRuntimeProductEventV1`）、`dto.rs`、`error.rs`（`ErrorKind` →
   状态码/代码映射表）、`host_error.rs`（启动错误）、`http/`（路由器 + 处理器 + utoipa）。
+- `scheduler.rs` 是唯一的单机 cron 编排入口：只从 Postgres 的计划定义读取，按 API
+  主机本地时区计算下一次触发，为每次 occurrence 创建独立的 AgentRuntime/Session，并复用
+  创建与消息准入的受控路径。它不引入租约、fencing、补跑或跨进程所有权；启动时只对
+  `starting` 记录做保守对账，任何持久 cron 损坏都必须故障关闭。
 - 审批处理器的 `HookInvocationId` 不由内核传入：内核保证先提交 `Pending`，处理器通过
   `stratum-postgres` 的 `read_open_hook_invocation`（`point` + `iteration` + `call_id` 精确地址）
   找到自己的开放调用，再以它为键复用/创建 `Requested`。恢复时重放 `Pending`，同一地址

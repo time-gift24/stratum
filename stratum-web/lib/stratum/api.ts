@@ -315,6 +315,25 @@ export type AgentRuntimeTurnAccepted = {
   turn_id: string
 }
 
+export type ScheduleView = {
+  schedule_id: string
+  agent_name: string
+  cron_expression: string
+  created_at: string
+  next_run_at: string
+}
+
+export type ScheduleSessionView = {
+  schedule_id: string
+  session_id: string
+  agent_runtime_id: string | null
+  agent_id: string | null
+  status: "starting" | "running" | "finished" | "failed" | "cancelled"
+  conversation_available: boolean
+  triggered_at: string
+  updated_at: string
+}
+
 export type StratumApi = {
   createAgentRuntime(input: {
     agentName: string
@@ -352,6 +371,19 @@ export type StratumApi = {
     approvalId: string,
     input: { turnId: string; decision: ApprovalDecision }
   ): Promise<void>
+  createSchedule(input: {
+    agentName: string
+    cronExpression: string
+  }): Promise<ScheduleView>
+  getSchedules(query?: {
+    page?: number
+    perPage?: number
+  }): Promise<PageEnvelope<ScheduleView>>
+  getSchedule(scheduleId: string): Promise<ScheduleView>
+  getScheduleSessions(
+    scheduleId: string,
+    query?: { page?: number; perPage?: number }
+  ): Promise<PageEnvelope<ScheduleSessionView>>
   listOntologies(query?: {
     page?: number
     perPage?: number
@@ -752,6 +784,47 @@ export function createStratumApi(options: {
         { turn_id: input.turnId, decision: input.decision },
         [204]
       ),
+    createSchedule: (input) =>
+      request(
+        "/v1/schedules",
+        (value) => value as ScheduleView,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            agent_name: input.agentName,
+            cron_expression: input.cronExpression,
+          }),
+        },
+        [201]
+      ),
+    getSchedules: (query = {}) => {
+      const search = new URLSearchParams({
+        page: String(query.page ?? 1),
+        per_page: String(query.perPage ?? 20),
+        sort: "-created_at",
+      })
+      return request(
+        `/v1/schedules?${search}`,
+        (value) => value as PageEnvelope<ScheduleView>
+      )
+    },
+    getSchedule: (scheduleId) =>
+      request(
+        `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+        (value) => value as ScheduleView
+      ),
+    getScheduleSessions: (scheduleId, query = {}) => {
+      const search = new URLSearchParams({
+        page: String(query.page ?? 1),
+        per_page: String(query.perPage ?? 20),
+        sort: "-triggered_at",
+      })
+      return request(
+        `/v1/schedules/${encodeURIComponent(scheduleId)}/sessions?${search}`,
+        (value) => value as PageEnvelope<ScheduleSessionView>
+      )
+    },
     listOntologies: (query) => {
       const search = new URLSearchParams()
       if (query?.page !== undefined) search.set("page", String(query.page))

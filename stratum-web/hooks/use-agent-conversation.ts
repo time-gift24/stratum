@@ -95,10 +95,20 @@ type PendingCreate = {
   modelConfig?: ModelConfig
 }
 
-export function useAgentConversation(): AgentConversation {
+export function useAgentConversation(
+  options: { initialAgentRuntimeId?: string | null } = {}
+): AgentConversation {
+  const initialAgentRuntimeId = options.initialAgentRuntimeId ?? null
   const [state, dispatch] = useReducer(
     conversationReducer,
-    initialConversationState
+    initialAgentRuntimeId,
+    (agentRuntimeId) =>
+      agentRuntimeId === null
+        ? initialConversationState
+        : conversationReducer(initialConversationState, {
+            type: "runtime_selected",
+            agentRuntimeId,
+          })
   )
   const [agentTemplates, setAgentTemplates] = useState<
     readonly AgentTemplateView[]
@@ -111,7 +121,7 @@ export function useAgentConversation(): AgentConversation {
   >([])
   const [selectedAgentRuntimeId, setSelectedAgentRuntimeId] = useState<
     string | null
-  >(null)
+  >(initialAgentRuntimeId)
   const [reconnectVersion, setReconnectVersion] = useState(0)
   const [selectedTemplate, setSelectedTemplate] =
     useState<AgentTemplateView | null>(null)
@@ -123,7 +133,7 @@ export function useAgentConversation(): AgentConversation {
   const [preferredThinkingLevel, setPreferredThinkingLevel] = useState<
     string | null
   >(null)
-  const selectedAgentRuntimeRef = useRef<string | null>(null)
+  const selectedAgentRuntimeRef = useRef<string | null>(initialAgentRuntimeId)
   const selectionGeneration = useRef(0)
   // SSE cursor 只存当前页面内存（协议禁止跨刷新持久化）
   const cursorsRef = useRef(new Map<string, string>())
@@ -238,6 +248,11 @@ export function useAgentConversation(): AgentConversation {
     setSelectedAgentRuntimeId(agentRuntimeId)
     dispatch({ type: "runtime_selected", agentRuntimeId })
   }, [])
+
+  useEffect(() => {
+    if (selectedAgentRuntimeRef.current !== initialAgentRuntimeId)
+      selectAgentRuntime(initialAgentRuntimeId)
+  }, [initialAgentRuntimeId, selectAgentRuntime])
 
   useEffect(
     () => () => {

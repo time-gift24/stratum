@@ -18,7 +18,7 @@ Stratum 当前优先服务通过对话委托真实任务的使用者。他们希
 
 Stratum 是 Rust-first 的 Agent Runtime 和工作流编排系统；“运筹 Stratum”是它面向人的 Agent OS。产品让使用者通过对话发起真实任务，并在任务执行期间按需审批、取消、恢复和查看过程。
 
-当前产品提供对话、Excalidraw 白板、本体管理（列表 + 画布编辑器）和 Studio 四类界面。Studio 面向开发者与管理员，以 Agent-first 仪表盘管理真实 Provider、Model 与 Agent definition；资源设置从全局导航最右侧进入。成功意味着使用者可以清楚地发起任务、理解必要反馈并让 Agent 可靠推进，编排侧也能管理同一真实运行目录，而不是依赖演示数据或文件配置。
+当前产品提供对话、单机计划任务、Excalidraw 白板、本体管理（列表 + 画布编辑器）和 Studio 五类界面。Studio 面向开发者与管理员，以 Agent-first 仪表盘管理真实 Provider、Model 与 Agent definition；资源设置从全局导航最右侧进入。计划任务让使用者安排周期执行并追溯每次产生的真实对话。成功意味着使用者可以清楚地发起任务、理解必要反馈并让 Agent 可靠推进，编排侧也能管理同一真实运行目录，而不是依赖演示数据或文件配置。
 
 ## Positioning
 
@@ -31,6 +31,7 @@ Stratum 的差异不是聊天外观，而是对持续 Agent 执行的产品化�
 - 使用者在 `/conversation` 选择真实存在的 Agent 与模型，输入任务或问题。
 - 对话过程中，思考、工具调用和中间步骤默认折叠，使用者按需展开。
 - 历史对话可以恢复；执行中的任务可以取消，受控操作可以审批。
+- `/schedulers` 允许指定 Agent 与 cron；每次单机触发创建独立 AgentRuntime/Session，并可从计划历史下钻到完整对话。
 - 根路由 `/` 直接进入 `/conversation`，当前没有概览页。
 - 白板 `/excalidraw` 是独立的沉浸画布页面，导航默认收起、按需唤出。
 - 本体管理位于 `/ontologies`（分页列表）与 `/ontologies/[id]`（画布编辑器），面向编排侧使用者；前端按契约实现，后端联调待落地。
@@ -39,7 +40,8 @@ Stratum 的差异不是聊天外观，而是对持续 Agent 执行的产品化�
 
 ## Capabilities and Constraints
 
-- 产品当前界面包括对话页面（含新建对话入口）、Excalidraw 白板、面向编排侧的本体列表与画布编辑器，以及管理真实 Provider、Model 与 Agent definition 的 Studio。
+- 产品当前界面包括对话页面（含新建对话入口）、计划任务列表/历史、Excalidraw 白板、面向编排侧的本体列表与画布编辑器，以及管理真实 Provider、Model 与 Agent definition 的 Studio。
+- 计划任务当前只支持单机调度、创建和历史追溯；cron 按 API 主机本地时区计算，不提供分布式所有权、错过触发补跑、暂停、编辑或删除。
 - Agent、模型、会话、审批与执行结果必须来自真实数据，不得为演示伪造。
 - 不存在面向用户的“就绪/未就绪”资源状态；加载、错误、发送和运行反馈只描述真实过程。
 - 画布、节点、连接线、参数检查器和常驻运行面板在能力正式推出前不得进入对话页面。

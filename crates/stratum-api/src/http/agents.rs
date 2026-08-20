@@ -53,6 +53,32 @@ pub(crate) async fn create_agent_runtime(
     let _admission = state.admission().enter()?;
     let idempotency_key = parse_idempotency_key(&headers)?;
     let body = json_request(request)?;
+    let agent_name: AgentName = body
+        .agent_name
+        .parse()
+        .map_err(|source| ApiError::with_source(ErrorKind::InvalidRequest, source))?;
+    Span::current().record("agent_name", agent_name.as_str());
+    let created =
+        create_agent_runtime_from_template(&state, idempotency_key, agent_name, body.model_config)
+            .await?;
+    Ok(created_response(created))
+}
+
+/// Creates or key-replays an AgentRuntime from the current Studio definition catalog.
+///
+/// The idempotency lookup is deliberately first so a replay never depends on
+/// a mutable catalog that may have changed since the original create.
+///
+/// # Errors
+///
+/// Returns a typed API error when the definition/model/tool preflight fails
+/// or Postgres cannot serve the idempotent create.
+pub(crate) async fn create_agent_runtime_from_template(
+    state: &AppState,
+    idempotency_key: uuid::Uuid,
+    agent_name: AgentName,
+    model_config: Option<ModelConfig>,
+) -> Result<AgentRuntimeCreated, ApiError> {
     // Key-first: an idempotent replay answers from the stored record alone,
     // without reading the current Studio definition catalog.
     if let Some(existing) = state
@@ -61,29 +87,26 @@ pub(crate) async fn create_agent_runtime(
         .await
         .map_err(ApiError::from_postgres)?
     {
-        return Ok(created_response(
-            existing.agent_runtime_id,
-            existing.agent_id,
-            existing.agent_name,
-            existing.agent_version,
-            existing.created_at,
-        ));
+        return Ok(AgentRuntimeCreated {
+            agent_runtime_id: existing.agent_runtime_id,
+            agent_id: existing.agent_id,
+            agent_name: existing.agent_name,
+            agent_version: existing.agent_version,
+            created_at: existing.created_at,
+        });
     }
 
     // Miss: hot-read and validate the current template, then preflight the
     // model and tools before any durable mutation.
-    let agent_name: AgentName = body
-        .agent_name
-        .parse()
-        .map_err(|_| ApiError::new(ErrorKind::InvalidRequest))?;
-    Span::current().record("agent_name", agent_name.as_str());
     let definition = state.resolve_agent_definition(&agent_name).await?;
     let template_model = definition.model.clone();
-    let effective_model = body
-        .model_config
-        .clone()
-        .unwrap_or_else(|| template_model.clone());
-    validate_model_override(&state, &effective_model).await?;
+    let effective_model = match model_config {
+        Some(overridden) => {
+            validate_model_override(state, &overridden).await?;
+            overridden
+        }
+        None => template_model.clone(),
+    };
     build_tool_registry(&definition.tools)
         .map_err(|_| ApiError::new(ErrorKind::InvalidAgentTemplate))?;
 
@@ -105,30 +128,18 @@ pub(crate) async fn create_agent_runtime(
         .await
         .map_err(ApiError::from_postgres)?;
     let runtime = outcome.runtime();
-    Ok(created_response(
-        runtime.agent_runtime_id,
-        runtime.agent_id,
-        runtime.agent_name.clone(),
-        runtime.agent_version.clone(),
-        runtime.created_at,
-    ))
+    Ok(AgentRuntimeCreated {
+        agent_runtime_id: runtime.agent_runtime_id,
+        agent_id: runtime.agent_id,
+        agent_name: runtime.agent_name.clone(),
+        agent_version: runtime.agent_version.clone(),
+        created_at: runtime.created_at,
+    })
 }
 
 /// 201 + Location + the stored representation, identical on replay.
-fn created_response(
-    agent_runtime_id: stratum_core::AgentRuntimeId,
-    agent_id: stratum_core::AgentId,
-    agent_name: String,
-    agent_version: stratum_core::AgentVersionTag,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Response {
-    let body = AgentRuntimeCreated {
-        agent_runtime_id,
-        agent_id,
-        agent_name,
-        agent_version,
-        created_at,
-    };
+fn created_response(body: AgentRuntimeCreated) -> Response {
+    let agent_runtime_id = body.agent_runtime_id;
     (
         StatusCode::CREATED,
         [("Location", format!("/v1/agent-runtimes/{agent_runtime_id}"))],

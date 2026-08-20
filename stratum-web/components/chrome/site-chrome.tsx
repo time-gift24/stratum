@@ -15,7 +15,7 @@ import styles from "./site-chrome.module.css"
 /**
  * 站点导航外壳（client 组件：图标是函数，不能从 Server Component 传入）。
  * SiteNavChrome —— root 级业务导航，由 (site) 路由组 layout 挂载，fixed 悬浮于所有页面之上。
- * 当前入口：对话（/conversation）、仪表盘（/studio）、本体（/ontologies）、Excalidraw（/excalidraw）。
+ * 当前入口：对话（/conversation）、计划任务（/schedulers）、仪表盘（/studio）、本体（/ontologies）、Excalidraw（/excalidraw）。
  * 右端是图标操作：主题切换 + 设置入口（/studio/settings/providers），均为纯图标。
  *
  * 导航在所有页面常开，包括白板（/excalidraw）与本体编辑器（/ontologies/[id]）
@@ -121,6 +121,7 @@ export function SiteNavChrome() {
         brand={{ name: "Stratum", href: "/conversation" }}
         links={[
           { label: "对话", href: "/conversation" },
+          { label: "计划任务", href: "/schedulers" },
           { label: "仪表盘", href: "/studio" },
           { label: "本体", href: "/ontologies" },
           { label: "Excalidraw", href: "/excalidraw" },
