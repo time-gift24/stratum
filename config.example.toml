@@ -1,6 +1,7 @@
 [api]
 bind = "127.0.0.1:8080"
-allowed_origins = ["http://localhost:5173"]
+# 本地前端 dev server（stratum-web，next dev 默认 3000）的跨域白名单
+allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 shutdown_drain_timeout_seconds = 10
 sse_keep_alive_seconds = 15
 dispatcher_idle_timeout_seconds = 60

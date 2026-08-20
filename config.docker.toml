@@ -6,6 +6,9 @@ allowed_origins = [
   "http://127.0.0.1:5173",
   "http://localhost:5175",
   "http://127.0.0.1:5175",
+  # 本地 pnpm dev（next dev）直连容器映射出的 API 时需要的跨域白名单
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
 ]
 
 [ontology]
