@@ -51,7 +51,8 @@ Stratum 的差异不是聊天外观，而是对持续 Agent 执行的产品化�
 - 保留“运筹 Stratum”名称和现有 Stratum 标志。
 - 语言直接、克制、可信，不用拟人化 AI 文案、伪技术参数或主题化小字解释产品气质。
 - 中国文化语境只能作为含蓄的秩序与节奏，不能使用文言包装、书法字体、仿古纹样或具象古风装饰。
-- 用户已将参考图的暗色科技方向设为后续视觉设计的约束；具体色彩、排版和组件规则由 `stratum-web/DESIGN.md` 管理。
+- 先前的"暗色科技参考图"视觉约束已由用户在 2026-08 明确解除。
+- 落地页视觉世界已确定为「流体雾场·纸墨」：宣纸米白大气场随滚动下潜沉入暖墨黑，MoltenMetal 熔墨 shader 为全页固定背景（含朱砂红芯），中文黑体大标题混排英文衬线斜体强调，朱砂配给制 + 古铜辅助，全站禁红绿并置。规则由 `stratum-site/DESIGN.md` 管理，开发约定由 `stratum-site/AGENTS.md` 管理。
 
 ## Evidence on Hand
 
@@ -59,7 +60,7 @@ Stratum 的差异不是聊天外观，而是对持续 Agent 执行的产品化�
 - 现有对话、历史恢复、Agent/模型选择、思考展开、审批、取消和重连实现位于 `stratum-web/app`。
 - 本体管理前端实现位于 `stratum-web/app/(site)/ontologies`、`stratum-web/components/stratum/ontology` 与 `stratum-web/features/ontology-editor`，契约见 `docs/ontology/API.md`；后端集成未完成。
 - 产品没有可公开使用的客户案例、用量数据、定价、测试背书或市场声明；未来页面不得自行补造。
-- 用户提供了暗色节点式科技界面与黑白加蓝、黄、洋红强调色的视觉参考，仅用于确定视觉世界，不代表当前已发布画布能力。
+- 先前的暗色节点式视觉参考不再具有约束力，相关图片已随旧设计一并废弃。
 
 ## Product Principles
 

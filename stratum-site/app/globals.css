@@ -1,0 +1,183 @@
+@import "tailwindcss";
+
+/*
+ * Stratum Site —「流体雾场 · 纸墨」
+ * 页面是一幅自上而下沉入墨中的宣纸：暖纸白为地，墨迹流体在其间游动，
+ * 滚动即下潜，深处见架构，最后浮回纸面。
+ * 本文件只允许：字体与 base reset、设计 token、跨页面基础规则。
+ */
+
+@theme {
+  /* ---- 纸墨中性色（暖调，参照宣纸/朱砂/古铜体系） ---- */
+  --color-paper: #fbf4e7; /* 宣纸：页面顶部地色 */
+  --color-paper-dim: #f1e8d6; /* 纸上凹陷/卡片 */
+  --color-mist: #a89d88; /* 雾：过渡带中间调 */
+  --color-ink: #1f1b15; /* 墨：暖黑主文字 */
+  --color-ink-soft: #605747; /* 纸面次级文字 */
+  --color-abyss: #16120e; /* 深处：暖墨黑区地色 */
+  --color-abyss-raise: #251f18; /* 深处卡片 */
+  --color-bone: #f7f0e2; /* 深处主文字 */
+  --color-fog: #a79c89; /* 深处次级文字 */
+
+  /* ---- 强调色：朱砂配给制 + 古铜辅助，禁红绿并置 ---- */
+  --color-seal: #b24731; /* 朱砂：审批标记、关键强调、focus ring */
+  --color-seal-deep: #8f3722;
+  --color-bronze: #be9563; /* 古铜：运行态、轨迹线、暗部点缀 */
+  --color-box: #f4f3f0; /* 输入盒：白偏灰，与白色 chip 形成层级 */
+
+  /* ---- 字体 ----
+   * display：标题 = Archivo(西文黑) + Noto Sans SC(中文黑)
+   * serif：英文衬线斜体强调词，嵌入大标题混排
+   * mono：数据、标签、眉题 */
+  --font-display: var(--font-archivo), var(--font-noto-sc), sans-serif;
+  --font-serif: var(--font-source-serif), "Noto Serif SC", serif;
+  --font-sans: var(--font-archivo), var(--font-noto-sc), sans-serif;
+  --font-mono: var(--font-chivo-mono), var(--font-noto-sc), monospace;
+
+  /* ---- 字距：只有三级 ---- */
+  --tracking-eyebrow: 0.22em; /* 眉题全大写等宽标签 */
+  --tracking-label: 0.12em; /* chip / 读数 / 导航小字 */
+  --tracking-display: -0.02em; /* 大标题收紧 */
+
+  /* ---- 字号 ramp（--text-* 直接生成 text-display 等工具类） ---- */
+  --text-display: clamp(2.25rem, 5.2vw, 4.5rem);
+  --text-display--line-height: 1.08;
+  --text-display-sm: clamp(2.25rem, 4.6vw, 3.75rem);
+  --text-display-sm--line-height: 1.08;
+  --text-headline: clamp(1.75rem, 3.2vw, 2.75rem);
+  --text-headline--line-height: 1.15;
+  --text-lead: 1.0625rem; /* 副文案 / 正文（17px） */
+  --text-ui: 0.9375rem; /* 控件文字、卡片正文（15px） */
+  --text-input: 1rem; /* 输入框文本（16px，低于此 iOS 聚焦会缩放页面） */
+
+  --leading-prose: 1.75;
+
+  /* ---- 布局：中轴壳宽与段落节奏 ---- */
+  --spacing-shell: 1120px; /* max-w-shell：nav / section / footer 共用 */
+  --spacing-section: clamp(6rem, 14vh, 11rem); /* py-section：段落纵向节奏 */
+  --spacing-measure-title: 20ch; /* max-w-measure-title：段落标题最大行宽 */
+  /* 顶栏水平 padding 让位刘海/圆角安全区，最小 1rem */
+  --spacing-safe-l: max(1rem, env(safe-area-inset-left));
+  --spacing-safe-r: max(1rem, env(safe-area-inset-right));
+
+  /* ---- 圆角：流体世界是有机的，不用硬角 ---- */
+  --radius-card: 20px;
+  --radius-pill: 999px;
+
+  /* ---- 动效：流体量级 ---- */
+  --ease-fluid: cubic-bezier(0.22, 1, 0.36, 1); /* 出场：快起缓落，像墨入水 */
+  --ease-dive: cubic-bezier(0.65, 0, 0.35, 1); /* 下潜：进出皆加速 */
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --duration-reveal: 700ms;
+  --duration-hover: 250ms;
+  --duration-drift: 14s; /* 环境漂移的最低量级 */
+
+  /* ---- 关键帧 ---- */
+  --animate-float: float-y 9s var(--ease-soft) infinite alternate;
+  --animate-seal-pulse: seal-pulse 2.8s var(--ease-soft) infinite;
+
+  @keyframes float-y {
+    from {
+      transform: translateY(-6px);
+    }
+    to {
+      transform: translateY(6px);
+    }
+  }
+
+  @keyframes seal-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
+
+  /* ---- 阴影：雾场里阴影是环境光，不是结构；hover 加深服务浮起规则 ---- */
+  --shadow-pill: 0 24px 60px rgb(31 27 21 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.7);
+  --shadow-card: 0 2px 4px rgb(31 27 21 / 0.05), 0 12px 32px rgb(31 27 21 / 0.08);
+  --shadow-card-hover: 0 4px 8px rgb(31 27 21 / 0.07), 0 20px 44px rgb(31 27 21 / 0.12);
+  --shadow-card-deep: 0 2px 4px rgb(0 0 0 / 0.3), 0 16px 40px rgb(0 0 0 / 0.35);
+  --shadow-card-deep-hover: 0 4px 8px rgb(0 0 0 / 0.4), 0 24px 56px rgb(0 0 0 / 0.45);
+  --shadow-button-hover: 0 12px 28px rgb(31 27 21 / 0.22);
+  --shadow-pill-focus: 0 28px 72px rgb(31 27 21 / 0.26), inset 0 1px 0 rgb(255 255 255 / 0.8);
+  /* chip 级控件：白底 + 软阴影从盒面浮起（不用 paper-dim 实色，避免与盒底糊成一片） */
+  --shadow-chip: 0 1px 2px rgb(31 27 21 / 0.06), 0 2px 8px rgb(31 27 21 / 0.05);
+  --shadow-chip-hover: 0 2px 4px rgb(31 27 21 / 0.08), 0 4px 14px rgb(31 27 21 / 0.08);
+  /* app 框架带：顶栏下缘 / 输入区上缘的边界阴影 */
+  --shadow-band: 0 8px 24px rgb(31 27 21 / 0.06);
+  --shadow-band-top: 0 -8px 24px rgb(31 27 21 / 0.06);
+}
+
+/* ---- base ---- */
+
+html {
+  scroll-behavior: smooth;
+}
+
+html,
+body {
+  overscroll-behavior-x: none;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background-color: var(--color-ink);
+  color: var(--color-paper);
+}
+
+/* 深处的选区反相 */
+.on-abyss ::selection {
+  background-color: var(--color-bone);
+  color: var(--color-abyss);
+}
+
+@layer base {
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-seal);
+    outline-offset: 3px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 1rem;
+  z-index: 50;
+  padding: 0.75rem 1.25rem;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  text-decoration: none;
+}
+
+.skip-to-content:focus {
+  left: 1rem;
+}

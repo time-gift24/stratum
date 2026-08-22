@@ -1,0 +1,10 @@
+# stratum-site 是独立的 pnpm 项目根，防止 pnpm 向上并入其他 workspace。
+packages: []
+
+# sharp / unrs-resolver 的构建脚本仅使用官方预编译二进制，明确允许。
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
